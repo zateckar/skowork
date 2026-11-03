@@ -35,6 +35,14 @@ bool cut_cleanly(const std::string& s) {
     return need == 0 || back >= need;
 }
 
+// A quantified group, such as (a|a*)*: std::regex backtracks exponentially on it even over a short text, so the
+// differential check skips it (the matcher itself is still run on the input above, within its budget).
+bool quantified_group(std::string_view p) {
+    for (size_t i = 0; i + 1 < p.size(); ++i)
+        if (p[i] == ')' && std::string_view("*+?{").find(p[i + 1]) != std::string_view::npos) return true;  // escaped or not
+    return false;
+}
+
 bool valid_utf8(std::string_view s) {
     for (size_t i = 0; i < s.size();) {
         const auto c = static_cast<unsigned char>(s[i]);
@@ -92,7 +100,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     for (const Field& f : tool->attrs)
         if (std::get<std::string>(f.value) != host) __builtin_trap();
     // Differential check against std::regex (backtracking, so only on short texts and patterns).
-    if (pattern.size() <= 24) {
+    if (pattern.size() <= 24 && !quantified_group(pattern)) {
         const std::string shorttext = text.substr(0, 12);
         if (auto mine = Pattern::compile(pattern); mine && !mine->nullable()) {
             std::optional<std::string> theirs;
