@@ -82,6 +82,9 @@ jobs:
       - name: Fetch the app runtime (pinned Node.js, SHA-256 and signature checked)
         shell: pwsh
         run: ./dev/scripts/fetch-node-runtime.ps1
+      - name: Display large enough for the desktop tests (the runner starts at 1024x768)
+        shell: pwsh
+        run: ./dev/scripts/ci-display.ps1
       - name: Release build and tests
         shell: pwsh
         working-directory: client

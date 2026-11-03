@@ -360,6 +360,19 @@ TEST(PolicyPathsWin, ShortNamesAreResolvedBeforeDenyRules) {
     EXPECT_EQ(v.rule, "filesystem.deny[\"**\\VeryLongSecretFolderName\\**\"]");
 }
 
+TEST(PolicyPathsWin, DenyRulesNamingAJunctionMatchTheFinalPath) {
+    EscapeFixture f;
+    write_file(f.ws / L"real" / L"key.pem", "k");
+    ASSERT_TRUE(f.junction(f.ws / L"alias", f.ws / L"real")) << "mklink /J failed";
+    // The rule names the folder through the junction; the file is opened by its real path.
+    const EffectivePolicy p(PolicyBundle{"u", "", 1, 0, 4102444800, 1, {}, {{"filesystem", {{"deny", {s(f.ws / L"alias") + "\\**"}}}}}});
+    const PathRules r = path_rules(&p, s(f.ws), s(f.data), {});
+    RuleVerdict v;
+    EXPECT_FALSE(open_for_read(s(f.ws / L"real" / L"key.pem"), r, &v));
+    EXPECT_EQ(v.rule.rfind("filesystem.deny", 0), 0u) << v.rule;
+    EXPECT_TRUE(open_for_read(s(f.ws / L"note.txt"), r));
+}
+
 TEST(PolicyPathsWin, PathRulesExpandVariables) {
     const EffectivePolicy p(PolicyBundle{"u", "", 1, 0, 4102444800, 1, {}, {{"filesystem", {{"read", {"%USERPROFILE%\\Documents\\**"}},
                                                                                             {"deny", {"%WORKBENCH_DATA%/secrets/**"}}}}}});

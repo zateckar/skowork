@@ -40,7 +40,16 @@ Result<unique_file> open_for_write(std::string_view path, WriteMode mode, const 
 // mix. Returns the final path written.
 Result<std::string> write_file_atomic(std::string_view path, std::string_view content, const PathRules& rules, RuleVerdict* verdict = nullptr);
 
+// A folder a rule names, as its final path (canonicalize), or normalised as given when it cannot be resolved.
+std::string final_folder(const std::string& folder);
+std::vector<std::string> final_folders(std::vector<std::string> folders);
+
+// A path glob with its literal leading folders as a final path and its wildcard part as written. A glob that starts
+// with a wildcard is returned as given.
+std::string final_glob(const std::string& glob);
+
 // The filesystem rules of an effective policy with environment variables expanded; %WORKBENCH_DATA% is the data root.
+// The folders the rules name (globs, workspace, data root, grants) are final paths, like the paths compared with them.
 PathRules path_rules(const EffectivePolicy* policy, const std::string& workspace, const std::string& data_root,
                      std::vector<FolderGrant> grants);
 

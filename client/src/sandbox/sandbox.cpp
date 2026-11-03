@@ -42,7 +42,32 @@ Result<unique_handle> restricted_token() {
     HANDLE restricted = nullptr;
     if (!::CreateRestrictedToken(token.get(), DISABLE_MAX_PRIVILEGE, 1, &disable, 0, nullptr, 0, nullptr, &restricted))
         return make_error("sandbox", "CreateRestrictedToken: " + error_text(::GetLastError()));
-    return unique_handle(restricted);
+    unique_handle out(restricted);
+    // An elevated token (UAC off, or an elevated client) owns new objects through Administrators and its default DACL
+    // grants only Administrators and SYSTEM. With Administrators deny-only, the child could not open its own process and
+    // thread and would fail to start (0xC0000142). The user owns the child's objects instead, as with a standard token.
+    DWORD needed = 0;
+    ::GetTokenInformation(out.get(), TokenUser, nullptr, 0, &needed);
+    std::vector<BYTE> user_buf(needed);
+    if (needed == 0 || !::GetTokenInformation(out.get(), TokenUser, user_buf.data(), needed, &needed))
+        return make_error("sandbox", "GetTokenInformation(TokenUser): " + error_text(::GetLastError()));
+    PSID user = reinterpret_cast<TOKEN_USER*>(user_buf.data())->User.Sid;
+    BYTE system[SECURITY_MAX_SID_SIZE];
+    size = sizeof system;
+    if (!::CreateWellKnownSid(WinLocalSystemSid, nullptr, system, &size))
+        return make_error("sandbox", "CreateWellKnownSid: " + error_text(::GetLastError()));
+    const DWORD acl_size = static_cast<DWORD>(sizeof(ACL) + 2 * (sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD))) + ::GetLengthSid(user) + ::GetLengthSid(system);
+    std::vector<BYTE> acl_buf(acl_size);
+    auto* acl = reinterpret_cast<ACL*>(acl_buf.data());
+    if (!::InitializeAcl(acl, acl_size, ACL_REVISION) || !::AddAccessAllowedAce(acl, ACL_REVISION, GENERIC_ALL, user) ||
+        !::AddAccessAllowedAce(acl, ACL_REVISION, GENERIC_ALL, system))
+        return make_error("sandbox", "default DACL: " + error_text(::GetLastError()));
+    TOKEN_DEFAULT_DACL dacl{acl};
+    TOKEN_OWNER owner{user};
+    if (!::SetTokenInformation(out.get(), TokenDefaultDacl, &dacl, sizeof dacl) ||
+        !::SetTokenInformation(out.get(), TokenOwner, &owner, sizeof owner))
+        return make_error("sandbox", "SetTokenInformation: " + error_text(::GetLastError()));
+    return out;
 }
 
 // ---- Environment ----------------------------------------------------------------------------------------------------

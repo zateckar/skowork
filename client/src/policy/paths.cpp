@@ -326,16 +326,36 @@ Result<std::string> write_file_atomic(std::string_view path, std::string_view co
     return *written;
 }
 
+std::string final_folder(const std::string& folder) {
+    auto c = canonicalize(folder);
+    return c ? *c : normalize_final_path(folder);
+}
+
+std::vector<std::string> final_folders(std::vector<std::string> folders) {
+    for (auto& f : folders) f = final_folder(f);
+    return folders;
+}
+
+std::string final_glob(const std::string& glob) {
+    const size_t wild = glob.find_first_of("*?");
+    if (wild == std::string::npos) return final_folder(glob);
+    const size_t cut = glob.rfind('\\', wild);
+    if (cut == std::string::npos) return glob;  // starts with a wildcard: nothing literal to resolve
+    auto c = canonicalize(glob.substr(0, cut + 1));
+    if (!c) return glob;
+    std::string out = normalize_final_path(*c);
+    if (out.back() != '\\') out += '\\';
+    return out + glob.substr(cut + 1);
+}
+
 PathRules path_rules(const EffectivePolicy* policy, const std::string& workspace, const std::string& data_root,
                      std::vector<FolderGrant> grants) {
     PathRules r;
-    // Final paths, like the paths they are compared with: the profile may be redirected or reached through a link.
-    const auto final_or_given = [](const std::string& p) {
-        auto c = canonicalize(p);
-        return c ? *c : normalize_final_path(p);
-    };
-    r.workspace = final_or_given(workspace);
-    r.data_root = final_or_given(data_root);
+    // Final paths, like the paths they are compared with: a rule may name a folder by its 8.3 name, through a junction
+    // or a redirected profile (Filesystem Path Rules).
+    r.workspace = final_folder(workspace);
+    r.data_root = final_folder(data_root);
+    for (auto& g : grants) g.folder = final_folder(g.folder);
     r.grants = std::move(grants);
     if (!policy) return r;
     const std::vector<std::pair<std::string, std::string>> extra = {{"WORKBENCH_DATA", r.data_root}};
@@ -344,7 +364,7 @@ PathRules path_rules(const EffectivePolicy* policy, const std::string& workspace
             std::string e = expand_environment(g, extra);
             for (auto& c : e)
                 if (c == '/') c = '\\';
-            out.push_back(std::move(e));
+            out.push_back(final_glob(e));
         }
     };
     load("filesystem.read", r.read);

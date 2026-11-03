@@ -27,7 +27,7 @@ bool tool_switched_off(const EffectivePolicy* policy, const std::string& tool_id
 PathRules PolicyEnforcer::path_rules_now() const {
     const auto p = env_.policy ? env_.policy() : nullptr;
     PathRules r = path_rules(p.get(), env_.workspace, env_.data_root, env_.grants ? env_.grants() : std::vector<FolderGrant>{});
-    if (env_.app_folders) r.app_folders = env_.app_folders({});
+    if (env_.app_folders) r.app_folders = final_folders(env_.app_folders({}));
     return r;
 }
 
@@ -68,7 +68,7 @@ Verdict PolicyEnforcer::evaluate(const runtime::ToolCallInfo& call) const {
             return check_egress_url(r.value, policy->strings("network.egress_allow"), policy->strings("network.egress_deny"));
         if (!rules_loaded) {
             rules = path_rules(policy.get(), env_.workspace, env_.data_root, env_.grants ? env_.grants() : std::vector<FolderGrant>{});
-            if (env_.app_folders) rules.app_folders = env_.app_folders(call.run.run_id);
+            if (env_.app_folders) rules.app_folders = final_folders(env_.app_folders(call.run.run_id));
             rules_loaded = true;
         }
         auto fp = canonicalize(r.value);

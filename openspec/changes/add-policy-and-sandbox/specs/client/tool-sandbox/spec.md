@@ -35,6 +35,10 @@ The client SHALL run sandboxed child processes with a restricted token. The toke
 - **WHEN** a sandboxed shell command prints its environment
 - **THEN** no control-plane or gateway access token appears in the output
 
+#### Scenario: Elevated client
+- **WHEN** the client runs with an elevated administrator token, for example with User Account Control off, and starts a sandboxed command
+- **THEN** the command starts and runs without administrative group membership, and the objects it creates are owned by the user
+
 ### Requirement: Shell Modes
 The client SHALL support policy.tools.shell.mode, whose default is `off`, with three values:
 - `off`: the shell tool is unavailable;

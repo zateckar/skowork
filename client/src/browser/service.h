@@ -70,6 +70,8 @@ public:
 
     // Closes the browser after policy.tools.browser.idle_timeout_minutes without calls, unless the user is using it.
     void tick();
+    // A browser tool call started or ended: the idle time counts from here.
+    void touch();
     // A Run ended: its tabs close.
     void run_ended(const std::string& run_id);
     void shutdown();
@@ -115,7 +117,6 @@ private:
     void on_download(const CdpMessage& m);
     void close_browser(const std::string& why);
     bool user_interacting(unsigned long pid);
-    void touch();
 
     // Element facts for a reference (design D3, D4); errors "stale_reference".
     Result<ElementFacts> facts(const std::shared_ptr<Process>& p, const std::shared_ptr<Tab>& tab, const std::string& ref);

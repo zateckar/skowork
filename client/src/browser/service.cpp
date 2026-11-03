@@ -1182,7 +1182,10 @@ std::vector<runtime::ToolDef> browser_tools(std::shared_ptr<BrowserService> serv
         };
         t.run = [w, fn](ToolContext& ctx, const json& a) {
             auto s = w.lock();
-            return s ? ((*s).*fn)(ctx, a) : ToolOutput::failure("The agent browser is shutting down.");
+            if (!s) return ToolOutput::failure("The agent browser is shutting down.");
+            auto result = ((*s).*fn)(ctx, a);
+            s->touch();  // a slow call (starting Chrome, a long navigation) is not idle time
+            return result;
         };
         t.resume = [w](ToolContext& ctx, const json& a, const json& state, const std::string& answer) {
             auto s = w.lock();
