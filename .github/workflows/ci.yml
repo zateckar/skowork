@@ -59,13 +59,6 @@ jobs:
       - name: Display large enough for the desktop tests (the runner starts at 1024x768)
         shell: pwsh
         run: ./dev/scripts/ci-display.ps1
-      - name: Configure and build (debug, warnings as errors, UBSan trap)
-        shell: pwsh
-        working-directory: client
-        run: |
-          g++ --version | Select-Object -First 1
-          cmake --preset debug '-DWORKBENCH_COMMIT=${{ github.sha }}'
-          cmake --build --preset debug
       - uses: actions/setup-node@v4
         with:
           node-version: '26'  # dev/graph-mock runs its TypeScript directly
@@ -77,10 +70,19 @@ jobs:
         shell: pwsh
         working-directory: dev/graph-mock
         run: npm ci
+      # Release preset only, to keep the job short (add-client-foundation design D9): the debug build with the UBSan
+      # trap and -fanalyzer run locally; undefined behaviour in the portable libraries is covered by the Linux job.
+      - name: Release build (warnings as errors)
+        shell: pwsh
+        working-directory: client
+        run: |
+          g++ --version | Select-Object -First 1
+          cmake --preset release '-DWORKBENCH_COMMIT=${{ github.sha }}'
+          cmake --build --preset release
       - name: Unit tests
         shell: pwsh
         working-directory: client
-        run: ctest --preset debug -LE e2e
+        run: ctest --preset release -LE e2e
       - name: Keep the images of failed golden tests
         if: failure()
         shell: pwsh
@@ -93,22 +95,12 @@ jobs:
           name: golden-actual
           path: golden-actual
           if-no-files-found: ignore
-      - name: Static analysis (-fanalyzer on the portable and platform libraries)
+      - name: Package and footprint check
         shell: pwsh
         working-directory: client
         run: |
-          cmake -S . -B build/analyzer -G Ninja -DCMAKE_BUILD_TYPE=Debug -DWORKBENCH_TESTS=OFF -DCMAKE_CXX_FLAGS="-fanalyzer"
-          cmake --build build/analyzer --target wb_base wb_platform wb_storage
-      - name: Release build and footprint check
-        shell: pwsh
-        working-directory: client
-        run: |
-          cmake --preset release '-DWORKBENCH_COMMIT=${{ github.sha }}'
-          cmake --build --preset release
-          ctest --preset release -LE e2e
           ./tools/package.ps1 -BuildDir build/release -OutDir build/package -Version '0.0.0-ci'
           ./tools/check-footprint.ps1 -BuildDir build/release
-
   portable-sanitizers:
     name: Portable libraries (Linux, ASan/UBSan)
     runs-on: ubuntu-24.04

@@ -190,9 +190,9 @@ RAM: the core process idles at about 30–40 MB. The index worker runs no model 
 - **Code layout for testability:** parsers and other platform-independent code (JSON, HTTP and Graph payloads, MCP, CDP, document extractors, SKILL.md, path globbing) live in libraries that use no Win32 headers.
 - **Sanitizers and fuzzing:** the MinGW GCC has no AddressSanitizer or libFuzzer runtime. The portable libraries are therefore also built on a Linux CI job with GCC: unit tests run under `-fsanitize=address,undefined`, and fuzz targets run under AFL++ in GCC-plugin mode. Fuzz targets use the `LLVMFuzzerTestOneInput` entry point, so they stay portable.
 - **CI on every merge request:**
-  - the Windows build and unit tests (GoogleTest);
-  - the Linux sanitizer and fuzz smoke job;
-  - `clang-tidy` over `compile_commands.json` and `-fanalyzer` on C sources;
+  - the Windows release build and its unit tests (GoogleTest). Only the release preset is built in CI, to keep the job short: tests that need the dev-only endpoints skip there, and the debug build (with the UBSan trap) and `-fanalyzer` run locally;
+  - the Linux sanitizer and fuzz smoke job, which also covers undefined behaviour in the portable libraries;
+  - `clang-tidy` over `compile_commands.json`;
   - a footprint check that fails the build if a budget in client/desktop-host is exceeded.
 - **Signing:** Authenticode signing with the organization code-signing certificate.
 

@@ -120,7 +120,7 @@ std::vector<UsageSegment> usage_segments(const json& categories, double max, siz
     std::vector<UsageSegment> entries;
     if (categories.is_object())
         for (const auto& [name, v] : categories.items())
-            if (v.is_number() && v.get<double>() > 0) entries.push_back({name, v.get<long long>(), 0});
+            if (const auto n = json_int(v); n && *n > 0) entries.push_back({name, *n, 0});
     std::stable_sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.bytes > b.bytes; });
     if (max_segments > 0 && entries.size() > max_segments) {
         long long other = 0;

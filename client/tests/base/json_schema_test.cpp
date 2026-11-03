@@ -78,3 +78,15 @@ TEST(JsonSchema, DeepSchemasDoNotRecurseForever) {
     }
     EXPECT_TRUE(validate_json(schema, value).empty());
 }
+
+TEST(Json, IntegersOutOfRangeFallBack) {
+    // Untrusted numbers: a double beyond long long has no conversion (undefined behaviour), so the fallback is used.
+    const json j = *parse_json(R"({"a": 42, "b": 7.9, "c": 3.3e72, "d": -1e300, "e": 18446744073709551615, "f": "9"})");
+    EXPECT_EQ(jint(j, "a", -1), 42);
+    EXPECT_EQ(jint(j, "b", -1), 7);
+    EXPECT_EQ(jint(j, "c", -1), -1);
+    EXPECT_EQ(jint(j, "d", -1), -1);
+    EXPECT_EQ(jint(j, "e", -1), -1);
+    EXPECT_EQ(jint(j, "f", -1), -1);
+    EXPECT_FALSE(json_int(j["c"]));
+}

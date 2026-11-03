@@ -155,7 +155,7 @@ TEST(PolicyGlob, Matching) {
 TEST(PolicyPaths, SyntaxEscapesAreRefused) {
     for (const char* bad : {"\\\\.\\PhysicalDrive0", "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\x", "\\??\\C:\\x", "C:\\x\\file.txt:secret",
                             "C:\\x\\file.txt::$DATA", "\\\\server\\share\\f:ads", "C:\\x\\CON", "C:\\x\\nul.txt", "C:\\x\\COM1",
-                            "relative\\path", "C:relative", "\\\\?\\Volume{1234}\\x", std::string("C:\\x\ny").c_str(), "", "\\\\"}) {
+                            "relative\\path", "C:relative", "\\\\?\\Volume{1234}\\x", "C:\\x\ny", "", "\\\\"}) {
         EXPECT_TRUE(path_syntax_problem(bad).has_value()) << bad;
     }
     for (const char* ok : {"C:\\Users\\a\\file.txt", "\\\\server\\share\\dir", "\\\\?\\C:\\long\\path", "\\\\?\\UNC\\server\\share\\x",

@@ -31,8 +31,8 @@ std::string policy_str(const PolicyLookup& p, const std::string& key, const std:
 long long policy_int(const PolicyLookup& p, const std::string& key, long long fallback, long long min) {
     if (!p) return fallback;
     const auto v = p(key);
-    if (!v || !v->is_number()) return fallback;
-    return std::max(min, v->get<long long>());
+    const auto n = v ? json_int(*v) : std::nullopt;
+    return n ? std::max(min, *n) : fallback;
 }
 
 std::string iso_day(long long ms) {

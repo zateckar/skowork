@@ -4,6 +4,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <climits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -26,13 +27,25 @@ inline std::string jstr(const json& j, const char* key, std::string fallback = {
     return it != j.end() && it->is_string() ? it->get<std::string>() : fallback;
 }
 
+// A JSON number as a long long (a fraction is cut); nullopt for any other value, or a number outside the range of long
+// long, which has no conversion (the cast would be undefined).
+inline std::optional<long long> json_int(const json& v) {
+    if (v.is_number_unsigned()) {
+        const auto u = v.get<unsigned long long>();
+        return u <= static_cast<unsigned long long>(LLONG_MAX) ? std::optional<long long>(static_cast<long long>(u)) : std::nullopt;
+    }
+    if (v.is_number_integer()) return v.get<long long>();
+    if (v.is_number_float()) {
+        const double d = v.get<double>();
+        if (d >= -9223372036854775808.0 && d < 9223372036854775808.0) return static_cast<long long>(d);
+    }
+    return std::nullopt;
+}
+
 inline long long jint(const json& j, const char* key, long long fallback = 0) {
     if (!j.is_object()) return fallback;
     const auto it = j.find(key);
-    if (it == j.end()) return fallback;
-    if (it->is_number_integer() || it->is_number_unsigned()) return it->get<long long>();
-    if (it->is_number_float()) return static_cast<long long>(it->get<double>());
-    return fallback;
+    return it == j.end() ? fallback : json_int(*it).value_or(fallback);
 }
 
 inline bool jbool(const json& j, const char* key, bool fallback = false) {

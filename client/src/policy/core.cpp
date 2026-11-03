@@ -220,7 +220,7 @@ std::string EffectivePolicy::string(std::string_view key, std::string_view fallb
 
 long long EffectivePolicy::integer(std::string_view key, long long fallback) const {
     const json* v = find(key);
-    return v && v->is_number() ? v->get<long long>() : fallback;
+    return v ? json_int(*v).value_or(fallback) : fallback;
 }
 
 std::string EffectivePolicy::source(std::string_view rule_path) const {
