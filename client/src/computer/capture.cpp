@@ -24,16 +24,18 @@ extern "C" HRESULT WINAPI CreateDirect3D11DeviceFromDXGIDevice(IDXGIDevice* dxgi
 
 namespace wb::computer {
 
+// IDirect3DDxgiInterfaceAccess {A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1} (windows.graphics.directx.direct3d11.interop.h,
+// which MinGW does not ship). Outside the anonymous namespace on purpose: with internal linkage GCC sees no class that
+// implements it, devirtualises GetInterface at -O2 to the pure declaration and calls an address that does not exist.
+struct IDirect3DDxgiInterfaceAccess : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetInterface(REFIID iid, void** p) = 0;
+};
+
 namespace {
 
 namespace wgc = ABI::Windows::Graphics::Capture;
 namespace wd3d = ABI::Windows::Graphics::DirectX::Direct3D11;
 
-// IDirect3DDxgiInterfaceAccess {A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1} (windows.graphics.directx.direct3d11.interop.h,
-// which MinGW does not ship).
-struct IDirect3DDxgiInterfaceAccess : public IUnknown {
-    virtual HRESULT STDMETHODCALLTYPE GetInterface(REFIID iid, void** p) = 0;
-};
 constexpr IID kIID_DxgiAccess = {0xa9b3d012, 0x3df2, 0x4ee3, {0xb8, 0xd1, 0x86, 0x95, 0xf4, 0x57, 0xd3, 0xc1}};
 
 struct Mta {
