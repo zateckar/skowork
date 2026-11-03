@@ -357,7 +357,7 @@ TEST(PolicyPathsWin, ShortNamesAreResolvedBeforeDenyRules) {
     f.rules.deny = {"**\\VeryLongSecretFolderName\\**"};
     RuleVerdict v;
     EXPECT_FALSE(open_for_read(narrow(shortp), f.rules, &v));
-    EXPECT_EQ(v.rule, "filesystem.deny[\"**\\VeryLongSecretFolderName\\**\"]");
+    EXPECT_EQ(v.rule, "filesystem.deny[\"**\\\\VeryLongSecretFolderName\\\\**\"]");  // the glob as a JSON string
 }
 
 TEST(PolicyPathsWin, DenyRulesNamingAJunctionMatchTheFinalPath) {

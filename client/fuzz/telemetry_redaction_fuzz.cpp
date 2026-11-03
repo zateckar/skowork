@@ -75,7 +75,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         // The planted secrets are gone, whatever surrounds them (a cut may also have removed them).
         if (f.attr == Attr::error_code || f.attr == Attr::error_message) {
             if (s->find(kPlanted) != std::string::npos) __builtin_trap();
-            if (s->find("abcdefghijklmnopqrstuvwxyz0123456789") != std::string::npos) __builtin_trap();
+            // Unless the text itself carries the same characters (the dictionary offers them), which are not the token.
+            constexpr std::string_view token = "abcdefghijklmnopqrstuvwxyz0123456789";
+            if (text.find(token) == std::string::npos && s->find(token) != std::string::npos) __builtin_trap();
         }
     }
 

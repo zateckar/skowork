@@ -77,7 +77,7 @@ public:
             shell::MainWindow::Options o;
             o.lang = "en";
             o.width = width;
-            o.height = 700;
+            o.height = 730;  // the client area of the golden images
             o.show = show;  // shown only to measure: an in-process UI Automation client must not get its events
             o.theme = ui::make_theme(false, false, kSys);
             o.post = [this](std::function<void()> f) { post(std::move(f)); };

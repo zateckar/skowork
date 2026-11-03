@@ -352,7 +352,7 @@ std::string iso_from_millis(long long ms) {
     const long long d = doy - (153 * mp + 2) / 5 + 1;
     const long long m = mp < 10 ? mp + 3 : mp - 9;
     const long long y = yoe + era * 400 + (m <= 2);
-    char buf[40];
+    char buf[160];  // GCC bounds each long long field at 20 bytes; the timestamp itself is 24
     std::snprintf(buf, sizeof buf, "%04lld-%02lld-%02lldT%02lld:%02lld:%02lld.%03lldZ", y, m, d, rem / 3600000,
                   rem / 60000 % 60, rem / 1000 % 60, rem % 1000);
     return buf;

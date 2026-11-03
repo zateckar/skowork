@@ -75,6 +75,9 @@ Result<std::unique_ptr<Window>> Window::create(const Options& o) {
     const float k = static_cast<float>(dpi) / 96.f;
     RECT rc{0, 0, static_cast<LONG>(std::lround(static_cast<float>(o.width) * k)), static_cast<LONG>(std::lround(static_cast<float>(o.height) * k))};
     ::AdjustWindowRectExForDpi(&rc, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
+    // With the custom frame the caption and top frame are client area (WM_NCCALCSIZE), so they are not added: the client
+    // area is the requested size whatever the system's caption height.
+    if (o.custom_frame) rc.top = 0;
     w->custom_frame_ = o.custom_frame;
     w->hwnd_ = ::CreateWindowExW(0, kClass, o.title.c_str(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
                                  rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, wc.hInstance, w.get());

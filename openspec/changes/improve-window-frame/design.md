@@ -18,6 +18,7 @@ The native window (add-native-ui) is a standard WS_OVERLAPPEDWINDOW with the sys
 ### D1. Custom frame
 - **Choice:**
   - The window keeps WS_OVERLAPPEDWINDOW, so Windows still gives it the shadow, the rounded corners, the window menu, snapping and the minimise and maximise animations. WM_NCCALCSIZE lets Windows compute its frame, then gives the top back to the client area: the system keeps its resize frame on the left, right and bottom, and the caption becomes client area. While maximised, the frame that lies beyond the monitor at the top is taken back (SM_CYFRAME plus SM_CXPADDEDBORDER).
+  - The window is created so that its client area is the requested size: the caption and top frame that AdjustWindowRectExForDpi adds are left out, because they become client area. The size of the content, and of the golden images, then does not depend on the system's caption height.
   - DwmExtendFrameIntoClientArea with a one-pixel top margin keeps the system border and shadow.
   - WM_NCACTIVATE is passed on with lParam -1, so Windows does not paint the old caption.
 - **Why:** this is how Windows 11 apps with their own title bar keep the system behaviours. Drawing everything ourselves would lose Snap layouts and the window animations.
