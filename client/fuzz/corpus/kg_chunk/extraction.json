@@ -1,0 +1,3 @@
+```json
+{"entities":[{"name":"Jana Nováková","type":"Person","email":"jana@x.example","chunks":[0,7]},{"name":"Phoenix","type":"Project","chunks":[1]}],"relations":[{"subject":"Jana Nováková","predicate":"leads","object":"Phoenix","confidence":1.7,"valid_from":"2026-10-26","chunk":0}]}
+```

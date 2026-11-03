@@ -1,0 +1,8 @@
+---
+name: a-b
+description: >
+  folded
+  text
+version: 0.1.0-rc.1
+interrupt_on: [mail.*]
+---

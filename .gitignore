@@ -1,0 +1,6 @@
+.env
+.env.*
+.claude
+.claude/
+CLAUDE.md
+!.env.example

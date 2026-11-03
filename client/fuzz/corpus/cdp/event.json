@@ -1,0 +1,1 @@
+{"method":"Fetch.requestPaused","params":{"requestId":"interception-job-1.0","request":{"url":"https://a.example/x","method":"GET"},"resourceType":"Document"},"sessionId":"S2"}

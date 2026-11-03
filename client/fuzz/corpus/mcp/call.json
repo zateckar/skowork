@@ -1,0 +1,1 @@
+{"content":[{"type":"text","text":"hi"},{"type":"image","mimeType":"image/png","data":"AA=="},{"type":"resource","resource":{"uri":"page://1","text":"t"}},{"type":"resource_link","uri":"u","name":"n"}],"structuredContent":{"a":1},"isError":false}

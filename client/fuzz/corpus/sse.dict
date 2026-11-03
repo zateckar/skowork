@@ -1,0 +1,13 @@
+# Tokens for the SSE framing parser (libFuzzer/AFL dictionary format).
+"data: "
+"data:"
+"event: "
+"id: "
+"retry: "
+": comment"
+"\x0a\x0a"
+"\x0d\x0a"
+"\x0d"
+"[DONE]"
+"{"
+"}"

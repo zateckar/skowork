@@ -1,0 +1,1 @@
+{"tools":[{"name":"search","description":"d","inputSchema":{"type":"object","properties":{"q":{"type":"string"}}},"annotations":{"readOnlyHint":true}},{"name":"x y"}],"nextCursor":"c"}

@@ -1,0 +1,41 @@
+{
+  "name": "workbench-control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Workbench control plane: identity, fleet registry, push, LLM gateway and admin console",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "dev": "node --env-file-if-exists=../.env --watch src/main.ts",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --test-concurrency=1 \"test/**/*.test.ts\"",
+    "test:real": "node --env-file-if-exists=../.env --test --test-concurrency=1 \"test-real/**/*.test.ts\"",
+    "policy:schema": "node scripts/policy-schema.ts",
+    "telemetry:catalogue": "node scripts/telemetry-catalogue.ts",
+    "load:telemetry": "node scripts/load-telemetry.ts",
+    "admin:dev": "vite --config admin/vite.config.ts",
+    "admin:build": "vite build --config admin/vite.config.ts"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "jose": "^6.1.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.7.0",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.1",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.0.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.1.9",
+    "yaml": "^2.9.1"
+  }
+}

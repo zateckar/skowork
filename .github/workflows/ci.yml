@@ -1,0 +1,192 @@
+# Continuous integration (add-client-foundation tasks 2.2, 2.3; design D9).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OPENSPEC_TELEMETRY: '0'
+  # Pinned toolchain (design D2a): WinLibs GCC 16.2.0 + MinGW-w64 14.0.0 (UCRT), with CMake and Ninja.
+  WINLIBS_URL: https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r2.7z
+  WINLIBS_SHA256: 53fb6773fbdf87cdf22b69a6b2a07ee33d3ada413b42d83044bc7cc6481400d2
+
+jobs:
+  specs:
+    name: OpenSpec validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npx --yes @fission-ai/openspec@latest validate --all --strict
+
+  client-windows:
+    name: Client (Windows, GCC/MinGW)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain cache
+        id: toolchain
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/winlibs
+          key: winlibs-${{ env.WINLIBS_SHA256 }}
+      - name: Install WinLibs (pinned, verified)
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'winlibs.7z'
+          Invoke-WebRequest $env:WINLIBS_URL -OutFile $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:WINLIBS_SHA256) { throw "WinLibs hash mismatch: $hash" }
+          7z x $archive "-o$env:RUNNER_TEMP\winlibs" -y | Out-Null
+      - name: Put the toolchain first on PATH
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\winlibs\mingw64\bin"
+      - name: Configure and build (debug, warnings as errors, UBSan trap)
+        shell: pwsh
+        working-directory: client
+        run: |
+          g++ --version | Select-Object -First 1
+          cmake --preset debug '-DWORKBENCH_COMMIT=${{ github.sha }}'
+          cmake --build --preset debug
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'  # dev/graph-mock runs its TypeScript directly
+      - name: MCP reference server for the client/mcp-client tests (dev-only, never shipped)
+        shell: pwsh
+        working-directory: dev/mcp-test-server
+        run: npm ci
+      - name: Graph mock for the client/mail-calendar tests (dev-only, never shipped)
+        shell: pwsh
+        working-directory: dev/graph-mock
+        run: npm ci
+      - name: Unit tests
+        shell: pwsh
+        working-directory: client
+        run: ctest --preset debug -LE e2e
+      - name: Static analysis (-fanalyzer on the portable and platform libraries)
+        shell: pwsh
+        working-directory: client
+        run: |
+          cmake -S . -B build/analyzer -G Ninja -DCMAKE_BUILD_TYPE=Debug -DWORKBENCH_TESTS=OFF -DCMAKE_CXX_FLAGS="-fanalyzer"
+          cmake --build build/analyzer --target wb_base wb_platform wb_storage
+      - name: Release build and footprint check
+        shell: pwsh
+        working-directory: client
+        run: |
+          cmake --preset release '-DWORKBENCH_COMMIT=${{ github.sha }}'
+          cmake --build --preset release
+          ctest --preset release -LE e2e
+          ./tools/package.ps1 -BuildDir build/release -OutDir build/package -Version '0.0.0-ci'
+          ./tools/check-footprint.ps1 -BuildDir build/release
+
+  portable-sanitizers:
+    name: Portable libraries (Linux, ASan/UBSan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test under sanitizers
+        working-directory: client
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build g++-14
+          cmake --preset sanitize -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14
+          cmake --build --preset sanitize
+          ctest --preset sanitize
+
+  fuzz:
+    name: Fuzz untrusted-input parsers (Linux, libFuzzer, ASan/UBSan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build fuzz targets
+        working-directory: client
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build clang-18 libclang-rt-18-dev
+          cmake --preset fuzz-libfuzzer -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
+          cmake --build --preset fuzz-libfuzzer
+      - name: Fuzz each target for two minutes
+        working-directory: client
+        run: |
+          mkdir -p build/corpus/tool_args build/corpus/sse build/corpus/markdown build/corpus/telemetry_redaction build/corpus/meeting_container
+          ./build/fuzz-libfuzzer/fuzz/fuzz_tool_args build/corpus/tool_args fuzz/corpus/tool_args \
+            -dict=fuzz/corpus/tool_args.dict -max_len=65536 -max_total_time=120 -timeout=2 -artifact_prefix=build/
+          ./build/fuzz-libfuzzer/fuzz/fuzz_sse build/corpus/sse tests/model/fixtures \
+            -dict=fuzz/corpus/sse.dict -max_len=65536 -max_total_time=120 -timeout=2 -artifact_prefix=build/
+          ./build/fuzz-libfuzzer/fuzz/fuzz_markdown build/corpus/markdown fuzz/corpus/markdown \
+            -dict=fuzz/corpus/markdown.dict -max_len=8192 -max_total_time=120 -timeout=2 -artifact_prefix=build/
+          ./build/fuzz-libfuzzer/fuzz/fuzz_telemetry_redaction build/corpus/telemetry_redaction fuzz/corpus/telemetry_redaction \
+            -dict=fuzz/corpus/telemetry_redaction.dict -max_len=20000 -max_total_time=120 -timeout=2 -artifact_prefix=build/
+          ./build/fuzz-libfuzzer/fuzz/fuzz_meeting_container build/corpus/meeting_container fuzz/corpus/meeting_container \
+            -dict=fuzz/corpus/meeting_container.dict -max_len=8192 -max_total_time=120 -timeout=2 -artifact_prefix=build/
+      - name: Keep a crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: client/build/crash-*
+
+  control-plane:
+    name: Control plane (Node.js, SQLite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: control-plane
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: control-plane/package-lock.json
+      - run: npm ci
+      - name: Type check
+        run: npm run check
+      - name: Telemetry allowlists match telemetry/catalogue.yaml
+        run: npm run telemetry:catalogue -- --check
+      - name: Tests (in-test issuer and upstream fakes; no organization services, no secrets)
+        run: npm test
+      - name: Admin console builds
+        run: npm run admin:build
+      - name: Container image builds
+        run: docker build -t workbench-control-plane:ci .
+
+  graph-mock:
+    name: Graph mock (dev/graph-mock)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dev/graph-mock
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: dev/graph-mock/package-lock.json
+      - run: npm ci
+      - name: Type check
+        run: npm run check
+      - name: Tests
+        run: npm test
+      - name: Single executable, ready within 5 seconds
+        run: npm run build:sea
+      - name: Container image builds and is ready within 5 seconds
+        run: |
+          docker build -t workbench-graph-mock:ci .
+          docker run -d --name graph-mock -p 4810:4810 -p 4811:4811 workbench-graph-mock:ci
+          for i in $(seq 1 50); do curl -sf http://127.0.0.1:4811/_mock/health && exit 0; sleep 0.1; done
+          docker logs graph-mock; exit 1
+# Not in CI on purpose (design D12): the client end-to-end tests and the control plane's real-LLM tests use the
+# organization Keycloak test realm and the organization LLM API from a developer's .env. They run locally only; the API key
+# is never stored as a repository or Actions secret.

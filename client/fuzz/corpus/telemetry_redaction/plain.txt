@@ -1,0 +1,2 @@
+salary-[0-9]+
+The tool failed: Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJqYW4ifQ.c2lnbmF0dXJl at https://wiki.corp.local/hr?x=1

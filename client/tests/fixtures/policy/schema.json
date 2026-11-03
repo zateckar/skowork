@@ -1,0 +1,2578 @@
+{
+  "version": 1,
+  "keys": [
+    {
+      "path": "apps.mcp",
+      "owner": "client/local-apps",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "read"
+        ]
+      },
+      "default": "read"
+    },
+    {
+      "path": "apps.mode",
+      "owner": "client/local-apps",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "dictation.mode",
+      "owner": "client/dictation",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "filesystem.deny",
+      "owner": "client/policy-enforcement",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "filesystem.grantable",
+      "owner": "client/policy-enforcement",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "filesystem.read",
+      "owner": "client/policy-enforcement",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "filesystem.write",
+      "owner": "client/policy-enforcement",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "knowledge.directory_enrichment",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "knowledge.embedding_daily_tokens",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "integer",
+        "min": 0
+      },
+      "default": 10000000
+    },
+    {
+      "path": "knowledge.exclusions",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "knowledge.extraction",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "knowledge.extraction_daily_calls",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "integer",
+        "min": 0
+      },
+      "default": 2000
+    },
+    {
+      "path": "knowledge.max_file_mb",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 25
+    },
+    {
+      "path": "knowledge.max_threads",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 2
+    },
+    {
+      "path": "knowledge.save_as_note",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "knowledge.sharing.groups",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "knowledge.sources.calendar",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "knowledge.sources.files",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "knowledge.sources.mail",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "knowledge.sources.meetings",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "knowledge.sources.notes",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "knowledge.sources.threads",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "llm.budget.embed_daily_tokens",
+      "owner": "control-plane/llm-gateway",
+      "type": {
+        "kind": "integer",
+        "min": 0
+      },
+      "default": 12000000
+    },
+    {
+      "path": "llm.budget.images_daily",
+      "owner": "control-plane/llm-gateway",
+      "type": {
+        "kind": "integer",
+        "min": 0
+      },
+      "default": 50
+    },
+    {
+      "path": "llm.budget.period",
+      "owner": "control-plane/llm-gateway",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "day",
+          "week",
+          "month"
+        ]
+      },
+      "default": "day"
+    },
+    {
+      "path": "llm.budget.tokens",
+      "owner": "control-plane/llm-gateway",
+      "type": {
+        "kind": "integer",
+        "min": 0
+      },
+      "default": 1000000
+    },
+    {
+      "path": "llm.max_concurrent_runs",
+      "owner": "client/agent-runtime",
+      "type": {
+        "kind": "integer",
+        "min": 1,
+        "max": 64
+      },
+      "default": 3
+    },
+    {
+      "path": "llm.max_images_per_request",
+      "owner": "client/model-access",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 4
+    },
+    {
+      "path": "llm.max_parallel_tools",
+      "owner": "client/agent-runtime",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 4
+    },
+    {
+      "path": "llm.max_tool_result_kb",
+      "owner": "client/agent-runtime",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 64
+    },
+    {
+      "path": "llm.models",
+      "owner": "control-plane/llm-gateway",
+      "type": {
+        "kind": "map",
+        "value": {
+          "kind": "string"
+        },
+        "keys": [
+          "main",
+          "vision",
+          "small",
+          "embed",
+          "rerank",
+          "image"
+        ]
+      },
+      "default": {
+        "main": "acme-llm-primary",
+        "vision": "acme-llm-primary",
+        "small": "acme-llm-secondary",
+        "embed": "acme-llm-embedding",
+        "rerank": "acme-llm-reranker",
+        "image": "acme-llm-image"
+      }
+    },
+    {
+      "path": "llm.rate_limits.concurrent_requests",
+      "owner": "control-plane/llm-gateway",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 4
+    },
+    {
+      "path": "llm.rate_limits.requests_per_minute",
+      "owner": "control-plane/llm-gateway",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 60
+    },
+    {
+      "path": "llm.run_limits.attended.model_calls",
+      "owner": "client/agent-runtime",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 60
+    },
+    {
+      "path": "llm.run_limits.attended.tool_calls",
+      "owner": "client/agent-runtime",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 200
+    },
+    {
+      "path": "llm.run_limits.attended.wall_minutes",
+      "owner": "client/agent-runtime",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 60
+    },
+    {
+      "path": "llm.run_limits.unattended.model_calls",
+      "owner": "client/agent-runtime",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 30
+    },
+    {
+      "path": "llm.run_limits.unattended.tool_calls",
+      "owner": "client/agent-runtime",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 80
+    },
+    {
+      "path": "llm.run_limits.unattended.wall_minutes",
+      "owner": "client/agent-runtime",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 30
+    },
+    {
+      "path": "llm.timeouts.connect_seconds",
+      "owner": "client/model-access",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 10
+    },
+    {
+      "path": "llm.timeouts.idle_seconds",
+      "owner": "client/model-access",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 60
+    },
+    {
+      "path": "mail.auth",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "oauth",
+          "mock"
+        ]
+      },
+      "default": "oauth"
+    },
+    {
+      "path": "mail.excluded_labels",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "mail.exclusions.categories",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "mail.exclusions.folders",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "mail.exclusions.private_items",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": true
+    },
+    {
+      "path": "mail.graph_base_url",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "string",
+        "pattern": "^(https://|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?(/|$))"
+      },
+      "default": "https://graph.microsoft.com/v1.0"
+    },
+    {
+      "path": "mail.oauth.authority",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "string"
+      },
+      "default": ""
+    },
+    {
+      "path": "mail.oauth.client_id",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "string"
+      },
+      "default": ""
+    },
+    {
+      "path": "mail.oauth.tenant_id",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "string"
+      },
+      "default": ""
+    },
+    {
+      "path": "mail.sync_interval_minutes",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 5
+    },
+    {
+      "path": "mail.sync_window.calendar_future_days",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "integer",
+        "min": 0
+      },
+      "default": 365
+    },
+    {
+      "path": "mail.sync_window.calendar_past_days",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "integer",
+        "min": 0
+      },
+      "default": 90
+    },
+    {
+      "path": "mail.sync_window.mail_days",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 180
+    },
+    {
+      "path": "mail.unlabelled",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "exclude",
+          "include"
+        ]
+      },
+      "default": "include"
+    },
+    {
+      "path": "mcp.idle_timeout_minutes",
+      "owner": "client/mcp-client",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 10
+    },
+    {
+      "path": "meeting_capture.allow_manual",
+      "owner": "client/meeting-capture",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": false
+    },
+    {
+      "path": "meeting_capture.allow_series_auto",
+      "owner": "client/meeting-capture",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": false
+    },
+    {
+      "path": "meeting_capture.apps",
+      "owner": "client/meeting-capture",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      }
+    },
+    {
+      "path": "meeting_capture.enabled",
+      "owner": "client/meeting-capture",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": false
+    },
+    {
+      "path": "meeting_capture.keep_audio",
+      "owner": "client/meeting-capture",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": false
+    },
+    {
+      "path": "meeting_capture.live_transcript",
+      "owner": "client/meeting-capture",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": false
+    },
+    {
+      "path": "meeting_capture.max_pending_days",
+      "owner": "client/meeting-capture",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 7
+    },
+    {
+      "path": "meeting_capture.notice_text",
+      "owner": "client/meeting-capture",
+      "type": {
+        "kind": "map",
+        "value": {
+          "kind": "string"
+        },
+        "keys": [
+          "cs",
+          "de",
+          "en"
+        ]
+      }
+    },
+    {
+      "path": "meeting_capture.require_notice",
+      "owner": "client/meeting-capture",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": true
+    },
+    {
+      "path": "messaging.mode",
+      "owner": "control-plane/user-messaging",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "network.egress_allow",
+      "owner": "client/policy-enforcement",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string",
+          "pattern": "^[A-Za-z0-9*?._:\\[\\]-]+$"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "network.egress_deny",
+      "owner": "client/policy-enforcement",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string",
+          "pattern": "^[A-Za-z0-9*?._:\\[\\]-]+$"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "notifications.action",
+      "owner": "client/work-inbox",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": true
+    },
+    {
+      "path": "notifications.completed",
+      "owner": "client/work-inbox",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": true
+    },
+    {
+      "path": "notifications.failed",
+      "owner": "client/work-inbox",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": true
+    },
+    {
+      "path": "scheduler.catch_up_window_hours",
+      "owner": "client/scheduler",
+      "type": {
+        "kind": "integer",
+        "min": 0
+      },
+      "default": 12
+    },
+    {
+      "path": "scheduler.enabled_kinds",
+      "owner": "client/scheduler",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "enum",
+          "values": [
+            "schedule",
+            "file",
+            "mail",
+            "calendar",
+            "meeting",
+            "session"
+          ]
+        }
+      },
+      "default": [
+        "schedule",
+        "file",
+        "mail",
+        "calendar",
+        "meeting",
+        "session"
+      ]
+    },
+    {
+      "path": "scheduler.history_days",
+      "owner": "client/scheduler",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 90
+    },
+    {
+      "path": "scheduler.max_concurrent_runs",
+      "owner": "client/scheduler",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 2
+    },
+    {
+      "path": "scheduler.max_triggers",
+      "owner": "client/scheduler",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 50
+    },
+    {
+      "path": "scheduler.min_interval_minutes",
+      "owner": "client/scheduler",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 15
+    },
+    {
+      "path": "scheduler.remote_share_results",
+      "owner": "control-plane/task-dispatch",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "scheduler.remote_trusted_issuers",
+      "owner": "client/scheduler",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "skills.auto_update",
+      "owner": "client/skills",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": true
+    },
+    {
+      "path": "skills.install_from",
+      "owner": "client/skills",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string",
+          "pattern": "^(org|group|shared|group:.+)$"
+        }
+      },
+      "default": [
+        "org",
+        "group",
+        "shared"
+      ]
+    },
+    {
+      "path": "skills.locked",
+      "owner": "client/skills",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "skills.publish",
+      "owner": "client/skills",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "enum",
+          "values": [
+            "shared",
+            "group",
+            "org"
+          ]
+        }
+      },
+      "default": [
+        "shared"
+      ]
+    },
+    {
+      "path": "skills.script_runtimes",
+      "owner": "client/skills",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": [
+        "powershell"
+      ]
+    },
+    {
+      "path": "storage.max_size_gb",
+      "owner": "client/local-storage",
+      "type": {
+        "kind": "number",
+        "min": 0
+      },
+      "default": 10
+    },
+    {
+      "path": "storage.root",
+      "owner": "client/local-storage",
+      "type": {
+        "kind": "string"
+      }
+    },
+    {
+      "path": "telemetry.buffer_max_mb",
+      "owner": "client/telemetry",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 20
+    },
+    {
+      "path": "telemetry.crash_reports",
+      "owner": "client/telemetry",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": true
+    },
+    {
+      "path": "telemetry.level",
+      "owner": "client/telemetry",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "metadata",
+          "content"
+        ]
+      },
+      "default": "metadata"
+    },
+    {
+      "path": "telemetry.redaction_patterns",
+      "owner": "client/telemetry",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "tools.browser.allow_eval",
+      "owner": "client/browser-use",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": false
+    },
+    {
+      "path": "tools.browser.headless_unattended",
+      "owner": "client/browser-use",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": false
+    },
+    {
+      "path": "tools.browser.idle_timeout_minutes",
+      "owner": "client/browser-use",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 15
+    },
+    {
+      "path": "tools.browser.retain_screenshots",
+      "owner": "client/browser-use",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": false
+    },
+    {
+      "path": "tools.computer.app_allowlist",
+      "owner": "client/computer-use",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "tools.computer.app_denylist",
+      "owner": "client/computer-use",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "tools.computer.mode",
+      "owner": "client/computer-use",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "allow"
+        ]
+      },
+      "default": "off"
+    },
+    {
+      "path": "tools.computer.perception",
+      "owner": "client/computer-use",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "tree_only",
+          "tree_and_vision"
+        ]
+      },
+      "default": "tree_and_vision"
+    },
+    {
+      "path": "tools.computer.retain_screenshots",
+      "owner": "client/computer-use",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": false
+    },
+    {
+      "path": "tools.computer.stop_hotkey",
+      "owner": "client/computer-use",
+      "type": {
+        "kind": "string"
+      },
+      "default": "Ctrl+Alt+End"
+    },
+    {
+      "path": "tools.files.max_read_kb",
+      "owner": "client/core-tools",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 256
+    },
+    {
+      "path": "tools.mcp.limits.cpu_percent",
+      "owner": "client/mcp-client",
+      "type": {
+        "kind": "integer",
+        "min": 1,
+        "max": 100
+      },
+      "default": 50
+    },
+    {
+      "path": "tools.mcp.limits.memory_mb",
+      "owner": "client/mcp-client",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 1024
+    },
+    {
+      "path": "tools.mcp.limits.processes",
+      "owner": "client/mcp-client",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 32
+    },
+    {
+      "path": "tools.risk",
+      "owner": "client/policy-enforcement",
+      "type": {
+        "kind": "decision-map",
+        "keys": [
+          "read",
+          "write-local",
+          "external",
+          "destructive"
+        ]
+      },
+      "default": {
+        "read": "allow",
+        "write-local": "approve",
+        "external": "approve",
+        "destructive": "deny"
+      }
+    },
+    {
+      "path": "tools.rules",
+      "owner": "client/policy-enforcement",
+      "type": {
+        "kind": "decision-map"
+      },
+      "default": {}
+    },
+    {
+      "path": "tools.shell.destructive_patterns",
+      "owner": "client/core-tools",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      }
+    },
+    {
+      "path": "tools.shell.executable",
+      "owner": "client/core-tools",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "powershell",
+          "pwsh"
+        ]
+      },
+      "default": "powershell"
+    },
+    {
+      "path": "tools.shell.limits.cpu_percent",
+      "owner": "client/tool-sandbox",
+      "type": {
+        "kind": "integer",
+        "min": 1,
+        "max": 100
+      },
+      "default": 50
+    },
+    {
+      "path": "tools.shell.limits.memory_mb",
+      "owner": "client/tool-sandbox",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 1024
+    },
+    {
+      "path": "tools.shell.limits.output_kb",
+      "owner": "client/tool-sandbox",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 1024
+    },
+    {
+      "path": "tools.shell.limits.processes",
+      "owner": "client/tool-sandbox",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 32
+    },
+    {
+      "path": "tools.shell.limits.wall_minutes",
+      "owner": "client/tool-sandbox",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 15
+    },
+    {
+      "path": "tools.shell.mode",
+      "owner": "client/tool-sandbox",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "sandboxed",
+          "allow"
+        ]
+      },
+      "default": "off"
+    },
+    {
+      "path": "ui.background_on_battery",
+      "owner": "client/desktop-host",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": false
+    },
+    {
+      "path": "unattended.allowed_risk",
+      "owner": "client/policy-enforcement",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "enum",
+          "values": [
+            "read",
+            "write-local",
+            "external",
+            "destructive"
+          ]
+        }
+      },
+      "default": [
+        "read",
+        "write-local"
+      ]
+    },
+    {
+      "path": "unattended.rules",
+      "owner": "client/policy-enforcement",
+      "type": {
+        "kind": "decision-map"
+      },
+      "default": {}
+    }
+  ],
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:workbench:policy:document:v1",
+    "title": "Workbench Group policy document",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apps": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mcp": {
+            "type": "string",
+            "enum": [
+              "off",
+              "read"
+            ],
+            "x-owner": "client/local-apps",
+            "x-merge": "scalar",
+            "default": "read",
+            "x-guardrail": "max-level"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "x-owner": "client/local-apps",
+            "x-merge": "scalar",
+            "default": "on",
+            "x-guardrail": "max-level"
+          }
+        }
+      },
+      "dictation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "x-owner": "client/dictation",
+            "x-merge": "scalar",
+            "default": "on",
+            "x-guardrail": "max-level"
+          }
+        }
+      },
+      "filesystem": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "deny": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "x-owner": "client/policy-enforcement",
+            "x-merge": "union",
+            "default": [],
+            "x-guardrail": "add"
+          },
+          "grantable": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "x-owner": "client/policy-enforcement",
+            "x-merge": "union",
+            "default": []
+          },
+          "read": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "x-owner": "client/policy-enforcement",
+            "x-merge": "union",
+            "default": []
+          },
+          "write": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "x-owner": "client/policy-enforcement",
+            "x-merge": "union",
+            "default": []
+          }
+        }
+      },
+      "knowledge": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "directory_enrichment": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "x-owner": "client/knowledge-graph",
+            "x-merge": "scalar",
+            "default": "on",
+            "x-guardrail": "max-level"
+          },
+          "embedding_daily_tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "x-owner": "client/knowledge-graph",
+            "x-merge": "scalar",
+            "default": 10000000,
+            "x-guardrail": "cap"
+          },
+          "exclusions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "x-owner": "client/knowledge-graph",
+            "x-merge": "union",
+            "default": [],
+            "x-guardrail": "add"
+          },
+          "extraction": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "x-owner": "client/knowledge-graph",
+            "x-merge": "scalar",
+            "default": "on",
+            "x-guardrail": "max-level"
+          },
+          "extraction_daily_calls": {
+            "type": "integer",
+            "minimum": 0,
+            "x-owner": "client/knowledge-graph",
+            "x-merge": "scalar",
+            "default": 2000,
+            "x-guardrail": "cap"
+          },
+          "max_file_mb": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/knowledge-graph",
+            "x-merge": "scalar",
+            "default": 25,
+            "x-guardrail": "cap"
+          },
+          "max_threads": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/knowledge-graph",
+            "x-merge": "scalar",
+            "default": 2,
+            "x-guardrail": "cap"
+          },
+          "save_as_note": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "x-owner": "client/knowledge-graph",
+            "x-merge": "scalar",
+            "default": "on",
+            "x-guardrail": "max-level"
+          },
+          "sharing": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "groups": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "x-owner": "client/knowledge-graph",
+                "x-merge": "union",
+                "default": [],
+                "x-guardrail": "restrict"
+              }
+            }
+          },
+          "sources": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "calendar": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "on"
+                ],
+                "x-owner": "client/knowledge-graph",
+                "x-merge": "scalar",
+                "default": "on",
+                "x-guardrail": "max-level"
+              },
+              "files": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "on"
+                ],
+                "x-owner": "client/knowledge-graph",
+                "x-merge": "scalar",
+                "default": "on",
+                "x-guardrail": "max-level"
+              },
+              "mail": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "on"
+                ],
+                "x-owner": "client/knowledge-graph",
+                "x-merge": "scalar",
+                "default": "on",
+                "x-guardrail": "max-level"
+              },
+              "meetings": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "on"
+                ],
+                "x-owner": "client/knowledge-graph",
+                "x-merge": "scalar",
+                "default": "on",
+                "x-guardrail": "max-level"
+              },
+              "notes": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "on"
+                ],
+                "x-owner": "client/knowledge-graph",
+                "x-merge": "scalar",
+                "default": "on",
+                "x-guardrail": "max-level"
+              },
+              "threads": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "on"
+                ],
+                "x-owner": "client/knowledge-graph",
+                "x-merge": "scalar",
+                "default": "on",
+                "x-guardrail": "max-level"
+              }
+            }
+          }
+        }
+      },
+      "llm": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "budget": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "embed_daily_tokens": {
+                "type": "integer",
+                "minimum": 0,
+                "x-owner": "control-plane/llm-gateway",
+                "x-merge": "scalar",
+                "default": 12000000,
+                "x-guardrail": "cap"
+              },
+              "images_daily": {
+                "type": "integer",
+                "minimum": 0,
+                "x-owner": "control-plane/llm-gateway",
+                "x-merge": "scalar",
+                "default": 50,
+                "x-guardrail": "cap"
+              },
+              "period": {
+                "type": "string",
+                "enum": [
+                  "day",
+                  "week",
+                  "month"
+                ],
+                "x-owner": "control-plane/llm-gateway",
+                "x-merge": "scalar",
+                "default": "day"
+              },
+              "tokens": {
+                "type": "integer",
+                "minimum": 0,
+                "x-owner": "control-plane/llm-gateway",
+                "x-merge": "scalar",
+                "default": 1000000,
+                "x-guardrail": "cap"
+              }
+            }
+          },
+          "max_concurrent_runs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64,
+            "x-owner": "client/agent-runtime",
+            "x-merge": "scalar",
+            "default": 3,
+            "x-guardrail": "cap"
+          },
+          "max_images_per_request": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/model-access",
+            "x-merge": "scalar",
+            "default": 4,
+            "x-guardrail": "cap"
+          },
+          "max_parallel_tools": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/agent-runtime",
+            "x-merge": "scalar",
+            "default": 4,
+            "x-guardrail": "cap"
+          },
+          "max_tool_result_kb": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/agent-runtime",
+            "x-merge": "scalar",
+            "default": 64,
+            "x-guardrail": "cap"
+          },
+          "models": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "main": {
+                "type": "string"
+              },
+              "vision": {
+                "type": "string"
+              },
+              "small": {
+                "type": "string"
+              },
+              "embed": {
+                "type": "string"
+              },
+              "rerank": {
+                "type": "string"
+              },
+              "image": {
+                "type": "string"
+              }
+            },
+            "x-owner": "control-plane/llm-gateway",
+            "x-merge": "whole-map",
+            "default": {
+              "main": "acme-llm-primary",
+              "vision": "acme-llm-primary",
+              "small": "acme-llm-secondary",
+              "embed": "acme-llm-embedding",
+              "rerank": "acme-llm-reranker",
+              "image": "acme-llm-image"
+            },
+            "x-guardrail": "force-entries"
+          },
+          "rate_limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "concurrent_requests": {
+                "type": "integer",
+                "minimum": 1,
+                "x-owner": "control-plane/llm-gateway",
+                "x-merge": "scalar",
+                "default": 4,
+                "x-guardrail": "cap"
+              },
+              "requests_per_minute": {
+                "type": "integer",
+                "minimum": 1,
+                "x-owner": "control-plane/llm-gateway",
+                "x-merge": "scalar",
+                "default": 60,
+                "x-guardrail": "cap"
+              }
+            }
+          },
+          "run_limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "attended": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "model_calls": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "x-owner": "client/agent-runtime",
+                    "x-merge": "scalar",
+                    "default": 60,
+                    "x-guardrail": "cap"
+                  },
+                  "tool_calls": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "x-owner": "client/agent-runtime",
+                    "x-merge": "scalar",
+                    "default": 200,
+                    "x-guardrail": "cap"
+                  },
+                  "wall_minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "x-owner": "client/agent-runtime",
+                    "x-merge": "scalar",
+                    "default": 60,
+                    "x-guardrail": "cap"
+                  }
+                }
+              },
+              "unattended": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "model_calls": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "x-owner": "client/agent-runtime",
+                    "x-merge": "scalar",
+                    "default": 30,
+                    "x-guardrail": "cap"
+                  },
+                  "tool_calls": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "x-owner": "client/agent-runtime",
+                    "x-merge": "scalar",
+                    "default": 80,
+                    "x-guardrail": "cap"
+                  },
+                  "wall_minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "x-owner": "client/agent-runtime",
+                    "x-merge": "scalar",
+                    "default": 30,
+                    "x-guardrail": "cap"
+                  }
+                }
+              }
+            }
+          },
+          "timeouts": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "connect_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "x-owner": "client/model-access",
+                "x-merge": "scalar",
+                "default": 10
+              },
+              "idle_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "x-owner": "client/model-access",
+                "x-merge": "scalar",
+                "default": 60
+              }
+            }
+          }
+        }
+      },
+      "mail": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "auth": {
+            "type": "string",
+            "enum": [
+              "oauth",
+              "mock"
+            ],
+            "x-owner": "client/mail-calendar",
+            "x-merge": "scalar",
+            "default": "oauth",
+            "x-guardrail": "max-level"
+          },
+          "excluded_labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "x-owner": "client/mail-calendar",
+            "x-merge": "union",
+            "default": [],
+            "x-guardrail": "add"
+          },
+          "exclusions": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "categories": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "x-owner": "client/mail-calendar",
+                "x-merge": "union",
+                "default": [],
+                "x-guardrail": "add"
+              },
+              "folders": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "x-owner": "client/mail-calendar",
+                "x-merge": "union",
+                "default": [],
+                "x-guardrail": "add"
+              },
+              "private_items": {
+                "type": "boolean",
+                "x-owner": "client/mail-calendar",
+                "x-merge": "scalar",
+                "default": true,
+                "x-guardrail": "force"
+              }
+            }
+          },
+          "graph_base_url": {
+            "type": "string",
+            "pattern": "^(https://|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?(/|$))",
+            "x-owner": "client/mail-calendar",
+            "x-merge": "scalar",
+            "default": "https://graph.microsoft.com/v1.0",
+            "x-guardrail": "force"
+          },
+          "oauth": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "authority": {
+                "type": "string",
+                "x-owner": "client/mail-calendar",
+                "x-merge": "scalar",
+                "default": "",
+                "x-guardrail": "force"
+              },
+              "client_id": {
+                "type": "string",
+                "x-owner": "client/mail-calendar",
+                "x-merge": "scalar",
+                "default": ""
+              },
+              "tenant_id": {
+                "type": "string",
+                "x-owner": "client/mail-calendar",
+                "x-merge": "scalar",
+                "default": ""
+              }
+            }
+          },
+          "sync_interval_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/mail-calendar",
+            "x-merge": "scalar",
+            "default": 5,
+            "x-guardrail": "floor"
+          },
+          "sync_window": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "calendar_future_days": {
+                "type": "integer",
+                "minimum": 0,
+                "x-owner": "client/mail-calendar",
+                "x-merge": "scalar",
+                "default": 365,
+                "x-guardrail": "cap"
+              },
+              "calendar_past_days": {
+                "type": "integer",
+                "minimum": 0,
+                "x-owner": "client/mail-calendar",
+                "x-merge": "scalar",
+                "default": 90,
+                "x-guardrail": "cap"
+              },
+              "mail_days": {
+                "type": "integer",
+                "minimum": 1,
+                "x-owner": "client/mail-calendar",
+                "x-merge": "scalar",
+                "default": 180,
+                "x-guardrail": "cap"
+              }
+            }
+          },
+          "unlabelled": {
+            "type": "string",
+            "enum": [
+              "exclude",
+              "include"
+            ],
+            "x-owner": "client/mail-calendar",
+            "x-merge": "scalar",
+            "default": "include",
+            "x-guardrail": "max-level"
+          }
+        }
+      },
+      "mcp": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "idle_timeout_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/mcp-client",
+            "x-merge": "scalar",
+            "default": 10,
+            "x-guardrail": "cap"
+          }
+        }
+      },
+      "meeting_capture": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "allow_manual": {
+            "type": "boolean",
+            "x-owner": "client/meeting-capture",
+            "x-merge": "scalar",
+            "default": false,
+            "x-guardrail": "force"
+          },
+          "allow_series_auto": {
+            "type": "boolean",
+            "x-owner": "client/meeting-capture",
+            "x-merge": "scalar",
+            "default": false,
+            "x-guardrail": "force"
+          },
+          "apps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "x-owner": "client/meeting-capture",
+            "x-merge": "union"
+          },
+          "enabled": {
+            "type": "boolean",
+            "x-owner": "client/meeting-capture",
+            "x-merge": "scalar",
+            "default": false,
+            "x-guardrail": "force"
+          },
+          "keep_audio": {
+            "type": "boolean",
+            "x-owner": "client/meeting-capture",
+            "x-merge": "scalar",
+            "default": false,
+            "x-guardrail": "force"
+          },
+          "live_transcript": {
+            "type": "boolean",
+            "x-owner": "client/meeting-capture",
+            "x-merge": "scalar",
+            "default": false
+          },
+          "max_pending_days": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/meeting-capture",
+            "x-merge": "scalar",
+            "default": 7,
+            "x-guardrail": "cap"
+          },
+          "notice_text": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "cs": {
+                "type": "string"
+              },
+              "de": {
+                "type": "string"
+              },
+              "en": {
+                "type": "string"
+              }
+            },
+            "x-owner": "client/meeting-capture",
+            "x-merge": "per-key-map"
+          },
+          "require_notice": {
+            "type": "boolean",
+            "x-owner": "client/meeting-capture",
+            "x-merge": "scalar",
+            "default": true,
+            "x-guardrail": "force"
+          }
+        }
+      },
+      "messaging": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "x-owner": "control-plane/user-messaging",
+            "x-merge": "scalar",
+            "default": "on",
+            "x-guardrail": "max-level"
+          }
+        }
+      },
+      "network": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "egress_allow": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9*?._:\\[\\]-]+$"
+            },
+            "x-owner": "client/policy-enforcement",
+            "x-merge": "union",
+            "default": []
+          },
+          "egress_deny": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9*?._:\\[\\]-]+$"
+            },
+            "x-owner": "client/policy-enforcement",
+            "x-merge": "union",
+            "default": [],
+            "x-guardrail": "add"
+          }
+        }
+      },
+      "notifications": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "boolean",
+            "x-owner": "client/work-inbox",
+            "x-merge": "scalar",
+            "default": true
+          },
+          "completed": {
+            "type": "boolean",
+            "x-owner": "client/work-inbox",
+            "x-merge": "scalar",
+            "default": true
+          },
+          "failed": {
+            "type": "boolean",
+            "x-owner": "client/work-inbox",
+            "x-merge": "scalar",
+            "default": true
+          }
+        }
+      },
+      "scheduler": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "catch_up_window_hours": {
+            "type": "integer",
+            "minimum": 0,
+            "x-owner": "client/scheduler",
+            "x-merge": "scalar",
+            "default": 12,
+            "x-guardrail": "cap"
+          },
+          "enabled_kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "schedule",
+                "file",
+                "mail",
+                "calendar",
+                "meeting",
+                "session"
+              ]
+            },
+            "x-owner": "client/scheduler",
+            "x-merge": "union",
+            "default": [
+              "schedule",
+              "file",
+              "mail",
+              "calendar",
+              "meeting",
+              "session"
+            ],
+            "x-guardrail": "restrict"
+          },
+          "history_days": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/scheduler",
+            "x-merge": "scalar",
+            "default": 90,
+            "x-guardrail": "cap"
+          },
+          "max_concurrent_runs": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/scheduler",
+            "x-merge": "scalar",
+            "default": 2,
+            "x-guardrail": "cap"
+          },
+          "max_triggers": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/scheduler",
+            "x-merge": "scalar",
+            "default": 50,
+            "x-guardrail": "cap"
+          },
+          "min_interval_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/scheduler",
+            "x-merge": "scalar",
+            "default": 15,
+            "x-guardrail": "floor"
+          },
+          "remote_share_results": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "x-owner": "control-plane/task-dispatch",
+            "x-merge": "union",
+            "default": []
+          },
+          "remote_trusted_issuers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "x-owner": "client/scheduler",
+            "x-merge": "union",
+            "default": []
+          }
+        }
+      },
+      "skills": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "auto_update": {
+            "type": "boolean",
+            "x-owner": "client/skills",
+            "x-merge": "scalar",
+            "default": true
+          },
+          "install_from": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(org|group|shared|group:.+)$"
+            },
+            "x-owner": "client/skills",
+            "x-merge": "union",
+            "default": [
+              "org",
+              "group",
+              "shared"
+            ],
+            "x-guardrail": "restrict"
+          },
+          "locked": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "x-owner": "client/skills",
+            "x-merge": "union",
+            "default": [],
+            "x-guardrail": "add"
+          },
+          "publish": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "shared",
+                "group",
+                "org"
+              ]
+            },
+            "x-owner": "client/skills",
+            "x-merge": "union",
+            "default": [
+              "shared"
+            ],
+            "x-guardrail": "restrict"
+          },
+          "script_runtimes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "x-owner": "client/skills",
+            "x-merge": "union",
+            "default": [
+              "powershell"
+            ]
+          }
+        }
+      },
+      "storage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "max_size_gb": {
+            "type": "number",
+            "minimum": 0,
+            "x-owner": "client/local-storage",
+            "x-merge": "scalar",
+            "default": 10,
+            "x-guardrail": "cap"
+          },
+          "root": {
+            "type": "string",
+            "x-owner": "client/local-storage",
+            "x-merge": "scalar"
+          }
+        }
+      },
+      "telemetry": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "buffer_max_mb": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/telemetry",
+            "x-merge": "scalar",
+            "default": 20,
+            "x-guardrail": "cap"
+          },
+          "crash_reports": {
+            "type": "boolean",
+            "x-owner": "client/telemetry",
+            "x-merge": "scalar",
+            "default": true
+          },
+          "level": {
+            "type": "string",
+            "enum": [
+              "off",
+              "metadata",
+              "content"
+            ],
+            "x-owner": "client/telemetry",
+            "x-merge": "scalar",
+            "default": "metadata",
+            "x-guardrail": "max-level"
+          },
+          "redaction_patterns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "x-owner": "client/telemetry",
+            "x-merge": "union",
+            "default": [],
+            "x-guardrail": "add"
+          }
+        }
+      },
+      "tools": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "browser": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "allow_eval": {
+                "type": "boolean",
+                "x-owner": "client/browser-use",
+                "x-merge": "scalar",
+                "default": false,
+                "x-guardrail": "force"
+              },
+              "headless_unattended": {
+                "type": "boolean",
+                "x-owner": "client/browser-use",
+                "x-merge": "scalar",
+                "default": false
+              },
+              "idle_timeout_minutes": {
+                "type": "integer",
+                "minimum": 1,
+                "x-owner": "client/browser-use",
+                "x-merge": "scalar",
+                "default": 15
+              },
+              "retain_screenshots": {
+                "type": "boolean",
+                "x-owner": "client/browser-use",
+                "x-merge": "scalar",
+                "default": false,
+                "x-guardrail": "force"
+              }
+            }
+          },
+          "computer": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "app_allowlist": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "x-owner": "client/computer-use",
+                "x-merge": "union",
+                "default": []
+              },
+              "app_denylist": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "x-owner": "client/computer-use",
+                "x-merge": "union",
+                "default": [],
+                "x-guardrail": "add"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "allow"
+                ],
+                "x-owner": "client/computer-use",
+                "x-merge": "scalar",
+                "default": "off",
+                "x-guardrail": "max-level"
+              },
+              "perception": {
+                "type": "string",
+                "enum": [
+                  "tree_only",
+                  "tree_and_vision"
+                ],
+                "x-owner": "client/computer-use",
+                "x-merge": "scalar",
+                "default": "tree_and_vision",
+                "x-guardrail": "max-level"
+              },
+              "retain_screenshots": {
+                "type": "boolean",
+                "x-owner": "client/computer-use",
+                "x-merge": "scalar",
+                "default": false,
+                "x-guardrail": "force"
+              },
+              "stop_hotkey": {
+                "type": "string",
+                "x-owner": "client/computer-use",
+                "x-merge": "scalar",
+                "default": "Ctrl+Alt+End"
+              }
+            }
+          },
+          "files": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "max_read_kb": {
+                "type": "integer",
+                "minimum": 1,
+                "x-owner": "client/core-tools",
+                "x-merge": "scalar",
+                "default": 256,
+                "x-guardrail": "cap"
+              }
+            }
+          },
+          "mcp": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "limits": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "cpu_percent": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "x-owner": "client/mcp-client",
+                    "x-merge": "scalar",
+                    "default": 50,
+                    "x-guardrail": "cap"
+                  },
+                  "memory_mb": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "x-owner": "client/mcp-client",
+                    "x-merge": "scalar",
+                    "default": 1024,
+                    "x-guardrail": "cap"
+                  },
+                  "processes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "x-owner": "client/mcp-client",
+                    "x-merge": "scalar",
+                    "default": 32,
+                    "x-guardrail": "cap"
+                  }
+                }
+              }
+            }
+          },
+          "risk": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "read": {
+                "enum": [
+                  "allow",
+                  "approve",
+                  "deny"
+                ]
+              },
+              "write-local": {
+                "enum": [
+                  "allow",
+                  "approve",
+                  "deny"
+                ]
+              },
+              "external": {
+                "enum": [
+                  "allow",
+                  "approve",
+                  "deny"
+                ]
+              },
+              "destructive": {
+                "enum": [
+                  "allow",
+                  "approve",
+                  "deny"
+                ]
+              }
+            },
+            "x-owner": "client/policy-enforcement",
+            "x-merge": "decision-map",
+            "default": {
+              "read": "allow",
+              "write-local": "approve",
+              "external": "approve",
+              "destructive": "deny"
+            },
+            "x-guardrail": "stricter"
+          },
+          "rules": {
+            "type": "object",
+            "propertyNames": {
+              "pattern": "^[A-Za-z0-9_.:*\\/-]{1,128}$"
+            },
+            "additionalProperties": {
+              "enum": [
+                "allow",
+                "approve",
+                "deny"
+              ]
+            },
+            "x-owner": "client/policy-enforcement",
+            "x-merge": "decision-map",
+            "default": {},
+            "x-guardrail": "stricter"
+          },
+          "shell": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "destructive_patterns": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "x-owner": "client/core-tools",
+                "x-merge": "union",
+                "x-guardrail": "add"
+              },
+              "executable": {
+                "type": "string",
+                "enum": [
+                  "powershell",
+                  "pwsh"
+                ],
+                "x-owner": "client/core-tools",
+                "x-merge": "scalar",
+                "default": "powershell"
+              },
+              "limits": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "cpu_percent": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "x-owner": "client/tool-sandbox",
+                    "x-merge": "scalar",
+                    "default": 50,
+                    "x-guardrail": "cap"
+                  },
+                  "memory_mb": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "x-owner": "client/tool-sandbox",
+                    "x-merge": "scalar",
+                    "default": 1024,
+                    "x-guardrail": "cap"
+                  },
+                  "output_kb": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "x-owner": "client/tool-sandbox",
+                    "x-merge": "scalar",
+                    "default": 1024,
+                    "x-guardrail": "cap"
+                  },
+                  "processes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "x-owner": "client/tool-sandbox",
+                    "x-merge": "scalar",
+                    "default": 32,
+                    "x-guardrail": "cap"
+                  },
+                  "wall_minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "x-owner": "client/tool-sandbox",
+                    "x-merge": "scalar",
+                    "default": 15,
+                    "x-guardrail": "cap"
+                  }
+                }
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "sandboxed",
+                  "allow"
+                ],
+                "x-owner": "client/tool-sandbox",
+                "x-merge": "scalar",
+                "default": "off",
+                "x-guardrail": "max-level"
+              }
+            }
+          }
+        }
+      },
+      "ui": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "background_on_battery": {
+            "type": "boolean",
+            "x-owner": "client/desktop-host",
+            "x-merge": "scalar",
+            "default": false,
+            "x-guardrail": "force"
+          }
+        }
+      },
+      "unattended": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "allowed_risk": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "read",
+                "write-local",
+                "external",
+                "destructive"
+              ]
+            },
+            "x-owner": "client/policy-enforcement",
+            "x-merge": "union",
+            "default": [
+              "read",
+              "write-local"
+            ],
+            "x-guardrail": "restrict"
+          },
+          "rules": {
+            "type": "object",
+            "propertyNames": {
+              "pattern": "^[A-Za-z0-9_.:*\\/-]{1,128}$"
+            },
+            "additionalProperties": {
+              "enum": [
+                "allow",
+                "approve",
+                "deny"
+              ]
+            },
+            "x-owner": "client/policy-enforcement",
+            "x-merge": "decision-map",
+            "default": {},
+            "x-guardrail": "stricter"
+          }
+        }
+      }
+    }
+  }
+}

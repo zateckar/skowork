@@ -1,0 +1,58 @@
+{
+  "anchor": "2026-10-26T08:00:00Z",
+  "labels": {
+    "public": "0f1e7b2a-1c39-4a0d-9d41-7a3f00000001",
+    "internal": "0f1e7b2a-1c39-4a0d-9d41-7a3f00000002",
+    "confidential": "0f1e7b2a-1c39-4a0d-9d41-7a3f00000003",
+    "strictly_confidential": "0f1e7b2a-1c39-4a0d-9d41-7a3f00000004"
+  },
+  "users": [
+    { "key": "jan", "displayName": "Jan Novák", "upn": "jan.novak@acme-test.example", "timeZone": "Central Europe Standard Time", "language": "cs-CZ", "default": true, "department": "Výroba – linka 4", "jobTitle": "Vedoucí údržby", "manager": "eva" },
+    { "key": "eva", "displayName": "Eva Schneider", "upn": "eva.schneider@acme-test.example", "timeZone": "W. Europe Standard Time", "language": "de-DE", "department": "Controlling", "jobTitle": "Controllerin", "manager": "tom" },
+    { "key": "tom", "displayName": "Tom Baker", "upn": "tom.baker@acme-test.example", "timeZone": "GMT Standard Time", "language": "en-GB", "department": "Finance", "jobTitle": "Head of Finance" }
+  ],
+  "folders": [
+    { "user": "jan", "name": "Projekty" },
+    { "user": "jan", "name": "Osobní" }
+  ],
+  "messages": [
+    { "user": "jan", "key": "budget-1", "thread": "budget", "from": "eva", "to": ["jan"], "cc": ["tom"], "subject": "Budget Q4 – Entwurf",
+      "body": "<p>Hallo Jan,</p><p>anbei der Entwurf des Budgets für Q4. Bitte prüfe die Positionen 3 bis 7 bis Mittwoch.</p><p>Viele Grüße<br>Eva</p>",
+      "received": "-3d 09:12", "label": "internal", "isRead": true,
+      "attachments": [{ "name": "Budget-Q4.docx", "text": "Budget Q4\nPosition 3: Schulungen 12 000 EUR\nPosition 7: Lizenzen 48 000 EUR" }] },
+    { "user": "jan", "key": "budget-2", "thread": "budget", "from": "tom", "to": ["eva", "jan"], "subject": "RE: Budget Q4 – Entwurf",
+      "body": "<p>Eva, the licence line looks high. Can we discuss on Thursday?</p><p>Tom</p>", "received": "-2d 14:40", "label": "internal" },
+    { "user": "jan", "key": "offer", "from": "Petra Malá <petra.mala@dodavatel-test.example>", "to": ["jan"], "subject": "Cenová nabídka – servis linky 4",
+      "body": "<p>Dobrý den, pane Nováku,</p><p>v příloze zasílám cenovou nabídku na servis linky 4. Platnost nabídky je do konce listopadu.</p><p>S pozdravem<br>Petra Malá</p>",
+      "received": "-1d 10:05", "label": "public",
+      "attachments": [{ "name": "Nabidka-servis-linka-4.pdf", "text": "Cenova nabidka\nServis linky 4\nCelkem 184 500 CZK bez DPH" }] },
+    { "user": "jan", "key": "board", "from": "tom", "to": ["jan"], "subject": "Board pack – strictly confidential",
+      "body": "<p>Restructuring plan for plant 3, do not forward.</p>", "received": "-1d 16:20", "label": "strictly_confidential" },
+    { "user": "jan", "key": "hr", "from": "HR Service <hr-service@acme-test.example>", "to": ["jan"], "subject": "Hodnocení zaměstnanců 2026",
+      "body": "<p>Hodnocení musí být odevzdána do 15. 11.</p>", "received": "-5d 08:00", "label": "confidential", "categories": ["HR"] },
+    { "user": "jan", "key": "newsletter", "from": "Newsletter <news@vendor-test.example>", "to": ["jan"], "subject": "Webinar: Digital twins in manufacturing",
+      "body": "<p>Join our webinar on 4 November.</p>", "received": "-6d 07:30", "label": null, "isRead": true },
+    { "user": "jan", "key": "lunch", "folder": "Osobní", "from": "eva", "to": ["jan"], "subject": "Mittagessen Freitag?",
+      "body": "<p>Hast du Freitag Zeit für ein Mittagessen?</p>", "received": "-4d 11:45", "label": "internal", "categories": ["Private"] },
+    { "user": "jan", "key": "project-a", "folder": "Projekty", "thread": "project-a", "from": "tom", "to": ["jan"], "subject": "Project Atlas – status",
+      "body": "<p>Milestone 2 is done; the test report is attached.</p>", "received": "-7d 13:00", "label": "internal",
+      "attachments": [{ "name": "Atlas-test-report.pdf", "text": "Atlas test report\nAll 42 cases passed\nOpen issue: sensor calibration" }] },
+    { "user": "jan", "key": "old", "from": "eva", "to": ["jan"], "subject": "Archiv: Jahresplanung 2025", "body": "<p>Alte Planung.</p>", "received": "-300d 09:00", "label": "internal", "isRead": true },
+    { "user": "jan", "key": "sent-1", "folder": "sentitems", "from": "jan", "to": ["eva"], "subject": "Re: Mittagessen Freitag?", "body": "<p>Ano, rád.</p>", "received": "-4d 12:10", "label": "internal", "isRead": true },
+    { "user": "eva", "key": "e-budget", "from": "tom", "to": ["eva"], "subject": "RE: Budget Q4 – Entwurf", "body": "<p>Thursday works.</p>", "received": "-2d 14:41", "label": "internal" },
+    { "user": "tom", "key": "t-hello", "from": "jan", "to": ["tom"], "subject": "Dotaz k Atlasu", "body": "<p>Tome, kdy bude kalibrace hotová?</p>", "received": "-1d 09:30", "label": "internal" }
+  ],
+  "events": [
+    { "user": "jan", "key": "standup", "subject": "Daily stand-up", "start": "-14d 07:30", "minutes": 15, "attendees": ["eva", "tom"],
+      "recurrence": { "type": "weekly", "daysOfWeek": ["monday", "tuesday", "wednesday", "thursday", "friday"], "until": "+60d" }, "label": "internal", "online": true },
+    { "user": "jan", "key": "budget-review", "uid": "budget-review", "subject": "Budget Q4 review", "start": "+3d 13:00", "minutes": 60, "organizer": "eva", "attendees": ["jan", "tom"], "location": "Springfield, Room 4.12", "label": "internal" },
+    { "user": "jan", "key": "doctor", "subject": "Lékař", "body": "<p>Preventivní prohlídka</p>", "start": "+1d 12:00", "minutes": 90, "private": true, "showAs": "oof" },
+    { "user": "jan", "key": "board-meeting", "uid": "board", "subject": "Board – plant 3", "start": "+2d 08:00", "minutes": 120, "organizer": "tom", "attendees": ["jan"], "label": "strictly_confidential" },
+    { "user": "jan", "key": "supplier", "subject": "Servis linky 4 – jednání", "start": "+4d 09:00", "minutes": 60, "attendees": ["Petra Malá <petra.mala@dodavatel-test.example>"], "location": "Teams", "online": true },
+    { "user": "jan", "key": "past", "subject": "Retrospektiva sprintu", "start": "-5d 14:00", "minutes": 60, "attendees": ["tom"], "label": "internal" },
+    { "user": "eva", "key": "e-budget-review", "uid": "budget-review", "subject": "Budget Q4 review", "start": "+3d 13:00", "minutes": 60, "attendees": ["jan", "tom"], "location": "Springfield, Room 4.12", "label": "internal" },
+    { "user": "eva", "key": "e-busy", "subject": "Lieferantentermin", "start": "+1d 08:00", "minutes": 180, "label": "internal" },
+    { "user": "tom", "key": "t-busy", "subject": "Plant visit", "start": "+1d 10:00", "minutes": 240, "showAs": "workingElsewhere" },
+    { "user": "tom", "key": "t-board", "uid": "board", "subject": "Board – plant 3", "start": "+2d 08:00", "minutes": 120, "attendees": ["jan"], "label": "strictly_confidential" }
+  ]
+}

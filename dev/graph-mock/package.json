@@ -1,0 +1,26 @@
+{
+  "name": "workbench-graph-mock",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only Microsoft Graph v1.0 subset with Entra-shaped OAuth endpoints, seeded fixtures, fault injection and a control API (dev/graph-mock). Never shipped.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --test-concurrency=1 \"test/**/*.test.ts\"",
+    "build:sea": "node scripts/build-sea.ts --check"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "jose": "^6.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.7.0",
+    "esbuild": "^0.25.12",
+    "typescript": "~5.9.3"
+  }
+}

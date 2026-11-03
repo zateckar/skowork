@@ -1,0 +1,201 @@
+# Workbench telemetry catalogue (add-telemetry-and-admin design D1, D2).
+#
+# Every telemetry field the client may send is listed here with its telemetry level and purpose. This file is the
+# reviewed artefact: it is what the organization-level approval process (data protection officer, works council) receives
+# before production rollout. Code may emit only what is listed here:
+#   - the client's C++ allowlist (client/src/telemetry/catalogue.gen.h) and
+#   - the control plane's TypeScript allowlist (control-plane/src/telemetry/catalogue.gen.ts)
+# are generated from it with `npm run telemetry:catalogue` in control-plane/. CI fails when the generated files are
+# out of date, and code that names a field missing here does not compile.
+#
+# Levels: metadata (the default policy.telemetry.level) or content (only when policy.telemetry.level is content).
+# Types: string, integer, number, boolean, and domain (a URL or host reduced to its host name before it is stored).
+# Strings are cut to 256 characters at metadata level and 8,000 at content level, and every string goes through
+# secret redaction (client/telemetry Secret Redaction).
+
+version: 1
+
+# Sent once per batch, describing the sender. The user principal is not a field: the ingest takes it from the
+# access token (client/telemetry Telemetry Identity).
+resource:
+  - name: service.version
+    type: string
+    level: metadata
+    purpose: Client version, for version adoption and to tie errors to a release.
+  - name: workbench.channel
+    type: string
+    level: metadata
+    purpose: Update channel of the installation (stable, pilot, dev).
+  - name: os.build
+    type: string
+    level: metadata
+    purpose: Windows build number, to find OS-specific failures.
+  - name: workbench.installation_id
+    type: string
+    level: metadata
+    purpose: The installation that sent the batch; the ingest checks it belongs to the token's user.
+
+attributes:
+  - name: run.id
+    type: string
+    level: metadata
+    purpose: Random Run identifier, to group the records of one Run. Not linked to any content.
+  - name: run.outcome
+    type: string
+    level: metadata
+    purpose: How a Run ended (succeeded, failed, cancelled, interrupted).
+  - name: run.origin
+    type: string
+    level: metadata
+    purpose: What started the Run (user, subagent, trigger, remote).
+  - name: run.duration_ms
+    type: integer
+    level: metadata
+    purpose: Wall-clock duration of the Run.
+  - name: run.tool_calls
+    type: integer
+    level: metadata
+    purpose: Number of tool calls in the Run.
+  - name: tool.id
+    type: string
+    level: metadata
+    purpose: Tool identifier (for example files.read), for tool usage and failure rates.
+  - name: tool.risk
+    type: string
+    level: metadata
+    purpose: Risk class of the tool call (read, write-local, external, destructive).
+  - name: tool.outcome
+    type: string
+    level: metadata
+    purpose: Result of the tool call (ok, error, denied, rejected, cancelled).
+  - name: tool.duration_ms
+    type: integer
+    level: metadata
+    purpose: Duration of the tool call.
+  - name: url.domain
+    type: domain
+    level: metadata
+    purpose: Host name of a URL a tool used (web.fetch, browser), never the path or query.
+  - name: approval.decision
+    type: string
+    level: metadata
+    purpose: How the user resolved an Approval (approve, reject, edit), for approval counts.
+  - name: policy.rule
+    type: string
+    level: metadata
+    purpose: Identifier of the policy rule that decided a tool call, for policy tuning. Rule ids name patterns, not paths the user touched.
+  - name: policy.version
+    type: integer
+    level: metadata
+    purpose: Version of the Policy bundle in force, for rollout adoption.
+  - name: policy.outcome
+    type: string
+    level: metadata
+    purpose: Decision of the policy hook (allow, approve, deny).
+  - name: model.role
+    type: string
+    level: metadata
+    purpose: Model role used (main, small, embed, rerank, image), for token usage per role.
+  - name: tokens.prompt
+    type: integer
+    level: metadata
+    purpose: Prompt tokens of a model call.
+  - name: tokens.completion
+    type: integer
+    level: metadata
+    purpose: Completion tokens of a model call.
+  - name: error.code
+    type: string
+    level: metadata
+    purpose: Typed error code (for example QUOTA_EXCEEDED, timeout), for error rates.
+  - name: error.component
+    type: string
+    level: metadata
+    purpose: Client component that reported the error (runtime, model, channel, sandbox, mcp, browser).
+  - name: network.enforcement
+    type: string
+    level: metadata
+    purpose: Network enforcement level of the tool sandbox (proxy-only or os-enforced).
+  - name: process.startup_ms
+    type: integer
+    level: metadata
+    purpose: Time from process start to a ready tray, for the footprint budget.
+  - name: process.working_set_mb
+    type: number
+    level: metadata
+    purpose: Working set of the core process, for the footprint budget.
+  - name: telemetry.discarded
+    type: integer
+    level: metadata
+    purpose: Records dropped because the offline buffer was full.
+  - name: crash.id
+    type: string
+    level: metadata
+    purpose: Random identifier of a crash report, to match the report with its dump.
+  - name: crash.process
+    type: string
+    level: metadata
+    purpose: Which process crashed (core or a worker kind).
+  - name: crash.exception_code
+    type: string
+    level: metadata
+    purpose: Windows exception code of the crash (for example 0xC0000005).
+  - name: crash.module
+    type: string
+    level: metadata
+    purpose: File name of the module the crash occurred in.
+  - name: crash.dump_bytes
+    type: integer
+    level: metadata
+    purpose: Size of the filtered minidump.
+  - name: content.prompt
+    type: string
+    level: content
+    purpose: The user's message to the agent. Content level only.
+  - name: content.response
+    type: string
+    level: content
+    purpose: The agent's answer. Content level only.
+  - name: tool.arguments
+    type: string
+    level: content
+    purpose: The arguments of a tool call as JSON. Content level only.
+  - name: error.message
+    type: string
+    level: content
+    purpose: Error text, which may quote user content. Content level only.
+
+events:
+  - name: run.finished
+    purpose: One per finished Run.
+    attributes: [run.id, run.outcome, run.origin, run.duration_ms, run.tool_calls, error.code, content.prompt, content.response]
+  - name: tool.call
+    purpose: One per finished tool call.
+    attributes: [run.id, tool.id, tool.risk, tool.outcome, tool.duration_ms, url.domain, tool.arguments]
+  - name: approval.resolved
+    purpose: One per resolved Approval.
+    attributes: [run.id, tool.id, tool.risk, approval.decision]
+  - name: policy.decision
+    purpose: One per policy decision the enforcer records (client/policy-enforcement).
+    attributes: [run.id, tool.id, tool.risk, policy.rule, policy.version, policy.outcome]
+  - name: model.usage
+    purpose: One per model call.
+    attributes: [run.id, model.role, tokens.prompt, tokens.completion, error.code]
+  - name: client.error
+    purpose: An error a component reported outside a Run.
+    attributes: [error.code, error.component, error.message]
+  - name: client.started
+    purpose: One per process start.
+    attributes: [process.startup_ms, network.enforcement]
+  - name: client.footprint
+    purpose: Hourly footprint sample.
+    attributes: [process.working_set_mb]
+  - name: sandbox.enforcement
+    purpose: The network enforcement level the tool sandbox reported, when it changes.
+    attributes: [network.enforcement]
+  - name: telemetry.buffer
+    purpose: Records the offline buffer had to drop since the last batch.
+    attributes: [telemetry.discarded]
+  - name: crash.report
+    purpose: One per crash report, sent with its filtered dump.
+    attributes: [crash.id, crash.process, crash.exception_code, crash.module, crash.dump_bytes]

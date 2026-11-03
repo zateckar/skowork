@@ -1,0 +1,1 @@
+{"name":"workbench-mcp-test-server","version":"0.1.0","private":true,"type":"module","description":"Dev-only MCP reference/test server (stdio and Streamable HTTP); also the mock Jira server. Never shipped.","dependencies":{"@modelcontextprotocol/sdk":"1.32.1"}}

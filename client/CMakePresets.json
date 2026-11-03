@@ -1,0 +1,65 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": { "CMAKE_C_COMPILER": "gcc", "CMAKE_CXX_COMPILER": "g++" }
+    },
+    {
+      "name": "debug",
+      "inherits": "base",
+      "displayName": "Debug (UBSan trap, dev endpoints)",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "WORKBENCH_DEV_ENDPOINTS": "ON" }
+    },
+    {
+      "name": "test",
+      "inherits": "base",
+      "displayName": "Optimised build with dev endpoints, for end-to-end tests against the mocks",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "WORKBENCH_DEV_ENDPOINTS": "ON" }
+    },
+    {
+      "name": "release",
+      "inherits": "base",
+      "displayName": "Release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "WORKBENCH_TESTS": "ON", "WORKBENCH_CHANNEL": "stable" }
+    },
+    {
+      "name": "sanitize",
+      "inherits": "base",
+      "displayName": "Portable libraries under ASan/UBSan (Linux)",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "WORKBENCH_SANITIZE": "ON" }
+    },
+    {
+      "name": "fuzz",
+      "inherits": "base",
+      "displayName": "Fuzz targets (Linux, AFL++ GCC plugin: set CC/CXX to afl-gcc-fast/afl-g++-fast)",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "WORKBENCH_FUZZ": "ON", "WORKBENCH_TESTS": "OFF",
+                          "CMAKE_C_COMPILER": "afl-gcc-fast", "CMAKE_CXX_COMPILER": "afl-g++-fast" }
+    },
+    {
+      "name": "fuzz-libfuzzer",
+      "inherits": "base",
+      "displayName": "Fuzz targets under libFuzzer with ASan/UBSan (Linux, Clang; the CI fuzz job)",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "WORKBENCH_FUZZ": "ON", "WORKBENCH_TESTS": "OFF",
+                          "WORKBENCH_SANITIZE": "ON", "WORKBENCH_WERROR": "OFF",
+                          "CMAKE_C_COMPILER": "clang", "CMAKE_CXX_COMPILER": "clang++" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "test", "configurePreset": "test" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "sanitize", "configurePreset": "sanitize" },
+    { "name": "fuzz", "configurePreset": "fuzz" },
+    { "name": "fuzz-libfuzzer", "configurePreset": "fuzz-libfuzzer" }
+  ],
+  "testPresets": [
+    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
+    { "name": "test", "configurePreset": "test", "output": { "outputOnFailure": true } },
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
+    { "name": "sanitize", "configurePreset": "sanitize", "output": { "outputOnFailure": true } }
+  ]
+}

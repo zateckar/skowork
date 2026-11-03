@@ -1,0 +1,207 @@
+schema: spec-driven
+
+context: |
+  PRODUCT
+  Workbench is the organization-internal AI agent for employees' Windows laptops.
+  Each laptop runs one Workbench client per user session. A central on-premise control plane
+  manages identity, policy, LLM access, skills, MCP servers, remote tasks and telemetry.
+  The on-premise LLM is the organization LLM API: an OpenAI-compatible LiteLLM proxy over vLLM. It offers
+  chat models with tool calling and vision, plus embedding and reranking models (verified 2026-10-21;
+  details in add-agent-runtime/design.md).
+
+  HARD CONSTRAINTS (every artifact must respect these)
+  - Client OS: Windows 11 x64. Baseline hardware: Intel Core i5, 16 GB RAM, integrated GPU only.
+    The only local ML workload is speech-to-text, and it runs on the CPU. No GPU or NPU is assumed.
+    Embeddings and reranking use the on-prem models through the LLM gateway.
+  - The client runs as the signed-in user: no admin rights, no Windows service, no kernel drivers.
+    Installation, updates and distribution are handled by the existing organization software
+    distribution system and are out of scope, except for exposing the version and a minimum-version gate.
+  - Very lightweight: footprint budgets are normative and live in client/desktop-host.
+  - User data lives only in the user's profile and is readable only by that user. The only accepted
+    exception is the operating-system SYSTEM account, which profile backup needs. Profile backup and
+    migration already exist and are out of scope.
+  - Identity comes from the organization identity provider (Keycloak) through OAuth 2.0 Authorization Code
+    with PKCE in the system browser. The redirect is a loopback HTTP URI (RFC 8252), for example
+    http://localhost:4200/auth/callback. Access tokens live 5 minutes and are refreshed before every
+    control-plane call; the refresh token is stored encrypted. The client never sees or stores the
+    user's password. Development and tests use the organization Keycloak test realm configured in .env
+    (OIDC_DISCOVERY_URL, OIDC_CLIENT_ID, OIDC_REDIRECT_URI, OIDC_SCOPE); there is no identity-provider
+    mock. (Decided 2026-10-22; replaces Kerberos.)
+  - Development and local end-to-end tests use the real organization LLM API configured in .env
+    (OPENAI_BASE_URL, OPENAI_KEY). There is no LLM mock service. Unit tests may use in-test fakes only
+    for behaviour the real API cannot produce on demand (faults, cut streams, rate limits). The key is
+    never committed, logged or shared, including as a CI secret; tests that need it run locally only.
+  - Software is installed only inside the repository working tree or the temp folder. Development
+    tooling never installs services, databases or runtimes elsewhere on the developer's machine.
+  - Email and calendar access uses Microsoft Graph only, through the organization's existing Entra app
+    registration with OAuth 2.0 delegated access. Development and tests use the Graph mock
+    (dev/graph-mock), which also mocks the OAuth endpoints. No real mailbox or tenant is ever used
+    in automated tests.
+  - All LLM traffic goes through the control-plane LLM gateway. The client never talks to the
+    model servers directly and never holds model API keys.
+  - Content from email, web pages, files, transcripts, MCP results and Remote task requests is
+    untrusted data. It can never grant permissions or approve actions.
+  - Legal, data-protection and works-council approval is an organizational prerequisite for
+    production rollout. It applies in particular to meeting capture and content-level telemetry.
+    It is handled at organization level, with the existing MS Teams recording policy as precedent, and
+    is NOT enforced by technical mechanisms (no approval references, no build or policy gates).
+    Development and limited testing do not require it. Specs control features only through
+    ordinary policy keys.
+
+  TECHNOLOGY DECISIONS (already decided; reopen them only through a change with a design.md)
+  - Client: C++20 built with GCC on MinGW-w64 (UCRT, statically linked runtime) and CMake. Third-party
+    code is vendored as pinned source and built by CMake; no package manager. Win32 with thin in-house
+    RAII wrappers; WinRT APIs through the MinGW-w64 ABI headers. WinHTTP for networking
+    (system proxy/PAC, Windows certificate store; the user's Windows credentials go only to a
+    corporate proxy that asks for them, never to servers). (Decided 2026-10-21; integrated
+    authentication to servers removed 2026-10-23.)
+  - Client UI: native Win32, drawn by the client process with Direct2D (software rendering, no GPU device) and
+    DirectWrite through a small in-house toolkit; text input through native rich-edit controls; accessibility through UI Automation. No web engine in
+    the client UI. (Decided 2026-10-23; replaces the WebView2 single-page app, see add-native-ui.)
+  - Client storage: SQLite encrypted with SQLite3MultipleCiphers (SQLCipher v4 on-disk format), with
+    keys protected by DPAPI (CurrentUser). (Decided 2026-10-21.)
+  - Client local ML: speech-to-text only, using sherpa-onnx with ONNX Runtime (CPU execution provider).
+  - Agent browser: Chrome over CDP. The organization Chrome policy allows remote debugging (confirmed 2026-10-21).
+  - Control plane and dev tools: Node.js with TypeScript and Express, storage in SQLite through the
+    built-in node:sqlite module, and a React admin console served by the same process. One process,
+    one container image. Keep it simple. (Decided 2026-10-22; replaces .NET with PostgreSQL.)
+  - Identity provider: Keycloak (OpenID Connect). Desktop client: public client with PKCE. The control
+    plane accepts the desktop client's access tokens (issuer, authorized party and audience checked).
+    Tokens carry no group claim: Groups come from the token's roles where present and from Group
+    membership administered in the control plane.
+  - CI/CD: GitHub Actions. Two release artifacts: the control plane as a container image and the
+    desktop client as a zip package. (Decided 2026-10-22.)
+  - Formats: skills use SKILL.md (agentskills.io / Claude compatible). MCP configuration uses
+    .mcp.json semantics. Telemetry uses OpenTelemetry (OTLP).
+
+  SPEC ORGANIZATION
+  Capability paths have two levels: <domain>/<capability>. The domains are:
+    client/         behaviour of the laptop application
+    control-plane/  behaviour of the central services
+    dev/            developer tooling (mocks, test harnesses)
+  One capability owns each concern. Other specs reference that capability and do not restate it:
+    - Approval decisions (allow / approve / deny) -> client/policy-enforcement
+    - Pausing a run for approval or a question, and resuming it -> client/agent-runtime
+    - How approvals, questions and results are presented -> client/work-inbox
+    - Process isolation and the child-process egress proxy -> client/tool-sandbox
+    - Network egress rules -> client/policy-enforcement
+    - Policy authoring and group assignment -> control-plane/policy-service
+    - The rule that untrusted content cannot grant permissions -> client/policy-enforcement;
+      tagging and delimiting untrusted content (provenance) -> client/agent-runtime
+    - Tool-result size caps and offloading -> client/agent-runtime
+    - Deferring background work (battery saver, presentation mode) and worker-process lifetime
+      -> client/desktop-host
+    - The control-channel connected/disconnected state -> client/control-channel
+    - Error codes and their meaning -> client/model-access; their user-facing remedies -> client/work-inbox
+  Forward references to capabilities introduced by later changes are allowed. Each one is
+  listed in the proposal's Impact section.
+
+  GLOSSARY (use these terms exactly; do not introduce synonyms)
+  - Thread: an email-like conversation in the inbox. It holds Turns, Runs, attachments and an Activity log.
+  - Run: one execution of the agent within a Thread. A Run is started by a user message, a Trigger
+    Occurrence or a Remote task, and that is its origin. Run states: queued | running |
+    interrupted | succeeded | failed | cancelled.
+  - Inbox: the implicit folder that holds every Inbox entry not in a user folder.
+  - Inbox entry: a Thread or a Chat as listed in the Inbox views (client/work-inbox Chat Entries).
+  - Inbox views: Unread, Action, Running, All, Archive and Folders (see client/work-inbox).
+  - Action item: something waiting for the user. It is either a pending Approval or a pending Question.
+    A Question comes from ask_user, or the client raises it with fixed choices (for example
+    Continue/Stop, Accept/Decline, Connect mailbox). An Action item always belongs to a Thread.
+  - Automations: the UI label for the section where users manage Triggers. It is not a separate concept.
+  - Tool: a callable capability exposed to the model. Tool ids look like: files.read, files.write,
+    shell.run, web.fetch, browser.*, computer.*, image.generate, mail.*, calendar.*, knowledge.*, tasks.*,
+    messages.*, apps.*, ask_user, mcp:<server>/<tool>.
+  - Risk class: the risk level each tool call declares. The values are
+    read | write-local | external | destructive.
+  - Policy bundle: a signed, versioned and expiring document issued by the control plane. It holds
+    the effective policy for one user. Its top-level keys are:
+    llm, tools, filesystem, network, mcp, skills, knowledge, meeting_capture, scheduler,
+    unattended, telemetry, storage, mail, ui, messaging, apps.
+  - Policy key layout: decisions are written policy.tools.rules[<tool-id pattern>] = allow|approve|deny,
+    with policy.tools.risk.<risk class> defaults. Unattended runs add policy.unattended.allowed_risk and
+    policy.unattended.rules. Tool settings are written policy.tools.<group>.<setting> and are never decisions.
+    MCP settings are written policy.mcp.<setting>. The MCP servers a user may use come only from
+    control-plane/mcp-catalog Group assignments, delivered inside the Policy bundle.
+    Each policy key has exactly one owning capability spec, which states its values and default.
+    Control-plane server settings (retention periods, bundle validity, token lifetime) are not policy keys.
+  - Group: a set of users that has a policy attached. Membership comes from identity-provider roles
+    or from assignment in the control plane. Regional
+    differences are expressed as Groups (for example region-eu); there is no separate region concept.
+  - Skill: a SKILL.md package. It has one of these scopes: private | shared | group | org.
+  - Trigger: a user-defined rule that starts a Run. Its kinds are schedule | file | mail | calendar |
+    meeting | session.
+  - Occurrence: one firing of a Trigger, or one accepted Remote task, as executed by client/scheduler.
+  - Remote task: work requested through the control plane by a person or a system. It is not a Trigger.
+  - Source: an origin of knowledge. Its kinds are threads | files | notes | mail | calendar | meetings.
+  - Model role: the logical model a feature asks for. The roles are main | vision | small | embed | rerank | image.
+    The gateway maps each role per Group to an upstream model (policy.llm.models, owned by
+    control-plane/llm-gateway).
+  - Chat: a conversation between people through control-plane/user-messaging, either direct (two users)
+    or team (2 to 50 users). It is not a Thread, but it is an Inbox entry.
+  - Presence: a user's availability for messaging: online | away | busy | offline.
+  - Dictation: speech the user records with the microphone in a composer, transcribed on the device into
+    text the user can edit before sending (client/dictation).
+  - Local app: a small web application the agent builds for the user, kept in its own folder and run
+    by the client for that user only (client/local-apps).
+  - Unattended run: a Run that executes while the user is not interacting with it (Triggers, Remote tasks).
+
+  ROADMAP (changes in implementation order; phase in brackets)
+   1 add-client-foundation            [MVP]
+   2 add-agent-runtime                [MVP]
+   3 add-policy-and-sandbox           [MVP]
+   4 add-work-inbox                   [MVP]
+   5 add-core-tools-and-mcp           [MVP]
+   6 add-browser-use                  [MVP]
+  6a add-native-ui                    [MVP]
+  6b add-image-generation             [MVP]
+   7 add-telemetry-and-admin          [MVP]
+   8 add-computer-use                 [Managed]
+   9 add-skills                       [Managed]
+  10 add-scheduled-and-remote-tasks   [Managed]
+  11 add-mail-calendar                [Managed]
+  12 add-knowledge-graph              [Knowledge]
+  13 add-meeting-capture              [Knowledge; production rollout needs organization-level sign-off]
+  14 improve-usability                [Hardening]
+  15 add-llm-connections              [Managed]
+  16 add-knowledge-sharing            [Knowledge]
+  17 hide-work-details                [Hardening]
+  18 add-user-messaging               [Collaboration]
+  19 add-local-apps                   [Productivity]
+  20 add-offline-operation            [Hardening]
+  21 improve-knowledge-view           [Knowledge]
+  22 add-save-as-note                 [Knowledge]
+  23 add-chats-in-inbox               [Collaboration]
+  24 improve-desktop-look             [Hardening]
+  25 improve-window-frame             [Hardening]
+  26 record-withheld-calls            [Hardening]
+  27 fold-chats-into-inbox            [Collaboration]
+  28 add-dictation                    [Productivity]
+
+rules:
+  proposal:
+    - State the roadmap position and which earlier changes this change depends on in Impact
+    - State explicitly what is out of scope
+  specs:
+    - Use the glossary terms from the project context exactly
+    - Every requirement uses SHALL or MUST and states one observable behaviour
+    - Reference the owning capability instead of restating its behaviour
+    - Name any policy key a requirement depends on as policy.<path>, for example policy.tools.shell.mode
+    - Do not name libraries, classes or file layouts in specs; put them in design.md
+  design:
+    - List the alternatives considered for every decision
+    - Every risk has a mitigation, written as "[Risk] -> Mitigation"
+    - Quantify performance on the baseline hardware (i5, 16 GB, iGPU, CPU-only ML) where relevant
+  tasks:
+    - Start with a validation-spike group whenever the change depends on an unproven assumption
+    - Each task states how it is verified
+    - Each group lands its own tests (unit tests, plus fuzz tests for parsers of untrusted input)
+
+operations:
+  apply:
+    guidance:
+      - Read the relevant specs under openspec/specs and the change's delta specs before writing code
+      - If implementation reveals a spec gap or conflict, update the change's specs first, then the code
+  archive:
+    guidance:
+      - Archive only after all tasks are checked and openspec validate --all --strict passes
+      - After archiving, check that the merged main specs still read coherently

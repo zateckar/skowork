@@ -1,0 +1,8 @@
+# Vendored sources must stay byte-identical to their pinned hashes (client/third_party/README.md).
+client/third_party/** -text
+# Recorded gateway responses (client/tests/model/fixtures) are replayed byte for byte.
+client/tests/model/fixtures/** -text
+# The generated policy schema is compared byte for byte with the control plane's registry.
+client/tests/fixtures/policy/** -text
+# Fuzz seeds are inputs byte for byte.
+client/fuzz/corpus/** -text

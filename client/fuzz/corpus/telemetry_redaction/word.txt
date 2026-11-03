@@ -1,0 +1,2 @@
+\b\w+@[\w.]+\b
+mail x@corp.cz, y

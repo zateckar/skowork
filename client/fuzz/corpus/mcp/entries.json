@@ -1,0 +1,1 @@
+[{"id":"a","kind":"remote","url":"https://x/mcp","auth":"audience-token"},{"id":"b","kind":"local","package":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","args":["bin/s.exe","--x"],"env":{"A":"b"},"exclude_tools":["d*"],"risk":{"t":"read"}}]

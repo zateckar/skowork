@@ -1,0 +1,2 @@
+[a-z]{3,}
+user:pw@[fe80::1]:8443/path?q=secret#frag

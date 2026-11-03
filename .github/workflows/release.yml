@@ -1,0 +1,137 @@
+# Release (add-client-foundation task 2.4): a version tag publishes two artifacts:
+#   - the control plane as a container image on GitHub Container Registry,
+#   - the desktop client as a zip package with its SHA-256 checksum, attached to the GitHub release,
+#     with the optional app runtime package for Local apps (add-local-apps) next to it.
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  WINLIBS_URL: https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r2.7z
+  WINLIBS_SHA256: 53fb6773fbdf87cdf22b69a6b2a07ee33d3ada413b42d83044bc7cc6481400d2
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - id: v
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "bad tag $GITHUB_REF_NAME"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          [[ "$v" == *-* ]] && echo "prerelease=true" >> "$GITHUB_OUTPUT" || echo "prerelease=false" >> "$GITHUB_OUTPUT"
+
+  control-plane-image:
+    name: Control plane container image
+    runs-on: ubuntu-latest
+    needs: version
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/workbench-control-plane
+          tags: |
+            type=raw,value=${{ needs.version.outputs.version }}
+            type=raw,value=latest,enable=${{ needs.version.outputs.prerelease == 'false' }}
+          labels: |
+            org.opencontainers.image.title=Workbench control plane
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: control-plane
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.version.outputs.version }}
+          provenance: true
+          sbom: true
+
+  desktop-zip:
+    name: Desktop client zip
+    runs-on: windows-latest
+    needs: version
+    env:
+      HAS_SIGNING_CERT: ${{ secrets.WORKBENCH_SIGNING_CERT_PFX_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install WinLibs (pinned, verified)
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'winlibs.7z'
+          Invoke-WebRequest $env:WINLIBS_URL -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:WINLIBS_SHA256) { throw 'WinLibs hash mismatch' }
+          7z x $archive "-o$env:RUNNER_TEMP\winlibs" -y | Out-Null
+          Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\winlibs\mingw64\bin"
+      - name: Fetch the app runtime (pinned Node.js, SHA-256 and signature checked)
+        shell: pwsh
+        run: ./dev/scripts/fetch-node-runtime.ps1
+      - name: Release build and tests
+        shell: pwsh
+        working-directory: client
+        run: |
+          cmake --preset release '-DWORKBENCH_VERSION=${{ needs.version.outputs.version }}' '-DWORKBENCH_COMMIT=${{ github.sha }}'
+          cmake --build --preset release
+          ctest --preset release -LE e2e
+          ./tools/check-footprint.ps1 -BuildDir build/release
+      - name: Sign executables (when a code-signing certificate is configured)
+        if: env.HAS_SIGNING_CERT == 'true'
+        shell: pwsh
+        env:
+          SIGNING_CERT: ${{ secrets.WORKBENCH_SIGNING_CERT_PFX_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.WORKBENCH_SIGNING_CERT_PASSWORD }}
+        working-directory: client
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'sign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_CERT))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:SIGNING_PASSWORD /tr http://timestamp.digicert.com /td SHA256 `
+            build/release/bin/Workbench.exe build/release/bin/workbench-worker.exe
+          Remove-Item $pfx
+      - name: Package
+        shell: pwsh
+        working-directory: client
+        run: ./tools/package.ps1 -BuildDir build/release -OutDir build/package -Version '${{ needs.version.outputs.version }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-zip
+          path: |
+            client/build/package/*.zip
+            client/build/package/*.zip.sha256
+
+  publish:
+    name: GitHub release
+    runs-on: ubuntu-latest
+    needs: [version, control-plane-image, desktop-zip]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-zip
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Workbench ${{ needs.version.outputs.version }}
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
+          files: |
+            dist/*.zip
+            dist/*.zip.sha256
+          body: |
+            Desktop client: `Workbench-${{ needs.version.outputs.version }}-win-x64.zip` (checksum in the `.sha256` file).
+            Optional app runtime for Local apps: `Workbench-${{ needs.version.outputs.version }}-app-runtime-win-x64.zip`, extracted next to Workbench.exe.
+            Control plane image: `ghcr.io/${{ github.repository_owner }}/workbench-control-plane:${{ needs.version.outputs.version }}`.

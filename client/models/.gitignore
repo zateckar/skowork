@@ -1,0 +1,4 @@
+# The speech-to-text models package (add-meeting-capture design D1): about 1 GB, fetched by dev/scripts/fetch-stt-models.ps1
+# and listed with hashes in client/third_party/README.md. Not committed.
+*
+!.gitignore

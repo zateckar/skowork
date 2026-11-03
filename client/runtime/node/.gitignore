@@ -1,0 +1,4 @@
+# The app runtime package (add-local-apps design D2): node.exe from the pinned official Node.js 26 LTS zip, fetched by
+# dev/scripts/fetch-node-runtime.ps1. Not committed.
+*
+!.gitignore
