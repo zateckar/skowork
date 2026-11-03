@@ -19,7 +19,7 @@ std::string iso8601_utc(sys_clock::time_point t) {
 #else
     gmtime_r(&secs, &tm);
 #endif
-    char buf[40];
+    char buf[80];  // GCC bounds the int fields at 78 bytes; the timestamp itself is 24
     std::snprintf(buf, sizeof buf, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                   tm.tm_hour, tm.tm_min, tm.tm_sec, static_cast<int>(ms % 1000));
     return buf;

@@ -44,7 +44,9 @@ std::string Redactor::apply(std::string_view text) const {
     return out;
 }
 std::string domain_of(std::string_view s) {
-    s = trim(s);
+    // trim returns a std::string: keep it alive for the whole function, not as a temporary behind a string_view.
+    const std::string trimmed = trim(s);
+    s = trimmed;
     std::string host;
     if (s.find("://") != std::string_view::npos) {
         const auto u = parse_url(s);
