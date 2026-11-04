@@ -1,0 +1,1242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI ecosystem and SkoWork - architecture and management briefing</title>
+<style>
+/* ---------- ŠKODA palette (from the ŠKODA CI guidelines) ---------- */
+:root{
+  --emerald:#0E3A2F;      /* primary dark */
+  --electric:#78FAAE;     /* signature green, dark grounds only */
+  --grey:#6F797A;
+  --light-grey:#CACECF;
+  --cyan:#1ED4DF;
+  --orange:#F7B046;
+  --paper:#FFFFFF;
+  --mist:#F3F5F4;
+  --ink:#0E3A2F;
+  --s:1;
+  --ease:cubic-bezier(.2,.7,.2,1);
+  /* no web fonts: system sans-serif stack only */
+  --font:"SKODA Next","Segoe UI",system-ui,-apple-system,Arial,Helvetica,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:#06130F;overflow:hidden;font-family:var(--font);-webkit-font-smoothing:antialiased}
+
+/* ---------- stage: fixed 1600x900 design, scaled to the window ---------- */
+.stage{position:absolute;left:50%;top:50%;width:1600px;height:900px;transform:translate(-50%,-50%) scale(var(--s));transform-origin:center center;overflow:hidden;background:var(--paper);box-shadow:0 0 0 1px rgba(0,0,0,.2)}
+.slide{position:absolute;inset:0;padding:96px 120px 90px;opacity:0;visibility:hidden;transition:opacity .6s var(--ease),visibility .6s;background:var(--paper);color:var(--ink);overflow:hidden}
+.slide.is-active{opacity:1;visibility:visible}
+.slide.dark{background:var(--emerald);color:#fff}
+.slide.dark.alt{background:#0A2B23}
+
+.kicker{font-size:22px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;color:var(--grey);margin-bottom:18px}
+.dark .kicker{color:var(--electric)}
+h1{font-size:150px;line-height:1;font-weight:800;letter-spacing:-.02em}
+h2{font-size:58px;line-height:1.1;font-weight:700;letter-spacing:-.01em;margin-bottom:44px;max-width:1300px}
+h3{font-size:34px;line-height:1.2;font-weight:700;margin-bottom:12px}
+p,li{font-size:26px;line-height:1.4}
+.lead{font-size:34px;line-height:1.35;max-width:1200px}
+.muted{color:var(--grey)}
+.dark .muted{color:var(--light-grey)}
+.e{color:var(--electric)}
+.card{border-radius:18px;padding:34px 36px;background:var(--mist)}
+.dark .card{background:rgba(255,255,255,.07);border:1px solid rgba(120,250,174,.25)}
+.card p{font-size:24px}
+.card ul{list-style:none}
+.card li{font-size:24px;line-height:1.4;padding-left:26px;position:relative;margin-top:8px}
+.card li::before{content:"";position:absolute;left:0;top:.7em;width:10px;height:10px;border-radius:2px;background:var(--electric)}
+.light .card li::before,.slide:not(.dark) .card li::before{background:var(--emerald)}
+.chip{display:inline-block;font-size:19px;font-weight:700;letter-spacing:.04em;border-radius:999px;padding:6px 16px;margin-left:10px;vertical-align:middle;text-transform:uppercase}
+.chip.acc{background:var(--emerald);color:var(--electric)}
+.chip.fl{background:var(--orange);color:var(--emerald)}
+.chip.pl{background:transparent;border:2px dashed var(--grey);color:var(--grey)}
+.dark .chip.pl{border-color:var(--light-grey);color:var(--light-grey)}
+.dark .chip.acc{background:var(--electric);color:var(--emerald)}
+.foot{position:absolute;left:120px;right:120px;bottom:36px;display:flex;justify-content:space-between;font-size:18px;letter-spacing:.06em;color:var(--grey)}
+.dark .foot{color:var(--light-grey)}
+.foot b{font-weight:700;letter-spacing:.12em}
+
+/* ---------- motion: runs only while the slide is active ---------- */
+@keyframes rise{from{opacity:0;transform:translateY(26px)}to{opacity:1;transform:none}}
+@keyframes grow{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@keyframes flow{to{stroke-dashoffset:-100}}
+@keyframes pop{0%{opacity:0;transform:scale(.6)}60%{opacity:1;transform:scale(1.06)}100%{opacity:1;transform:none}}
+@keyframes ring{0%{r:10;opacity:.9}100%{r:38;opacity:0}}
+@keyframes ringR{0%{transform:scale(.4);opacity:.9}100%{transform:scale(2.2);opacity:0}}
+@keyframes stepOn{0%,100%{background:#fff;color:var(--emerald)}4%,16%{background:var(--electric);color:var(--emerald)}22%{background:#fff;color:var(--emerald)}}
+@keyframes lineOn{0%,100%{background:var(--light-grey)}4%,16%{background:var(--electric)}22%{background:var(--light-grey)}}
+@keyframes cursor{0%{transform:translate(0,0)}25%{transform:translate(250px,60px)}45%{transform:translate(250px,60px) scale(.9)}50%{transform:translate(250px,60px)}80%{transform:translate(250px,180px)}100%{transform:translate(250px,180px)}}
+@keyframes clickRing{0%,50%{opacity:0;transform:scale(.3)}52%{opacity:1;transform:scale(.6)}75%{opacity:0;transform:scale(1.6)}100%{opacity:0}}
+@keyframes hlOn{0%,20%{background:transparent}30%,100%{background:rgba(120,250,174,.22)}}
+@keyframes typing{from{width:0}to{width:100%}}
+@keyframes blink{50%{opacity:0}}
+@keyframes bar{0%{transform:translateX(-100%)}100%{transform:translateX(0)}}
+@keyframes sweep{0%{background-position:0 0}100%{background-position:60px 0}}
+@keyframes lightPulse{0%,100%{opacity:.35}50%{opacity:1}}
+@keyframes seg{0%,28%{left:0}33%,61%{left:33.33%}66%,95%{left:66.66%}100%{left:0}}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.is-active .rise{animation:rise .8s var(--ease) both;animation-delay:var(--d,0s)}
+.is-active .pop{animation:pop .6s var(--ease) both;animation-delay:var(--d,0s)}
+.is-active .flow{stroke-dasharray:10 90;animation:flow var(--t,2.4s) linear infinite;animation-delay:var(--dl,0s)}
+.is-active .bar{animation:grow .9s var(--ease) both;transform-origin:left;animation-delay:var(--d,0s)}
+.is-active .step{animation:stepOn 7.2s ease-in-out infinite;animation-delay:calc(var(--i) * 1.2s)}
+.is-active .stepline{animation:lineOn 7.2s ease-in-out infinite;animation-delay:calc(var(--i) * 1.2s)}
+.is-active .hl{animation:hlOn 6s ease-in-out infinite;animation-delay:var(--d,0s)}
+.is-active .ringR{animation:ringR 2.4s ease-out infinite;animation-delay:var(--d,0s)}
+.is-active .pulse{animation:lightPulse 2.4s ease-in-out infinite;animation-delay:var(--d,0s)}
+.is-active .spin{animation:spin 6s linear infinite}
+.is-active .cur{animation:cursor 6s ease-in-out infinite}
+
+/* ---------- slide-specific helpers ---------- */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:28px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:28px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:24px}
+.cols{display:flex;gap:40px;align-items:stretch}
+.num{font-size:26px;font-weight:800;color:var(--emerald);background:var(--electric);border-radius:50%;width:56px;height:56px;display:inline-flex;align-items:center;justify-content:center;margin-bottom:18px}
+.dark .num{background:var(--electric);color:var(--emerald)}
+.tag{font-size:19px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--grey);margin-bottom:10px}
+.dark .tag{color:var(--electric)}
+.small{font-size:21px;line-height:1.35}
+.tight .card{padding:20px 28px}
+.tight .small{font-size:20px;line-height:1.3}
+.tight h3{font-size:30px;margin-bottom:8px}
+.tight li{font-size:21px}
+svg text{font-family:var(--font)}
+
+/* ---------- title ---------- */
+.title-wrap{position:absolute;left:120px;top:250px;right:120px}
+.title-wrap .sub{font-size:40px;line-height:1.3;margin-top:36px;max-width:1150px}
+.bigbar{position:absolute;left:120px;top:150px;width:1360px;height:10px;background:var(--electric);border-radius:5px;transform-origin:left}
+
+/* ---------- chapter ---------- */
+.hint{position:absolute;right:120px;bottom:120px;font-size:20px;color:var(--light-grey)}
+
+/* ---------- lifecycle ---------- */
+.life{display:flex;justify-content:space-between;position:relative;margin-top:30px}
+.life::before{content:"";position:absolute;left:70px;right:70px;top:58px;height:4px;background:rgba(255,255,255,.2)}
+.stepbox{width:200px;text-align:center;position:relative}
+.stepdot{width:116px;height:116px;border-radius:50%;margin:0 auto 22px;display:flex;align-items:center;justify-content:center;font-size:30px;font-weight:800;background:#fff;color:var(--emerald);border:4px solid var(--electric);position:relative;z-index:1}
+.stepbox h3{font-size:30px}
+.stepbox p{font-size:22px;color:var(--light-grey);line-height:1.35}
+.lightlife .life::before{background:var(--light-grey)}
+.lightlife .stepdot{border-color:var(--emerald)}
+.lightlife .stepbox p{color:var(--grey)}
+
+/* ---------- layers ---------- */
+.layer{height:112px;border-radius:16px;padding:20px 32px;margin-bottom:22px;display:flex;flex-direction:column;justify-content:center}
+.layer h3{font-size:30px;margin:0}
+.layer p{font-size:22px;margin-top:4px}
+.decision{display:inline-block;font-size:30px;font-weight:800;padding:10px 26px;border-radius:12px;margin-right:14px}
+table.t{border-collapse:collapse;width:100%;font-size:24px}
+table.t th,table.t td{text-align:left;padding:16px 18px;border-bottom:2px solid var(--light-grey)}
+table.t th{color:var(--grey);font-size:20px;text-transform:uppercase;letter-spacing:.08em}
+table.compact th,table.compact td{padding:9px 14px}
+
+/* ---------- knowledge / acting / chat mocks ---------- */
+.mock{background:#fff;border-radius:16px;color:var(--ink);box-shadow:0 10px 40px rgba(0,0,0,.25);overflow:hidden;position:relative}
+.mock .bar-top{background:var(--emerald);color:#fff;padding:14px 20px;font-size:20px;font-weight:700;display:flex;justify-content:space-between}
+.mock .row{padding:14px 20px;border-bottom:1px solid var(--light-grey);font-size:22px;display:flex;justify-content:space-between;align-items:center;position:relative}
+.dotp{display:inline-block;width:14px;height:14px;border-radius:50%;margin-right:10px;vertical-align:middle}
+.bubble{background:var(--mist);border-radius:14px;padding:16px 20px;font-size:22px;max-width:620px;margin-bottom:14px;color:var(--ink)}
+.bubble.me{background:var(--electric);margin-left:auto}
+.approval{border:3px solid var(--orange);border-radius:14px;padding:16px 20px;font-size:21px;background:#FFF8EA;color:var(--ink);max-width:620px}
+
+/* ---------- controls ---------- */
+#progress{position:fixed;left:0;top:0;height:5px;width:100%;background:rgba(255,255,255,.12);z-index:10}
+#progress i{display:block;height:100%;width:0;background:var(--electric);transition:width .5s var(--ease)}
+.navzone{position:fixed;top:0;bottom:0;z-index:5;cursor:pointer}
+.navzone.l{left:0;width:15%}.navzone.r{right:0;width:15%}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation:none!important;transition:none!important}
+  .pk{display:none!important}
+}
+.pk{stroke:var(--electric)}
+.light .pk,.slide:not(.dark) .pk{stroke:var(--emerald)}
+
+/* ---------- ecosystem part: one accent per application ---------- */
+.a-sko{--acc:#78FAAE}.a-arc{--acc:#1ED4DF}.a-spe{--acc:#F7B046}.a-gon{--acc:#A7C4FF}.a-rud{--acc:#CACECF}
+.grid5{display:grid;grid-template-columns:repeat(5,1fr);gap:20px}
+.appcard{border-radius:18px;padding:24px 24px 18px;background:var(--mist);position:relative;overflow:hidden}
+.appcard::before{content:"";position:absolute;left:0;right:0;top:0;height:8px;background:var(--acc)}
+.appcard .ico{width:52px;height:52px;border-radius:14px;background:var(--emerald);color:var(--acc);display:flex;align-items:center;justify-content:center;margin-bottom:10px}
+.appcard h3{font-size:32px;margin-bottom:2px}
+.appcard .role{font-size:17px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--grey);margin-bottom:10px}
+.appcard p{font-size:20px;line-height:1.35}
+.appcard .who{margin-top:12px;font-size:17px;color:var(--grey);border-top:1px solid var(--light-grey);padding-top:10px}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:20px}
+.kpi{border-radius:18px;padding:16px 24px;background:rgba(255,255,255,.07);border:1px solid rgba(120,250,174,.25)}
+.slide:not(.dark) .kpi{background:var(--emerald);border:0}
+.kpi b{display:block;font-size:50px;line-height:1;font-weight:800;color:var(--electric);letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+/* numbers line up in every table and figure */
+table.mgmt td,table.dots td,.chips span{font-variant-numeric:tabular-nums}.kpi span{display:block;font-size:19px;line-height:1.3;margin-top:8px;color:var(--light-grey)}
+.appkick{display:inline-flex;align-items:center;gap:12px}
+.appkick i{display:inline-block;width:18px;height:18px;border-radius:5px;background:var(--acc)}
+.pill{display:inline-block;font-size:16px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;border-radius:999px;padding:4px 12px;background:var(--acc);color:var(--emerald);margin-bottom:8px}
+.a-rud .pill,.a-rud.pill{border:1px solid var(--grey)}
+.chips{display:flex;flex-wrap:wrap;gap:10px}
+.chips span{font-size:18px;font-weight:700;border-radius:999px;padding:6px 14px;background:var(--emerald);color:var(--electric)}
+.dark .chips span{background:rgba(255,255,255,.1);color:#fff;border:1px solid rgba(255,255,255,.2)}
+.chips.sm span{font-size:15px;padding:4px 11px}
+.state{display:inline-block;font-size:16px;font-weight:800;letter-spacing:.05em;border-radius:999px;padding:7px 15px;background:#fff;color:var(--emerald)}
+.state.off{background:transparent;border:2px solid var(--grey);color:var(--light-grey)}
+.arrowsep{font-size:26px;color:var(--electric);margin:0 8px}
+table.dots{border-collapse:collapse;width:100%}
+table.dots th,table.dots td{padding:8px 10px;border-bottom:2px solid var(--light-grey);font-size:20px;text-align:left}
+table.dots th{font-size:16px;text-transform:uppercase;letter-spacing:.08em;color:var(--grey);text-align:center}
+table.dots td+td{text-align:center}
+.dot{display:inline-block;width:24px;height:24px;border-radius:50%;border:3px solid var(--emerald)}
+.dot.f{background:var(--emerald)}
+.dot.h{background:linear-gradient(90deg,var(--emerald) 50%,transparent 50%)}
+.dot.e{border-color:var(--light-grey)}
+.is-active .dot{animation:pop .5s var(--ease) both;animation-delay:var(--d,0s)}
+table.mgmt{border-collapse:collapse;width:100%;color:#fff}
+table.mgmt th,table.mgmt td{text-align:left;vertical-align:top;padding:11px 14px;border-bottom:1px solid rgba(255,255,255,.18);font-size:18px;line-height:1.3}
+table.mgmt th{font-size:15px;text-transform:uppercase;letter-spacing:.08em;color:var(--electric)}
+table.mgmt td:first-child{font-weight:800;font-size:21px;white-space:nowrap}
+table.mgmt td:first-child i{display:inline-block;width:14px;height:14px;border-radius:4px;background:var(--acc);margin-right:10px}
+.seclayer{border-radius:10px;padding:9px 16px;font-size:19px;font-weight:700;margin-bottom:8px;background:var(--emerald);color:#fff}
+.seclayer:nth-child(odd){background:#1E5A49}
+.seclayer:first-child{background:var(--electric);color:var(--emerald)}
+.quote{font-size:30px;font-style:italic;color:var(--electric)}
+@keyframes genA{0%,42%{opacity:1}50%,92%{opacity:.18}100%{opacity:1}}
+@keyframes genB{0%,42%{opacity:.18}50%,92%{opacity:1}100%{opacity:.18}}
+@keyframes nodePulse{0%,100%{r:6}50%{r:10}}
+@keyframes dashMove{to{stroke-dashoffset:-60}}
+.is-active .genA{animation:genA 8s ease-in-out infinite}
+.is-active .genB{animation:genB 8s ease-in-out infinite}
+.is-active .np{animation:nodePulse 2.6s ease-in-out infinite;animation-delay:var(--d,0s)}
+.is-active .dash{animation:dashMove 3s linear infinite}
+.compactlife .stepdot{width:96px;height:96px;margin-bottom:12px;font-size:26px}
+.compactlife .life::before{top:48px}
+svg .bar{transform-box:fill-box}
+.whirl{transform-box:fill-box;transform-origin:center}
+.is-active .whirl{animation:spin 24s linear infinite}
+.halo{transform-box:fill-box;transform-origin:center}
+.is-active .halo{animation:ringR 3s ease-out infinite;animation-delay:var(--d,0s)}
+</style>
+</head>
+<body>
+<div id="progress"><i></i></div>
+<!-- application icons, reused by every ecosystem slide -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-sko" viewBox="0 0 48 48"><g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="9" width="32" height="22" rx="3"/><path d="M3 38h42"/></g><path d="M24 12.5l2 5 5 2-5 2-2 5-2-5-5-2 5-2z" fill="currentColor"/></symbol>
+    <symbol id="i-arc" viewBox="0 0 48 48"><g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="13" r="5"/><circle cx="36" cy="11" r="5"/><circle cx="23" cy="36" r="6"/><circle cx="41" cy="34" r="3.5"/><path d="M14 17.5l6 13M33 15l-7 16M16 12.5h15M29 35.5h8.5"/></g></symbol>
+    <symbol id="i-spe" viewBox="0 0 48 48"><g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5h18l9 9v29H11z"/><path d="M29 5v9h9"/><path d="M17 22h15M17 29h15M17 36h8"/></g></symbol>
+    <symbol id="i-gon" viewBox="0 0 48 48"><g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l42-6"/><path d="M24 7v9"/><rect x="10" y="16" width="28" height="25" rx="4"/><path d="M10 27h28M19.5 16v11M28.5 16v11"/></g></symbol>
+    <symbol id="i-rud" viewBox="0 0 48 48"><g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><circle cx="24" cy="24" r="12"/><circle cx="24" cy="24" r="3.5"/><path d="M24 3v18M24 27v18M3 24h18M27 24h18M9.2 9.2l12.3 12.3M26.5 26.5l12.3 12.3M38.8 9.2L26.5 21.5M21.5 26.5L9.2 38.8"/></g></symbol>
+    <marker id="arrC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#CACECF"/></marker>
+    <marker id="arrG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#78FAAE"/></marker>
+  </defs>
+</svg>
+
+<div class="stage" id="stage">
+
+<!-- ================= PART 1: THE ECOSYSTEM ================= -->
+
+<!-- E1 ECOSYSTEM TITLE (animated orbit) -->
+<section class="slide dark is-active">
+  <div class="bigbar bar" style="--d:0s;width:640px"></div>
+  <div class="title-wrap" style="right:auto;width:760px;top:210px">
+    <div class="kicker rise" style="--d:.1s">ŠKODA AUTO &middot; Architecture and management briefing</div>
+    <h1 class="rise" style="--d:.2s;font-size:116px">One AI ecosystem</h1>
+    <p class="sub rise" style="--d:.4s;font-size:32px">Five applications that take work from domain knowledge and an idea to running, governed software, and put an agent on every laptop.</p>
+    <div class="chips rise" style="--d:.7s;margin-top:34px">
+      <span style="color:#78FAAE">SkoWork</span><span style="color:#1ED4DF">Archie</span><span style="color:#F7B046">Specman</span><span style="color:#A7C4FF">Gondo</span><span style="color:#CACECF">Rudder</span>
+    </div>
+  </div>
+  <svg style="position:absolute;right:90px;top:140px" width="640" height="640" viewBox="0 0 620 620" aria-hidden="true">
+    <circle cx="310" cy="310" r="230" fill="none" stroke="rgba(120,250,174,.35)" stroke-width="2" stroke-dasharray="4 16" class="dash"/>
+    <circle cx="310" cy="310" r="290" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="1"/>
+    <!-- spokes -->
+    <g fill="none" stroke="rgba(120,250,174,.35)" stroke-width="3">
+      <path d="M310,214 L310,144"/><path d="M401,280 L468,259"/><path d="M366,388 L408,444"/><path d="M254,388 L212,444"/><path d="M219,280 L152,259"/>
+    </g>
+    <g fill="none" stroke-width="5" stroke-linecap="round">
+      <path class="pk flow" pathLength="100" d="M310,214 L310,144" style="--dl:0s;--t:1.6s;stroke:#78FAAE"/>
+      <path class="pk flow" pathLength="100" d="M401,280 L468,259" style="--dl:.3s;--t:1.6s;stroke:#1ED4DF"/>
+      <path class="pk flow" pathLength="100" d="M366,388 L408,444" style="--dl:.6s;--t:1.6s;stroke:#F7B046"/>
+      <path class="pk flow" pathLength="100" d="M254,388 L212,444" style="--dl:.9s;--t:1.6s;stroke:#A7C4FF"/>
+      <path class="pk flow" pathLength="100" d="M219,280 L152,259" style="--dl:1.2s;--t:1.6s;stroke:#CACECF"/>
+    </g>
+    <!-- hub -->
+    <circle cx="310" cy="310" r="96" fill="rgba(120,250,174,.14)" stroke="#78FAAE" stroke-width="3" class="pop" style="--d:.2s;transform-box:fill-box;transform-origin:center"/>
+    <g font-size="17" fill="#fff" text-anchor="middle">
+      <text x="310" y="282" font-size="20" font-weight="700" fill="#78FAAE">Shared platform</text>
+      <text x="310" y="310">Company sign-in</text>
+      <text x="310" y="334">Company LLM gateway</text>
+      <text x="310" y="358" fill="#CACECF">Specs first, images</text>
+    </g>
+    <!-- nodes -->
+    <g text-anchor="middle" font-size="19" font-weight="700">
+      <g class="pop" style="--d:.35s;transform-box:fill-box;transform-origin:center"><circle class="halo" style="--d:0s" cx="310" cy="80" r="64" fill="none" stroke="#78FAAE" stroke-width="2"/><circle cx="310" cy="80" r="64" fill="#0A2B23" stroke="#78FAAE" stroke-width="3"/><use href="#i-sko" x="290" y="42" width="40" height="40" style="color:#78FAAE"/><text x="310" y="108" fill="#fff">SkoWork</text></g>
+      <g class="pop" style="--d:.5s;transform-box:fill-box;transform-origin:center"><circle class="halo" style="--d:.6s" cx="529" cy="239" r="64" fill="none" stroke="#1ED4DF" stroke-width="2"/><circle cx="529" cy="239" r="64" fill="#0A2B23" stroke="#1ED4DF" stroke-width="3"/><use href="#i-arc" x="509" y="201" width="40" height="40" style="color:#1ED4DF"/><text x="529" y="267" fill="#fff">Archie</text></g>
+      <g class="pop" style="--d:.65s;transform-box:fill-box;transform-origin:center"><circle class="halo" style="--d:1.2s" cx="445" cy="496" r="64" fill="none" stroke="#F7B046" stroke-width="2"/><circle cx="445" cy="496" r="64" fill="#0A2B23" stroke="#F7B046" stroke-width="3"/><use href="#i-spe" x="425" y="458" width="40" height="40" style="color:#F7B046"/><text x="445" y="524" fill="#fff">Specman</text></g>
+      <g class="pop" style="--d:.8s;transform-box:fill-box;transform-origin:center"><circle class="halo" style="--d:1.8s" cx="175" cy="496" r="64" fill="none" stroke="#A7C4FF" stroke-width="2"/><circle cx="175" cy="496" r="64" fill="#0A2B23" stroke="#A7C4FF" stroke-width="3"/><use href="#i-gon" x="155" y="458" width="40" height="40" style="color:#A7C4FF"/><text x="175" y="524" fill="#fff">Gondo</text></g>
+      <g class="pop" style="--d:.95s;transform-box:fill-box;transform-origin:center"><circle class="halo" style="--d:2.4s" cx="91" cy="239" r="64" fill="none" stroke="#CACECF" stroke-width="2"/><circle cx="91" cy="239" r="64" fill="#0A2B23" stroke="#CACECF" stroke-width="3"/><use class="whirl" href="#i-rud" x="71" y="201" width="40" height="40" style="color:#CACECF"/><text x="91" y="267" fill="#fff">Rudder</text></g>
+    </g>
+  </svg>
+</section>
+
+<!-- E2 AT A GLANCE -->
+<section class="slide light">
+  <div class="kicker">The ecosystem at a glance</div>
+  <h2 style="margin-bottom:22px">Five applications, one job each</h2>
+  <div class="grid5">
+    <div class="appcard a-sko rise" style="--d:.1s"><div class="ico"><svg width="40" height="40"><use href="#i-sko"/></svg></div><h3>SkoWork</h3><div class="role">Personal agent</div><p>A governed AI agent on every Windows laptop: Threads, Inbox, private knowledge, automation, browser and desktop use.</p><div class="who">For every employee</div></div>
+    <div class="appcard a-arc rise" style="--d:.2s"><div class="ico"><svg width="40" height="40"><use href="#i-arc"/></svg></div><h3>Archie</h3><div class="role">Domain knowledge</div><p>A curated knowledge graph built from architecture documents and LeanIX, with cited answers in chat or over MCP.</p><div class="who">For architects, curators and AI agents</div></div>
+    <div class="appcard a-spe rise" style="--d:.3s"><div class="ico"><svg width="40" height="40"><use href="#i-spe"/></svg></div><h3>Specman</h3><div class="role">Specification</div><p>An agent interviews a colleague, writes the application's design document and hands developers a build-ready spec.</p><div class="who">For people who commission software</div></div>
+    <div class="appcard a-gon rise" style="--d:.4s"><div class="ico"><svg width="40" height="40"><use href="#i-gon"/></svg></div><h3>Gondo</h3><div class="role">Agentic development</div><p>Schedules AI coding tasks and runs every agent in a disposable MicroVM. Delivers tested code and a verified image.</p><div class="who">For development teams</div></div>
+    <div class="appcard a-rud rise" style="--d:.5s"><div class="ico"><svg width="40" height="40"><use href="#i-rud"/></svg></div><h3>Rudder</h3><div class="role">Hosting platform</div><p>Runs container apps on ordinary VMs with Podman and Traefik: blue/green deploys, WAF, TLS and an audit trail.</p><div class="who">For platform operators and app teams</div></div>
+  </div>
+  <div class="kpis" style="margin-top:20px">
+    <div class="kpi rise" style="--d:.7s"><b data-to="5">5</b><span>applications on one shared platform</span></div>
+    <div class="kpi rise" style="--d:.8s"><b data-to="18">18</b><span>MCP tools offered to agents (Archie 8, Gondo 10)</span></div>
+    <div class="kpi rise" style="--d:.9s"><b data-to="90">90</b><span>machine-checked Lean 4 theorems (Specman 38, Rudder 52)</span></div>
+    <div class="kpi rise" style="--d:1s"><b data-to="2757" data-suf="+">2,757+</b><span>automated tests in SkoWork, Gondo and Rudder alone</span></div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span></span></div>
+</section>
+
+<!-- E3 ECOSYSTEM ARCHITECTURE (animated) -->
+<section class="slide dark">
+  <div class="kicker">Ecosystem architecture</div>
+  <h2 style="margin-bottom:14px">Five apps, one shared foundation</h2>
+  <svg viewBox="0 0 1360 610" width="1360" height="610" style="display:block">
+    <!-- people -->
+    <g font-size="17" fill="#fff" text-anchor="middle">
+      <rect class="rise" style="--d:.05s" x="14" y="6" width="220" height="40" rx="20" fill="rgba(255,255,255,.08)"/><text x="124" y="32">Every employee</text>
+      <rect class="rise" style="--d:.1s" x="292" y="6" width="220" height="40" rx="20" fill="rgba(255,255,255,.08)"/><text x="402" y="32">Architects, curators</text>
+      <rect class="rise" style="--d:.15s" x="570" y="6" width="220" height="40" rx="20" fill="rgba(255,255,255,.08)"/><text x="680" y="32">Business colleagues</text>
+      <rect class="rise" style="--d:.2s" x="848" y="6" width="220" height="40" rx="20" fill="rgba(255,255,255,.08)"/><text x="958" y="32">Development teams</text>
+      <rect class="rise" style="--d:.25s" x="1126" y="6" width="220" height="40" rx="20" fill="rgba(255,255,255,.08)"/><text x="1236" y="32">Platform operators</text>
+    </g>
+    <g stroke="rgba(202,206,207,.6)" stroke-width="2" marker-end="url(#arrC)">
+      <path d="M124,48 L124,92"/><path d="M402,48 L402,92"/><path d="M680,48 L680,92"/><path d="M958,48 L958,92"/><path d="M1236,48 L1236,92"/>
+    </g>
+    <!-- applications -->
+    <g font-size="16" fill="#CACECF">
+      <g class="rise" style="--d:.3s"><rect x="0" y="96" width="248" height="190" rx="16" fill="rgba(255,255,255,.06)" stroke="#78FAAE" stroke-width="2.5"/><use href="#i-sko" x="18" y="112" width="40" height="40" style="color:#78FAAE"/><text x="68" y="142" font-size="26" font-weight="700" fill="#fff">SkoWork</text><text x="18" y="180" font-size="15" font-weight="700" letter-spacing="1.2" fill="#78FAAE">PERSONAL AGENT</text><text x="18" y="208">Windows client, per user</text><text x="18" y="232">Control plane: Node, SQLite</text><text x="18" y="256">Policy, approvals, sandbox</text></g>
+      <g class="rise" style="--d:.4s"><rect x="278" y="96" width="248" height="190" rx="16" fill="rgba(255,255,255,.06)" stroke="#1ED4DF" stroke-width="2.5"/><use href="#i-arc" x="296" y="112" width="40" height="40" style="color:#1ED4DF"/><text x="346" y="142" font-size="26" font-weight="700" fill="#fff">Archie</text><text x="296" y="180" font-size="15" font-weight="700" letter-spacing="1.2" fill="#1ED4DF">DOMAIN KNOWLEDGE</text><text x="296" y="208">SQLite: FTS5 + vectors</text><text x="296" y="232">Curation of claims</text><text x="296" y="256">MCP server: 8 tools</text></g>
+      <g class="rise" style="--d:.5s"><rect x="556" y="96" width="248" height="190" rx="16" fill="rgba(255,255,255,.06)" stroke="#F7B046" stroke-width="2.5"/><use href="#i-spe" x="574" y="112" width="40" height="40" style="color:#F7B046"/><text x="624" y="142" font-size="26" font-weight="700" fill="#fff">Specman</text><text x="574" y="180" font-size="15" font-weight="700" letter-spacing="1.2" fill="#F7B046">SPECIFICATION</text><text x="574" y="208">Guided interview agent</text><text x="574" y="232">Git repo per application</text><text x="574" y="256">spec/ + AGENTS.md handoff</text></g>
+      <g class="rise" style="--d:.6s"><rect x="834" y="96" width="248" height="190" rx="16" fill="rgba(255,255,255,.06)" stroke="#A7C4FF" stroke-width="2.5"/><use href="#i-gon" x="852" y="112" width="40" height="40" style="color:#A7C4FF"/><text x="902" y="142" font-size="26" font-weight="700" fill="#fff">Gondo</text><text x="852" y="180" font-size="15" font-weight="700" letter-spacing="1.2" fill="#A7C4FF">AGENTIC DEVELOPMENT</text><text x="852" y="208">Bun, React, SQLite</text><text x="852" y="232">Gondolin MicroVMs on KVM</text><text x="852" y="256">MCP server: 10 tools</text></g>
+      <g class="rise" style="--d:.7s"><rect x="1112" y="96" width="248" height="190" rx="16" fill="rgba(255,255,255,.06)" stroke="#CACECF" stroke-width="2.5"/><use class="whirl" href="#i-rud" x="1130" y="112" width="40" height="40" style="color:#CACECF"/><text x="1180" y="142" font-size="26" font-weight="700" fill="#fff">Rudder</text><text x="1130" y="180" font-size="15" font-weight="700" letter-spacing="1.2" fill="#CACECF">HOSTING PLATFORM</text><text x="1130" y="208">Bun, SvelteKit, SQLite</text><text x="1130" y="232">Podman, Traefik, CrowdSec</text><text x="1130" y="256">kubectl-compatible API</text></g>
+    </g>
+    <!-- proposed integrations -->
+    <g fill="none" stroke="rgba(120,250,174,.55)" stroke-width="2.5" stroke-dasharray="7 7" marker-end="url(#arrG)">
+      <path d="M150,288 C150,342 376,342 376,290"/>
+      <path d="M700,288 C700,342 938,342 938,290"/>
+      <path d="M982,288 C982,342 1216,342 1216,290"/>
+      <path d="M100,288 C100,400 872,400 872,290"/>
+    </g>
+    <g fill="none" stroke-width="5" stroke-linecap="round">
+      <path class="pk flow" pathLength="100" d="M150,288 C150,342 376,342 376,290" style="--dl:0s"/>
+      <path class="pk flow" pathLength="100" d="M700,288 C700,342 938,342 938,290" style="--dl:.6s;stroke:#F7B046"/>
+      <path class="pk flow" pathLength="100" d="M982,288 C982,342 1216,342 1216,290" style="--dl:1.2s;stroke:#A7C4FF"/>
+      <path class="pk flow" pathLength="100" d="M100,288 C100,400 872,400 872,290" style="--dl:.3s;--t:3.4s"/>
+    </g>
+    <g font-size="16" fill="#fff" text-anchor="middle" stroke="#0E3A2F" stroke-width="7" paint-order="stroke">
+      <text x="263" y="318">MCP: ask, search</text>
+      <text x="819" y="318">spec/ + AGENTS.md</text>
+      <text x="1099" y="318">verified OCI image</text>
+      <text x="500" y="390">MCP: create and follow tasks</text>
+      <text x="1360" y="388" text-anchor="end" fill="#CACECF" font-size="15">Dashed: proposed integrations, not built yet</text>
+    </g>
+    <!-- shared foundations -->
+    <g font-size="15" fill="#CACECF">
+      <g class="rise" style="--d:.8s"><rect x="0" y="404" width="325" height="96" rx="14" fill="rgba(120,250,174,.12)" stroke="#78FAAE"/><text x="18" y="434" font-size="20" font-weight="700" fill="#fff">Company sign-in</text><text x="18" y="458">Keycloak, OIDC with PKCE</text>
+        <circle cx="26" cy="482" r="6" fill="#78FAAE"/><circle cx="44" cy="482" r="6" fill="#1ED4DF"/><circle cx="62" cy="482" r="6" fill="#F7B046"/><circle cx="80" cy="482" r="6" fill="#A7C4FF"/><circle cx="98" cy="482" r="6" fill="#CACECF"/></g>
+      <g class="rise" style="--d:.9s"><rect x="345" y="404" width="325" height="96" rx="14" fill="rgba(120,250,174,.12)" stroke="#78FAAE"/><text x="363" y="434" font-size="20" font-weight="700" fill="#fff">Company LLM gateway</text><text x="363" y="458">OpenAI-compatible, models in-house</text>
+        <circle cx="371" cy="482" r="6" fill="#78FAAE"/><circle cx="389" cy="482" r="6" fill="#1ED4DF"/><circle cx="407" cy="482" r="6" fill="#F7B046"/><circle cx="425" cy="482" r="6" fill="#A7C4FF"/></g>
+      <g class="rise" style="--d:1s"><rect x="690" y="404" width="325" height="96" rx="14" fill="rgba(120,250,174,.12)" stroke="#78FAAE"/><text x="708" y="434" font-size="20" font-weight="700" fill="#fff">GitHub Actions to GHCR</text><text x="708" y="458">Server sides ship as container images</text>
+        <circle cx="716" cy="482" r="6" fill="#78FAAE"/><circle cx="734" cy="482" r="6" fill="#1ED4DF"/><circle cx="752" cy="482" r="6" fill="#F7B046"/><circle cx="770" cy="482" r="6" fill="#CACECF"/></g>
+      <g class="rise" style="--d:1.1s"><rect x="1035" y="404" width="325" height="96" rx="14" fill="rgba(120,250,174,.12)" stroke="#78FAAE"/><text x="1053" y="434" font-size="20" font-weight="700" fill="#fff">OpenSpec and Lean 4</text><text x="1053" y="458">Specs first, proofs where it matters</text>
+        <circle cx="1061" cy="482" r="6" fill="#78FAAE"/><circle cx="1079" cy="482" r="6" fill="#F7B046"/><circle cx="1097" cy="482" r="6" fill="#A7C4FF"/><circle cx="1115" cy="482" r="6" fill="#CACECF"/></g>
+    </g>
+    <!-- infrastructure -->
+    <g font-size="15" fill="#CACECF">
+      <g class="rise" style="--d:1.2s"><rect x="0" y="520" width="325" height="82" rx="14" fill="none" stroke="#CACECF" stroke-dasharray="6 5"/><text x="18" y="552" font-size="20" font-weight="700" fill="#fff">Windows 11 laptops</text><text x="18" y="578">SkoWork client, no admin rights</text></g>
+      <g class="rise" style="--d:1.3s"><rect x="345" y="520" width="325" height="82" rx="14" fill="none" stroke="#CACECF" stroke-dasharray="6 5"/><text x="363" y="552" font-size="20" font-weight="700" fill="#fff">Rudder worker VMs</text><text x="363" y="578">Proposed home of the server sides</text></g>
+      <g class="rise" style="--d:1.4s"><rect x="690" y="520" width="325" height="82" rx="14" fill="none" stroke="#CACECF" stroke-dasharray="6 5"/><text x="708" y="552" font-size="20" font-weight="700" fill="#fff">KVM hosts</text><text x="708" y="578">Gondo's disposable MicroVMs</text></g>
+      <g class="rise" style="--d:1.5s"><rect x="1035" y="520" width="325" height="82" rx="14" fill="none" stroke="#CACECF" stroke-dasharray="6 5"/><text x="1053" y="552" font-size="20" font-weight="700" fill="#fff">Sources</text><text x="1053" y="578">Git hosts, LeanIX, Microsoft 365</text></g>
+    </g>
+  </svg>
+  <div class="foot"><span><b>INTERNAL</b></span><span></span></div>
+</section>
+
+<!-- E4 DELIVERY CHAIN (animated) -->
+<section class="slide light lightlife compactlife">
+  <div class="kicker">How the pieces fit</div>
+  <h2 style="margin-bottom:20px">From an idea to running software</h2>
+  <div class="life" style="margin-top:10px">
+    <div class="stepbox rise a-spe" style="--d:.1s"><div class="stepdot step" style="--i:0">1</div><span class="pill">Specman</span><h3>Describe</h3><p>A colleague is interviewed; the agent writes the design chapters.</p></div>
+    <div class="stepbox rise a-spe" style="--d:.2s"><div class="stepdot step" style="--i:1">2</div><span class="pill">Specman</span><h3>Approve</h3><p>Review of the proposal branch writes spec/ and AGENTS.md.</p></div>
+    <div class="stepbox rise a-gon" style="--d:.3s"><div class="stepdot step" style="--i:2">3</div><span class="pill">Gondo</span><h3>Build</h3><p>Agents plan, implement and review, each in its own MicroVM.</p></div>
+    <div class="stepbox rise a-gon" style="--d:.4s"><div class="stepdot step" style="--i:3">4</div><span class="pill">Gondo</span><h3>Verify</h3><p>Fresh-VM tests, offline image build, smoke test without source.</p></div>
+    <div class="stepbox rise a-rud" style="--d:.5s"><div class="stepdot step" style="--i:4">5</div><span class="pill">Rudder</span><h3>Run</h3><p>Blue/green deploy behind TLS, WAF and company sign-in.</p></div>
+    <div class="stepbox rise a-sko" style="--d:.6s"><div class="stepdot step" style="--i:5">6</div><span class="pill">SkoWork</span><h3>Use</h3><p>Employees and their agents use the app every day.</p></div>
+  </div>
+  <div class="card rise a-arc" style="--d:.8s;margin-top:22px;padding:16px 28px;display:flex;align-items:center;gap:22px;border-left:10px solid var(--acc)">
+    <svg width="44" height="44" style="color:var(--emerald);flex:none"><use href="#i-arc"/></svg>
+    <p style="font-size:22px"><b>Archie runs along the whole chain:</b> curated domain knowledge informs the interview, guides the build and answers questions about the running portfolio.</p>
+  </div>
+  <div class="grid2 tight" style="margin-top:18px;gap:22px">
+    <div class="card rise" style="--d:1s"><div class="tag">Today</div><p class="small">Each application works on its own. Handoffs are files: download the spec, upload a folder, push an image.</p></div>
+    <div class="card rise" style="--d:1.1s;border:2px dashed var(--emerald)"><div class="tag">Proposed</div><p class="small">Connect the steps: Specman's spec into Gondo's task intake, Gondo's verified image into Rudder's deploy webhook, Archie and Gondo in SkoWork's MCP catalog.</p></div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span></span></div>
+</section>
+
+<!-- E5 MANAGEMENT OVERVIEW -->
+<section class="slide dark">
+  <div class="kicker">Management overview</div>
+  <h2 style="margin-bottom:22px">What each application gives the company</h2>
+  <table class="mgmt rise" style="--d:.2s">
+    <tr><th>Application</th><th>Serves</th><th>What it delivers</th><th>Quality evidence</th><th>Runs as</th></tr>
+    <tr class="a-sko"><td><i></i>SkoWork</td><td>Every employee</td><td>A governed personal agent: Threads, Inbox, private knowledge, automation, browser and desktop use</td><td>13 capabilities, 555 Windows tests</td><td>Desktop client + control plane image</td></tr>
+    <tr class="a-arc"><td><i></i>Archie</td><td>Architects, curators, AI agents</td><td>Curated domain knowledge with cited answers; LeanIX portfolio and capability map</td><td>36 unit + 9 end-to-end test files; evaluation set with LLM judge</td><td>Container image</td></tr>
+    <tr class="a-spe"><td><i></i>Specman</td><td>Colleagues who commission software</td><td>An approved design document and a build-ready spec, diagram, mock-up and cost view</td><td>22 capabilities, ~1,130 test assertions, 38 Lean theorems</td><td>Container image</td></tr>
+    <tr class="a-gon"><td><i></i>Gondo</td><td>Development teams, platform admins</td><td>AI coding in isolated MicroVMs: tested code, OpenSpec and a verified OCI image, with evidence</td><td>13 capabilities, 1,492 unit + 30 browser tests</td><td>Control plane + KVM workers</td></tr>
+    <tr class="a-rud"><td><i></i>Rudder</td><td>Platform operators, app teams</td><td>Containers on plain VMs with blue/green deploys, WAF, TLS, audit and a kubectl API</td><td>680 tests, 52 Lean theorems</td><td>Container image + worker VMs</td></tr>
+  </table>
+  <div class="grid3" style="margin-top:22px;gap:20px">
+    <div class="rise" style="--d:.5s;border-left:6px solid var(--electric);padding-left:20px"><h3 style="font-size:26px">One governance model</h3><p class="small" style="color:var(--light-grey)">Company sign-in and company-hosted models across the AI apps; no model keys on laptops or in sandboxes.</p></div>
+    <div class="rise" style="--d:.65s;border-left:6px solid var(--electric);padding-left:20px"><h3 style="font-size:26px">Lean to operate</h3><p class="small" style="color:var(--light-grey)">Each server side is one process with SQLite and one container image; no cluster to run.</p></div>
+    <div class="rise" style="--d:.8s;border-left:6px solid var(--electric);padding-left:20px"><h3 style="font-size:26px">Built to be checked</h3><p class="small" style="color:var(--light-grey)">Specifications first, automated tests, and formal proofs for the riskiest lifecycles.</p></div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b> &middot; figures read from each repository on 3 Nov 2026</span><span></span></div>
+</section>
+
+<!-- E6 SHARED FOUNDATIONS -->
+<section class="slide light">
+  <div class="kicker">Shared foundations</div>
+  <h2 style="margin-bottom:22px">Common building blocks, one platform</h2>
+  <div class="grid2" style="grid-template-columns:1.35fr .65fr;gap:44px;align-items:start">
+    <table class="dots">
+      <tr><th style="text-align:left">Building block</th><th>SkoWork</th><th>Archie</th><th>Specman</th><th>Gondo</th><th>Rudder</th></tr>
+      <tr><td>Company sign-in (Keycloak / OIDC)</td><td><i class="dot f" style="--d:.1s"></i></td><td><i class="dot f" style="--d:.15s"></i></td><td><i class="dot f" style="--d:.2s"></i></td><td><i class="dot f" style="--d:.25s"></i></td><td><i class="dot f" style="--d:.3s"></i></td></tr>
+      <tr><td>Company LLM gateway</td><td><i class="dot f" style="--d:.2s"></i></td><td><i class="dot f" style="--d:.25s"></i></td><td><i class="dot f" style="--d:.3s"></i></td><td><i class="dot f" style="--d:.35s"></i></td><td><i class="dot e" style="--d:.4s"></i></td></tr>
+      <tr><td>MCP (client or server)</td><td><i class="dot f" style="--d:.3s"></i></td><td><i class="dot f" style="--d:.35s"></i></td><td><i class="dot e" style="--d:.4s"></i></td><td><i class="dot f" style="--d:.45s"></i></td><td><i class="dot e" style="--d:.5s"></i></td></tr>
+      <tr><td>Spec-driven with OpenSpec</td><td><i class="dot f" style="--d:.4s"></i></td><td><i class="dot e" style="--d:.45s"></i></td><td><i class="dot f" style="--d:.5s"></i></td><td><i class="dot f" style="--d:.55s"></i></td><td><i class="dot e" style="--d:.6s"></i></td></tr>
+      <tr><td>Formal proofs (Lean 4)</td><td><i class="dot e" style="--d:.5s"></i></td><td><i class="dot e" style="--d:.55s"></i></td><td><i class="dot f" style="--d:.6s"></i></td><td><i class="dot e" style="--d:.65s"></i></td><td><i class="dot f" style="--d:.7s"></i></td></tr>
+      <tr><td>Published container image</td><td><i class="dot f" style="--d:.6s"></i></td><td><i class="dot f" style="--d:.65s"></i></td><td><i class="dot f" style="--d:.7s"></i></td><td><i class="dot h" style="--d:.75s"></i></td><td><i class="dot f" style="--d:.8s"></i></td></tr>
+      <tr><td>SQLite, single process</td><td><i class="dot f" style="--d:.7s"></i></td><td><i class="dot f" style="--d:.75s"></i></td><td><i class="dot f" style="--d:.8s"></i></td><td><i class="dot f" style="--d:.85s"></i></td><td><i class="dot f" style="--d:.9s"></i></td></tr>
+    </table>
+    <div>
+      <div class="card rise" style="--d:.4s;margin-bottom:12px;padding:16px 24px"><h3 style="font-size:26px">One identity</h3><p class="small">The same company sign-in everywhere, so access and offboarding happen in one place.</p></div>
+      <div class="card rise" style="--d:.6s;margin-bottom:12px;padding:16px 24px"><h3 style="font-size:26px">One model gateway</h3><p class="small">Model spend, quotas and data residency are governed once for every AI app.</p></div>
+      <div class="card rise" style="--d:.8s;padding:16px 24px"><h3 style="font-size:26px">One skill set</h3><p class="small">The same small stack everywhere: TypeScript, SvelteKit or React, SQLite, containers.</p></div>
+    </div>
+  </div>
+  <p class="small muted rise" style="--d:1s;margin-top:10px"><i class="dot f" style="width:16px;height:16px;vertical-align:-2px"></i> yes &nbsp;&nbsp; <i class="dot h" style="width:16px;height:16px;vertical-align:-2px"></i> partly (Dockerfile, not published) &nbsp;&nbsp; <i class="dot e" style="width:16px;height:16px;vertical-align:-2px"></i> not today</p>
+  <div class="foot"><span><b>INTERNAL</b></span><span></span></div>
+</section>
+
+<!-- E7 ARCHIE: PIPELINE (animated) -->
+<section class="slide dark a-arc">
+  <div class="kicker appkick"><i></i>Archie &middot; domain knowledge base</div>
+  <h2 style="font-size:46px;margin-bottom:16px">Architecture documents become a curated knowledge graph, and every answer cites its source</h2>
+  <svg viewBox="0 0 1360 450" width="1360" height="450" style="display:block">
+    <!-- ingest row -->
+    <path d="M200,50 L1112,50" fill="none" stroke="rgba(30,212,223,.4)" stroke-width="3"/>
+    <path class="pk flow" pathLength="100" d="M200,50 L1112,50" fill="none" stroke-width="5" stroke-linecap="round" style="stroke:#1ED4DF;--t:3s"/>
+    <g text-anchor="middle" fill="#fff">
+      <g class="rise" style="--d:.1s"><rect x="0" y="10" width="200" height="80" rx="14" fill="#0A2B23" stroke="#1ED4DF" stroke-width="2.5"/><text x="100" y="44" font-size="19" font-weight="700">Sources</text><text x="100" y="70" font-size="14" fill="#CACECF">Git, uploads, LeanIX</text></g>
+      <g class="rise" style="--d:.2s"><rect x="240" y="10" width="190" height="80" rx="14" fill="#0E3A2F" stroke="rgba(255,255,255,.35)"/><text x="335" y="44" font-size="18" font-weight="700">Clean, translate</text><text x="335" y="70" font-size="14" fill="#CACECF">boilerplate out, English</text></g>
+      <g class="rise" style="--d:.3s"><rect x="458" y="10" width="190" height="80" rx="14" fill="#0E3A2F" stroke="rgba(255,255,255,.35)"/><text x="553" y="44" font-size="18" font-weight="700">Semantic chunks</text><text x="553" y="70" font-size="14" fill="#CACECF">LLM split, regex fallback</text></g>
+      <g class="rise" style="--d:.4s"><rect x="676" y="10" width="190" height="80" rx="14" fill="#0E3A2F" stroke="rgba(255,255,255,.35)"/><text x="771" y="44" font-size="18" font-weight="700">Extract</text><text x="771" y="70" font-size="14" fill="#CACECF">topics, relations, claims</text></g>
+      <g class="rise" style="--d:.5s"><rect x="894" y="10" width="190" height="80" rx="14" fill="#0E3A2F" stroke="rgba(255,255,255,.35)"/><text x="989" y="44" font-size="18" font-weight="700">Consistency</text><text x="989" y="70" font-size="14" fill="#CACECF">duplicates, conflicts</text></g>
+      <g class="rise" style="--d:.6s"><rect x="1112" y="10" width="248" height="80" rx="14" fill="rgba(247,176,70,.18)" stroke="#F7B046" stroke-width="2.5"/><text x="1236" y="44" font-size="18" font-weight="700">Curator review</text><text x="1236" y="70" font-size="14" fill="#CACECF">accept, dismiss, reject</text></g>
+    </g>
+    <path d="M989,92 C989,118 760,112 700,138" fill="none" stroke="rgba(30,212,223,.5)" stroke-width="3" marker-end="url(#arrC)"/>
+    <!-- claim states -->
+    <text x="0" y="162" font-size="18" font-weight="700" fill="#1ED4DF">Claim states</text>
+    <g font-size="18" font-weight="700" text-anchor="middle">
+      <rect class="rise" style="--d:.7s" x="0" y="176" width="200" height="48" rx="24" fill="#78FAAE"/><text x="100" y="207" fill="#0E3A2F">active</text>
+      <rect class="rise" style="--d:.8s" x="0" y="236" width="200" height="48" rx="24" fill="#F7B046"/><text x="100" y="267" fill="#0E3A2F">conflicting</text>
+      <rect class="rise" style="--d:.9s" x="0" y="296" width="200" height="48" rx="24" fill="none" stroke="#F7B046" stroke-width="2.5"/><text x="100" y="327" fill="#F7B046">flagged (stale)</text>
+      <rect class="rise" style="--d:1s" x="0" y="356" width="200" height="48" rx="24" fill="none" stroke="#6F797A" stroke-width="2.5"/><text x="100" y="387" fill="#CACECF">superseded</text>
+    </g>
+    <!-- knowledge graph store -->
+    <rect class="rise" style="--d:.5s" x="240" y="140" width="560" height="300" rx="22" fill="rgba(30,212,223,.10)" stroke="#1ED4DF" stroke-width="3"/>
+    <text x="520" y="176" text-anchor="middle" font-size="24" font-weight="700" fill="#1ED4DF">Knowledge graph</text>
+    <g stroke="rgba(255,255,255,.35)" stroke-width="2">
+      <line x1="300" y1="250" x2="380" y2="215"/><line x1="380" y1="215" x2="470" y2="260"/><line x1="470" y1="260" x2="560" y2="220"/><line x1="560" y1="220" x2="650" y2="250"/><line x1="650" y1="250" x2="730" y2="215"/>
+      <line x1="300" y1="250" x2="330" y2="330"/><line x1="330" y1="330" x2="420" y2="310"/><line x1="420" y1="310" x2="470" y2="260"/><line x1="420" y1="310" x2="520" y2="345"/><line x1="520" y1="345" x2="610" y2="300"/>
+      <line x1="610" y1="300" x2="560" y2="220"/><line x1="610" y1="300" x2="700" y2="345"/><line x1="700" y1="345" x2="755" y2="285"/><line x1="755" y1="285" x2="730" y2="215"/><line x1="650" y1="250" x2="610" y2="300"/><line x1="470" y1="260" x2="520" y2="345"/>
+    </g>
+    <g fill="#1ED4DF">
+      <circle class="np" style="--d:0s" cx="300" cy="250" r="7"/><circle class="np" style="--d:.4s" cx="380" cy="215" r="7"/><circle class="np" style="--d:.8s" cx="470" cy="260" r="7"/><circle class="np" style="--d:1.2s" cx="560" cy="220" r="7"/><circle class="np" style="--d:1.6s" cx="650" cy="250" r="7"/><circle class="np" style="--d:2s" cx="730" cy="215" r="7"/>
+    </g>
+    <g fill="#78FAAE">
+      <circle class="np" style="--d:.2s" cx="330" cy="330" r="7"/><circle class="np" style="--d:.6s" cx="420" cy="310" r="7"/><circle class="np" style="--d:1s" cx="520" cy="345" r="7"/><circle class="np" style="--d:1.4s" cx="610" cy="300" r="7"/><circle class="np" style="--d:1.8s" cx="700" cy="345" r="7"/><circle class="np" style="--d:2.2s" cx="755" cy="285" r="7"/>
+    </g>
+    <g font-size="15" fill="#CACECF" text-anchor="middle">
+      <text x="520" y="398"><tspan fill="#1ED4DF">&#9679;</tspan> topics &nbsp; <tspan fill="#78FAAE">&#9679;</tspan> claims, 15 relation types</text>
+      <text x="520" y="422">SQLite: FTS5 keyword index + vector embeddings; each claim traced to its chunk</text>
+    </g>
+    <!-- answering -->
+    <path d="M800,290 L858,290" stroke="#1ED4DF" stroke-width="3" marker-end="url(#arrC)"/>
+    <text x="860" y="162" font-size="18" font-weight="700" fill="#1ED4DF">Answering</text>
+    <path d="M1110,176 L1110,440" fill="none" stroke="rgba(30,212,223,.4)" stroke-width="3"/>
+    <path class="pk flow" pathLength="100" d="M1110,176 L1110,440" fill="none" stroke-width="5" stroke-linecap="round" style="stroke:#1ED4DF;--dl:.5s"/>
+    <g font-size="18" fill="#fff">
+      <g class="rise" style="--d:.8s"><rect x="860" y="176" width="500" height="54" rx="12" fill="#0E3A2F" stroke="rgba(255,255,255,.35)"/><text x="882" y="209">Question from web chat or MCP <tspan font-weight="700">ask</tspan></text></g>
+      <g class="rise" style="--d:.9s"><rect x="860" y="246" width="500" height="54" rx="12" fill="#0E3A2F" stroke="rgba(255,255,255,.35)"/><text x="882" y="279">Hybrid search: vectors + keywords, rank fusion</text></g>
+      <g class="rise" style="--d:1s"><rect x="860" y="316" width="500" height="54" rx="12" fill="#0E3A2F" stroke="rgba(255,255,255,.35)"/><text x="882" y="349">LLM rerank, optional synthesis briefing</text></g>
+      <g class="rise" style="--d:1.1s"><rect x="860" y="386" width="500" height="54" rx="12" fill="rgba(30,212,223,.22)" stroke="#1ED4DF" stroke-width="2"/><text x="882" y="419" font-weight="700">Streamed answer with [source] citations</text></g>
+    </g>
+  </svg>
+  <div class="chips rise" style="--d:1.3s;margin-top:16px">
+    <span>8 MCP tools</span><span>~97 % recall@10, 4-bit vector index</span><span>Daily read-only LeanIX sync</span><span>OAuth 2.1 for MCP clients</span>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span></span></div>
+</section>
+
+<!-- E8 ARCHIE: FEATURES -->
+<section class="slide light a-arc">
+  <div class="kicker appkick"><i></i>Archie &middot; features</div>
+  <h2 style="margin-bottom:26px">Curated, traceable, and open to every agent</h2>
+  <div class="grid3 tight" style="gap:18px">
+    <div class="card rise" style="--d:.1s;border-top:6px solid var(--acc)"><div class="tag">Curation</div><h3>Claims with a review loop</h3><p class="small">A consistency check marks duplicates, conflicts and updates. Curators compare claims side by side; a claim goes stale when its source changes.</p></div>
+    <div class="card rise" style="--d:.2s;border-top:6px solid var(--acc)"><div class="tag">Retrieval</div><h3>Hybrid RAG</h3><p class="small">Vector and keyword search merged by rank fusion, LLM reranking and multi-pass gathering. Answers stream with citations and collect feedback.</p></div>
+    <div class="card rise" style="--d:.3s;border-top:6px solid var(--acc)"><div class="tag">For agents</div><h3>MCP server</h3><p class="small">Streamable HTTP at /api/mcp with OAuth 2.1 tokens. Any MCP client, such as Claude Code, shares the pipeline and token budget of the web UI.</p></div>
+    <div class="card rise" style="--d:.4s;border-top:6px solid var(--acc)"><div class="tag">Wiki</div><h3>Documents stay in git</h3><p class="small">Browse and edit repository files in a rich editor with history, diff and revert. Every edit is a git commit by an admin or contributor.</p></div>
+    <div class="card rise" style="--d:.5s;border-top:6px solid var(--acc)"><div class="tag">Portfolio</div><h3>LeanIX and capability map</h3><p class="small">Drill-down charts, runway, blast radius and the action gap. Business capability map: 17 domains, 218 level-3 capabilities. Grounded market research per product.</p></div>
+    <div class="card rise" style="--d:.6s;border-top:6px solid var(--acc)"><div class="tag">Operations</div><h3>Measured quality</h3><p class="small">Usage and token dashboard, rate limits, answer ratings with context, and an evaluation run against a golden set with an LLM judge.</p></div>
+  </div>
+  <div class="rise" style="--d:.8s;margin-top:22px;display:flex;align-items:center;gap:16px">
+    <span class="tag" style="margin:0;white-space:nowrap">MCP tools</span>
+    <div class="chips sm"><span>ask</span><span>search_knowledge</span><span>search_documents</span><span>list_conversations</span><span>get_conversation</span><span>pin_conversation</span><span>delete_conversation</span><span>rate_answer</span></div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span></span></div>
+</section>
+
+<!-- E9 SPECMAN: INTERVIEW (animated) -->
+<section class="slide dark a-spe">
+  <div class="kicker appkick"><i></i>Specman &middot; AI-guided application design</div>
+  <h2 style="font-size:50px;margin-bottom:26px">A colleague talks; Specman writes the design document</h2>
+  <div class="grid2" style="grid-template-columns:1fr 1fr;gap:50px;align-items:start">
+    <div class="mock rise" style="--d:.1s">
+      <div class="bar-top" style="background:#1E5A49"><span>Interview &middot; example: room booking</span><span>Chapter 6 of 12</span></div>
+      <div style="padding:22px 24px">
+        <div class="bubble rise" style="--d:.3s;font-size:20px">Who may cancel a booking, and until when?</div>
+        <div class="bubble me rise" style="--d:.7s;font-size:20px">Anyone who booked it, but not on the same day.</div>
+        <div class="bubble rise" style="--d:1.1s;font-size:20px"><b>Rule recorded:</b> a booking can be cancelled until the day before.</div>
+        <div class="approval rise" style="--d:1.5s;font-size:19px"><b>You said &ldquo;you decide&rdquo;</b> about reminders. Assumption recorded: one reminder the day before. You confirm it later.</div>
+      </div>
+    </div>
+    <div>
+      <svg viewBox="0 0 640 440" width="640" height="440" style="display:block">
+        <text x="0" y="22" font-size="20" font-weight="700" fill="#F7B046">Chapter index</text>
+        <g font-size="16" fill="#CACECF">
+          <text x="0" y="62">Chapter 1</text><text x="0" y="92">Chapter 2</text><text x="0" y="122">Chapter 3</text><text x="0" y="152">Chapter 4</text><text x="0" y="182">Chapter 5</text><text x="0" y="212">Chapter 6</text>
+          <text x="0" y="242">Chapter 7</text><text x="0" y="272">Chapter 8</text><text x="0" y="302">Chapter 9</text><text x="0" y="332">Chapter 10</text><text x="0" y="362">Chapter 11</text><text x="0" y="392">Chapter 12</text>
+        </g>
+        <g fill="rgba(255,255,255,.1)"><rect x="110" y="48" width="420" height="16" rx="8"/><rect x="110" y="78" width="420" height="16" rx="8"/><rect x="110" y="108" width="420" height="16" rx="8"/><rect x="110" y="138" width="420" height="16" rx="8"/><rect x="110" y="168" width="420" height="16" rx="8"/><rect x="110" y="198" width="420" height="16" rx="8"/><rect x="110" y="228" width="420" height="16" rx="8"/><rect x="110" y="258" width="420" height="16" rx="8"/><rect x="110" y="288" width="420" height="16" rx="8"/><rect x="110" y="348" width="420" height="16" rx="8"/></g>
+        <g>
+          <rect class="bar" style="--d:.2s" x="110" y="48" width="420" height="16" rx="8" fill="#78FAAE"/>
+          <rect class="bar" style="--d:.3s" x="110" y="78" width="420" height="16" rx="8" fill="#78FAAE"/>
+          <rect class="bar" style="--d:.4s" x="110" y="108" width="420" height="16" rx="8" fill="#78FAAE"/>
+          <rect class="bar" style="--d:.5s" x="110" y="138" width="420" height="16" rx="8" fill="#78FAAE"/>
+          <rect class="bar" style="--d:.6s" x="110" y="168" width="420" height="16" rx="8" fill="#78FAAE"/>
+          <rect class="bar pulse" style="--d:.7s" x="110" y="198" width="300" height="16" rx="8" fill="#F7B046"/>
+          <rect class="bar" style="--d:.8s" x="110" y="228" width="220" height="16" rx="8" fill="#F7B046"/>
+          <rect class="bar" style="--d:.9s" x="110" y="258" width="140" height="16" rx="8" fill="#F7B046"/>
+          <rect class="bar" style="--d:1s" x="110" y="288" width="60" height="16" rx="8" fill="#F7B046"/>
+          <rect class="bar" style="--d:1.2s" x="110" y="348" width="30" height="16" rx="8" fill="#F7B046"/>
+        </g>
+        <g fill="none" stroke="#6F797A" stroke-width="2" stroke-dasharray="6 5"><rect x="110" y="318" width="420" height="16" rx="8"/><rect x="110" y="378" width="420" height="16" rx="8"/></g>
+        <g font-size="15" fill="#CACECF"><text x="545" y="62">complete</text><text x="545" y="212" fill="#F7B046">now</text><text x="545" y="332">set aside</text><text x="545" y="392">set aside</text></g>
+        <rect class="rise" style="--d:1.4s" x="0" y="408" width="640" height="32" rx="8" fill="rgba(247,176,70,.15)"/>
+        <text class="rise" style="--d:1.4s" x="16" y="430" font-size="16" fill="#fff">Chapters that do not apply are set aside, never deleted.</text>
+      </svg>
+    </div>
+  </div>
+  <p class="quote rise" style="--d:1.9s;margin-top:20px;color:#F7B046">&ldquo;Notation may be stored but never shown.&rdquo; <span style="font-size:20px;font-style:normal;color:var(--light-grey)">Requirements are kept as SHALL statements and ArchiMate; the colleague sees plain sentences.</span></p>
+  <div class="foot"><span><b>INTERNAL</b></span><span></span></div>
+</section>
+
+<!-- E10 SPECMAN: WORKFLOW AND OUTPUTS -->
+<section class="slide light lightlife a-spe">
+  <div class="kicker appkick"><i></i>Specman &middot; from interview to handoff</div>
+  <h2 style="margin-bottom:16px">Reviewed changes, then a build-ready spec</h2>
+  <div class="life" style="margin-top:6px">
+    <div class="stepbox rise" style="--d:.1s"><div class="stepdot step" style="--i:0">1</div><h3>Create</h3><p>Profile questions set aside chapters that do not apply. A Git repo per application.</p></div>
+    <div class="stepbox rise" style="--d:.2s"><div class="stepdot step" style="--i:1">2</div><h3>Interview</h3><p>Talk or dictate. Text, rules and decisions stream in, or draft all at once.</p></div>
+    <div class="stepbox rise" style="--d:.3s"><div class="stepdot step" style="--i:2">3</div><h3>Confirm</h3><p>Assumptions the agent made for the colleague are confirmed.</p></div>
+    <div class="stepbox rise" style="--d:.4s"><div class="stepdot step" style="--i:3">4</div><h3>Verify</h3><p>Structure checks, then a four-way LLM check of the whole document.</p></div>
+    <div class="stepbox rise" style="--d:.5s"><div class="stepdot step" style="--i:4">5</div><h3>Review</h3><p>A proposal branch with the text diff and the requirement changes.</p></div>
+    <div class="stepbox rise" style="--d:.6s"><div class="stepdot step" style="--i:5">6</div><h3>Approve</h3><p>Merge to main, journaled and recoverable, then write the handoff.</p></div>
+  </div>
+  <div class="grid4 tight" style="margin-top:18px;gap:16px">
+    <div class="card rise" style="--d:.8s;border-top:6px solid var(--acc)"><h3 style="font-size:24px">Build-ready spec/</h3><p class="small">Requirements, AGENTS.md and decisions.md, with known gaps stated first.</p></div>
+    <div class="card rise" style="--d:.9s;border-top:6px solid var(--acc)"><h3 style="font-size:24px">Architecture diagram</h3><p class="small">Business, application and technology layers; ArchiMate exchange export.</p></div>
+    <div class="card rise" style="--d:1s;border-top:6px solid var(--acc)"><h3 style="font-size:24px">Mock-up</h3><p class="small">A sandboxed HTML preview of the application to view or download.</p></div>
+    <div class="card rise" style="--d:1.1s;border-top:6px solid var(--acc)"><h3 style="font-size:24px">Management overview</h3><p class="small">Pitch, business case, build effort and Azure running cost.</p></div>
+  </div>
+  <div class="chips rise" style="--d:1.3s;margin-top:16px"><span>22 capabilities</span><span>225 requirements</span><span>38 Lean theorems: locks, approval, recovery</span><span>~1,130 test assertions</span></div>
+  <div class="foot"><span><b>INTERNAL</b></span><span></span></div>
+</section>
+
+<!-- E11 GONDO: SCHEDULING AND SANDBOXES (animated) -->
+<section class="slide dark a-gon">
+  <div class="kicker appkick"><i></i>Gondo &middot; agentic development tasks</div>
+  <h2 style="font-size:46px;margin-bottom:12px">Tasks are scheduled fairly between teams, and every agent runs in a disposable MicroVM</h2>
+  <svg viewBox="0 0 1360 440" width="1360" height="440" style="display:block">
+    <!-- teams -->
+    <g font-size="18" fill="#fff">
+      <g class="rise" style="--d:.1s"><rect x="0" y="20" width="220" height="100" rx="14" fill="rgba(255,255,255,.07)"/><text x="18" y="52" font-weight="700">Team A</text><rect x="18" y="70" width="28" height="28" rx="6" fill="#A7C4FF"/><rect x="54" y="70" width="28" height="28" rx="6" fill="#A7C4FF" opacity=".7"/><rect x="90" y="70" width="28" height="28" rx="6" fill="#A7C4FF" opacity=".45"/></g>
+      <g class="rise" style="--d:.2s"><rect x="0" y="150" width="220" height="100" rx="14" fill="rgba(255,255,255,.07)"/><text x="18" y="182" font-weight="700">Team B</text><rect x="18" y="200" width="28" height="28" rx="6" fill="#A7C4FF"/><rect x="54" y="200" width="28" height="28" rx="6" fill="#A7C4FF" opacity=".7"/></g>
+      <g class="rise" style="--d:.3s"><rect x="0" y="280" width="220" height="100" rx="14" fill="rgba(255,255,255,.07)"/><text x="18" y="312" font-weight="700">Team C</text><rect x="18" y="330" width="28" height="28" rx="6" fill="#A7C4FF"/><text x="60" y="351" font-size="15" fill="#CACECF">daily schedule</text></g>
+    </g>
+    <g fill="none" stroke="rgba(167,196,255,.45)" stroke-width="3"><path d="M220,70 C260,70 260,200 300,200"/><path d="M220,200 L300,200"/><path d="M220,330 C260,330 260,200 300,200"/></g>
+    <g fill="none" stroke-width="5" stroke-linecap="round">
+      <path class="pk flow" pathLength="100" d="M220,70 C260,70 260,200 300,200" style="stroke:#A7C4FF;--dl:0s"/>
+      <path class="pk flow" pathLength="100" d="M220,200 L300,200" style="stroke:#A7C4FF;--dl:.8s"/>
+      <path class="pk flow" pathLength="100" d="M220,330 C260,330 260,200 300,200" style="stroke:#A7C4FF;--dl:1.6s"/>
+    </g>
+    <!-- scheduler -->
+    <g class="rise" style="--d:.4s">
+      <rect x="300" y="80" width="230" height="240" rx="18" fill="rgba(167,196,255,.14)" stroke="#A7C4FF" stroke-width="3"/>
+      <circle class="dash" cx="415" cy="140" r="30" fill="none" stroke="#A7C4FF" stroke-width="4" stroke-dasharray="10 8"/>
+      <text x="415" y="200" text-anchor="middle" font-size="21" font-weight="700" fill="#fff">Fair scheduler</text>
+      <g font-size="15" fill="#CACECF" text-anchor="middle"><text x="415" y="230">turns between teams</text><text x="415" y="252">first in, first out per team</text><text x="415" y="274">2 pipelines, 1 per team</text><text x="415" y="296">(configurable 1 to 8)</text></g>
+    </g>
+    <g fill="none" stroke="rgba(167,196,255,.45)" stroke-width="3"><path d="M530,200 C580,200 570,100 620,100"/><path d="M530,200 C580,200 570,320 620,320"/></g>
+    <g fill="none" stroke-width="5" stroke-linecap="round">
+      <path class="pk flow" pathLength="100" d="M530,200 C580,200 570,100 620,100" style="stroke:#A7C4FF;--dl:.4s"/>
+      <path class="pk flow" pathLength="100" d="M530,200 C580,200 570,320 620,320" style="stroke:#A7C4FF;--dl:1.2s"/>
+    </g>
+    <!-- workers -->
+    <g font-size="15" fill="#fff" text-anchor="middle">
+      <g class="rise" style="--d:.5s"><rect x="620" y="0" width="440" height="200" rx="16" fill="rgba(255,255,255,.05)" stroke="#CACECF" stroke-width="2"/><text x="640" y="30" text-anchor="start" font-size="18" font-weight="700">KVM worker 1</text><text x="1040" y="30" text-anchor="end" fill="#CACECF">Ubuntu x86-64, over SSH</text>
+        <rect class="pulse" style="--d:0s" x="635" y="50" width="128" height="130" rx="12" fill="rgba(167,196,255,.2)" stroke="#A7C4FF" stroke-width="2"/><use href="#i-gon" x="679" y="64" width="40" height="40" style="color:#A7C4FF"/><text x="699" y="130" font-weight="700">MicroVM</text><text x="699" y="154" fill="#CACECF">analyst</text>
+        <rect class="pulse" style="--d:.8s" x="777" y="50" width="128" height="130" rx="12" fill="rgba(167,196,255,.2)" stroke="#A7C4FF" stroke-width="2"/><use href="#i-gon" x="821" y="64" width="40" height="40" style="color:#A7C4FF"/><text x="841" y="130" font-weight="700">MicroVM</text><text x="841" y="154" fill="#CACECF">implementer</text>
+        <rect x="919" y="50" width="128" height="130" rx="12" fill="none" stroke="#6F797A" stroke-width="2" stroke-dasharray="6 5"/><text x="983" y="120" fill="#CACECF">free slot</text></g>
+      <g class="rise" style="--d:.6s"><rect x="620" y="220" width="440" height="200" rx="16" fill="rgba(255,255,255,.05)" stroke="#CACECF" stroke-width="2"/><text x="640" y="250" text-anchor="start" font-size="18" font-weight="700">KVM worker 2</text><text x="1040" y="250" text-anchor="end" fill="#CACECF">chosen by capacity</text>
+        <rect class="pulse" style="--d:.4s" x="635" y="270" width="128" height="130" rx="12" fill="rgba(167,196,255,.2)" stroke="#A7C4FF" stroke-width="2"/><use href="#i-gon" x="679" y="284" width="40" height="40" style="color:#A7C4FF"/><text x="699" y="350" font-weight="700">MicroVM</text><text x="699" y="374" fill="#CACECF">verifier</text>
+        <rect class="pulse" style="--d:1.2s" x="777" y="270" width="128" height="130" rx="12" fill="rgba(167,196,255,.2)" stroke="#A7C4FF" stroke-width="2"/><use href="#i-gon" x="821" y="284" width="40" height="40" style="color:#A7C4FF"/><text x="841" y="350" font-weight="700">MicroVM</text><text x="841" y="374" fill="#CACECF">security review</text>
+        <rect class="pulse" style="--d:1.6s" x="919" y="270" width="128" height="130" rx="12" fill="rgba(120,250,174,.16)" stroke="#78FAAE" stroke-width="2"/><text x="983" y="326" font-weight="700">Image VM</text><text x="983" y="350" fill="#CACECF">offline, rootless</text><text x="983" y="372" fill="#CACECF">podman build</text></g>
+    </g>
+    <!-- model proxy -->
+    <g fill="none" stroke="rgba(120,250,174,.45)" stroke-width="3"><path d="M1060,100 C1100,100 1100,120 1140,120"/><path d="M1060,320 C1110,320 1100,150 1140,150"/><path d="M1250,190 L1250,250"/></g>
+    <g fill="none" stroke-width="5" stroke-linecap="round">
+      <path class="pk flow" pathLength="100" d="M1060,100 C1100,100 1100,120 1140,120" style="--dl:.2s"/>
+      <path class="pk flow" pathLength="100" d="M1060,320 C1110,320 1100,150 1140,150" style="--dl:1s"/>
+      <path class="pk flow" pathLength="100" d="M1250,190 L1250,250" style="--dl:.6s;--t:1.4s"/>
+    </g>
+    <g text-anchor="middle" fill="#fff">
+      <g class="rise" style="--d:.7s"><rect x="1140" y="70" width="220" height="120" rx="16" fill="rgba(120,250,174,.14)" stroke="#78FAAE" stroke-width="2"/><text x="1250" y="104" font-size="19" font-weight="700">Model proxy</text><g font-size="15" fill="#CACECF"><text x="1250" y="130">keys stay on the host;</text><text x="1250" y="150">guests get a short-lived</text><text x="1250" y="170">task-scoped handle</text></g></g>
+      <g class="rise" style="--d:.8s"><rect x="1140" y="250" width="220" height="110" rx="16" fill="rgba(255,255,255,.08)" stroke="#fff" stroke-width="2"/><text x="1250" y="284" font-size="19" font-weight="700">Company LLM</text><g font-size="15" fill="#CACECF"><text x="1250" y="310">primary, secondary</text><text x="1250" y="330">and decision models</text></g></g>
+    </g>
+  </svg>
+  <div class="rise" style="--d:1s;margin-top:16px;display:flex;align-items:center;flex-wrap:wrap;gap:4px">
+    <span class="tag" style="margin:0 16px 0 0">Task states</span>
+    <span class="state step" style="--i:0">QUEUED</span><span class="arrowsep">&rarr;</span><span class="state step" style="--i:1">RUNNING</span><span class="arrowsep">&rarr;</span><span class="state step" style="--i:2">CHECKED</span><span class="arrowsep">&rarr;</span><span class="state step" style="--i:3">SUCCEEDED</span>
+    <span style="width:14px"></span><span class="state off">FAILED</span> <span class="state off">CANCELLED</span> <span class="state off">INTERRUPTED</span>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span></span></div>
+</section>
+
+<!-- E12 GONDO: ORCHESTRATION -->
+<section class="slide light lightlife compactlife a-gon">
+  <div class="kicker appkick"><i></i>Gondo &middot; adaptive orchestration</div>
+  <h2 style="margin-bottom:14px">Plan, build, check, and only then ship</h2>
+  <div class="life" style="margin-top:6px">
+    <div class="stepbox rise" style="--d:.1s"><div class="stepdot step" style="--i:0">1</div><h3>Assess</h3><p>Choose the agents and skills the task needs.</p></div>
+    <div class="stepbox rise" style="--d:.2s"><div class="stepdot step" style="--i:1">2</div><h3>Plan review</h3><p>A separate, read-only reviewer must approve the plan.</p></div>
+    <div class="stepbox rise" style="--d:.3s"><div class="stepdot step" style="--i:2">3</div><h3>Build</h3><p>Independent work in parallel, at most two VMs.</p></div>
+    <div class="stepbox rise" style="--d:.4s"><div class="stepdot step" style="--i:3">4</div><h3>Integrate</h3><p>A fresh build and tests in a new VM.</p></div>
+    <div class="stepbox rise" style="--d:.5s"><div class="stepdot step" style="--i:4">5</div><h3>Review</h3><p>Critical review, up to three repair rounds.</p></div>
+    <div class="stepbox rise" style="--d:.6s"><div class="stepdot step" style="--i:5">6</div><h3>Image gate</h3><p>Offline image build, smoke test without the source.</p></div>
+  </div>
+  <div class="grid3 tight" style="margin-top:16px;gap:18px">
+    <div class="card rise" style="--d:.8s;border-top:6px solid var(--acc)"><div class="tag">Catalog</div><div class="chips sm"><span>analyst</span><span>architect</span><span>implementer</span><span>frontend-developer</span><span>game-developer</span><span>bug-fixer</span><span>integrator</span><span>verifier</span><span>security-reviewer</span><span>specification-reviewer</span><span>delivery-reporter</span></div><p class="small" style="margin-top:10px">11 agents, 9 skills, pinned versions, team review before publication.</p></div>
+    <div class="card rise" style="--d:.95s;border-top:6px solid var(--acc)"><div class="tag">Contained</div><ul><li>No host folders mounted; unrelated network blocked</li><li>Model keys behind the host proxy</li><li>Output scanned for credentials; downloads checked by SHA-256</li></ul></div>
+    <div class="card rise" style="--d:1.1s;border-top:6px solid var(--acc)"><div class="tag">Interfaces</div><ul><li>Web UI live view: agents, tokens, findings, before/after diff</li><li>MCP server with 10 tools</li><li>Daily or weekday schedules</li></ul></div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b> &middot; Delivers source, OpenSpec, an OCI archive and evidence for download</span><span></span></div>
+</section>
+
+<!-- E13 RUDDER: ARCHITECTURE (animated blue/green) -->
+<section class="slide dark a-rud">
+  <div class="kicker appkick"><i></i>Rudder &middot; container platform</div>
+  <h2 style="font-size:46px;margin-bottom:12px">Containers on ordinary VMs, with Kubernetes-style deploys and built-in security</h2>
+  <svg viewBox="0 0 1360 440" width="1360" height="440" style="display:block">
+    <!-- control plane -->
+    <g class="rise" style="--d:.1s">
+      <rect x="0" y="20" width="300" height="410" rx="18" fill="rgba(255,255,255,.06)" stroke="#CACECF" stroke-width="2.5"/>
+      <use class="whirl" href="#i-rud" x="18" y="36" width="36" height="36" style="color:#CACECF"/>
+      <text x="64" y="62" font-size="21" font-weight="700" fill="#fff">Rudder control plane</text>
+      <text x="18" y="96" font-size="15" fill="#CACECF">one process: Bun, SvelteKit, SQLite</text>
+      <g font-size="17" fill="#fff">
+        <rect x="18" y="112" width="264" height="40" rx="10" fill="rgba(255,255,255,.1)"/><text x="34" y="138">Web UI and API</text>
+        <rect x="18" y="160" width="264" height="40" rx="10" fill="rgba(255,255,255,.1)"/><text x="34" y="186">kubectl API at /k8s/</text>
+        <rect x="18" y="208" width="264" height="40" rx="10" fill="rgba(255,255,255,.1)"/><text x="34" y="234">CI deploy webhooks</text>
+        <rect x="18" y="256" width="264" height="40" rx="10" fill="rgba(255,255,255,.1)"/><text x="34" y="282">Deploy locks, drift reports</text>
+        <rect x="18" y="304" width="264" height="40" rx="10" fill="rgba(255,255,255,.1)"/><text x="34" y="330">Secrets, AES-256-GCM</text>
+        <rect x="18" y="352" width="264" height="40" rx="10" fill="rgba(255,255,255,.1)"/><text x="34" y="378">Team RBAC, audit log</text>
+      </g>
+    </g>
+    <!-- control links -->
+    <g fill="none" stroke="rgba(202,206,207,.5)" stroke-width="3"><path d="M300,150 L420,150"/><path d="M300,290 L420,290"/></g>
+    <g fill="none" stroke-width="5" stroke-linecap="round">
+      <path class="pk flow" pathLength="100" d="M300,150 L420,150" style="--dl:0s;--t:1.8s"/>
+      <path class="pk flow" pathLength="100" d="M300,290 L420,290" style="--dl:.9s;--t:1.8s"/>
+    </g>
+    <g font-size="14" fill="#CACECF" text-anchor="middle"><text x="360" y="128">Podman API</text><text x="360" y="176">over mTLS</text><text x="360" y="268">Traefik config</text><text x="360" y="316">+ hash ack</text></g>
+    <!-- worker -->
+    <rect class="rise" style="--d:.2s" x="420" y="20" width="680" height="410" rx="18" fill="rgba(255,255,255,.04)" stroke="#CACECF" stroke-width="2" stroke-dasharray="8 6"/>
+    <text x="440" y="54" font-size="20" font-weight="700" fill="#fff">Worker VM <tspan font-size="15" font-weight="400" fill="#CACECF">&nbsp; provisioned over SSH; SSH keys never stored on the server</tspan></text>
+    <!-- request path -->
+    <path d="M1180,210 L660,210" fill="none" stroke="rgba(120,250,174,.4)" stroke-width="3"/>
+    <path class="pk flow" pathLength="100" d="M1180,210 L660,210" fill="none" stroke-width="5" stroke-linecap="round" style="--t:2s"/>
+    <g class="genA"><path d="M660,210 C640,210 640,135 620,135" fill="none" stroke="#78FAAE" stroke-width="4"/></g>
+    <g class="genB"><path d="M660,210 C640,210 640,285 620,285" fill="none" stroke="#78FAAE" stroke-width="4"/></g>
+    <g text-anchor="middle" fill="#fff">
+      <g class="genA"><rect x="440" y="80" width="180" height="110" rx="14" fill="rgba(120,250,174,.18)" stroke="#78FAAE" stroke-width="2.5"/><text x="530" y="124" font-size="18" font-weight="700">generation N</text><text x="530" y="150" font-size="14" fill="#CACECF">app containers</text><text x="530" y="172" font-size="14" fill="#CACECF">127.0.0.1 only</text></g>
+      <g class="genB"><rect x="440" y="230" width="180" height="110" rx="14" fill="rgba(120,250,174,.18)" stroke="#78FAAE" stroke-width="2.5"/><text x="530" y="274" font-size="18" font-weight="700">generation N+1</text><text x="530" y="300" font-size="14" fill="#CACECF">health-gated</text><text x="530" y="322" font-size="14" fill="#CACECF">cutover</text></g>
+      <g class="rise" style="--d:.4s"><rect x="660" y="140" width="180" height="140" rx="14" fill="rgba(247,176,70,.16)" stroke="#F7B046" stroke-width="2.5"/><text x="750" y="190" font-size="19" font-weight="700">CrowdSec</text><text x="750" y="216" font-size="14" fill="#CACECF">AppSec WAF</text><text x="750" y="238" font-size="14" fill="#CACECF">IP bans</text></g>
+      <g class="rise" style="--d:.5s"><rect x="880" y="140" width="200" height="140" rx="14" fill="rgba(30,212,223,.14)" stroke="#1ED4DF" stroke-width="2.5"/><text x="980" y="190" font-size="19" font-weight="700">Traefik</text><text x="980" y="216" font-size="14" fill="#CACECF">TLS, Let's Encrypt</text><text x="980" y="238" font-size="14" fill="#CACECF">rate limits, OIDC</text></g>
+      <g class="rise" style="--d:.6s"><rect x="1180" y="150" width="180" height="120" rx="16" fill="rgba(255,255,255,.1)" stroke="#fff" stroke-width="2"/><text x="1270" y="202" font-size="20" font-weight="700">Users</text><text x="1270" y="230" font-size="15" fill="#CACECF">HTTPS</text></g>
+    </g>
+    <g font-size="14" fill="#0E3A2F" font-weight="700" text-anchor="middle">
+      <rect x="440" y="370" width="120" height="36" rx="18" fill="#CACECF"/><text x="500" y="393">Podman</text>
+      <rect x="570" y="370" width="120" height="36" rx="18" fill="#CACECF"/><text x="630" y="393">Traefik</text>
+      <rect x="700" y="370" width="120" height="36" rx="18" fill="#CACECF"/><text x="760" y="393">CrowdSec</text>
+      <rect x="830" y="370" width="120" height="36" rx="18" fill="#CACECF"/><text x="890" y="393">nftables</text>
+      <rect x="960" y="370" width="120" height="36" rx="18" fill="#CACECF"/><text x="1020" y="393">systemd timers</text>
+    </g>
+  </svg>
+  <p class="small rise" style="--d:.9s;margin-top:14px;color:var(--light-grey)">Blue/green: the new generation starts next to the old one and receives traffic only after its health checks pass. The old generation stays for instant rollback.</p>
+  <div class="foot"><span><b>INTERNAL</b></span><span></span></div>
+</section>
+
+<!-- E14 RUDDER: FEATURES -->
+<section class="slide light a-rud">
+  <div class="kicker appkick"><i></i>Rudder &middot; features</div>
+  <h2 style="margin-bottom:24px">Deploy, secure and operate without a cluster</h2>
+  <div class="grid3 tight" style="gap:20px;align-items:stretch">
+    <div class="card rise" style="--d:.1s;border-top:6px solid var(--emerald)"><div class="tag">Deploy</div><ul><li>A container, a Compose file or Kubernetes manifests</li><li>Blue/green generations, rollback by image digest</li><li>Automatic image updates; GitHub and GitLab webhooks</li><li>kubectl get, apply, scale, logs and exec</li></ul></div>
+    <div class="card rise" style="--d:.25s;border-top:6px solid var(--emerald)"><div class="tag">Security layers</div>
+      <div class="seclayer rise" style="--d:.4s">nftables firewall</div>
+      <div class="seclayer rise" style="--d:.5s">CrowdSec WAF and IP bans</div>
+      <div class="seclayer rise" style="--d:.6s">Traefik TLS, rate limits, headers</div>
+      <div class="seclayer rise" style="--d:.7s">Company sign-in per app (OIDC)</div>
+      <div class="seclayer rise" style="--d:.8s">mTLS to the Podman API, fails closed</div>
+      <div class="seclayer rise" style="--d:.9s">Secrets as read-only tmpfs files</div>
+    </div>
+    <div class="card rise" style="--d:.4s;border-top:6px solid var(--emerald)"><div class="tag">Operate and comply</div><ul><li>Logs, terminal, metrics and alerts to webhook, Slack or e-mail</li><li>Drift reports that never delete anything</li><li>Volume backup, restore and copy</li><li>Teams, quotas, SSO, API keys and a full audit log</li></ul></div>
+  </div>
+  <div class="kpis" style="margin-top:22px">
+    <div class="kpi rise" style="--d:1s"><b data-to="52">52</b><span>Lean theorems on the app lifecycle</span></div>
+    <div class="kpi rise" style="--d:1.1s"><b data-to="680">680</b><span>automated tests, run in about a second</span></div>
+    <div class="kpi rise" style="--d:1.2s"><b data-to="79">79</b><span>API endpoints, 23 pages</span></div>
+    <div class="kpi rise" style="--d:1.3s"><b data-to="0">0</b><span>Kubernetes clusters to run</span></div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span></span></div>
+</section>
+
+<!-- E15 NEXT STEPS -->
+<section class="slide dark">
+  <div class="kicker">Connecting the ecosystem</div>
+  <h2 style="margin-bottom:30px">Proposed next steps</h2>
+  <div class="grid4 tight" style="gap:18px">
+    <div class="card rise" style="--d:.1s"><div class="num">1</div><h3 style="font-size:25px">Archie in SkoWork</h3><p class="small">Add Archie's MCP server to SkoWork's approved catalog, so every employee's agent can ask the curated domain knowledge.</p></div>
+    <div class="card rise" style="--d:.2s"><div class="num">2</div><h3 style="font-size:25px">Spec into build</h3><p class="small">Feed Specman's approved spec/ and AGENTS.md straight into a Gondo task.</p></div>
+    <div class="card rise" style="--d:.3s"><div class="num">3</div><h3 style="font-size:25px">Build into run</h3><p class="small">Push Gondo's verified image to Rudder through a deploy webhook, with a person approving production.</p></div>
+    <div class="card rise" style="--d:.4s"><div class="num">4</div><h3 style="font-size:25px">One home</h3><p class="small">Host the server sides of Archie, Specman and SkoWork on Rudder workers.</p></div>
+  </div>
+  <div class="grid2" style="margin-top:44px;gap:40px">
+    <div class="rise" style="--d:.6s"><h3 class="e">Questions for this audience</h3><ul class="small" style="list-style:none;font-size:23px;line-height:1.55"><li>&bull; Which handoff to connect first: spec to build, or build to run?</li><li>&bull; Who operates the shared platform: workers, sign-in realm, model quotas?</li><li>&bull; Which teams pilot the full chain?</li></ul></div>
+    <div class="rise" style="--d:.75s"><h3 class="e">Status</h3><ul class="small" style="list-style:none;font-size:23px;line-height:1.55"><li>&bull; All five applications run on their own today</li><li>&bull; None of these integrations is built yet</li><li>&bull; Next: SkoWork in depth</li></ul></div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span></span></div>
+</section>
+
+<!-- ================= PART 2: SKOWORK IN DEPTH ================= -->
+
+<!-- 1 TITLE -->
+<section class="slide dark" data-n="1">
+  <div class="bigbar bar" style="--d:0s"></div>
+  <div class="title-wrap">
+    <div class="kicker rise" style="--d:.1s">Part 2 &middot; SkoWork in depth</div>
+    <h1 class="rise" style="--d:.2s">SkoWork</h1>
+    <p class="sub rise" style="--d:.4s">The company AI agent for Windows laptops: governed, on-premise, and private by default.</p>
+  </div>
+  <div class="hint rise" style="--d:1s">Use &larr; &rarr; or click the edges to move through the deck</div>
+</section>
+
+<!-- 2 PROBLEM -->
+<section class="slide light" data-n="2">
+  <div class="kicker">The problem</div>
+  <h2>Knowledge work is spread across many tools, and AI must stay governed</h2>
+  <div class="grid4" style="margin-top:10px">
+    <div class="card rise" style="--d:.1s"><div class="tag">Mail and calendar</div><p>Microsoft 365 mailboxes and meetings hold decisions and follow-ups.</p></div>
+    <div class="card rise" style="--d:.25s"><div class="tag">Documents and files</div><p>Reports, specifications and notes sit in local folders and on the laptop.</p></div>
+    <div class="card rise" style="--d:.4s"><div class="tag">Chats and line-of-business apps</div><p>Colleagues talk in chats; many desktop applications have no API.</p></div>
+    <div class="card rise" style="--d:.55s"><div class="tag">Routine work</div><p>Weekly reports, supplier triage and change reviews repeat every week.</p></div>
+  </div>
+  <div class="grid2" style="margin-top:56px">
+    <div class="rise" style="--d:.8s;border-left:8px solid var(--emerald);padding-left:30px"><h3>AI must run on company-controlled models</h3><p class="muted">Credentials and model keys stay on company servers, not on laptops.</p></div>
+    <div class="rise" style="--d:1s;border-left:8px solid var(--emerald);padding-left:30px"><h3>Actions must stay within policy</h3><p class="muted">Anything that sends, writes or deletes needs a rule, and often a person's approval.</p></div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span>2 / 17</span></div>
+</section>
+
+<!-- 3 WHAT IT IS -->
+<section class="slide dark" data-n="3">
+  <div class="kicker">What SkoWork is</div>
+  <h2>One agent per employee, managed centrally</h2>
+  <div class="cols" style="margin-top:20px">
+    <div class="card rise" style="--d:.1s;flex:1"><div class="num">1</div><h3>On the laptop</h3><p>A Windows desktop client runs as the signed-in user, with a tray icon and encrypted local storage. All user data stays local.</p></div>
+    <div class="card rise" style="--d:.25s;flex:1"><div class="num">2</div><h3>In the company</h3><p>A control plane on company servers handles sign-in, policy, Groups, the LLM gateway, the approved MCP catalog, the fleet and the admin console.</p></div>
+    <div class="card rise" style="--d:.4s;flex:1"><div class="num">3</div><h3>Models</h3><p>The company LLM API serves all model calls through the gateway. Laptops never hold model keys and never call model servers directly.</p></div>
+  </div>
+  <p class="lead rise" style="--d:.7s;margin-top:60px">Work happens in Threads. The agent asks for approval when policy requires it, and it never acts beyond what the user's Groups allow.</p>
+  <div class="foot"><span><b>INTERNAL</b></span><span>3 / 17</span></div>
+</section>
+
+<!-- 4 ARCHITECTURE (animated) -->
+<section class="slide dark" data-n="4">
+  <div class="kicker">Architecture overview</div>
+  <h2 style="margin-bottom:14px">Three places, one controlled path for every request</h2>
+  <svg viewBox="0 0 1360 560" width="1360" height="560" style="display:block">
+    <defs>
+      <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#78FAAE"/></marker>
+    </defs>
+    <!-- client -->
+    <rect x="10" y="60" width="430" height="440" rx="18" fill="rgba(255,255,255,.05)" stroke="#78FAAE" stroke-width="2"/>
+    <text x="30" y="98" font-size="24" font-weight="700" fill="#78FAAE">Windows laptop</text>
+    <text x="30" y="124" font-size="18" fill="#CACECF">SkoWork client, per user, data kept locally</text>
+    <g font-size="18" fill="#fff">
+      <rect class="rise" style="--d:.15s" x="30" y="140" width="190" height="50" rx="12" fill="rgba(120,250,174,.22)" stroke="#78FAAE"/><text x="125" y="171" text-anchor="middle">Agent runtime</text>
+      <rect class="rise" style="--d:.21s" x="230" y="140" width="190" height="50" rx="12" fill="rgba(255,255,255,.1)"/><text x="325" y="171" text-anchor="middle">Policy and sandbox</text>
+      <rect class="rise" style="--d:.27s" x="30" y="198" width="190" height="50" rx="12" fill="rgba(255,255,255,.1)"/><text x="125" y="229" text-anchor="middle">Inbox and Chats</text>
+      <rect class="rise" style="--d:.33s" x="230" y="198" width="190" height="50" rx="12" fill="rgba(255,255,255,.1)"/><text x="325" y="229" text-anchor="middle">Knowledge graph</text>
+      <rect class="rise" style="--d:.39s" x="30" y="256" width="190" height="50" rx="12" fill="rgba(255,255,255,.1)"/><text x="125" y="287" text-anchor="middle">Skills</text>
+      <rect class="rise" style="--d:.45s" x="230" y="256" width="190" height="50" rx="12" fill="rgba(255,255,255,.1)"/><text x="325" y="287" text-anchor="middle">Triggers, remote tasks</text>
+      <rect class="rise" style="--d:.51s" x="30" y="314" width="190" height="50" rx="12" fill="rgba(255,255,255,.1)"/><text x="125" y="345" text-anchor="middle">Browser use</text>
+      <rect class="rise" style="--d:.57s" x="230" y="314" width="190" height="50" rx="12" fill="rgba(255,255,255,.1)"/><text x="325" y="345" text-anchor="middle">Computer use</text>
+      <rect class="rise" style="--d:.63s" x="30" y="372" width="190" height="50" rx="12" fill="rgba(255,255,255,.1)"/><text x="125" y="403" text-anchor="middle">Local apps</text>
+      <rect class="rise" style="--d:.69s" x="230" y="372" width="190" height="50" rx="12" fill="rgba(255,255,255,.1)"/><text x="325" y="403" text-anchor="middle">Meeting capture</text>
+      <rect class="rise" style="--d:.75s" x="30" y="430" width="190" height="50" rx="12" fill="rgba(255,255,255,.1)"/><text x="125" y="461" text-anchor="middle">Encrypted storage</text>
+      <rect class="rise" style="--d:.81s" x="230" y="430" width="190" height="50" rx="12" fill="none" stroke="#CACECF" stroke-dasharray="5 5"/><text x="325" y="461" text-anchor="middle" fill="#CACECF">Mail via Graph</text>
+    </g>
+    <!-- control plane -->
+    <rect x="540" y="60" width="340" height="440" rx="18" fill="rgba(255,255,255,.05)" stroke="#78FAAE" stroke-width="2"/>
+    <text x="560" y="98" font-size="24" font-weight="700" fill="#78FAAE">Control plane</text>
+    <text x="560" y="124" font-size="18" fill="#CACECF">Node.js, Express, SQLite, one process</text>
+    <g font-size="18" fill="#fff">
+      <rect class="rise" style="--d:.20s" x="560" y="140" width="300" height="38" rx="10" fill="rgba(255,255,255,.1)"/><text x="710" y="165" text-anchor="middle">Identity and Groups</text>
+      <rect class="rise" style="--d:.28s" x="560" y="184" width="300" height="38" rx="10" fill="rgba(255,255,255,.1)"/><text x="710" y="209" text-anchor="middle">Policy service</text>
+      <rect class="rise" style="--d:.36s" x="560" y="228" width="300" height="38" rx="10" fill="rgba(120,250,174,.22)" stroke="#78FAAE"/><text x="710" y="253" text-anchor="middle">LLM gateway</text>
+      <rect class="rise" style="--d:.44s" x="560" y="272" width="300" height="38" rx="10" fill="rgba(255,255,255,.1)"/><text x="710" y="297" text-anchor="middle">MCP catalog</text>
+      <rect class="rise" style="--d:.52s" x="560" y="316" width="300" height="38" rx="10" fill="rgba(255,255,255,.1)"/><text x="710" y="341" text-anchor="middle">Skill catalog and review</text>
+      <rect class="rise" style="--d:.60s" x="560" y="360" width="300" height="38" rx="10" fill="rgba(255,255,255,.1)"/><text x="710" y="385" text-anchor="middle">Messaging and Presence</text>
+      <rect class="rise" style="--d:.68s" x="560" y="404" width="300" height="38" rx="10" fill="rgba(255,255,255,.1)"/><text x="710" y="429" text-anchor="middle">Remote tasks, knowledge sharing</text>
+      <rect class="rise" style="--d:.76s" x="560" y="448" width="300" height="38" rx="10" fill="rgba(255,255,255,.1)"/><text x="710" y="473" text-anchor="middle">Fleet, telemetry, admin console</text>
+    </g>
+    <!-- right column -->
+    <rect class="rise" style="--d:.3s" x="1000" y="60" width="350" height="120" rx="18" fill="rgba(255,255,255,.1)" stroke="#fff" stroke-width="2"/>
+    <text x="1175" y="108" text-anchor="middle" font-size="24" font-weight="700" fill="#fff">Company LLM API</text>
+    <text x="1175" y="140" text-anchor="middle" font-size="18" fill="#CACECF">OpenAI-compatible, vLLM behind LiteLLM</text>
+    <rect class="rise" style="--d:.45s" x="1000" y="240" width="350" height="100" rx="18" fill="rgba(255,255,255,.1)" stroke="#fff" stroke-width="2"/>
+    <text x="1175" y="282" text-anchor="middle" font-size="24" font-weight="700" fill="#fff">Keycloak</text>
+    <text x="1175" y="314" text-anchor="middle" font-size="18" fill="#CACECF">Company sign-in, OIDC with PKCE</text>
+    <rect class="rise" style="--d:.6s" x="1000" y="380" width="350" height="120" rx="18" fill="rgba(255,255,255,.1)" stroke="#fff" stroke-width="2"/>
+    <text x="1175" y="428" text-anchor="middle" font-size="24" font-weight="700" fill="#fff">MCP servers</text>
+    <text x="1175" y="460" text-anchor="middle" font-size="18" fill="#CACECF">Catalog only: remote or pinned local</text>
+
+    <!-- flows (base, dim) -->
+    <g fill="none" stroke="rgba(120,250,174,.45)" stroke-width="3" marker-end="url(#arr)">
+      <path id="f1" d="M440,200 L540,200"/>
+      <path id="f2" d="M880,300 C940,300 940,180 1000,150"/>
+      <path id="f3" d="M180,60 L180,30 L1175,30 L1175,240" stroke-dasharray="6 6"/>
+      <path id="f4" d="M180,500 L180,540 L1175,540 L1175,500"/>
+    </g>
+    <!-- packets -->
+    <g fill="none" stroke="#78FAAE" stroke-width="5" stroke-linecap="round">
+      <path class="pk flow" pathLength="100" d="M440,200 L540,200" style="--dl:0s"/>
+      <path class="pk flow" pathLength="100" d="M880,300 C940,300 940,180 1000,150" style="--dl:.8s"/>
+      <path class="pk flow" pathLength="100" d="M180,30 L1175,30 L1175,240" style="--dl:1.6s"/>
+      <path class="pk flow" pathLength="100" d="M180,500 L180,540 L1175,540 L1175,500" style="--dl:.4s"/>
+    </g>
+    <!-- flow labels -->
+    <g font-size="18" fill="#CACECF" text-anchor="middle" stroke="#0E3A2F" stroke-width="8" paint-order="stroke">
+      <text x="490" y="166">policy,</text>
+      <text x="490" y="188">push</text>
+      <text x="940" y="226">model calls</text>
+      <text x="940" y="248">by role</text>
+      <text x="1080" y="16" text-anchor="start">Sign-in in the system browser, PKCE</text>
+      <text x="680" y="530">MCP over HTTPS or pinned packages, inside the tool sandbox</text>
+    </g>
+  </svg>
+  <div class="foot"><span><b>INTERNAL</b></span><span>4 / 17</span></div>
+</section>
+
+<!-- 5 RUN LIFECYCLE (animated) -->
+<section class="slide light lightlife" data-n="5">
+  <div class="kicker">How a Run works</div>
+  <h2>A Run moves through the model, tools, policy and, when needed, a person</h2>
+  <div class="life" style="margin-top:28px">
+    <div class="stepbox rise" style="--d:.1s"><div class="stepdot step" style="--i:0">1</div><h3>Request</h3><p>A user message, a Trigger or a Remote task starts a Run in a Thread.</p></div>
+    <div class="stepbox rise" style="--d:.2s"><div class="stepdot step" style="--i:1">2</div><h3>Model</h3><p>The main model role, through the gateway, plans the next step.</p></div>
+    <div class="stepbox rise" style="--d:.3s"><div class="stepdot step" style="--i:2">3</div><h3>Tool call</h3><p>The tool declares its Risk class: read, write-local, external or destructive.</p></div>
+    <div class="stepbox rise" style="--d:.4s"><div class="stepdot step" style="--i:3">4</div><h3>Policy</h3><p>Allow, approve or deny. The decision comes from the user's effective policy.</p></div>
+    <div class="stepbox rise" style="--d:.5s"><div class="stepdot step" style="--i:4">5</div><h3>Action item</h3><p>On approve, the Run pauses and waits for a person in the Inbox. It resumes once.</p></div>
+    <div class="stepbox rise" style="--d:.6s"><div class="stepdot step" style="--i:5">6</div><h3>Result</h3><p>The result returns to the model as untrusted data, and is kept in the Thread.</p></div>
+  </div>
+  <div class="card rise" style="--d:.9s;margin-top:36px;max-width:1360px;padding:24px 32px"><p><b>Rule:</b> an approval is resolved only by an explicit action in the client. Text inside an email, web page or file cannot approve anything.</p></div>
+  <div class="foot"><span><b>INTERNAL</b></span><span>5 / 17</span></div>
+</section>
+
+<!-- 6 POLICY -->
+<section class="slide dark" data-n="6">
+  <div class="kicker">Governance: policy</div>
+  <h2>Every tool call gets exactly one decision</h2>
+  <div class="grid2" style="grid-template-columns:1.1fr .9fr;gap:60px;align-items:start">
+    <div>
+      <div class="layer rise" style="--d:.1s;background:var(--electric);color:var(--emerald)"><h3>1 &middot; Org guardrail</h3><p>Applies to everyone. Can only make things stricter; Groups cannot override it.</p></div>
+      <div class="layer rise" style="--d:.25s;background:rgba(255,255,255,.12)"><h3>2 &middot; Groups</h3><p>Standard, power-user, developer, region-cz. Deny wins across Groups; lists are merged.</p></div>
+      <div class="layer rise" style="--d:.4s;background:rgba(255,255,255,.06);border:2px solid var(--electric)"><h3>3 &middot; User</h3><p>Folder grants and choices inside the bounds set above.</p></div>
+      <p class="small rise" style="--d:.6s;margin-top:18px;color:var(--light-grey)">A signed, expiring policy bundle is delivered per user. Policy changes reach clients by push.</p>
+    </div>
+    <div>
+      <div class="tag rise" style="--d:.2s">Decision for each call</div>
+      <div class="rise" style="--d:.3s;margin-bottom:36px">
+        <span class="decision" style="background:var(--electric);color:var(--emerald)">allow</span>
+        <span class="decision" style="background:var(--orange);color:var(--emerald)">approve</span>
+        <span class="decision" style="background:#fff;color:var(--emerald)">deny</span>
+      </div>
+      <table class="t rise" style="--d:.45s;color:#fff">
+        <tr><th>Risk class</th><th>Default</th></tr>
+        <tr><td>read</td><td>allow</td></tr>
+        <tr><td>write-local</td><td>approve</td></tr>
+        <tr><td>external</td><td>approve</td></tr>
+        <tr><td>destructive</td><td>deny</td></tr>
+      </table>
+      <p class="small rise" style="--d:.7s;margin-top:22px;color:var(--light-grey)">Some tools keep a minimum decision, for example sending mail always asks first. Unattended runs use stricter rules.</p>
+    </div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span>6 / 17</span></div>
+</section>
+
+<!-- 7 CONTAINMENT -->
+<section class="slide light" data-n="7">
+  <div class="kicker">Governance: containment</div>
+  <h2>Anything the agent runs is contained, and untrusted content cannot grant rights</h2>
+  <div class="grid3 tight">
+    <div class="card rise" style="--d:.1s"><div class="tag">Process sandbox</div><h3>Shell and tools run contained</h3><ul><li>Child processes run in Job Objects with memory, CPU and process limits</li><li>Reduced token, no admin rights</li><li>Shell mode: off, sandboxed or allow (default off)</li></ul></div>
+    <div class="card rise" style="--d:.25s"><div class="tag">Network egress</div><h3>Every outbound request is checked</h3><ul><li>Allow and deny host rules apply to web fetch, MCP, browser and sandboxed processes</li><li>Child processes use a local egress proxy</li><li>No-network mode refuses every destination</li></ul></div>
+    <div class="card rise" style="--d:.4s"><div class="tag">Untrusted content</div><h3>Data, never commands</h3><ul><li>Email, web pages, files, transcripts, MCP results and Remote task prompts are tagged with their source</li><li>They cannot change a decision or resolve an approval</li><li>No valid policy bundle: only reads of the client's own data run</li></ul></div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span>7 / 17</span></div>
+</section>
+
+<!-- 8 KNOWLEDGE (animated) -->
+<section class="slide dark" data-n="8">
+  <div class="kicker">Knowledge</div>
+  <h2 style="margin-bottom:10px">A private knowledge graph on the laptop, with sharing only by choice</h2>
+  <svg viewBox="0 0 1360 500" width="1360" height="500" style="display:block">
+    <g font-size="21" fill="#fff">
+      <rect class="rise" style="--d:.1s" x="0" y="20" width="250" height="52" rx="12" fill="rgba(255,255,255,.1)"/><text x="125" y="53" text-anchor="middle">Threads</text>
+      <rect class="rise" style="--d:.18s" x="0" y="92" width="250" height="52" rx="12" fill="rgba(255,255,255,.1)"/><text x="125" y="125" text-anchor="middle">Files and folders</text>
+      <rect class="rise" style="--d:.26s" x="0" y="164" width="250" height="52" rx="12" fill="rgba(255,255,255,.1)"/><text x="125" y="197" text-anchor="middle">Notes</text>
+      <rect class="rise" style="--d:.34s" x="0" y="236" width="250" height="52" rx="12" fill="rgba(255,255,255,.1)"/><text x="125" y="269" text-anchor="middle">Mail</text>
+      <rect class="rise" style="--d:.42s" x="0" y="308" width="250" height="52" rx="12" fill="rgba(255,255,255,.1)"/><text x="125" y="341" text-anchor="middle">Calendar</text>
+      <rect class="rise" style="--d:.5s" x="0" y="380" width="250" height="52" rx="12" fill="none" stroke="#CACECF" stroke-dasharray="6 5"/><text x="125" y="413" text-anchor="middle" fill="#CACECF">Meetings (in flight)</text>
+    </g>
+    <g fill="none" stroke="rgba(120,250,174,.4)" stroke-width="3">
+      <path d="M250,46 C330,46 340,200 440,220"/>
+      <path d="M250,118 C320,118 350,200 440,224"/>
+      <path d="M250,190 C330,190 350,220 440,230"/>
+      <path d="M250,262 C330,262 350,250 440,246"/>
+      <path d="M250,334 C330,334 350,270 440,262"/>
+    </g>
+    <g fill="none" stroke="#78FAAE" stroke-width="5" stroke-linecap="round">
+      <path class="pk flow" pathLength="100" d="M250,46 C330,46 340,200 440,220" style="--dl:0s"/>
+      <path class="pk flow" pathLength="100" d="M250,118 C320,118 350,200 440,224" style="--dl:.5s"/>
+      <path class="pk flow" pathLength="100" d="M250,262 C330,262 350,250 440,246" style="--dl:1s"/>
+      <path class="pk flow" pathLength="100" d="M250,334 C330,334 350,270 440,262" style="--dl:1.5s"/>
+    </g>
+    <rect class="rise" style="--d:.3s" x="440" y="150" width="380" height="180" rx="22" fill="rgba(120,250,174,.18)" stroke="#78FAAE" stroke-width="3"/>
+    <text x="630" y="200" text-anchor="middle" font-size="27" font-weight="700" fill="#78FAAE">Local knowledge store</text>
+    <text x="630" y="236" text-anchor="middle" font-size="19" fill="#fff">chunks, full-text and vector index</text>
+    <text x="630" y="264" text-anchor="middle" font-size="19" fill="#fff">entities, facts, provenance</text>
+    <text x="630" y="302" text-anchor="middle" font-size="18" fill="#CACECF">Private by default</text>
+    <rect class="rise" style="--d:.6s" x="1010" y="40" width="350" height="130" rx="18" fill="rgba(255,255,255,.1)"/>
+    <text x="1185" y="88" text-anchor="middle" font-size="25" font-weight="700" fill="#fff">Agent retrieval</text>
+    <text x="1185" y="124" text-anchor="middle" font-size="18" fill="#CACECF">search, entity, related, timeline</text>
+    <text x="1185" y="150" text-anchor="middle" font-size="18" fill="#CACECF">hybrid, reranked, with citations</text>
+    <rect class="rise" style="--d:.8s" x="1010" y="280" width="350" height="150" rx="18" fill="none" stroke="#CACECF" stroke-width="2" stroke-dasharray="8 6"/>
+    <text x="1185" y="326" text-anchor="middle" font-size="25" font-weight="700" fill="#fff">Team knowledge</text>
+    <text x="1185" y="362" text-anchor="middle" font-size="18" fill="#CACECF">Shared to chosen Groups by the owner</text>
+    <text x="1185" y="390" text-anchor="middle" font-size="18" fill="#CACECF">(in flight: add-knowledge-sharing)</text>
+    <line x1="820" y1="210" x2="1010" y2="110" stroke="#78FAAE" stroke-width="3"/>
+    <line x1="820" y1="290" x2="1010" y2="340" stroke="#CACECF" stroke-width="3" stroke-dasharray="8 6"/>
+    <text x="630" y="400" text-anchor="middle" font-size="19" fill="#CACECF">Embeddings and extraction use the company models through the gateway.</text>
+    <text x="630" y="428" text-anchor="middle" font-size="19" fill="#CACECF">No embedding model runs on the laptop.</text>
+  </svg>
+  <div class="foot"><span><b>INTERNAL</b></span><span>8 / 17</span></div>
+</section>
+
+<!-- 9 AUTOMATION -->
+<section class="slide light" data-n="9">
+  <div class="kicker">Automation</div>
+  <h2 style="margin-bottom:26px">Work that starts without typing</h2>
+  <div class="grid2 tight" style="gap:22px">
+    <div class="card rise" style="--d:.1s"><div class="tag">Skills</div><h3>Reusable SKILL.md packages</h3><p class="small">A skill captures how a task is done. Tiers: built-in, org, group, shared, private. Org-wide skills need an automated scan, a reviewer's approval and signing. Installed versions are pinned and can be revoked centrally.</p></div>
+    <div class="card rise" style="--d:.25s"><div class="tag">Triggers and Occurrences</div><h3>Schedule, file, mail, calendar, meeting</h3><p class="small">A Trigger starts a Run. Each firing is an Occurrence, retried up to three times. These Runs are Unattended: the stricter unattended rules apply, and any approval waits for a person.</p></div>
+    <div class="card rise" style="--d:.4s"><div class="tag">Remote tasks</div><h3>Requested by people or systems</h3><p class="small">Colleagues or systems such as Jira or CI request work through a control-plane API. The target user consents the first time. A Remote task is not a Trigger.</p></div>
+    <div class="card rise" style="--d:.55s"><div class="tag">Inbox results</div><h3>Results arrive as Threads</h3><p class="small">Every automated Run lands in the Inbox like any other Thread. Action items appear in the Action view. The tray shows the count.</p></div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span>9 / 17</span></div>
+</section>
+
+<!-- 10 BROWSER AND COMPUTER USE -->
+<section class="slide dark" data-n="10">
+  <div class="kicker">Acting in applications</div>
+  <h2 style="font-size:46px;margin-bottom:26px">Browser and desktop use, always visible and under the user's control</h2>
+  <div class="grid2" style="grid-template-columns:1fr 1fr;gap:50px;align-items:start">
+    <div>
+      <h3 class="rise" style="--d:.1s">Browser use</h3>
+      <div class="mock rise" style="--d:.2s;height:238px;margin:14px 0 16px">
+        <div class="bar-top" style="background:#1E5A49"><span>Agent browser (dedicated SkoWork profile)</span><span>&times;</span></div>
+        <div class="row" style="padding:0"><div style="width:100%;padding:12px 18px;font-size:19px;color:var(--grey)">intranet.skoda-auto.example/orders</div></div>
+        <div class="row hl" style="--d:0s"><span>Order 4471, pending</span><span style="color:var(--grey)">open</span></div>
+        <div class="row hl" style="--d:.5s"><span>Order 4472, pending</span><span style="color:var(--grey)">open</span></div>
+        <div class="row"><span>Order 4473, approved</span><span style="color:var(--grey)">open</span></div>
+        <div class="cur" style="position:absolute;left:24px;top:60px;width:30px;height:30px;z-index:2"><svg width="30" height="30" viewBox="0 0 30 30"><path d="M4,2 L4,24 L10,18 L15,28 L19,26 L14,16 L23,16 Z" fill="#0E3A2F" stroke="#fff" stroke-width="2"/></svg></div>
+      </div>
+      <ul class="small" style="list-style:none;color:#fff">
+        <li class="rise" style="--d:.5s;font-size:20px;margin-bottom:4px">&bull; A dedicated profile; the user's own Chrome is never touched</li>
+        <li class="rise" style="--d:.6s;font-size:20px;margin-bottom:4px">&bull; Control through a private pipe only, with no open debugging port</li>
+        <li class="rise" style="--d:.7s;font-size:20px">&bull; The agent never types passwords; sign-in is completed by the user</li>
+      </ul>
+    </div>
+    <div>
+      <h3 class="rise" style="--d:.1s">Computer use</h3>
+      <div class="mock rise" style="--d:.2s;height:238px;margin:14px 0 16px">
+        <div class="bar-top" style="background:#1E5A49"><span>Legacy desktop application</span><span>&times;</span></div>
+        <div class="row"><span>UIA: Window &rsaquo; Form &rsaquo; Customer</span></div>
+        <div class="row hl" style="--d:.8s"><span>UIA: Button &ldquo;Save&rdquo;</span><span style="color:var(--grey)">pattern: Invoke</span></div>
+        <div class="row"><span>UIA: Edit &ldquo;Quantity&rdquo;</span></div>
+        <div style="position:absolute;left:0;right:0;bottom:0;background:var(--electric);color:var(--emerald);padding:12px 18px;font-weight:700;font-size:20px">Agent is controlling this window. Ctrl+Alt+End stops it.</div>
+      </div>
+      <ul style="list-style:none;color:#fff">
+        <li class="rise" style="--d:.5s;font-size:20px;margin-bottom:4px">&bull; Reads the accessibility tree first; screenshots for the vision model second</li>
+        <li class="rise" style="--d:.6s;font-size:20px;margin-bottom:4px">&bull; Touching mouse or keyboard pauses the agent until the user continues</li>
+        <li class="rise" style="--d:.7s;font-size:20px">&bull; Off by default; per-application allow and deny lists; no elevated windows</li>
+      </ul>
+    </div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span>10 / 17</span></div>
+</section>
+
+<!-- 11 LOCAL APPS AND MCP -->
+<section class="slide light" data-n="11">
+  <div class="kicker">Connected tools and small apps</div>
+  <h2>Only approved MCP servers, and apps that run without network</h2>
+  <div class="grid2 tight" style="grid-template-columns:1fr 1fr;gap:40px">
+    <div class="card rise" style="--d:.1s">
+      <div class="tag">MCP servers</div>
+      <h3>From an admin catalog</h3>
+      <ul><li>The client connects only to servers assigned to the user's Groups</li><li>Local packages are pinned by SHA-256 and checked on every start</li><li>Tools appear as mcp:&lt;server&gt;/&lt;tool&gt;; results are untrusted; the default risk is external</li></ul>
+    </div>
+    <div class="card rise" style="--d:.25s">
+      <div class="tag">Local apps</div>
+      <h3>Small apps the agent builds for one user</h3>
+      <ul><li>Node.js, HTML, CSS and SQLite, built-in modules only</li><li>Runs in a contained process with no network access</li><li>Opens for the user only, on a loopback address in their browser</li><li>Reads live data from approved read-only MCP tools</li></ul>
+    </div>
+  </div>
+  <svg viewBox="0 0 1360 150" width="1360" height="150" style="display:block;margin-top:14px">
+    <g font-size="22" font-weight="700" fill="#0E3A2F">
+      <rect class="rise" style="--d:.4s" x="0" y="40" width="280" height="90" rx="16" fill="#CACECF"/><text x="140" y="95" text-anchor="middle">App folder</text>
+      <rect class="rise" style="--d:.55s" x="540" y="40" width="280" height="90" rx="16" fill="#78FAAE"/><text x="680" y="88" text-anchor="middle">Node runtime</text><text x="680" y="116" text-anchor="middle" font-size="18" font-weight="400">no network</text>
+      <rect class="rise" style="--d:.7s" x="1080" y="40" width="280" height="90" rx="16" fill="#CACECF"/><text x="1220" y="88" text-anchor="middle">Browser, loopback</text><text x="1220" y="116" text-anchor="middle" font-size="18" font-weight="400">user only</text>
+    </g>
+    <g fill="none" stroke="#6F797A" stroke-width="3"><path d="M280,85 L540,85"/><path d="M820,85 L1080,85"/></g>
+    <g fill="none" stroke="#0E3A2F" stroke-width="5" stroke-linecap="round"><path class="pk flow" pathLength="100" d="M280,85 L540,85" style="--dl:.2s"/><path class="pk flow" pathLength="100" d="M820,85 L1080,85" style="--dl:.8s"/></g>
+    <text x="680" y="22" text-anchor="middle" font-size="19" fill="#6F797A">MCP data reaches the app only through the client, as read-risk tools</text>
+  </svg>
+  <div class="foot"><span><b>INTERNAL</b></span><span>11 / 17</span></div>
+</section>
+
+<!-- 12 COLLABORATION -->
+<section class="slide dark" data-n="12">
+  <div class="kicker">Collaboration</div>
+  <h2>Messaging between colleagues, with agent access on request</h2>
+  <div class="grid2" style="grid-template-columns:.85fr 1.15fr;gap:60px;align-items:start">
+    <div>
+      <div class="card rise" style="--d:.1s;margin-bottom:18px"><h3>Chats</h3><p class="small">Direct or team (2 to 50 people), pushed through the control plane.</p><p class="small" style="margin-top:6px"><span class="dotp" style="background:var(--electric)"></span>online &nbsp; <span class="dotp" style="background:var(--orange)"></span>away &nbsp; <span class="dotp" style="background:var(--orange);opacity:.6"></span>busy &nbsp; <span class="dotp" style="background:var(--light-grey)"></span>offline</p></div>
+      <div class="card rise" style="--d:.18s"><h3>In the Inbox</h3><p class="small">Next to Threads in Unread, folders and the Archive; can be saved as a knowledge note.</p></div>
+    </div>
+    <div>
+    <div class="mock rise" style="--d:.2s;color:var(--ink);padding:0">
+      <div class="bar-top"><span>Chat: Supplier planning (team, 6)</span><span>Presence: busy</span></div>
+      <div style="padding:26px 28px">
+        <div class="bubble rise" style="--d:.4s">Can someone check the Q3 supplier list before Friday?</div>
+        <div class="bubble me rise" style="--d:.9s;color:var(--emerald)">Asking my SkoWork to pull it from the shared folder.</div>
+        <div class="approval rise" style="--d:1.5s"><b>messages.send</b> wants to post to the team Chat.<br>Approval required by default. <b>Approve</b> &nbsp;|&nbsp; Reject</div>
+      </div>
+    </div>
+    <p class="small rise muted" style="--d:1.8s;margin-top:22px;color:var(--light-grey)">Agent tools: find users, list Chats, read messages (untrusted, with the sender as provenance) and send (approval by default). Messages never start Runs.</p>
+    </div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span>12 / 17</span></div>
+</section>
+
+<!-- 13 ADMINISTRATION -->
+<section class="slide light" data-n="13">
+  <div class="kicker">Administration</div>
+  <h2>One admin console for policy, models, tools and the fleet</h2>
+  <div class="grid3 tight" style="gap:18px">
+    <div class="card rise" style="--d:.05s"><h3>Policy editor</h3><p class="small">Typed controls per Group, raw JSON view, validation, diff, simulation and staged rollout.</p></div>
+    <div class="card rise" style="--d:.12s"><h3>Models and quotas</h3><p class="small">Role-to-model mapping per Group, token and image budgets, rate limits, usage audit.</p></div>
+    <div class="card rise" style="--d:.19s"><h3>LLM connections</h3><p class="small">Named endpoints with encrypted credentials, managed by platform admins.</p></div>
+    <div class="card rise" style="--d:.26s"><h3>MCP catalog</h3><p class="small">Servers, hashes, Group assignment, tool risk annotations and review of new tools.</p></div>
+    <div class="card rise" style="--d:.33s"><h3>Skill review</h3><p class="small">Review queue and public import. Arrives with add-skills.</p></div>
+    <div class="card rise" style="--d:.4s"><h3>Fleet and dashboards</h3><p class="small">Installations, online state, minimum version, revocation, audit log, aggregate usage.</p></div>
+  </div>
+  <div class="rise" style="--d:.6s;margin-top:26px;display:flex;gap:14px;flex-wrap:wrap;align-items:center">
+    <span class="tag" style="margin:0 14px 0 0">Five admin roles</span>
+    <span class="chip acc" style="background:var(--emerald);color:var(--electric)">platform-admin</span>
+    <span class="chip acc" style="background:var(--emerald);color:var(--electric)">security-auditor</span>
+    <span class="chip acc" style="background:var(--emerald);color:var(--electric)">group-owner</span>
+    <span class="chip acc" style="background:var(--emerald);color:var(--electric)">skill-reviewer</span>
+    <span class="chip acc" style="background:var(--emerald);color:var(--electric)">works-council-reviewer</span>
+  </div>
+  <p class="small rise muted" style="--d:.8s;margin-top:18px">No per-user productivity views. Only the security-auditor can reach individual-level data, and every access is recorded.</p>
+  <div class="foot"><span><b>INTERNAL</b></span><span>13 / 17</span></div>
+</section>
+
+<!-- 14 TELEMETRY -->
+<section class="slide dark" data-n="14">
+  <div class="kicker">Telemetry and privacy</div>
+  <h2>Metadata by default; content only after company-level approval</h2>
+  <div style="position:relative;display:grid;grid-template-columns:1fr 1fr 1fr;background:rgba(255,255,255,.08);border-radius:999px;padding:8px;margin-top:20px;max-width:1200px">
+    <div style="position:absolute;top:8px;bottom:8px;width:calc((100% - 16px)/3);left:calc(8px + (100% - 16px)/3);background:var(--electric);border-radius:999px"></div>
+    <div style="text-align:center;padding:22px;font-size:30px;font-weight:700;position:relative;z-index:1;color:#fff">off</div>
+    <div style="text-align:center;padding:22px;font-size:30px;font-weight:700;position:relative;z-index:1;color:var(--emerald)">metadata (default)</div>
+    <div style="text-align:center;padding:22px;font-size:30px;font-weight:700;position:relative;z-index:1;color:#fff">content</div>
+  </div>
+  <div class="grid3" style="margin-top:44px;gap:24px">
+    <div class="card rise" style="--d:.1s"><h3>Metadata</h3><p class="small">Operational signals: health, usage and failures. The default level.</p></div>
+    <div class="card rise" style="--d:.2s"><h3>Content</h3><p class="small">Adds content. The user sees a persistent indicator. Production use needs the company approval process.</p></div>
+    <div class="card rise" style="--d:.3s"><h3>Viewer and buffer</h3><p class="small">Users can see what was sent. Records wait in an encrypted buffer, capped at 20 MB, and are forwarded over OTLP to the company SIEM.</p></div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span>14 / 17</span></div>
+</section>
+
+<!-- 15 DEPLOYMENT AND OPERATIONS -->
+<section class="slide light" data-n="15">
+  <div class="kicker">Deployment and operations</div>
+  <h2>Two release artifacts, a light client, and clear offline behaviour</h2>
+  <svg viewBox="0 0 1360 170" width="760" height="95" style="display:block;margin-bottom:6px">
+    <g font-size="22" font-weight="700">
+      <rect class="rise" style="--d:.1s" x="0" y="40" width="260" height="90" rx="16" fill="#CACECF" fill-opacity="1"/><text x="130" y="94" text-anchor="middle" fill="#0E3A2F">Version tag</text>
+      <rect class="rise" style="--d:.3s" x="390" y="40" width="300" height="90" rx="16" fill="#0E3A2F"/><text x="540" y="94" text-anchor="middle" fill="#78FAAE">GitHub Actions</text>
+      <rect class="rise" style="--d:.55s" x="800" y="0" width="560" height="60" rx="14" fill="#78FAAE"/><text x="1080" y="38" text-anchor="middle" fill="#0E3A2F">Control plane: container image</text>
+      <rect class="rise" style="--d:.7s" x="800" y="100" width="560" height="60" rx="14" fill="#78FAAE"/><text x="1080" y="138" text-anchor="middle" fill="#0E3A2F">Desktop client: zip with checksum</text>
+    </g>
+    <path d="M260,85 L390,85" stroke="#6F797A" stroke-width="3" fill="none"/>
+    <path d="M690,60 L800,30 M690,110 L800,130" stroke="#6F797A" stroke-width="3" fill="none"/>
+  </svg>
+  <div class="grid3 tight" style="gap:20px">
+    <div class="card rise" style="--d:.2s"><h3>Installed like any app</h3><ul><li>Windows 11 x64, signed in user</li><li>No admin rights, no service, no driver</li><li>Delivered by the company software distribution system</li></ul></div>
+    <div class="card rise" style="--d:.35s"><h3>Lean footprint</h3><ul><li>Core package 25 MB or less</li><li>Idle working set 60 MB or less, with the window closed</li><li>Tray ready within 2 seconds</li></ul></div>
+    <div class="card rise" style="--d:.5s"><h3>Offline for a day or more</h3><ul><li>Threads, local search and notes keep working: all data is local</li><li>New requests wait in their Thread and start on reconnect</li><li>The session survives network failures; the policy is valid for 7 days</li><li>Chats, sharing and policy updates wait for the connection</li></ul></div>
+  </div>
+  <div class="foot"><span><b>INTERNAL</b></span><span>15 / 17</span></div>
+</section>
+
+<!-- 16 BENEFITS -->
+<section class="slide dark" data-n="16">
+  <div class="kicker">Benefits for management</div>
+  <h2>What the design gives the business</h2>
+  <div class="grid2 tight" style="gap:22px">
+    <div class="card rise" style="--d:.1s"><div class="num">P</div><h3>Productivity</h3><p class="small">Routine work runs in the background, and results wait in the Inbox. Colleagues can reach each other in Chats.</p></div>
+    <div class="card rise" style="--d:.2s"><div class="num">C</div><h3>Control</h3><p class="small">Policy per Group, approvals for risky actions, egress rules, contained processes and a decision audit trail.</p></div>
+    <div class="card rise" style="--d:.3s"><div class="num">D</div><h3>Data residency</h3><p class="small">Models run on company infrastructure. Laptops hold no model keys, and personal knowledge stays on the laptop by default.</p></div>
+    <div class="card rise" style="--d:.4s"><div class="num">$</div><h3>Cost visibility</h3><p class="small">Budgets and rate limits per user and Group, a usage audit and an image budget, for example 50 images a day by default.</p></div>
+  </div>
+  <p class="small rise" style="--d:.6s;margin-top:34px;color:var(--light-grey)">This slide describes intent from the specifications. It asserts no adoption, productivity or cost figures.</p>
+  <div class="foot"><span><b>INTERNAL</b></span><span>16 / 17</span></div>
+</section>
+
+<!-- 17 SUMMARY -->
+<section class="slide dark" data-n="17">
+  <div class="kicker">Summary</div>
+  <h2>A governed agent on every laptop, with models and data kept in the company</h2>
+  <div class="grid2" style="gap:30px;margin-top:10px">
+    <div class="rise" style="--d:.1s"><h3 class="e">What we have</h3><ul class="small" style="list-style:none;font-size:24px;line-height:1.5"><li>&bull; One client per user, one control plane, one company model gateway</li><li>&bull; Policy with allow, approve and deny for every tool call</li><li>&bull; Private knowledge on the laptop, shared only by explicit choice</li></ul></div>
+    <div class="rise" style="--d:.25s"><h3 class="e">Decisions for this audience</h3><ul class="small" style="list-style:none;font-size:24px;line-height:1.5"><li>&bull; Content-level telemetry needs company-level approval</li><li>&bull; Meeting capture needs company-level sign-off before production</li><li>&bull; Knowledge sharing defaults to no Groups</li></ul></div>
+  </div>
+  <p class="lead rise" style="--d:.5s;margin-top:60px;font-size:30px;color:var(--light-grey)">Source of truth: the OpenSpec specifications in the SkoWork repository. Items marked in flight or planned are not yet delivered.</p>
+  <div class="foot"><span><b>INTERNAL</b></span><span>17 / 17</span></div>
+</section>
+
+</div>
+<div class="navzone l" id="navL" aria-hidden="true"></div>
+<div class="navzone r" id="navR" aria-hidden="true"></div>
+
+<script>
+(function(){
+  var stage=document.getElementById('stage');
+  var slides=[].slice.call(document.querySelectorAll('.slide'));
+  var bar=document.querySelector('#progress i');
+  var total=slides.length, idx=0;
+  var still=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // page numbers are computed, so slides can be added without renumbering
+  slides.forEach(function(s,i){var f=s.querySelector('.foot span:last-child'); if(f) f.textContent=(i+1)+' / '+total;});
+  function countUp(sl){
+    [].forEach.call(sl.querySelectorAll('[data-to]'),function(el){
+      var to=+el.getAttribute('data-to'), suf=el.getAttribute('data-suf')||'', t0=null, dur=1600;
+      function out(v){el.textContent=v.toLocaleString('en-US')+suf;}
+      if(still){out(to);return;}
+      out(0);
+      setTimeout(function(){
+        t0=Date.now();
+        var h=setInterval(function(){var p=Math.min((Date.now()-t0)/dur,1);out(Math.round(to*(1-Math.pow(1-p,3))));if(p>=1||!sl.classList.contains('is-active')){clearInterval(h);out(to);}},30);
+      },500);
+    });
+  }
+  function fit(){
+    var s=Math.min(window.innerWidth/1600, window.innerHeight/900);
+    document.documentElement.style.setProperty('--s', s);
+  }
+  function show(i){
+    if(i<0||i>=total) return;
+    slides[idx].classList.remove('is-active');
+    idx=i;
+    slides[idx].classList.add('is-active');
+    countUp(slides[idx]);
+    bar.style.width=((idx+1)/total*100)+'%';
+    history.replaceState(null,'','#'+(idx+1));
+  }
+  function next(){show(idx+1);} function prev(){show(idx-1);}
+  document.addEventListener('keydown',function(e){
+    if(e.key==='ArrowRight'||e.key==='ArrowDown'||e.key==='PageDown'||(e.key===' '&&!e.shiftKey)){e.preventDefault();next();}
+    else if(e.key==='ArrowLeft'||e.key==='ArrowUp'||e.key==='PageUp'||(e.key===' '&&e.shiftKey)){e.preventDefault();prev();}
+    else if(e.key==='Home'){show(0);} else if(e.key==='End'){show(total-1);}
+  });
+  document.getElementById('navR').addEventListener('click',next);
+  document.getElementById('navL').addEventListener('click',prev);
+  window.addEventListener('resize',fit);
+  var h=parseInt(location.hash.slice(1),10);
+  fit();
+  show(isNaN(h)?0:Math.min(Math.max(h-1,0),total-1));
+  if(isNaN(h)) { /* first slide already active */ }
+  // ensure the first slide is active on load even when a hash is given
+  slides.forEach(function(s,i){ if(i!==idx) s.classList.remove('is-active'); });
+  slides[idx].classList.add('is-active');
+  bar.style.width=((idx+1)/total*100)+'%';
+})();
+</script>
+</body>
+</html>
