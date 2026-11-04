@@ -111,13 +111,7 @@ jobs:
           SIGNING_CERT: ${{ secrets.WORKBENCH_SIGNING_CERT_PFX_BASE64 }}
           SIGNING_PASSWORD: ${{ secrets.WORKBENCH_SIGNING_CERT_PASSWORD }}
         working-directory: client
-        run: |
-          $pfx = Join-Path $env:RUNNER_TEMP 'sign.pfx'
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_CERT))
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
-          & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:SIGNING_PASSWORD /tr http://timestamp.digicert.com /td SHA256 `
-            build/release/bin/Workbench.exe build/release/bin/workbench-worker.exe
-          Remove-Item $pfx
+        run: ./tools/sign.ps1 -BuildDir build/release
       - name: Package
         shell: pwsh
         working-directory: client

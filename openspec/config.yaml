@@ -70,7 +70,8 @@ context: |
     Tokens carry no group claim: Groups come from the token's roles where present and from Group
     membership administered in the control plane.
   - CI/CD: GitHub Actions. Two release artifacts: the control plane as a container image and the
-    desktop client as a zip package. (Decided 2026-10-22.)
+    desktop client as a zip package. (Decided 2026-10-22.) Both are published for every version
+    tag, and as a dev build for every change on main. (Decided 2026-11-04; add-client-foundation D9.)
   - Formats: skills use SKILL.md (agentskills.io / Claude compatible). MCP configuration uses
     .mcp.json semantics. Telemetry uses OpenTelemetry (OTLP).
 

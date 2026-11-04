@@ -195,6 +195,13 @@ RAM: the core process idles at about 30–40 MB. The index worker runs no model 
   - `clang-tidy` over `compile_commands.json`;
   - a footprint check that fails the build if a budget in client/desktop-host is exceeded.
 - **Signing:** Authenticode signing with the organization code-signing certificate.
+- **Published artifacts (decided 2026-11-04):** every change publishes fresh artifacts, so what was last merged can always be deployed and tried.
+  - A version tag `vMAJOR.MINOR.PATCH[-pre]` publishes a release: the control plane image tagged with the version (and `latest` unless it is a pre-release), and a GitHub release with the desktop zip, the optional app runtime package and their SHA-256 files. Channel `stable`.
+  - Every push to `main` whose CI passes publishes a dev build from the same CI run, reusing the build its tests ran against. Its version is the patch after the last release tag, with the suffix `-dev.<CI run number>` (after `v0.1.0`: `0.1.1-dev.42`), so it sorts after that release and before the next one. Channel `dev`. The image is tagged with that version and with `main`, never `latest`. The packages replace those of one rolling GitHub pre-release, tag `dev`, which never becomes the latest release; each CI run also keeps them as workflow artifacts.
+  - Pull requests build and test only; nothing is published.
+  - Pushes to `main` do not cancel each other's CI runs, so a run that is publishing is not cut off; the queue keeps only the newest pending run, so the last change is always the one published.
+  - Executables are signed in both cases when the certificate is configured; unsigned dev builds reach organization hosts only through the dev proxy (D12).
+  - Alternatives: a dev release per commit (tags and releases pile up; the workflow artifacts already keep each build); a separate workflow triggered after CI (builds and tests the Windows client a second time).
 
 ### D10. Repository layout and wire contracts
 These are the contracts that the client and the control plane are built against. Later changes extend them in their own design.md.
@@ -203,7 +210,7 @@ These are the contracts that the client and the control plane are built against.
 - `client/`: CMake project. `src/base` (portable: JSON, base64url, URL, JWT parsing, time, logging redaction), `src/platform` (Win32 RAII, WinHTTP HTTP and WebSocket, DPAPI, BCrypt, registry, named pipe), `src/storage`, `src/identity`, `src/channel`, `src/host` (tray, window, local API), `src/app` (wiring, `Workbench.exe`), `src/worker` (`workbench-worker.exe`), `ui/` (Svelte SPA, built with npm and embedded as resources), `tests/` (GoogleTest, vendored).
 - `control-plane/`: one Node.js (22+) TypeScript package. `src/server.ts` (Express app and `ws` push server), `src/<module>/` per capability (identity, fleet, gateway, policy and so on), `src/db.ts` (`node:sqlite` with numbered SQL migrations applied at start), `admin/` (React and Vite admin console, built into `dist/admin` and served by the same process), `test/` (`node:test` with an in-memory database and locally signed test tokens; tests that need the real Keycloak or LLM are tagged and run locally only), `Dockerfile`. Runtime dependencies stay few: express, ws and jose.
 - `dev/graph-mock`: Microsoft Graph mock (add-mail-calendar), the only mock, because there is no access to a real tenant.
-- `.github/workflows/`: `ci.yml` (every push and pull request) and `release.yml` (version tags `v*`).
+- `.github/workflows/`: `ci.yml` (every push and pull request; publishes the dev build on `main`, D9) and `release.yml` (version tags `v*`).
 - `evals/`: the agent eval suite (add-agent-runtime).
 
 **Machine configuration** (client/control-channel Control-Plane Discovery, client/identity Identity Provider Configuration): read first from `HKLM\SOFTWARE\Policies\Workbench` (values `ControlPlaneUrl`, `IdpIssuer`, `IdpClientId`, `IdpRedirectUri`, `IdpScope`, `Channel`), then from `workbench.machine.json` next to the executable, which the distribution system or the zip package places there. User-writable locations are never read. Builds with `WORKBENCH_DEV_ENDPOINTS` (the debug and test presets, never release) also accept `http://` URLs whose host is a loopback address, so tests can run against the local control plane without certificates; release builds refuse them (client/identity Server Identity Verification).

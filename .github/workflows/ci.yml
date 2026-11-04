@@ -1,4 +1,6 @@
-# Continuous integration (add-client-foundation tasks 2.2, 2.3; design D9).
+# Continuous integration (add-client-foundation tasks 2.2, 2.3, 2.5; design D9). Every push to main that passes
+# publishes a dev build: the control plane image (tagged with the dev version and `main`) and the desktop packages on the
+# rolling `dev` pre-release. Pull requests publish nothing. Version tags are released by release.yml.
 name: ci
 
 on:
@@ -11,7 +13,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A run on main may be publishing: let it finish. The queue keeps only the newest pending run.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   OPENSPEC_TELEMETRY: '0'
@@ -20,6 +23,32 @@ env:
   WINLIBS_SHA256: 53fb6773fbdf87cdf22b69a6b2a07ee33d3ada413b42d83044bc7cc6481400d2
 
 jobs:
+  version:
+    name: Build version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the release tags
+      - id: v
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]]; then
+            # The patch after the last release tag (pre-release tags excluded), as a dev pre-release of it.
+            last=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*' 2>/dev/null || echo v0.0.0)
+            IFS=. read -r major minor patch <<< "${last#v}"
+            version="$major.$minor.$((patch + 1))-dev.$GITHUB_RUN_NUMBER"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$ ]] || { echo "bad version $version (from $last)"; exit 1; }
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-ci" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Version: $(grep '^version=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)"
+
   specs:
     name: OpenSpec validation
     runs-on: ubuntu-latest
@@ -33,6 +62,11 @@ jobs:
   client-windows:
     name: Client (Windows, GCC/MinGW)
     runs-on: windows-latest
+    needs: version
+    env:
+      PUBLISH: ${{ needs.version.outputs.publish }}
+      VERSION: ${{ needs.version.outputs.version }}
+      HAS_SIGNING_CERT: ${{ secrets.WORKBENCH_SIGNING_CERT_PFX_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain cache
@@ -77,7 +111,9 @@ jobs:
         working-directory: client
         run: |
           g++ --version | Select-Object -First 1
-          cmake --preset release '-DWORKBENCH_COMMIT=${{ github.sha }}'
+          # The published dev build reports its version and the dev channel; the tests run against that same build.
+          $publish = if ($env:PUBLISH -eq 'true') { @("-DWORKBENCH_VERSION=$env:VERSION", '-DWORKBENCH_CHANNEL=dev') } else { @() }
+          cmake --preset release '-DWORKBENCH_COMMIT=${{ github.sha }}' @publish
           cmake --build --preset release
       - name: Unit tests
         shell: pwsh
@@ -95,12 +131,29 @@ jobs:
           name: golden-actual
           path: golden-actual
           if-no-files-found: ignore
+      - name: Sign executables (dev build, when a code-signing certificate is configured)
+        if: env.PUBLISH == 'true' && env.HAS_SIGNING_CERT == 'true'
+        shell: pwsh
+        env:
+          SIGNING_CERT: ${{ secrets.WORKBENCH_SIGNING_CERT_PFX_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.WORKBENCH_SIGNING_CERT_PASSWORD }}
+        working-directory: client
+        run: ./tools/sign.ps1 -BuildDir build/release
       - name: Package and footprint check
         shell: pwsh
         working-directory: client
         run: |
-          ./tools/package.ps1 -BuildDir build/release -OutDir build/package -Version '0.0.0-ci'
+          ./tools/package.ps1 -BuildDir build/release -OutDir build/package -Version $env:VERSION
           ./tools/check-footprint.ps1 -BuildDir build/release
+      - name: Keep the dev build packages
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-zip-${{ needs.version.outputs.version }}
+          if-no-files-found: error
+          path: |
+            client/build/package/*.zip
+            client/build/package/*.zip.sha256
   portable-sanitizers:
     name: Portable libraries (Linux, ASan/UBSan)
     runs-on: ubuntu-24.04
@@ -197,6 +250,79 @@ jobs:
           docker run -d --name graph-mock -p 4810:4810 -p 4811:4811 workbench-graph-mock:ci
           for i in $(seq 1 50); do curl -sf http://127.0.0.1:4811/_mock/health && exit 0; sleep 0.1; done
           docker logs graph-mock; exit 1
+
+  # ---- Dev build (design D9 Published artifacts): only on a push to main, only when every job above passed. ----
+
+  publish-image:
+    name: Publish the control plane image (dev build)
+    runs-on: ubuntu-latest
+    needs: [version, specs, client-windows, portable-sanitizers, fuzz, control-plane, graph-mock]
+    if: needs.version.outputs.publish == 'true'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/workbench-control-plane
+          # Never `latest`: that tag belongs to the stable releases (release.yml).
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ needs.version.outputs.version }}
+            type=raw,value=main
+          labels: |
+            org.opencontainers.image.title=Workbench control plane
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: control-plane
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.version.outputs.version }}
+          provenance: true
+          sbom: true
+
+  publish-packages:
+    name: Publish the desktop packages (dev pre-release)
+    runs-on: ubuntu-latest
+    needs: [version, specs, client-windows, portable-sanitizers, fuzz, control-plane, graph-mock]
+    if: needs.version.outputs.publish == 'true'
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-zip-${{ needs.version.outputs.version }}
+          path: dist
+      - name: Replace the rolling dev pre-release
+        run: |
+          ls -l dist
+          notes=$(cat <<EOF
+          Dev build $VERSION of main at ${GITHUB_SHA::12}, replaced by every change on main that passes CI. Channel: dev.
+
+          Desktop client: \`Workbench-$VERSION-win-x64.zip\` (checksum in the \`.sha256\` file).
+          Optional app runtime for Local apps: \`Workbench-$VERSION-app-runtime-win-x64.zip\`, extracted next to Workbench.exe.
+          Control plane image: \`ghcr.io/${GITHUB_REPOSITORY_OWNER}/workbench-control-plane:$VERSION\` (also \`:main\`).
+          EOF
+          )
+          gh release delete dev --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          # A `dev` tag left without its release would pin the new release to the old commit.
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/dev" 2>/dev/null || true
+          gh release create dev dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "Workbench $VERSION (dev)" --notes "$notes"
 # Not in CI on purpose (design D12): the client end-to-end tests and the control plane's real-LLM tests use the
 # organization Keycloak test realm and the organization LLM API from a developer's .env. They run locally only; the API key
 # is never stored as a repository or Actions secret.
