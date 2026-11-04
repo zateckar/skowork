@@ -85,6 +85,17 @@ jobs:
       - name: Display large enough for the desktop tests (the runner starts at 1024x768)
         shell: pwsh
         run: ./dev/scripts/ci-display.ps1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'  # dev/graph-mock runs its TypeScript directly
+      - name: MCP reference server for the client/mcp-client tests (dev-only, never shipped)
+        shell: pwsh
+        working-directory: dev/mcp-test-server
+        run: npm ci
+      - name: Graph mock for the client/mail-calendar tests (dev-only, never shipped)
+        shell: pwsh
+        working-directory: dev/graph-mock
+        run: npm ci
       - name: Release build and tests
         shell: pwsh
         working-directory: client
