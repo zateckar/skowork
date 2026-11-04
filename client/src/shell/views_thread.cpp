@@ -43,6 +43,8 @@ void ThreadPane::rebuild() {
         composer_->update();
     };
     const Route& r = shell_.route();
+    // A Thread opened again starts from a fresh feed (Runs' details hidden), not the one kept while it was last open.
+    if (r.name == RouteName::new_thread || shell_.open_id().empty()) kept_feed_.reset();
     if (r.name == RouteName::new_thread) {
         name = shell_.t("composer.new_title");
         padding = ui::Insets::all(24);

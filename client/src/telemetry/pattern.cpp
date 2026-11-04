@@ -268,7 +268,8 @@ private:
             bool single = false;
             unsigned char lo = 0;
             if (!class_atom(single, lo, s)) return false;
-            if (peek() == '-' && peek(1) != ']' && peek(1) != '\0') {
+            // A range needs a bound after '-': not ']' and not the end of the pattern (a NUL byte is a bound, not the end).
+            if (peek() == '-' && i_ + 1 < p_.size() && peek(1) != ']') {
                 ++i_;
                 bool single_hi = false;
                 unsigned char hi = 0;

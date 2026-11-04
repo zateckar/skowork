@@ -134,7 +134,7 @@ TEST(TelemetryRecord, PolicyPatternsCannotBacktrackExponentially) {
 }
 
 TEST(TelemetryPattern, EcmaScriptSubsetMatchesLeftmostFirst) {
-    auto rep = [](const char* pattern, std::string_view text) {
+    auto rep = [](std::string_view pattern, std::string_view text) {
         auto p = Pattern::compile(pattern);
         if (!p) return std::string("<invalid>");
         long long budget = kRedactionBudget;
@@ -157,6 +157,10 @@ TEST(TelemetryPattern, EcmaScriptSubsetMatchesLeftmostFirst) {
     for (const char* bad : {R"((\w+)-\1)", "(?=a)", "(?!a)", "(?<n>a)", "a**", "a{3,2}", "*a", "[]", "[z-a]", "(a", "a)", R"(\q)",
                             "[[:alpha:]]", "a{1001}", "(((((a{1,1000}){1,1000})))))"})
         EXPECT_EQ(rep(bad, "a"), "<invalid>") << bad;
+    // A NUL byte after '-' bounds a range; it is not the end of the pattern (fuzz finding).
+    using namespace std::string_view_literals;
+    EXPECT_EQ(rep("[\x01-\0]"sv, "a"), "<invalid>");
+    EXPECT_EQ(rep("[\0-\x01]"sv, "a-\x01"sv), "a-#");
 }
 
 TEST(TelemetryPattern, AnOverBudgetTextIsRedactedWhole) {
