@@ -59,7 +59,9 @@ The end-to-end tests (`-L e2e`) need an OIDC test realm and an LLM API. Copy `.e
 Pushing a tag such as `v1.2.3` runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which:
 
 - publishes the control plane as `ghcr.io/<owner>/workbench-control-plane:1.2.3` (and `latest` for stable versions), and
-- builds `Workbench-1.2.3-win-x64.zip` with its SHA-256 checksum and attaches both to a GitHub Release.
+- builds the desktop client and attaches it to a GitHub Release, each zip with a SHA-256 checksum file:
+  - `Workbench-1.2.3-win-x64.zip`: the client;
+  - `Workbench-1.2.3-app-runtime-win-x64.zip`: optional, the Node.js runtime for Local apps. Extract it next to `Workbench.exe`; without it the client works, but Local apps are not available.
 
 Tags with a suffix, such as `v1.2.3-rc.1`, are published as pre-releases and do not update `latest`. Code signing is optional: it runs when the repository secrets `WORKBENCH_SIGNING_CERT_PFX_BASE64` and `WORKBENCH_SIGNING_CERT_PASSWORD` are set.
 
