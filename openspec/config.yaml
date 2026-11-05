@@ -178,6 +178,7 @@ context: |
   27 fold-chats-into-inbox            [Collaboration]
   28 add-dictation                    [Productivity]
   29 improve-deployment-guidance      [Hardening]
+  30 simplify-secret-key              [Hardening]
 
 rules:
   proposal:

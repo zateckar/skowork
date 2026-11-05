@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { loadConfig, type Config } from '../src/config.ts';
 import { openDb } from '../src/db.ts';
 import { Audit } from '../src/identity/audit.ts';
-import { Connections } from '../src/gateway/connections.ts';
+import { Connections, serverKey, StartupError } from '../src/gateway/connections.ts';
 import { fakeUpstream, json, startHarness, type FakeUpstream, type Harness } from './helpers.ts';
 
 const KEY_A = 'upstream-key-a-0123456789';
@@ -96,6 +96,23 @@ test('connections: production refuses to start without WORKBENCH_SECRET_KEY once
   const k = new Connections({ ...keyed, gateway: { ...keyed.gateway, discoveryIntervalMs: 3_600_000 } }, db3, new Audit(db3), () => {});
   assert.equal(k.list().connections.length, 1);
   k.close();
+});
+
+test('connections: the server key comes from a passphrase or an existing base64 key; a short value is refused', () => {
+  const pass = serverKey('correct horse battery staple');
+  assert.equal(pass.length, 32);
+  assert.deepEqual(serverKey('correct horse battery staple'), pass, 'the same passphrase gives the same key after a restart');
+  assert.notDeepEqual(serverKey('correct horse battery stapler'), pass);
+  const raw = Buffer.alloc(32, 7);
+  assert.deepEqual(serverKey(raw.toString('base64')), raw, 'an existing base64 key is used as it is');
+  assert.throws(() => serverKey('secret'), (e: unknown) => e instanceof StartupError && /WORKBENCH_SECRET_KEY must be at least 16 characters/.test(e.message));
+  // A production start with a passphrase stores the bootstrap connection.
+  const cfg = loadConfig({ WORKBENCH_ENV: 'production', WORKBENCH_DB: ':memory:', OPENAI_BASE_URL: 'https://llm.example.test/v1', OPENAI_KEY: 'k-123456789', WORKBENCH_SECRET_KEY: 'correct horse battery staple' });
+  const db = openDb(':memory:');
+  const c = new Connections({ ...cfg, gateway: { ...cfg.gateway, discoveryIntervalMs: 3_600_000 } }, db, new Audit(db), () => {});
+  assert.equal(c.list().key_available, true);
+  assert.equal(c.list().connections.length, 1);
+  c.close();
 });
 
 test('connections: admin API, discovery, wrong credential, capabilities, disabled, missing and pinned models', async () => {

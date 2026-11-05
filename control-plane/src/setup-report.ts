@@ -20,7 +20,7 @@ export function setupReport(cfg: Config, opts: { consoleBuilt: boolean; port: nu
   if (cfg.identity.bootstrapAdmins.length === 0)
     warnings.push('warning: WORKBENCH_BOOTSTRAP_ADMINS is empty; unless an admin was assigned earlier, nobody can use the admin console');
   if (!cfg.gateway.secretKey && cfg.env === 'production')
-    warnings.push('warning: WORKBENCH_SECRET_KEY is not set; LLM connections cannot be added in the admin console (generate one with: openssl rand -base64 32)');
+    warnings.push('warning: WORKBENCH_SECRET_KEY is not set; LLM connections cannot be added in the admin console (set it to any passphrase of at least 16 characters)');
   if (cfg.gateway.upstreams.length === 0)
     warnings.push('warning: no LLM upstream configured (OPENAI_BASE_URL); the gateway will answer MODEL_UNAVAILABLE until an LLM connection is added in the admin console');
   return { info, warnings };

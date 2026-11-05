@@ -67,8 +67,8 @@ Fill in `.env`. [`deploy/.env.example`](deploy/.env.example) explains each value
 | `OIDC_DISCOVERY_URL` | yes, refuses to start without it | `https://<keycloak>/realms/<realm>/.well-known/openid-configuration` (must be https) |
 | `OIDC_CLIENT_ID` | yes | The client from step 1. Without it every token is refused. |
 | `WORKBENCH_BOOTSTRAP_ADMINS` | yes, for the first start | Comma-separated `preferred_username`s that get the platform-admin role. They can assign further admins in the console. |
-| `WORKBENCH_TELEMETRY_SECRET` | yes, refuses to start without it | Random secret: `openssl rand -base64 32` |
-| `WORKBENCH_SECRET_KEY` | yes, once an LLM connection exists | Base64 of 32 random bytes (`openssl rand -base64 32`). Encrypts LLM credentials. If it is missing while connections exist or `OPENAI_BASE_URL` is set, the control plane refuses to start. Keep it safe: without it, stored credentials are lost. |
+| `WORKBENCH_TELEMETRY_SECRET` | yes, refuses to start without it | Any long random text, for example four or five random words |
+| `WORKBENCH_SECRET_KEY` | yes, once an LLM connection exists | A passphrase of at least 16 characters, for example four or five random words. It encrypts LLM credentials. If it is missing while connections exist or `OPENAI_BASE_URL` is set, the control plane refuses to start. Keep it safe and unchanged: with a different value, stored credentials cannot be read and must be entered again. |
 | `OPENAI_BASE_URL`, `OPENAI_KEY` | no | An OpenAI-compatible upstream that becomes the first LLM connection. Alternatively, add connections in the admin console. Without any, the gateway answers `MODEL_UNAVAILABLE`. |
 | `WORKBENCH_ADMIN_REDIRECT_URI` | no | Admin console redirect. Default: `<console origin>/admin/` |
 | `WORKBENCH_TELEMETRY_FORWARD_URL`, `WORKBENCH_TELEMETRY_FORWARD_HEADERS` | no | Forward client telemetry to an OTLP/HTTP logs endpoint |

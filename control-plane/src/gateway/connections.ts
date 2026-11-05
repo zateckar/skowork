@@ -1,7 +1,7 @@
 // LLM connections of control-plane/llm-gateway (add-llm-connections): stored OpenAI-compatible upstreams with
 // encrypted credentials (D1), the environment bootstrap (D2), routing of model ids to connections (D3) and model
 // discovery (D4). Credentials never leave this module except in the Authorization header sent to the upstream.
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Config, ModelCapability } from '../config.ts';
@@ -68,14 +68,28 @@ interface ModelRow {
 
 // ---- credential encryption (D1) ----------------------------------------------------------------------
 
-function loadKey(cfg: Config, needed: boolean): Buffer | null {
-  if (cfg.gateway.secretKey) {
-    const k = Buffer.from(cfg.gateway.secretKey, 'base64');
-    if (k.length !== 32) throw new Error('WORKBENCH_SECRET_KEY must be the base64 encoding of 32 bytes');
-    return k;
+/**
+ * The server key from WORKBENCH_SECRET_KEY (Server Key From A Passphrase): the base64 encoding of 32 bytes is the key
+ * itself (keys of earlier deployments); any other value of at least 16 characters is a passphrase the key is derived
+ * from. The salt is fixed so the same passphrase gives the same key after a restart.
+ */
+export function serverKey(value: string): Buffer {
+  const v = value.trim();
+  if (/^[A-Za-z0-9+/]{43}=$/.test(v)) {
+    const k = Buffer.from(v, 'base64');
+    if (k.length === 32) return k;
   }
+  if (v.length < 16) throw new StartupError('WORKBENCH_SECRET_KEY must be at least 16 characters (any passphrase, for example four random words)');
+  return scryptSync(v, 'workbench/llm-credentials/v1', 32, { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+}
+
+/** A settings problem that stops the control plane at startup; main.ts prints only its message. */
+export class StartupError extends Error {}
+
+function loadKey(cfg: Config, needed: boolean): Buffer | null {
+  if (cfg.gateway.secretKey) return serverKey(cfg.gateway.secretKey);
   if (cfg.env === 'production') {
-    if (needed) throw new Error('WORKBENCH_SECRET_KEY is required: LLM connection credentials are stored encrypted with it');
+    if (needed) throw new StartupError('WORKBENCH_SECRET_KEY is required: LLM connection credentials are stored encrypted with it (any passphrase of at least 16 characters)');
     return null;
   }
   if (cfg.dbPath === ':memory:') return randomBytes(32);
