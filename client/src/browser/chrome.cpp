@@ -196,7 +196,7 @@ Result<std::unique_ptr<ChromeProcess>> launch_chrome(const LaunchOptions& o, Cdp
     cw.reset();
 
     proc->cdp_ = std::make_unique<CdpConnection>(pw.release(), pr.release(), std::move(on_event), std::move(on_closed));
-    auto v = proc->cdp_->call("Browser.getVersion", json::object(), {}, std::chrono::seconds(10));
+    auto v = proc->cdp_->call("Browser.getVersion", json::object(), {}, o.handshake_timeout);
     if (!v) {
         const bool exited = !proc->running();
         proc->terminate();

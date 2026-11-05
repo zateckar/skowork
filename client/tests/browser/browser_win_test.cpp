@@ -128,6 +128,9 @@ TEST(BrowserChrome, PipeHandshakeLoadsAPageWithoutAListeningPort) {
     o.exe = chrome_info->exe;
     o.profile_dir = dir.path / L"profile";
     o.headless = true;
+    // This is the run's first Chrome start: on a fresh CI runner it is a cold start (no disk cache, the antivirus scans
+    // Chrome, a new profile) that can exceed the product's 10 s. The test checks the pipe handshake, not start-up time.
+    o.handshake_timeout = 60s;
     std::mutex mx;
     std::vector<std::string> events;
     auto p = launch_chrome(o, [&](const CdpMessage& m) {

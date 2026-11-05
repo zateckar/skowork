@@ -7,6 +7,7 @@
 #include "browser/cdp.h"
 #include "platform/win.h"
 
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -42,6 +43,8 @@ struct LaunchOptions {
     bool headless = false;
     std::string proxy_server;               // http://127.0.0.1:<port>, empty: none
     std::vector<std::wstring> extra_args;
+    // add-browser-use design: the tool is withdrawn when the handshake takes longer than 10 s.
+    std::chrono::milliseconds handshake_timeout{10'000};
 };
 
 class ChromeProcess {
