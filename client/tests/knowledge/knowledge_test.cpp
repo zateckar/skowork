@@ -554,7 +554,7 @@ TEST(KnowledgeIndexer, DeferralStopsNewWorkAndBackfillStaysLight) {
     EXPECT_EQ(kg.svc->store().counts("threads").items, 0);  // deferred: no new work taken
     EXPECT_TRUE(kg.svc->status()["deferred"].get<bool>());
     kg.deferred = false;
-    kg.svc->policy_changed();  // the host lifts the deferral and wakes the indexer
+    kg.svc->wake();  // the host lifts the deferral: its gate change wakes the indexer (app.cpp gate.on_change)
     const auto until = std::chrono::steady_clock::now() + 10s;
     while (kg.svc->store().counts("threads").items == 0 && std::chrono::steady_clock::now() < until) std::this_thread::sleep_for(20ms);
     EXPECT_EQ(kg.svc->store().counts("threads").items, 1);
@@ -579,6 +579,26 @@ TEST(KnowledgeIndexer, DeferralStopsNewWorkAndBackfillStaysLight) {
     std::cout << "[ knowledge ] backfill of 300 files: private bytes grew by " << grew_mb << " MB\n";
     EXPECT_LT(grew_mb, 40.0);
     kg.svc->stop();
+}
+
+// A deferral is obeyed inside a step too: no queued item is indexed and no embedding, extraction or enrichment batch
+// is sent while it lasts; everything continues once it is lifted.
+TEST(KnowledgeIndexer, DeferredStepTakesNoItemAndSendsNoBatch) {
+    Kg kg({{"knowledge.extraction", "on"}});
+    for (int i = 0; i < 3; ++i) {
+        kg.add_thread("d" + std::to_string(i), {{"user", "Nabídka na servis číslo " + std::to_string(i) + "."}});
+        kg.svc->thread_finished("d" + std::to_string(i));
+    }
+    kg.deferred = true;
+    const int embeds = kg.gw.embed_calls, chats = kg.gw.chat_calls;
+    EXPECT_FALSE(kg.svc->step());
+    EXPECT_EQ(kg.svc->store().counts("threads").items, 0);
+    EXPECT_EQ(kg.gw.embed_calls, embeds);
+    EXPECT_EQ(kg.gw.chat_calls, chats);
+    kg.deferred = false;
+    kg.idle();
+    EXPECT_EQ(kg.svc->store().counts("threads").items, 3);
+    EXPECT_GT(kg.gw.embed_calls, embeds);
 }
 
 // ==== Embeddings (4.1, 4.4) ===============================================================================================
@@ -785,6 +805,14 @@ TEST(KnowledgeRetrieval, RerankFallbackCitationsAndGraphExpansion) {
     auto rr = kg.svc->search("licence linka", {});
     EXPECT_TRUE(rr.reranked);
     EXPECT_EQ(rr.passages.front().chunk_id, r.passages.back().chunk_id);
+    EXPECT_TRUE(rr.semantic);
+    // Query embedding unavailable: full-text and graph results still come back, with full provenance.
+    kg.gw.offline = true;
+    auto off = kg.svc->search("licence linka", {});
+    EXPECT_FALSE(off.semantic);
+    ASSERT_EQ(off.passages.size(), 5u);
+    for (const auto& p : off.passages) EXPECT_EQ(p.ref.rfind("workbench://thread/", 0), 0u);
+    kg.gw.offline = false;
     // Graph expansion: a passage that mentions a query entity is found without sharing a word with the query.
     kg.add_thread("plan", {{"user", "Harmonogram na čtvrté čtvrtletí."}});
     kg.svc->thread_finished("plan");

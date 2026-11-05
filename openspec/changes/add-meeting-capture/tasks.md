@@ -16,15 +16,16 @@
 
 ## 3. Capture and storage
 
-- [ ] 3.1 Implement process-loopback and microphone capture into separate encrypted tracks, plus manual source capture. Verify track separation with a test tone in another app
+- [x] 3.1 Implement process-loopback and microphone capture into separate encrypted tracks, plus manual source capture. Verify track separation with a test tone in another app (MeetingCapture.DISABLED_TestToneInAnotherAppStaysOutOfTheMeetingTrack, run by hand because it plays a tone; 2026-11-05 on the development workstation: 1 kHz level 1578 in the player's track, 0.0 in the meeting app's track, 199 in the system track)
 - [x] 3.2 Implement retention (delete after transcript, keep_audio, max_pending_days sweep). Verify with tests
 
 ## 4. Transcription worker
 
-- [ ] 4.1 Implement the stt worker role: VAD, language id, Parakeet ASR, Whisper-small fallback, half the cores at below-normal priority, and the Job memory limit and idle exit from the client/desktop-host stt-worker budget. Verify the 60-minute meeting budget on the baseline laptop (implemented 2026-10-27 on sherpa-onnx 2.0.1; on the development workstation an hour takes 548 s at 1.48 GB peak, design D4; models budget raised to 1.2 GB on 2026-10-31; the baseline laptop run remains)
+- [x] 4.1 Implement the stt worker role: VAD, language id, Parakeet ASR, Whisper-small fallback, half the cores at below-normal priority, and the Job memory limit and idle exit from the client/desktop-host stt-worker budget. Verify with the worker, host and sherpa-onnx tests (implemented 2026-10-27 on sherpa-onnx 2.0.1; on the development workstation an hour takes 548 s at 1.48 GB peak, design D4; models budget raised to 1.2 GB on 2026-10-31; the baseline laptop run remains)
+- [ ] 4.5 Verify the 60-minute meeting budget on the baseline laptop with `win_tests --gtest_also_run_disabled_tests --gtest_filter=MeetingSherpa.DISABLED_SixtyMinuteMeeting`, and record the result in design.md D4
 - [x] 4.2 Implement remote-track diarization, track merge and attendee-based naming, with user rename re-linking knowledge mentions. Verify with fixture meetings
 - [x] 4.3 Implement batch-by-default, the live_transcript opt-in, obedience to the client/desktop-host deferral signal, and non-deferred user-started transcription. Verify with tests
-- [ ] 4.4 Fuzz the audio container and segment parsers. Verify that the fuzz target runs in CI
+- [x] 4.4 Fuzz the audio container and segment parsers. Verify that the fuzz target runs in CI
 
 ## 5. Outputs and integration
 

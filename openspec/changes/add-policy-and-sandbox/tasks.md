@@ -21,7 +21,7 @@
 - [x] 3.1 Implement bundle fetch, verification (signature, subject, expiry, anti-rollback), encrypted cache and the 6-hour refresh. Verify with tests for tampered, expired and rollback bundles
 - [x] 3.2 Implement the decision function as the mandatory BeforeToolCall handler. The steps are: `tools.rules` pattern, then `tools.risk`, then the Risk Class Defaults, then argument checks, then tool- and Skill-declared floors, then the unattended rules. Verify with a table-driven test suite that includes the filesystem and unattended defaults
 - [x] 3.3 Implement fail-closed behaviour with no valid bundle. Verify that only reads of the client's own data are allowed
-- [ ] 3.4 Implement path canonicalisation and glob matching with handle-based final-path checks and TOCTOU-safe creation. Verify with the escape corpus (junction, symlink, 8.3, ADS, device, UNC) and a fuzz target
+- [x] 3.4 Implement path canonicalisation and glob matching with handle-based final-path checks and TOCTOU-safe creation. Verify with the escape corpus (junction, symlink, 8.3, ADS, device, UNC) and a fuzz target
 - [x] 3.5 Implement user folder grants within `grantable` bounds, including revocation. Verify that out-of-bounds grants are refused
 - [x] 3.6 Implement in-process egress checks, including re-checks after redirects, with an interface the agent browser uses for every request, and the platform-connection exemption (control plane, Graph hosts, domain controllers). Verify that a redirect to a denied host is blocked and that platform connections work with an empty allow list
 - [x] 3.7 Implement the decision audit log and the effective-policy summary view data, including "why denied". Verify that the denied-call record names the matched rule and its source Group

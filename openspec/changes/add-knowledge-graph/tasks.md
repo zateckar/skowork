@@ -10,7 +10,7 @@
 
 - [x] 2.1 Create the `kg.db` schema (sources, items, chunks, FTS5, vec, entities, relations, mentions, user facts) with migrations. Verify with migration tests
 - [x] 2.2 Implement Source enablement (policy defaults and user toggles) and exclusion handling (policy.knowledge.exclusions globs, mail-calendar exclusions, user exclusions), with removal on exclusion. Verify with unit tests for the policy-disabled, policy-glob and exclusion-added scenarios
-- [ ] 2.3 Implement the indexer worker role with budgets (threads, priority, backfill throttling, daily extraction budget) and obedience to the client/desktop-host deferral signal. Verify that indexing stops on a simulated deferral, and that the core-process idle budget holds during backfill
+- [x] 2.3 Implement the indexer worker role with budgets (threads, priority, backfill throttling, daily extraction budget) and obedience to the client/desktop-host deferral signal. Verify that indexing stops on a simulated deferral, and that the core-process idle budget holds during backfill (2026-11-05: deferral is also checked before each item and batch inside a step, and lifting it wakes the indexer through the host gate; KnowledgeIndexer tests. The 60 MB idle measurement on the baseline laptop is part of 6.2)
 - [x] 2.4 Register the forget-cascade handlers for Sources, items and entities. Verify that no derived rows remain after forgetting
 
 ## 3. Source connectors
@@ -29,7 +29,7 @@
 
 ## 5. Retrieval and tools
 
-- [ ] 5.1 Implement hybrid retrieval (BM25, vector, RRF, graph expansion, reranking through the `rerank` role) with provenance and fallback to fused order. Verify citation completeness, the reranker-unavailable scenario, and p95 latency on the benchmark set
+- [x] 5.1 Implement hybrid retrieval (BM25, vector, RRF, graph expansion, reranking through the `rerank` role) with provenance and fallback to fused order. Verify citation completeness, the reranker-unavailable scenario, and p95 latency on the benchmark set (2026-11-05: query-embedding-unavailable path tested, rerank capped at 30 after the team merge; local p95 measured with kg_bench in design D1, the p95 including both gateway calls belongs to spike 1.1)
 - [x] 5.2 Implement knowledge.search, knowledge.entity, knowledge.related, knowledge.timeline and knowledge.remember with their risk classes and per-passage provenance. Verify with tool tests, including the injected-instruction scenario in the eval suite
 - [x] 5.3 Expose the knowledge tools to skills through the standard tool registry. Verify that a skill run receives filtered results
 

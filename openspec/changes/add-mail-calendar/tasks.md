@@ -15,7 +15,7 @@
 - [x] 2.4 Implement the calendar endpoints (events, calendarView, delta, getSchedule, create, respond). Verify with mock unit tests
 - [x] 2.5 Implement fault injection and the `/_mock` control API (reset, deliver mail, change event, captured sends, request log). Verify with tests that inject throttling and delta expiry
 - [ ] 2.6 Add contract tests against sanitised recordings from the test tenant. Verify that a deliberately removed property fails the suite
-- [ ] 2.7 Package as a single-file executable (Node.js single executable application) and a container image. Verify it starts in under 5 seconds in CI, and document usage in the mock's own help output
+- [x] 2.7 Package as a single-file executable (Node.js single executable application) and a container image. Verify it starts in under 5 seconds in CI, and document usage in the mock's own help output
 
 ## 3. Client Graph access (client/mail-calendar)
 

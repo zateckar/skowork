@@ -1,8 +1,8 @@
 // client/meeting-capture (add-meeting-capture 2.x, 3.2, 4.1-4.4, 5.1, 5.2): the portable core, the encrypted track
 // container, the stt worker with the development test engine and with the sherpa-onnx engine on the models package
 // (skipped where client/models/stt is not fetched), the recording indicator, and the meeting service over a real
-// runtime and scheduler on app.db with fakes for the audio devices and the machine probe. No test opens a real audio
-// device (3.1 is verified on hardware).
+// runtime and scheduler on app.db with fakes for the audio devices and the machine probe. Only the disabled, hand-run
+// MeetingCapture test opens real audio devices (3.1 track separation; it plays an audible tone).
 #include "base/strings.h"
 #include "host/workers.h"
 #include "meeting/audio_file.h"
@@ -19,7 +19,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <map>
 #include <set>
 #include <thread>
 
@@ -513,6 +515,110 @@ TEST(MeetingSherpa, DISABLED_SixtyMinuteMeeting) {
     std::printf("[ stt ] 60 min on two tracks: %.0f s (real-time factor %.3f), %zu segments, %zu speakers, worker peak %llu MB private, %llu MB working set, %u threads\n",
                 secs, secs / 3600.0, segs->size(), speakers.size(), static_cast<unsigned long long>(pmc.PeakPagefileUsage >> 20),
                 static_cast<unsigned long long>(pmc.PeakWorkingSetSize >> 20), std::max(1u, std::thread::hardware_concurrency() / 2));
+}
+
+// ---- real capture (3.1) ----------------------------------------------------------------------------------------------------
+
+namespace {
+
+// Magnitude of the 1 kHz component (Goertzel), normalised so a full-scale sine gives about 16384.
+double tone_level(const std::vector<std::int16_t>& pcm, double freq = 1000.0, double rate = 16000.0) {
+    if (pcm.empty()) return 0;
+    const double w = 2 * 3.14159265358979 * freq / rate, coeff = 2 * std::cos(w);
+    double s1 = 0, s2 = 0;
+    for (const std::int16_t x : pcm) {
+        const double s0 = x + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    const double power = s1 * s1 + s2 * s2 - coeff * s1 * s2;
+    return std::sqrt(std::max(0.0, power)) / static_cast<double>(pcm.size());
+}
+
+void write_wav(const std::filesystem::path& file, const std::vector<std::int16_t>& pcm, std::uint32_t rate) {
+    std::ofstream f(file, std::ios::binary);
+    const auto u32 = [&](std::uint32_t v) { f.write(reinterpret_cast<const char*>(&v), 4); };
+    const auto u16 = [&](std::uint16_t v) { f.write(reinterpret_cast<const char*>(&v), 2); };
+    const auto bytes = static_cast<std::uint32_t>(pcm.size() * 2);
+    f.write("RIFF", 4), u32(36 + bytes), f.write("WAVEfmt ", 8), u32(16), u16(1), u16(1), u32(rate), u32(rate * 2), u16(2), u16(16);
+    f.write("data", 4), u32(bytes), f.write(reinterpret_cast<const char*>(pcm.data()), bytes);
+}
+
+}  // namespace
+
+// Track separation with a test tone in another application (task 3.1, spec "Other application sounds"): a separate
+// process plays a 1 kHz tone; the process-loopback track of that process has it, the process-loopback track of another
+// process tree (a silent sibling process standing in for the meeting app) does not, and the system track has it.
+// It plays an audible tone on the default output device, so it is run by hand:
+//   win_tests --gtest_also_run_disabled_tests --gtest_filter=MeetingCapture.DISABLED_TestToneInAnotherAppStaysOutOfTheMeetingTrack
+TEST(MeetingCapture, DISABLED_TestToneInAnotherAppStaysOutOfTheMeetingTrack) {
+    TempRoot tmp;
+    std::filesystem::create_directories(tmp.path);
+    const auto wav = tmp.path / L"tone.wav";
+    {
+        std::vector<std::int16_t> pcm(4 * 16000);
+        for (size_t i = 0; i < pcm.size(); ++i) pcm[i] = static_cast<std::int16_t>(4000 * std::sin(2 * 3.14159265358979 * 1000.0 * static_cast<double>(i) / 16000));
+        write_wav(wav, pcm, 16000);
+    }
+    // The tone player: another application, started suspended so every capture is open before it makes a sound.
+    std::wstring cmd = L"powershell.exe -NoProfile -NonInteractive -Command \"(New-Object Media.SoundPlayer '" + wav.wstring() + L"').PlaySync()\"";
+    STARTUPINFOW si{sizeof si};
+    PROCESS_INFORMATION pi{};
+    ASSERT_TRUE(::CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi));
+    // The meeting app: a silent sibling of the player. (Not this test process: process loopback includes the whole
+    // process tree, and the player is this process's child.)
+    std::wstring quiet_cmd = L"powershell.exe -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 15\"";
+    PROCESS_INFORMATION quiet{};
+    ASSERT_TRUE(::CreateProcessW(nullptr, quiet_cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &quiet));
+    const auto end_quiet = [&] {
+        ::TerminateProcess(quiet.hProcess, 0);
+        ::CloseHandle(quiet.hThread), ::CloseHandle(quiet.hProcess);
+    };
+
+    struct Track {
+        const wchar_t* name;
+        CaptureSource source;
+        std::shared_ptr<TrackWriter> writer;
+        std::unique_ptr<AudioCapture> capture;
+    };
+    std::vector<Track> tracks;
+    tracks.push_back({L"player.skau", {CaptureSource::Kind::process, pi.dwProcessId}, {}, {}});
+    tracks.push_back({L"meeting-app.skau", {CaptureSource::Kind::process, static_cast<unsigned>(quiet.dwProcessId)}, {}, {}});
+    tracks.push_back({L"system.skau", {CaptureSource::Kind::system, 0}, {}, {}});
+    for (auto& t : tracks) {
+        auto w = TrackWriter::create(tmp.path / t.name, TrackKind::remote, 16000, 0);
+        ASSERT_TRUE(w) << w.error().message;
+        t.writer = std::move(*w);
+        auto c = AudioCapture::start(t.source, t.writer);
+        if (!c) {
+            ::TerminateProcess(pi.hProcess, 1);
+            ::CloseHandle(pi.hThread), ::CloseHandle(pi.hProcess);
+            end_quiet();
+            GTEST_SKIP() << "no capture on this machine (" << path_to_utf8(t.name) << "): " << c.error().message;
+        }
+        t.capture = std::move(*c);
+    }
+    ::ResumeThread(pi.hThread);
+    EXPECT_EQ(::WaitForSingleObject(pi.hProcess, 30000), WAIT_OBJECT_0);
+    DWORD player_exit = 0;
+    ::GetExitCodeProcess(pi.hProcess, &player_exit);
+    EXPECT_EQ(player_exit, 0u) << "the tone player failed";
+    ::CloseHandle(pi.hThread), ::CloseHandle(pi.hProcess);
+    std::this_thread::sleep_for(300ms);
+    end_quiet();
+    std::map<std::wstring, double> level;
+    for (auto& t : tracks) {
+        t.capture->stop();
+        EXPECT_EQ(t.capture->error(), "") << path_to_utf8(t.name);
+        ASSERT_TRUE(t.writer->close());
+        auto r = read_track(tmp.path / t.name);
+        ASSERT_TRUE(r) << r.error().message;
+        level[t.name] = tone_level(r->pcm);
+        std::printf("[ capture ] %ls: %.1f s, 1 kHz level %.1f\n", t.name, static_cast<double>(r->pcm.size()) / 16000, level[t.name]);
+    }
+    if (level[L"system.skau"] < 50) GTEST_SKIP() << "the tone did not reach the output mix (muted or no render device)";
+    EXPECT_GT(level[L"player.skau"], 50) << "the player's own track has the tone";
+    EXPECT_LT(level[L"meeting-app.skau"], 5) << "another application's tone stays out of the meeting app's track";
 }
 
 // ---- the recording indicator ------------------------------------------------------------------------------------------------

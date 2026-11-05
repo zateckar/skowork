@@ -1055,6 +1055,70 @@ TEST(ComputerRuntime, OnScreenInstructionsArriveAsUntrustedDataAndChangeNoDecisi
     EXPECT_EQ(app.sends.load(), 0);
 }
 
+// 4.3 through the runtime (User Input Takes Precedence): user input during a drag interrupts the Run with a
+// Continue/Stop Question Action item; Continue resumes the Run and Stop cancels it.
+TEST(ComputerRuntime, UserInputInterruptsTheRunWithAContinueStopQuestion) {
+    REQUIRE_DESKTOP();
+    TestApp app;
+    RuntimeFx r({{"tools", {{"computer", {{"mode", "allow"}}}, {"risk", {{"read", "allow"}, {"external", "allow"}, {"destructive", "allow"}}}}}});
+    const auto t = r.env.thread();
+    const Box frame = extended_frame(app.hwnd);
+    const RECT c = app.screen_rect(app.canvas);
+    // The model drags across the canvas, using the pixel size of the screenshot it just received.
+    const auto drag_from_screenshot = [&, frame, c](const std::string& call_id) {
+        return [&, frame, c, call_id](const model::ChatRequest& req, const model::ChatSink&) {
+            int iw = 0, ih = 0;
+            const std::regex size(R"((\d+)x(\d+) pixels)");
+            for (const auto& m : req.messages) {
+                std::smatch s;
+                if (std::regex_search(m.content, s, size)) {
+                    iw = std::stoi(s[1]);
+                    ih = std::stoi(s[2]);
+                }
+            }
+            const auto img = [&](double sx, double sy) { return std::pair{(sx - frame.x + 0.5) * iw / frame.w, (sy - frame.y + 0.5) * ih / frame.h}; };
+            const auto [x1, y1] = img(c.left + 20, (c.top + c.bottom) / 2.0);
+            const auto [x2, y2] = img(c.right - 20, (c.top + c.bottom) / 2.0);
+            return model::ModelResult<model::ChatResponse>(calls_response(
+                {{call_id, "computer.drag", {{"from_x", x1}, {"from_y", y1}, {"to_x", x2}, {"to_y", y2}, {"duration_ms", 1500}, {"rationale", "draw a line"}}}}));
+        };
+    };
+    const auto interrupted_by_user = [&](const std::string& run) -> std::string {
+        if (!wait_until([&] { return app.canvas_down.load(); })) return {};
+        std::this_thread::sleep_for(200ms);
+        r.f.svc->simulate_user_input();
+        if (!r.env.wait(run, RunState::interrupted)) return {};
+        const auto actions = r.env.rt->pending_actions(t);
+        if (actions.size() != 1) return {};
+        EXPECT_EQ(actions[0].kind, "question");
+        EXPECT_EQ(actions[0].payload["choices"], json({"Continue", "Stop"}));
+        return actions[0].id;
+    };
+
+    r.env.model.push_calls({{"c1", "find_tools", {{"query", "computer desktop window"}}}, {"c1b", "find_tools", {{"query", "drag the mouse"}}}});
+    r.env.model.push_calls({{"c2", "computer.screenshot", {{"window", app.title_utf8()}}}});
+    r.env.model.push(drag_from_screenshot("c3"));
+    r.env.model.push_text("Line drawn.");
+    const auto run = r.env.run(t, "Draw a line on the canvas in the test window");
+    const std::string q1 = interrupted_by_user(run);
+    ASSERT_FALSE(q1.empty()) << r.env.tool_content(run, "c3");
+    EXPECT_FALSE(r.f.svc->input().holding(VK_LBUTTON)) << "control stopped: the button is released";
+    // Continue: the Run resumes and ends normally.
+    ASSERT_TRUE(r.env.rt->answer_question(q1, "Continue"));
+    ASSERT_TRUE(r.env.wait(run, RunState::succeeded));
+
+    // Stop: the Run is cancelled.
+    r.env.model.push_calls({{"d1", "find_tools", {{"query", "computer desktop window"}}}, {"d1b", "find_tools", {{"query", "drag the mouse"}}}});
+    r.env.model.push_calls({{"d2", "computer.screenshot", {{"window", app.title_utf8()}}}});
+    r.env.model.push(drag_from_screenshot("d3"));
+    const auto run2 = r.env.run(t, "Draw another line");
+    const std::string q2 = interrupted_by_user(run2);
+    ASSERT_FALSE(q2.empty()) << r.env.tool_content(run2, "d3");
+    ASSERT_TRUE(r.env.rt->answer_question(q2, "Stop"));
+    ASSERT_TRUE(r.env.wait(run2, RunState::cancelled));
+    EXPECT_FALSE(r.f.svc->controlling());
+}
+
 TEST(ComputerRuntime, UnattendedClickYieldsAnApprovalAndNoScreenshotIsKept) {
     REQUIRE_DESKTOP();
     TestApp app;

@@ -23,7 +23,7 @@
 
 - [x] 4.1 Implement the overlay with capture exclusion. Verify the overlay is visible on screen and absent from captured screenshots
 - [x] 4.2 Implement the global stop hotkey and release of held input. Verify in an automated test that the Run is cancelled within 1 s during a drag
-- [ ] 4.3 Implement user-input detection that stops control and raises the Continue/Stop Question through client/agent-runtime. Verify that physical input interrupts the Run and injected input does not
+- [x] 4.3 Implement user-input detection that stops control and raises the Continue/Stop Question through client/agent-runtime. Verify that physical input interrupts the Run and injected input does not (ComputerWin.InjectedInputDoesNotInterruptButUserInputAsksToContinue, and through the runtime ComputerRuntime.UserInputInterruptsTheRunWithAContinueStopQuestion; physical input is simulated through the hooks' test entry point, design Implementation Notes; passed 2026-11-05)
 - [x] 4.4 Implement app allow/deny scoping, always-deny for self and credential UI, and unreachable-surface errors (elevated, secure desktop, lock screen) followed by a client-raised Question. Verify with tests for each case
 - [x] 4.5 Implement in-memory screenshot handling, retention under policy, and the Unattended decision floor of approve. Verify that no screenshot files exist after a default Run and that an Unattended click yields an Approval Action item
 
@@ -35,7 +35,7 @@
 ## 6. Launching, target checks and provenance
 
 - [x] 6.1 Implement computer.launch (design D8): CreateProcessW on an executable name or path, refusal of command interpreters and scoped-out executables before approval, and the 8-second wait for the new window that becomes the Run's target. Verify with unit tests of the refusal and argument rules; verify once in the desktop test that Notepad opens and its window id works for computer.type
-- [ ] 6.2 Implement the precheck hook that runs before the policy decision (design D9) and use it for every computer.* tool. Verify with a unit test that a call with no target creates no approval and that a call with a valid target still reaches policy
+- [x] 6.2 Implement the precheck hook that runs before the policy decision (design D9) and use it for every computer.* tool. Verify with a unit test that a call with no target creates no approval and that a call with a valid target still reaches policy (RuntimeApproval.PrecheckRefusalComesBeforePolicyAndCreatesNoApproval)
 - [x] 6.3 Tag failure results with the `desktop` provenance instead of an empty source (design D10). Verify with a unit test that no computer result has an empty application
 - [x] 6.4 Run `openspec validate --all --strict` after the changes above
 

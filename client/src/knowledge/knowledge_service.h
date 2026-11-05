@@ -141,6 +141,8 @@ public:
     // One round of background work: queued items, the periodic sweep, then one embedding, extraction and enrichment
     // batch. Returns whether anything was done. The background thread calls it; tests call it directly.
     bool step();
+    // The host's background gate changed (deferral lifted, pause ended): look for work now instead of at the next poll.
+    void wake();
     // step() until nothing is left to do (tests), at most `max_rounds`.
     void run_until_idle(int max_rounds = 1000);
     void sweep_now();
@@ -249,6 +251,7 @@ private:
     bool enrich_step();
     void store_extraction(const std::vector<ChunkRow>& batch, const Extraction& x);
     void notify();
+    [[nodiscard]] bool deferred() const;
     void loop();
     long long now_ms() const { return env_.clock->unix_millis(); }
 

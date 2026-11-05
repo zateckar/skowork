@@ -1021,6 +1021,47 @@ TEST(RuntimeApproval, MissingRationaleIsRejectedWithoutRunningOrAsking) {
     EXPECT_TRUE(c.env.rt->pending_actions().empty());
 }
 
+// add-computer-use D9 (Target Checked Before Approval): a tool's precheck runs before the policy decision. A call it
+// refuses never reaches policy and creates no Action item; a call it accepts is decided by policy as usual.
+TEST(RuntimeApproval, PrecheckRefusalComesBeforePolicyAndCreatesNoApproval) {
+    Env env;
+    ToolDef t = make_tool(env, "computer.type", Risk::external, "Type into a window");
+    t.core = true;
+    t.parameters = json::parse(R"({"type":"object","properties":{"window":{"type":"string"},"text":{"type":"string"}},"required":["text"]})");
+    t.precheck = [](const std::string&, const json& a) -> std::optional<std::string> {
+        if (!a.contains("window")) return std::string("No target window: call computer.observe first.");
+        return std::nullopt;
+    };
+    env.add_tool(t);
+    env.policy->approvals.insert("computer.type");
+    env.start();
+    const auto reached_policy = [&env] {
+        const std::lock_guard lock(env.policy->mx);
+        return std::count_if(env.policy->seen.begin(), env.policy->seen.end(), [](const ToolCallInfo& c) { return c.tool == "computer.type"; });
+    };
+
+    // No target: refused by the precheck, no decision, no approval, nothing typed.
+    env.model.push_calls({{"c1", "computer.type", {{"text", "hello"}, {"rationale", "fill the form"}}}});
+    env.model.push_text("I need to observe first.");
+    const std::string thread_id = env.thread();
+    const std::string run1 = env.run(thread_id, "type hello");
+    ASSERT_TRUE(env.wait(run1, RunState::succeeded));
+    EXPECT_NE(env.tool_content(run1, "c1").find("computer.observe"), std::string::npos);
+    EXPECT_EQ(reached_policy(), 0);
+    EXPECT_TRUE(env.rt->pending_actions().empty());
+    EXPECT_EQ(env.calls.count("computer.type"), 0);
+
+    // A valid target: the call reaches policy, which asks for approval.
+    env.model.push_calls({{"c2", "computer.type", {{"window", "w-1"}, {"text", "hello"}, {"rationale", "fill the form"}}}});
+    const std::string run2 = env.run(thread_id, "type hello into the form");
+    ASSERT_TRUE(env.wait(run2, RunState::interrupted));
+    EXPECT_EQ(reached_policy(), 1);
+    const auto actions = env.rt->pending_actions(thread_id);
+    ASSERT_EQ(actions.size(), 1u);
+    EXPECT_EQ(actions[0].kind, "approval");
+    EXPECT_EQ(env.calls.count("computer.type"), 0);
+}
+
 TEST(RuntimeApproval, ApproveRunsTheCallWithoutTheRationaleArgument) {
     ApprovalCase c;
     c.env.model.push_text("sent");

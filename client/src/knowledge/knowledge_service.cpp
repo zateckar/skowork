@@ -152,6 +152,18 @@ void KnowledgeService::policy_changed() {
     wake_.notify_all();
 }
 
+void KnowledgeService::wake() {
+    {
+        const std::lock_guard lock(mx_);
+        wake_now_ = true;
+    }
+    wake_.notify_all();
+}
+
+bool KnowledgeService::deferred() const {
+    return env_.deferred && env_.deferred();
+}
+
 void KnowledgeService::notify() {
     if (env_.changed) env_.changed();
 }
@@ -748,8 +760,10 @@ bool KnowledgeService::enrich_step() {
 
 bool KnowledgeService::step() {
     bool did = false, reindexed_shareable = false;
-    // Queued items first (new and changed before backfill).
+    // Queued items first (new and changed before backfill). A deferral that starts during the step stops it before the
+    // next item and before each batch (Indexing Resource Budget: no new work while deferred).
     for (int i = 0; i < kTasksPerStep; ++i) {
+        if (deferred()) return did;
         Task t;
         {
             const std::lock_guard lock(mx_);
@@ -778,9 +792,10 @@ bool KnowledgeService::step() {
         sweep_now();
         did = true;
     }
-    if (embed_step()) did = true;
-    if (extract_step()) did = true;
-    if (enrich_step()) did = true;
+    for (bool (KnowledgeService::*batch)() : {&KnowledgeService::embed_step, &KnowledgeService::extract_step, &KnowledgeService::enrich_step}) {
+        if (deferred()) break;
+        if ((this->*batch)()) did = true;
+    }
     if (did) notify();
     return did;
 }
@@ -801,7 +816,7 @@ void KnowledgeService::loop() {
     while (!stop_) {
         bool did = false;
         // Deferral (Indexing Resource Budget): no new work is taken while the host defers background work.
-        if (!(env_.deferred && env_.deferred())) {
+        if (!deferred()) {
             try {
                 did = step();
             } catch (const std::exception& e) {
@@ -882,6 +897,7 @@ SearchResult KnowledgeService::search(const std::string& query, const SearchOpti
         candidates = std::move(merged);
         out.passages.clear();
     }
+    if (candidates.size() > 30) candidates.resize(30);  // design D6: the top 30 combined results are reranked
     // Rerank the top 30; on failure the fused order stays.
     if (env_.rerank && candidates.size() > 1) {
         std::vector<std::string> texts;

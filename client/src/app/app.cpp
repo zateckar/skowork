@@ -1491,6 +1491,10 @@ void App::start_knowledge() {
                                return {};
                            });
     knowledge_live = knowledge_svc.get();
+    // Indexing resumes as soon as the host lifts a deferral (client/desktop-host Background Work Deferral).
+    gate.on_change([this] {
+        if (auto* k = knowledge_live.load()) k->wake();
+    });
     knowledge_svc->start();
 }
 
