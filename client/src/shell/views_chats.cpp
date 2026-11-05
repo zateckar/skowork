@@ -4,6 +4,8 @@
 // leave (after asking); Save as note with a period (add-save-as-note D3), which opens the draft in the Knowledge view's
 // editor. New Chat and Add members pick people by searching (improve-desktop-look D7, fold-chats-into-inbox D2). The
 // host keeps the cache and talks to the control plane (messaging.*).
+#include <deque>
+
 #include "base/strings.h"
 #include "base/time.h"
 #include "shell/shell.h"
@@ -108,11 +110,19 @@ private:
             build_results();
         });
     }
-    // After the click that asked for it returns: rebuilding removes the control that was clicked.
+    // After the click that asked for it returns: rebuilding removes the control that was clicked. One timer drains a
+    // queue, because Windows fires due timers in no particular order and picks must keep the order of the clicks.
     void later(std::function<void()> f) {
+        later_.push_back(std::move(f));
+        if (later_.size() > 1) return;
         std::weak_ptr<int> alive = alive_;
-        shell_.window().set_timer(1, [alive, f = std::move(f)] {
-            if (alive.lock()) f();
+        shell_.window().set_timer(1, [this, alive] {
+            if (!alive.lock()) return;
+            while (!later_.empty()) {
+                auto next = std::move(later_.front());
+                later_.pop_front();
+                next();
+            }
         });
     }
     void changed() {
@@ -192,6 +202,7 @@ private:
     Node* chips_ = nullptr;
     Node* results_ = nullptr;
     std::vector<std::pair<std::string, std::u16string>> picked_;
+    std::deque<std::function<void()>> later_;
     json users_ = json::array();
     std::u16string error_;
     bool in_flight_ = false;
