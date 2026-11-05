@@ -1,0 +1,31 @@
+# Workbench control plane: production deployment with Docker Compose.
+#
+#   cp .env.example .env      # then fill in every value marked REQUIRED
+#   docker compose up -d
+#   docker compose logs -f    # the startup log names every setting that is still missing
+#
+# Desktop clients only accept https, so put the control plane behind the organization's TLS reverse proxy and set
+# WORKBENCH_PUBLIC_BASE_URL to the https address clients use. The proxy must forward WebSocket upgrades
+# (/api/v1/fleet/push) and must not buffer streamed responses (/llm). See "Deploy the control plane" in README.md.
+name: workbench
+
+services:
+  control-plane:
+    # Stable releases: latest or a version such as 0.1.0. Dev builds from main: main.
+    image: ghcr.io/zateckar/workbench-control-plane:${WORKBENCH_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      WORKBENCH_ENV: production
+      WORKBENCH_DB: /data/workbench.db
+      PORT: "8080"
+    ports:
+      # Published on the host for the reverse proxy. Use "127.0.0.1:8080:8080" when the proxy runs on this host.
+      - "${WORKBENCH_HTTP_PORT:-8080}:8080"
+    volumes:
+      - workbench-data:/data
+    stop_grace_period: 30s
+
+volumes:
+  # SQLite database: identity, policy, fleet, audit, LLM connections, skills, team knowledge. Back it up.
+  workbench-data:

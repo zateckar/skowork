@@ -45,11 +45,17 @@ export interface ControlPlane {
   audit: Audit;
   team: TeamKnowledge;
   messaging: Messaging;
+  /** Whether the admin console build was found and is served at /admin/. */
+  consoleBuilt: boolean;
   listen(port?: number, host?: string): Promise<number>;
   close(): Promise<void>;
 }
 
-export function createControlPlane(cfg: Config, log: (m: string) => void = console.log): ControlPlane {
+export function createControlPlane(
+  cfg: Config,
+  log: (m: string) => void = console.log,
+  opts: { adminDist?: string } = {},
+): ControlPlane {
   const db = openDb(cfg.dbPath);
   const audit = new Audit(db);
   const identity = new IdentityService(cfg, db, audit);
@@ -109,8 +115,11 @@ export function createControlPlane(cfg: Config, log: (m: string) => void = conso
   });
 
   // Admin console (React build), public static files; the API below needs tokens.
-  const adminDist = fileURLToPath(new URL('../dist/admin', import.meta.url));
-  if (existsSync(adminDist)) {
+  // The root redirects to the console (Console Entry Point).
+  const adminDist = opts.adminDist ?? fileURLToPath(new URL('../dist/admin', import.meta.url));
+  const consoleBuilt = existsSync(adminDist);
+  if (consoleBuilt) {
+    app.get('/', (_req, res) => res.redirect(302, '/admin/'));
     app.use('/admin', express.static(adminDist, { index: 'index.html', maxAge: '1h' }));
     app.get(/^\/admin(\/.*)?$/, (_req, res) => res.sendFile('index.html', { root: adminDist }));
   }
@@ -208,7 +217,7 @@ export function createControlPlane(cfg: Config, log: (m: string) => void = conso
   void identity.warmUp(log);
 
   return {
-    server, db, identity, push, fleet, gateway, policy, tokens, catalog, telemetry, skills, tasks, audit, team, messaging,
+    server, db, identity, push, fleet, gateway, policy, tokens, catalog, telemetry, skills, tasks, audit, team, messaging, consoleBuilt,
     async listen(port = cfg.port, host = cfg.host) {
       const hosts = host.split(',').map((h) => h.trim()).filter(Boolean);
       let bound = port;

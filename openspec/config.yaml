@@ -177,6 +177,7 @@ context: |
   26 record-withheld-calls            [Hardening]
   27 fold-chats-into-inbox            [Collaboration]
   28 add-dictation                    [Productivity]
+  29 improve-deployment-guidance      [Hardening]
 
 rules:
   proposal:

@@ -26,6 +26,8 @@ const random = (n: number) => b64url(crypto.getRandomValues(new Uint8Array(n)));
 async function load(): Promise<void> {
   if (cfg && disc) return;
   cfg = (await (await fetch('/api/v1/public/admin-config')).json()) as AdminConfig;
+  // Console Entry Point: without WORKBENCH_ADMIN_REDIRECT_URI the console itself is the redirect target.
+  if (!cfg.redirect_uri) cfg.redirect_uri = `${location.origin}/admin/`;
   disc = (await (await fetch(cfg.discovery_url)).json()) as Discovery;
 }
 

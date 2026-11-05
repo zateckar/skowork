@@ -30,14 +30,129 @@ npm test
 npm run admin:build
 ```
 
-Configuration is read from environment variables; see [`control-plane/src/config.ts`](control-plane/src/config.ts). The essentials are `OIDC_DISCOVERY_URL`, `OIDC_CLIENT_ID`, `WORKBENCH_SECRET_KEY`, `WORKBENCH_BOOTSTRAP_ADMINS` and `WORKBENCH_DB`.
+For a local development server, run `npm run dev`. It reads the repository's `.env`; see `.env.example`. All settings are environment variables, listed in [`control-plane/src/config.ts`](control-plane/src/config.ts). To deploy the control plane, see the next section.
 
-Run it in a container:
+## Deploy the control plane
+
+The control plane is one container: API, push channel, LLM gateway and admin console, with a SQLite database on a volume. [`deploy/docker-compose.yml`](deploy/docker-compose.yml) runs the published image.
+
+### 1. Identity provider client (Keycloak)
+
+The desktop clients and the admin console sign in through **one public OpenID Connect client** (Authorization Code with PKCE, no client secret). In the Keycloak realm, create or ask for a client, for example `workbench-desktop`, with:
+
+| Setting | Value |
+| --- | --- |
+| Client authentication | Off (public client) |
+| Standard flow | On; PKCE method `S256` |
+| Valid redirect URIs | `http://localhost:4200/auth/callback` (desktop clients, loopback) and `https://<control plane>/admin/` (admin console) |
+| Valid post logout redirect URIs | `https://<control plane>/admin/` |
+| Web origins | `https://<control plane>` (the admin console calls the token endpoint from the browser) |
+| Audience | Add an **Audience** mapper that puts the client ID itself into the access token's `aud`. The control plane only accepts tokens whose `aud` contains `OIDC_CLIENT_ID` (or `WORKBENCH_AUDIENCES`). |
+| Access token lifespan | 10 minutes or less (`WORKBENCH_MAX_TOKEN_LIFETIME_S`, default 600) |
+
+Admins are matched by the token's `preferred_username`.
+
+### 2. Settings
 
 ```bash
-docker build -t workbench-control-plane control-plane
-docker run -p 8080:8080 -v workbench-data:/data --env-file .env workbench-control-plane
+cd deploy
+cp .env.example .env
 ```
+
+Fill in `.env`. [`deploy/.env.example`](deploy/.env.example) explains each value.
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `WORKBENCH_PUBLIC_BASE_URL` | yes | The https address clients use, for example `https://workbench.example.com`. Registration returns service URLs under it. Without it they are derived from the request, which gives `http://` behind a TLS proxy, and clients refuse those. |
+| `OIDC_DISCOVERY_URL` | yes, refuses to start without it | `https://<keycloak>/realms/<realm>/.well-known/openid-configuration` (must be https) |
+| `OIDC_CLIENT_ID` | yes | The client from step 1. Without it every token is refused. |
+| `WORKBENCH_BOOTSTRAP_ADMINS` | yes, for the first start | Comma-separated `preferred_username`s that get the platform-admin role. They can assign further admins in the console. |
+| `WORKBENCH_TELEMETRY_SECRET` | yes, refuses to start without it | Random secret: `openssl rand -base64 32` |
+| `WORKBENCH_SECRET_KEY` | yes, once an LLM connection exists | Base64 of 32 random bytes (`openssl rand -base64 32`). Encrypts LLM credentials. If it is missing while connections exist or `OPENAI_BASE_URL` is set, the control plane refuses to start. Keep it safe: without it, stored credentials are lost. |
+| `OPENAI_BASE_URL`, `OPENAI_KEY` | no | An OpenAI-compatible upstream that becomes the first LLM connection. Alternatively, add connections in the admin console. Without any, the gateway answers `MODEL_UNAVAILABLE`. |
+| `WORKBENCH_ADMIN_REDIRECT_URI` | no | Admin console redirect. Default: `<console origin>/admin/` |
+| `WORKBENCH_TELEMETRY_FORWARD_URL`, `WORKBENCH_TELEMETRY_FORWARD_HEADERS` | no | Forward client telemetry to an OTLP/HTTP logs endpoint |
+
+### 3. Start
+
+```bash
+docker compose up -d
+docker compose logs control-plane
+```
+
+The log names the admin console URL and warns about each missing setting:
+
+```text
+Workbench control plane (production) listening on 0.0.0.0:8080
+admin console: https://workbench.example.com/admin/
+```
+
+Check that the service is up with `curl http://localhost:8080/healthz`, which returns `{"status":"ok"}`.
+
+### 4. Reverse proxy (TLS)
+
+Desktop clients only connect over https. Put the container behind the organization's reverse proxy at the address in `WORKBENCH_PUBLIC_BASE_URL`, forwarding everything (`/`, `/admin`, `/api`, `/llm`) to port 8080 without a path prefix. The proxy must:
+
+- forward WebSocket upgrades (`/api/v1/fleet/push`), and
+- not buffer streamed responses (`/llm/...`, server-sent events).
+
+### 5. First sign-in
+
+Open `https://<control plane>/` (it redirects to `/admin/`) and sign in as one of `WORKBENCH_BOOTSTRAP_ADMINS`. Then:
+
+1. Under **LLM connections**, add the LLM upstream if `OPENAI_BASE_URL` is not set.
+2. Under **Models & quotas**, map the models.
+3. Under **Policies**, publish a policy for `everyone`.
+
+### Troubleshooting
+
+| Symptom | Cause |
+| --- | --- |
+| Exits with `refusing to start: ...` | The named setting is missing: `OIDC_DISCOVERY_URL` (https) or `WORKBENCH_TELEMETRY_SECRET`. |
+| `/` or `/admin` answers `{"error":{"code":"NOT_FOUND"...}}` | The admin console is not built. The startup log says so. Use the container image, or run `npm run admin:build` before `npm start`. |
+| Keycloak shows "Invalid parameter: redirect_uri" | `https://<control plane>/admin/` is not a valid redirect URI of the client (step 1). |
+| The console shows "Failed to fetch" after signing in | Web origins of the client do not include `https://<control plane>`. |
+| The console shows `claim aud invalid` or `client ... not allowed` | No Audience mapper on the client, or `OIDC_CLIENT_ID` differs from the client the token was issued to. |
+| The console says you have no access | Your `preferred_username` is not in `WORKBENCH_BOOTSTRAP_ADMINS` and no admin has given you a role. |
+| Clients sign in but stay disconnected | `WORKBENCH_PUBLIC_BASE_URL` is missing or not https, or the proxy does not forward WebSocket upgrades. |
+
+## Connect desktop clients
+
+The client reads its control plane address from **machine configuration** that the organization software distribution sets (Intune, GPO, SCCM). Users cannot change it. Without it, the client shows *Workbench is not configured* together with the missing settings and where they are read from.
+
+The client reads the following registry values first:
+
+```text
+HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Workbench
+  ControlPlaneUrl   REG_SZ  https://workbench.example.com                       (required)
+  IdpIssuer         REG_SZ  https://keycloak.example.com/realms/example         (required)
+  IdpClientId       REG_SZ  workbench-desktop                                   (default: workbench-desktop)
+  IdpRedirectUri    REG_SZ  http://localhost:4200/auth/callback                 (default; must be http loopback)
+  IdpScope          REG_SZ  openid profile email                                (default)
+  Channel           REG_SZ  stable                                              (default)
+```
+
+For example, as an administrator:
+
+```powershell
+$k = 'HKLM:\SOFTWARE\Policies\Workbench'
+New-Item $k -Force | Out-Null
+Set-ItemProperty $k ControlPlaneUrl 'https://workbench.example.com'
+Set-ItemProperty $k IdpIssuer 'https://keycloak.example.com/realms/example'
+Set-ItemProperty $k IdpClientId 'workbench-desktop'
+```
+
+If the registry key has no `ControlPlaneUrl`, the client reads `workbench.machine.json` from the folder of `Workbench.exe` instead:
+
+```json
+{
+  "control_plane_url": "https://workbench.example.com",
+  "idp_issuer": "https://keycloak.example.com/realms/example",
+  "idp_client_id": "workbench-desktop"
+}
+```
+
+Optional keys are `idp_redirect_uri`, `idp_scope` and `channel`. Install the client in a folder users cannot write to, for example `C:\Program Files\Workbench`, so they cannot replace this file. The values must match the server: `ControlPlaneUrl` = `WORKBENCH_PUBLIC_BASE_URL`, `IdpIssuer` = the issuer of `OIDC_DISCOVERY_URL`, and `IdpClientId` = `OIDC_CLIENT_ID`. Both URLs must be https.
 
 ## Desktop client
 
