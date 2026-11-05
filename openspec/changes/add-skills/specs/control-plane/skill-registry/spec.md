@@ -44,15 +44,23 @@ Results are attached to the version. A version with embedded secrets MUST be rej
 - **THEN** the registry rejects the submission and tells the author where the secret was found
 
 ### Requirement: Org Review And Signing
-The skill registry SHALL make an org-scope Skill version available only after a skill-reviewer approves it. On approval, the registry signs the version's content digest. Reviewers MUST NOT approve their own submissions.
+The skill registry SHALL make an org-scope Skill version available only after a skill-reviewer approves it. On approval, the registry signs the version's content digest. Reviewers MUST NOT approve their own submissions, unless the author is the sole reviewer: no other user holds platform-admin or skill-reviewer. A sole-reviewer self-approval MUST carry a comment that justifies it, and the registry records it on the version and in the audit log as a self-approval.
 
 #### Scenario: Approval signs version
 - **WHEN** a skill-reviewer approves a submitted org Skill version
 - **THEN** the registry signs it, publishes it to the org scope, and notifies the author
 
 #### Scenario: Self-review blocked
-- **WHEN** the author of a Skill version tries to approve it
-- **THEN** the registry refuses the approval
+- **WHEN** the author of a Skill version tries to approve it while another user holds platform-admin or skill-reviewer
+- **THEN** the registry refuses the approval and names the other reviewers' roles as the way forward
+
+#### Scenario: Sole reviewer approves own version
+- **WHEN** the only user who holds platform-admin or skill-reviewer approves their own Skill version with a justifying comment
+- **THEN** the registry signs and publishes it, and records the approval as a self-approval on the version and in the audit log
+
+#### Scenario: Sole reviewer without a comment
+- **WHEN** the sole reviewer approves their own Skill version without a comment
+- **THEN** the registry refuses the approval and asks for a justification
 
 ### Requirement: Public Skill Import
 The skill registry SHALL accept externally sourced Skills, such as those from agentskills.io, only as submissions to org review. A platform-admin gives either the HTTPS URL of the package, which the registry downloads, or the package itself, with an optional source URL. The licence is the one given, or else the license field of SKILL.md; an import without either is refused. The source URL, when known, and the licence are recorded on the version.

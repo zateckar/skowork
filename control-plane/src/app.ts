@@ -80,7 +80,7 @@ export function createControlPlane(
   const skills = new SkillRegistry(cfg.skills, db, audit, push, (u) => {
     const scopes = policy.compileFor(u.groups, u.userName).flat.get('skills.publish');
     return Array.isArray(scopes) ? (scopes as string[]) : ['shared'];
-  });
+  }, () => identity.holdersOf(['platform-admin', 'skill-reviewer']));
   const tasks = new TaskDispatch(db, audit, identity, policy, push);
   push.taskSink = (m) => tasks.handleClient(m);
 

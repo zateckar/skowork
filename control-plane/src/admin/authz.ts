@@ -5,18 +5,21 @@ import { sendError } from '../http.ts';
 import type { Audit } from '../identity/audit.ts';
 import type { AdminRole } from '../identity/identity.ts';
 
-/** Console views and the roles that may open them. The server checks the same table on each view's API. */
+/**
+ * Console views and the roles that may open them. The server checks the same table on each view's API. The order is
+ * the console's grouped navigation order (improve-admin-console-ux D1).
+ */
 export const VIEWS = {
   dashboards: ['platform-admin', 'security-auditor'],
+  identity: ['platform-admin'],
+  fleet: ['platform-admin', 'security-auditor'],
   policy: ['platform-admin', 'security-auditor', 'group-owner'],
   models: ['platform-admin'],
   connections: ['platform-admin'],
-  knowledge: ['platform-admin'],
-  identity: ['platform-admin'],
-  remote: ['platform-admin'],
   mcp: ['platform-admin'],
   skills: ['platform-admin', 'skill-reviewer'],
-  fleet: ['platform-admin', 'security-auditor'],
+  knowledge: ['platform-admin'],
+  remote: ['platform-admin'],
   audit: ['security-auditor'],
   individual: ['security-auditor'],
   'access-records': ['security-auditor', 'works-council-reviewer'],

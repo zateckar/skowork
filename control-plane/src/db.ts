@@ -455,6 +455,10 @@ const migrations: string[] = [
     WHERE json_extract(entry, '$.auth') = 'audience-token';
   DELETE FROM service_signing_keys WHERE purpose = 'mcp-token';
   `,
+  // add-skills D6 Sole reviewer: a self-approval stays visible on the version.
+  `
+  ALTER TABLE skill_versions ADD COLUMN self_approved INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 export function openDb(path: string): Db {

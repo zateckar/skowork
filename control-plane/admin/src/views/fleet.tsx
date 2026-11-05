@@ -34,7 +34,7 @@ export function Fleet({ me }: { me: Me }) {
                 <td>{time(i.last_seen)}</td>
                 <td>
                   {manage && !i.revoked_at && (
-                    <button data-testid={`revoke-${i.id}`} onClick={() => confirmed('Revoke this installation? Its user is signed out on that machine.') &&
+                    <button className="danger" data-testid={`revoke-${i.id}`} onClick={() => confirmed('Revoke this installation? Its user is signed out on that machine.') &&
                       void act.run(async () => (await api('POST', `${F}/installations/${i.id}/revoke`, { reason: 'revoked in admin console' }), list.reload()), 'Installation revoked.')}>
                       Revoke
                     </button>

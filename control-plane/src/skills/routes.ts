@@ -57,7 +57,7 @@ export function skillAdminRoutes(reg: SkillRegistry, maxPackageBytes: number): R
   const r = Router();
   r.get('/queue', wrap(() => reg.queue()));
   r.get('/', wrap(() => reg.all()));
-  r.get('/versions/:id', wrap((req) => reg.detail(Number(req.params.id))));
+  r.get('/versions/:id', wrap((req) => ({ ...reg.detail(Number(req.params.id)), approval: reg.approvalFor(req.user!, Number(req.params.id)) })));
   r.get('/versions/:id/content', (req, res, next) => {
     try {
       const d = reg.detail(Number(req.params.id));

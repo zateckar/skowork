@@ -33,6 +33,7 @@
 - [x] 5.4 Implement the distribution API, skills-changed and skill-revoked pushes, revocations in sync responses, and aggregate usage counts. Verify that a revocation removes the skill from a connected client on push, and from an offline client at its next sync
 
 - [x] 5.5 Public import from a URL or from an uploaded package (one of them), licence from SKILL.md, and `metadata.version` in the registry and client parsers (D6, revised 2026-11-05). Verify with registry tests (download, both sources refused, redirect to HTTP refused, size limit, licence fallback), a client parser test, and the admin end-to-end import test
+- [x] 5.6 Sole-reviewer self-approval with a required comment, `self_approved` on the version and in the audit, and the matching hint in the admin console's review queue (D6 Sole reviewer, added 2026-11-05). Verify with registry tests: blocked with a second reviewer, refused without a comment, allowed and recorded as sole reviewer
 
 ## 6. Client installation and lifecycle
 

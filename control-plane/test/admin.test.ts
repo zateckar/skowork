@@ -46,8 +46,8 @@ test('admin: each role sees only its views, and its API is authorized against th
   try {
     const t = await roles(h);
     const views = async (token: string) => (await h.call('GET', '/api/v1/admin/me', token)).body.views;
-    assert.deepEqual(await views(t.admin), ['dashboards', 'policy', 'models', 'connections', 'knowledge', 'identity', 'remote', 'mcp', 'skills', 'fleet']);
-    assert.deepEqual(await views(t.auditor), ['dashboards', 'policy', 'fleet', 'audit', 'individual', 'access-records']);
+    assert.deepEqual(await views(t.admin), ['dashboards', 'identity', 'fleet', 'policy', 'models', 'connections', 'mcp', 'skills', 'knowledge', 'remote']);
+    assert.deepEqual(await views(t.auditor), ['dashboards', 'fleet', 'policy', 'audit', 'individual', 'access-records']);
     assert.deepEqual(await views(t.owner), ['policy']);
     assert.deepEqual(await views(t.reviewer), ['skills']);
     assert.deepEqual(await views(t.council), ['access-records']);

@@ -22,6 +22,7 @@ export function useAction(): { error: ApiError | Error | null; note: string; run
   const [error, setError] = useState<ApiError | Error | null>(null);
   const [note, setNote] = useState('');
   const run = useCallback(async (fn: () => Promise<unknown>, done = '') => {
+    setNote('');
     try {
       await fn();
       setError(null);
@@ -36,13 +37,48 @@ export function useAction(): { error: ApiError | Error | null; note: string; run
   return { error, note, run };
 }
 
+// One notice at a time, fixed near the top of the window, so an outcome is visible wherever the admin scrolled (D2).
+interface Notice { text: string; kind: 'ok' | 'err'; id?: string; owner: object }
+let notice: Notice | null = null;
+const listeners = new Set<() => void>();
+const setNotice = (n: Notice | null) => ((notice = n), listeners.forEach((l) => l()));
+
+function usePublish(text: string, kind: Notice['kind'], id: string | undefined) {
+  const [owner] = useState(() => ({}));
+  useEffect(() => {
+    if (text) setNotice({ text, kind, id, owner });
+    else if (notice?.owner === owner) setNotice(null);
+  }, [text, kind, id, owner]);
+  useEffect(() => () => void (notice?.owner === owner && setNotice(null)), [owner]);
+}
+
+export function Notices() {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const l = () => tick((n) => n + 1);
+    listeners.add(l);
+    return () => void listeners.delete(l);
+  }, []);
+  if (!notice) return null;
+  return (
+    <div className={`toast ${notice.kind}`} role={notice.kind === 'err' ? 'alert' : 'status'} data-testid={notice.id}>
+      <p>{notice.text}</p>
+      <button aria-label="Dismiss" title="Dismiss" onClick={() => setNotice(null)}>×</button>
+    </div>
+  );
+}
+
+/** An error next to where it happened; action errors (not load errors) are also raised as a notice. */
 export function Err({ error, id }: { error: string | Error | null | undefined; id?: string }) {
+  usePublish(error instanceof Error ? error.message : '', 'err', id && `${id}-notice`);
   if (!error) return null;
   return <p className="err" data-testid={id} role="alert">{typeof error === 'string' ? error : error.message}</p>;
 }
 
+/** A success note, shown as the notice. */
 export function Note({ text, id }: { text: string; id?: string }) {
-  return text ? <p className="note" data-testid={id} role="status">{text}</p> : null;
+  usePublish(text, 'ok', id);
+  return null;
 }
 
 export function Card({ title, id, children, actions }: { title: string; id?: string; children: ReactNode; actions?: ReactNode }) {

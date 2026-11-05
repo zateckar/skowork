@@ -76,8 +76,8 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     assert.ok((h.cp.audit.query({ action: 'admin.refused', user: 'dev1' }) as any[]).some((e) => e.details.path === '/api/v1/admin/me'));
 
     const expected: Record<string, string[]> = {
-      admin1: ['dashboards', 'policy', 'models', 'connections', 'knowledge', 'identity', 'remote', 'mcp', 'skills', 'fleet'],
-      auditor1: ['dashboards', 'policy', 'fleet', 'audit', 'individual', 'access-records'],
+      admin1: ['dashboards', 'identity', 'fleet', 'policy', 'models', 'connections', 'mcp', 'skills', 'knowledge', 'remote'],
+      auditor1: ['dashboards', 'fleet', 'policy', 'audit', 'individual', 'access-records'],
       owner1: ['policy'],
       reviewer1: ['skills'],
       council1: ['access-records'],
@@ -436,7 +436,7 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     })()`);
     await b.submit('skill-import-form', { source_url: 'https://agentskills.io/skills/pdf-tools', licence: 'Apache-2.0' });
     assert.match(await b.text('skill-note'), /pdf-tools 2\.0\.0 entered the review queue/);
-    assert.match(await b.text('skill-pdf-tools-2.0.0'), /import: https:\/\/agentskills\.io\/skills\/pdf-tools \(Apache-2\.0\)/);
+    assert.match(await b.text('skill-pdf-tools-2.0.0'), /Imported from https:\/\/agentskills\.io\/skills\/pdf-tools \(Apache-2\.0\)/);
 
     // Revocation from the console.
     await b.submit('skill-revoke-supplier-triage-1.0.0', { reason: 'superseded' });

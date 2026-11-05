@@ -255,6 +255,16 @@ export class IdentityService {
     return [...set].sort();
   }
 
+  /** Lower-case names of every user who holds one of `roles`, bootstrap admins included. */
+  holdersOf(roles: readonly AdminRole[]): string[] {
+    const set = new Set<string>(roles.includes('platform-admin') ? this.#cfg.identity.bootstrapAdmins : []);
+    const marks = roles.map(() => '?').join(',');
+    for (const r of this.#db.prepare(`SELECT user_name FROM admin_roles WHERE role IN (${marks})`).all(...roles) as { user_name: string }[]) {
+      set.add(r.user_name.toLowerCase());
+    }
+    return [...set].sort();
+  }
+
   findDenied(userName: string, installationId: string | null): { kind: string; reason: string } | undefined {
     return this.#db
       .prepare(

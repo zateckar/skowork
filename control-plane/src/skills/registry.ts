@@ -43,6 +43,7 @@ interface VersionRow {
   review_comment: string | null;
   reviewed_by: string | null;
   reviewed_at: string | null;
+  self_approved: number;
   created_at: string;
   published_at: string | null;
   ended_at: string | null;
@@ -52,7 +53,7 @@ interface VersionRow {
 const GROUP = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const USER = /^[^\s,]{1,128}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
-const COLUMNS = 'id, name, version, scope, audience, digest, size, manifest, scan, state, author, source_url, licence, signature, review_comment, reviewed_by, reviewed_at, created_at, published_at, ended_at, revoke_reason';
+const COLUMNS = 'id, name, version, scope, audience, digest, size, manifest, scan, state, author, source_url, licence, signature, review_comment, reviewed_by, reviewed_at, self_approved, created_at, published_at, ended_at, revoke_reason';
 
 const lower = (s: string) => s.toLowerCase();
 const same = (a: string, b: string) => lower(a) === lower(b);
@@ -133,14 +134,16 @@ export class SkillRegistry {
   readonly #push: PushHub;
   readonly #cfg: SkillsConfig;
   readonly #publishScopes: (u: Actor) => string[];
+  readonly #reviewers: () => string[];
   readonly keys: KeyRing;
 
-  constructor(cfg: SkillsConfig, db: Db, audit: Audit, push: PushHub, publishScopes: (u: Actor) => string[]) {
+  constructor(cfg: SkillsConfig, db: Db, audit: Audit, push: PushHub, publishScopes: (u: Actor) => string[], reviewers: () => string[]) {
     this.#cfg = cfg;
     this.#db = db;
     this.#audit = audit;
     this.#push = push;
     this.#publishScopes = publishScopes;
+    this.#reviewers = reviewers;
     // Rotated-out skill keys stay published, so that every signature ever issued verifies (Signing Keys).
     this.keys = new KeyRing(db, 'skills', () => 100 * 365 * 86400);
   }
@@ -172,7 +175,7 @@ export class SkillRegistry {
       id: r.id, name: r.name, version: r.version, scope: r.scope, audience: JSON.parse(r.audience) as string[], digest: r.digest, size: r.size,
       state: r.state, author: r.author, description: m.description, risk: m.risk, network: m.network, tools: m.tools, requires_mcp: m.requires_mcp,
       findings: scan.findings.length, source_url: r.source_url, licence: r.licence, review_comment: r.review_comment, reviewed_by: r.reviewed_by,
-      reviewed_at: r.reviewed_at, created_at: r.created_at, published_at: r.published_at, ended_at: r.ended_at, revoke_reason: r.revoke_reason,
+      reviewed_at: r.reviewed_at, self_approved: r.self_approved === 1, created_at: r.created_at, published_at: r.published_at, ended_at: r.ended_at, revoke_reason: r.revoke_reason,
     };
   }
 
@@ -338,26 +341,44 @@ export class SkillRegistry {
     };
   }
 
+  /**
+   * How `actor` may approve the version: 'review' for someone else's, 'self-approval' for the sole reviewer's own
+   * (needs a justifying comment), 'self-review-blocked' when another reviewer exists (D6 Sole reviewer).
+   */
+  approvalFor(actor: Actor, id: number): 'review' | 'self-approval' | 'self-review-blocked' {
+    const r = this.#mustRow(id);
+    if (!same(r.author, actor.userName)) return 'review';
+    return this.#reviewers().some((u) => !same(u, actor.userName)) ? 'self-review-blocked' : 'self-approval';
+  }
+
   async approve(actor: Actor, id: number, comment: unknown) {
     const r = this.#mustRow(id);
     if (!isReviewer(actor)) throw new ApiError(403, 'FORBIDDEN', 'Only a skill-reviewer or platform-admin can approve a Skill.');
     if (r.state !== 'in-review') throw new ApiError(409, 'NOT_IN_REVIEW', `Version ${r.version} of ${r.name} is ${r.state}, not in review.`);
-    if (same(r.author, actor.userName)) {
+    const text = typeof comment === 'string' ? comment.trim() : '';
+    const mode = this.approvalFor(actor, id);
+    if (mode === 'self-review-blocked') {
       this.#audit.write({ category: 'skills', action: 'skill.approve', outcome: 'refused', subject: actor.subject, userName: actor.userName, reason: 'self-review', details: { id } });
-      throw new ApiError(403, 'SELF_REVIEW', 'You cannot approve your own Skill version.');
+      throw new ApiError(403, 'SELF_REVIEW', 'You cannot approve your own Skill version. Another skill-reviewer or platform-admin must approve it.');
     }
+    if (mode === 'self-approval' && !text) {
+      throw new ApiError(400, 'COMMENT_REQUIRED', 'You are the only reviewer, so approving your own Skill version needs a comment that justifies it.', { field: 'comment' });
+    }
+    const self = mode === 'self-approval';
     const key = await this.keys.current();
     const signature = await new SignJWT({ name: r.name, version: r.version, digest: r.digest, scope: r.scope })
       .setProtectedHeader({ alg: 'ES256', kid: key.kid, typ: 'workbench-skill+jwt' })
       .setIssuedAt()
       .sign(key.key);
     const now = nowIso();
-    const text = typeof comment === 'string' ? comment.trim() : '';
     const done = this.#db
-      .prepare(`UPDATE skill_versions SET state = 'published', signature = ?, review_comment = ?, reviewed_by = ?, reviewed_at = ?, published_at = ? WHERE id = ? AND state = 'in-review'`)
-      .run(signature, text || null, lower(actor.userName), now, now, r.id);
+      .prepare(`UPDATE skill_versions SET state = 'published', signature = ?, review_comment = ?, reviewed_by = ?, reviewed_at = ?, published_at = ?, self_approved = ? WHERE id = ? AND state = 'in-review'`)
+      .run(signature, text || null, lower(actor.userName), now, now, self ? 1 : 0, r.id);
     if (done.changes === 0) throw new ApiError(409, 'NOT_IN_REVIEW', 'The version was decided meanwhile.');
-    this.#audit.write({ category: 'skills', action: 'skill.approve', outcome: 'ok', subject: actor.subject, userName: actor.userName, details: { id, name: r.name, version: r.version, digest: r.digest, kid: key.kid } });
+    this.#audit.write({
+      category: 'skills', action: 'skill.approve', outcome: 'ok', subject: actor.subject, userName: actor.userName,
+      details: { id, name: r.name, version: r.version, digest: r.digest, kid: key.kid, ...(self ? { selfApproved: true, comment: text } : {}) },
+    });
     const row = this.#row(r.id)!;
     this.#notify(row, 'published');
     this.#notifyAuthor(row, 'approved', text ? { comment: text } : {});

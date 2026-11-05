@@ -1,7 +1,7 @@
 // Skill review queue (control-plane/admin-console Skill Review Queue) over control-plane/skill-registry: the submitted
 // org versions with their scan results and the diff against the previous version, approve or reject with a comment,
 // public import for platform-admins, and revocation.
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Me } from '../App.tsx';
 import { api, download, upload } from '../auth.ts';
 import { Card, confirmed, Err, Field, Form, Note, qs, time, useAction, useLoad } from '../ui.tsx';
@@ -11,7 +11,7 @@ const S = '/api/v1/admin/skills';
 interface Version {
   id: number; name: string; version: string; scope: string; audience: string[]; state: string; author: string; description: string;
   risk: string; network: string; tools: string[]; requires_mcp: string[]; findings: number; source_url: string | null; licence: string | null;
-  review_comment: string | null; reviewed_by: string | null; created_at: string; revoke_reason: string | null;
+  review_comment: string | null; reviewed_by: string | null; created_at: string; revoke_reason: string | null; self_approved: boolean;
 }
 interface Finding { kind: string; severity: string; file: string; line: number; rule: string; message: string }
 interface Detail extends Version {
@@ -19,9 +19,10 @@ interface Detail extends Version {
   body: string;
   files: { path: string; size: number }[];
   diff: { against: string; files: { path: string; status: string; lines?: string[]; note?: string }[] } | null;
+  approval: 'review' | 'self-approval' | 'self-review-blocked';
 }
 
-export function Skills({ me }: { me: Me }) {
+export function Skills({ me, onQueue }: { me: Me; onQueue?: (n: number) => void }) {
   const queue = useLoad<Version[]>(`${S}/queue`);
   const all = useLoad<Version[]>(S);
   const [open, setOpen] = useState<number | null>(null);
@@ -29,39 +30,45 @@ export function Skills({ me }: { me: Me }) {
   const reload = () => (queue.reload(), all.reload());
   const run = (fn: () => Promise<unknown>, note: string) => act.run(async () => (await fn(), reload()), note);
   const admin = me.admin_roles.includes('platform-admin');
+  useEffect(() => void (queue.data && onQueue?.(queue.data.length)), [queue.data, onQueue]);
+  const waiting = queue.data?.length ?? 0;
   return (
     <>
-      <Card title="Skill review queue" id="skill-queue" actions={<button data-testid="skill-refresh" onClick={reload}>Refresh</button>}>
-        {queue.data?.length === 0 && <p data-testid="skill-queue-empty">No Skill versions are waiting for review.</p>}
+      <Card title={waiting ? `Waiting for review (${waiting})` : 'Waiting for review'} id="skill-queue" actions={<button data-testid="skill-refresh" onClick={reload}>Refresh</button>}>
+        {queue.data?.length === 0 && <p data-testid="skill-queue-empty" className="empty">No Skill versions are waiting for review. Versions submitted for the whole organization appear here.</p>}
         {!!queue.data?.length && (
           <table>
             <thead><tr><th>Skill</th><th>Author</th><th>Declared</th><th>Findings</th><th>Submitted</th><th /></tr></thead>
             <tbody>
               {queue.data.map((v) => (
-                <tr key={v.id} data-testid={`skill-${v.name}-${v.version}`}>
-                  <td><b>{v.name}</b> {v.version}<br /><small>{v.description}</small>{v.licence && <><br /><small>import: {v.source_url ?? 'uploaded package'} ({v.licence})</small></>}</td>
-                  <td>{v.author}</td>
+                <tr key={v.id} data-testid={`skill-${v.name}-${v.version}`} className={open === v.id ? 'selected' : ''} aria-selected={open === v.id}>
+                  <td><b>{v.name}</b> {v.version}<br /><small>{v.description}</small>{v.licence && <><br /><small>Imported from {v.source_url ?? 'an uploaded package'} ({v.licence})</small></>}</td>
+                  <td>{v.author}{same(v.author, me.user_name) && <small> (you)</small>}</td>
                   <td><small>risk {v.risk} · tools {v.tools.join(', ') || 'default'}{v.requires_mcp.length ? ` · MCP ${v.requires_mcp.join(', ')}` : ''}</small></td>
-                  <td>{v.findings}</td>
+                  <td>{v.findings ? <b className="err">{v.findings}</b> : 0}</td>
                   <td><small>{time(v.created_at)}</small></td>
-                  <td><button data-testid={`skill-open-${v.id}`} onClick={() => setOpen(v.id)}>Review</button></td>
+                  <td><button className={open === v.id ? '' : 'primary'} data-testid={`skill-open-${v.id}`} onClick={() => setOpen(v.id)}>{open === v.id ? 'Reviewing' : 'Review'}</button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
       </Card>
-      {open !== null && <Review id={open} onDecided={(note) => (setOpen(null), reload(), act.run(async () => {}, note))} />}
+      {open !== null && <Review key={open} id={open} onClose={() => setOpen(null)} onDecided={(note) => (setOpen(null), reload(), act.run(async () => {}, note))} />}
       {admin && <Import onDone={(note) => run(async () => {}, note)} />}
-      <Card title="Published Skills" id="skill-all">
+      <Card title="All Skill versions" id="skill-all">
         <table>
           <thead><tr><th>Skill</th><th>Scope</th><th>State</th><th>Author</th><th>Revoke</th></tr></thead>
           <tbody>
             {all.data?.map((v) => (
               <tr key={v.id} data-testid={`skill-row-${v.name}-${v.version}`}>
                 <td><b>{v.name}</b> {v.version}</td>
-                <td>{v.scope}{v.audience.length ? `: ${v.audience.join(', ')}` : ''}</td>
-                <td data-testid={`skill-state-${v.name}-${v.version}`}>{v.state}{v.revoke_reason ? ` (${v.revoke_reason})` : ''}{v.review_comment ? ` — ${v.review_comment}` : ''}</td>
+                <td>{SCOPES[v.scope] ?? v.scope}{v.audience.length ? `: ${v.audience.join(', ')}` : ''}</td>
+                <td data-testid={`skill-state-${v.name}-${v.version}`}>
+                  <span className={`state ${v.state}`}>{v.state}</span>
+                  {v.self_approved && <small> self-approved</small>}
+                  {v.revoke_reason ? ` (${v.revoke_reason})` : ''}{v.review_comment ? ` — ${v.review_comment}` : ''}
+                </td>
                 <td>{v.author}</td>
                 <td>
                   {v.state === 'published' && (
@@ -72,7 +79,7 @@ export function Skills({ me }: { me: Me }) {
                 </td>
               </tr>
             ))}
-            {all.data?.length === 0 && <tr><td colSpan={5} className="empty">No Skills have been published yet.</td></tr>}
+            {all.data?.length === 0 && <tr><td colSpan={5} className="empty">No Skills have been shared yet.</td></tr>}
           </tbody>
         </table>
       </Card>
@@ -82,19 +89,36 @@ export function Skills({ me }: { me: Me }) {
   );
 }
 
-function Review({ id, onDecided }: { id: number; onDecided: (note: string) => void }) {
+const SCOPES: Record<string, string> = { shared: 'Shared with users', group: 'Groups', org: 'Organization' };
+const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+function Review({ id, onDecided, onClose }: { id: number; onDecided: (note: string) => void; onClose: () => void }) {
   const d = useLoad<Detail>(`${S}/versions/${id}`);
   const act = useAction();
   const [comment, setComment] = useState('');
+  const card = useRef<HTMLDivElement>(null);
   const v = d.data;
+  useEffect(() => void (v && card.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })), [v]);
   if (!v) return <Err error={d.error} id="skill-detail-error" />;
+  const self = v.approval === 'self-approval';
+  const blocked = v.approval === 'self-review-blocked';
   const decide = (what: 'approve' | 'reject') =>
     act.run(async () => {
       await api('POST', `${S}/versions/${id}/${what}`, { comment });
-      onDecided(`${v.name} ${v.version} ${what === 'approve' ? 'approved and signed' : 'rejected'}.`);
+      onDecided(`${v.name} ${v.version} ${what === 'approve' ? (self ? 'approved as a self-approval and signed' : 'approved and signed') : 'rejected'}.`);
     });
   return (
-    <Card title={`Review ${v.name} ${v.version}`} id="skill-detail" actions={<button onClick={() => void act.run(() => download(`${S}/versions/${id}/content`))}>Download package</button>}>
+    <div ref={card} className="stack">
+    <Card
+      title={`Review ${v.name} ${v.version}`}
+      id="skill-detail"
+      actions={
+        <span className="row">
+          <button onClick={() => void act.run(() => download(`${S}/versions/${id}/content`))}>Download package</button>
+          <button onClick={onClose} data-testid="skill-close">Close</button>
+        </span>
+      }
+    >
       <p>{v.description}</p>
       <p data-testid="skill-declared">
         Declared risk <b>{v.risk}</b>, network {v.network}, tools {v.tools.join(', ') || 'default (read-class)'}
@@ -126,13 +150,28 @@ function Review({ id, onDecided }: { id: number; onDecided: (note: string) => vo
           : <ul>{v.files.map((f) => <li key={f.path}>{f.path} <small>{f.size} B</small></li>)}</ul>}
       </div>
       <details><summary>Instructions (SKILL.md body)</summary><pre>{v.body}</pre></details>
+      <h3>Decision</h3>
+      {self && (
+        <p className="callout warn" data-testid="skill-self-approval">
+          You submitted this version, and you are the only skill-reviewer or platform-admin. You may approve it, but it will be
+          recorded as a <b>self-approval</b> on the version and in the audit log. Explain in the comment why it is safe to publish.
+        </p>
+      )}
+      {blocked && (
+        <p className="callout warn" data-testid="skill-self-blocked">
+          You submitted this version, so another skill-reviewer or platform-admin must approve it. You can still reject it.
+        </p>
+      )}
       <div className="row">
-        <Field label="Comment (required to reject)" grow><textarea data-testid="skill-comment" value={comment} onChange={(e) => setComment(e.target.value)} rows={2} /></Field>
-        <button data-testid="skill-approve" onClick={() => void decide('approve')}>Approve and sign</button>
-        <button data-testid="skill-reject" onClick={() => void decide('reject')}>Reject</button>
+        <Field label={self ? 'Comment (required)' : 'Comment (required to reject)'} grow>
+          <textarea data-testid="skill-comment" value={comment} onChange={(e) => setComment(e.target.value)} rows={2} required={self} />
+        </Field>
+        <button className="primary" data-testid="skill-approve" disabled={blocked || (self && !comment.trim())} onClick={() => void decide('approve')}>Approve and sign</button>
+        <button className="danger" data-testid="skill-reject" onClick={() => void decide('reject')}>Reject</button>
       </div>
       <Err error={act.error} id="skill-review-error" />
     </Card>
+    </div>
   );
 }
 

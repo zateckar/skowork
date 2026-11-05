@@ -184,6 +184,7 @@ context: |
   30 simplify-secret-key              [Hardening]
   31 keep-sign-in-response-on-root    [Hardening]
   32 use-idp-tokens-for-mcp           [Hardening]
+  33 improve-admin-console-ux         [Hardening]
 
 rules:
   proposal:

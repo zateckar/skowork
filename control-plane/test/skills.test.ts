@@ -209,6 +209,38 @@ test('skills: org review shows findings, blocks self-review, signs on approval, 
   }
 });
 
+test('skills: the sole reviewer may approve their own import with a comment, recorded as a self-approval', async () => {
+  const h = await startHarness();
+  try {
+    const { admin, role } = await setup(h);
+    const imp = await upload(h, '/api/v1/admin/skills/import?source_url=https://agentskills.io/pdf-tools&licence=MIT', admin, zip({ 'SKILL.md': skillMd('pdf-tools', '1.0.0') }));
+    assert.equal(imp.body.state, 'in-review');
+    const url = `/api/v1/admin/skills/versions/${imp.body.id}`;
+    assert.equal((await h.call('GET', url, admin)).body.approval, 'self-approval');
+
+    // A second reviewer brings the block back; removing them lifts it again.
+    await role('rita', 'skill-reviewer');
+    assert.equal((await h.call('GET', url, admin)).body.approval, 'self-review-blocked');
+    assert.equal((await h.call('GET', url, await h.token('rita'))).body.approval, 'review');
+    assert.equal((await h.call('POST', `${url}/approve`, admin, { comment: 'only me' })).body.error.code, 'SELF_REVIEW');
+    await h.call('DELETE', '/api/v1/admin/identity/admin-roles', admin, { user_name: 'rita', role: 'skill-reviewer' });
+
+    const bare = await h.call('POST', `${url}/approve`, admin, { comment: '  ' });
+    assert.equal(bare.status, 400);
+    assert.equal(bare.body.error.code, 'COMMENT_REQUIRED');
+    const ok = await h.call('POST', `${url}/approve`, admin, { comment: 'Only reviewer; checked the scan and the scripts.' });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal(ok.body.state, 'published');
+    assert.equal(ok.body.self_approved, true);
+    await role('aud', 'security-auditor');
+    const events = (await h.call('GET', '/api/v1/admin/audit?action=skill.approve', await h.token('aud'))).body;
+    const list = (Array.isArray(events) ? events : events.events ?? events.items) as any[];
+    assert.ok(list.some((e) => e.outcome === 'ok' && JSON.stringify(e).includes('"selfApproved":true')), JSON.stringify(events));
+  } finally {
+    await h.close();
+  }
+});
+
 test('skills: public import goes to org review with source and licence, platform-admin only', async () => {
   const h = await startHarness();
   try {

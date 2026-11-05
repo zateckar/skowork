@@ -21,7 +21,7 @@ export function Remote() {
             {rules.data?.map((r) => (
               <tr key={r.id} data-testid={`rule-${r.issuer}`}>
                 <td>{r.issuer_kind} {r.issuer}</td><td>{r.target_kind === 'any' ? 'all users' : `${r.target_kind} ${r.target}`}</td>
-                <td><button onClick={() => confirmed('Remove this dispatch rule? Matching Remote tasks are refused from then on.') && void act.run(async () => (await api('DELETE', `${R}/${r.id}`), rules.reload()), 'Rule removed.')}>Remove</button></td>
+                <td><button className="danger" onClick={() => confirmed('Remove this dispatch rule? Matching Remote tasks are refused from then on.') && void act.run(async () => (await api('DELETE', `${R}/${r.id}`), rules.reload()), 'Rule removed.')}>Remove</button></td>
               </tr>
             ))}
           </tbody>
@@ -45,7 +45,7 @@ export function Remote() {
             {limits.data?.limits.map((l) => (
               <tr key={l.issuer} data-testid={`limit-${l.issuer}`}>
                 <td>{l.issuer}</td><td>{l.per_hour}</td><td>{time(l.updated_at)} by {l.updated_by}</td>
-                <td><button onClick={() => confirmed(`Remove the limit of ${l.issuer}?`) && void act.run(async () => (await api('DELETE', `${T}/limits/${encodeURIComponent(l.issuer)}`), limits.reload()), 'Limit removed.')}>Remove</button></td>
+                <td><button className="danger" onClick={() => confirmed(`Remove the limit of ${l.issuer}?`) && void act.run(async () => (await api('DELETE', `${T}/limits/${encodeURIComponent(l.issuer)}`), limits.reload()), 'Limit removed.')}>Remove</button></td>
               </tr>
             ))}
           </tbody>
@@ -62,7 +62,7 @@ export function Remote() {
           {callbacks.data?.map((c) => (
             <li key={c.prefix} data-testid={`callback-${c.prefix}`}>
               <span>{c.prefix} <small>({time(c.added_at)} by {c.added_by})</small></span>
-              <button className="icon" aria-label={`Remove ${c.prefix}`} title="Remove" onClick={() => confirmed(`Remove the prefix ${c.prefix}?`) && void act.run(async () => (await api('POST', `${T}/callbacks/remove`, { prefix: c.prefix }), callbacks.reload()), 'Prefix removed.')}>×</button>
+              <button className="icon danger" aria-label={`Remove ${c.prefix}`} title="Remove" onClick={() => confirmed(`Remove the prefix ${c.prefix}?`) && void act.run(async () => (await api('POST', `${T}/callbacks/remove`, { prefix: c.prefix }), callbacks.reload()), 'Prefix removed.')}>×</button>
             </li>
           ))}
         </ul>

@@ -26,7 +26,7 @@ export function Identity() {
             {deny.data?.map((d) => (
               <tr key={d.id} data-testid={`deny-${d.value}`}>
                 <td>{d.kind}</td><td>{d.value}</td><td>{d.reason}</td><td>{d.created_by}</td><td>{time(d.created_at)}</td>
-                <td><button onClick={() => confirmed(`Lift the denial of ${d.value}?`) && void run(() => api('DELETE', `${I}/deny-list/${d.id}`), deny.reload, 'Lifted.')}>Lift</button></td>
+                <td><button className="danger" onClick={() => confirmed(`Lift the denial of ${d.value}?`) && void run(() => api('DELETE', `${I}/deny-list/${d.id}`), deny.reload, 'Lifted.')}>Lift</button></td>
               </tr>
             ))}
             {deny.data?.length === 0 && <tr><td colSpan={6} className="empty">Nobody is denied.</td></tr>}
@@ -36,7 +36,7 @@ export function Identity() {
           <Field label="Kind"><select name="kind"><option value="user">user</option><option value="installation">installation</option></select></Field>
           <Field label="User name or installation id" grow><input name="value" required /></Field>
           <Field label="Reason" grow><input name="reason" /></Field>
-          <button>Deny</button>
+          <button className="danger">Deny</button>
         </Form>
       </Card>
 
@@ -49,7 +49,7 @@ export function Identity() {
               <tr key={p.client_id} data-testid={`sp-${p.name}`}>
                 <td>{p.name}</td><td>{p.client_id}</td><td>{p.apis.join(', ')}</td>
                 <td>{p.retired_at ? `retired ${time(p.retired_at)} by ${p.retired_by}` : `${time(p.registered_at)} by ${p.registered_by}`}</td>
-                <td>{!p.retired_at && <button onClick={() => confirmed(`Retire ${p.name}? Its tokens are refused from then on.`) && void run(() => api('POST', `${I}/service-principals/${encodeURIComponent(p.client_id)}/retire`), principals.reload, 'Retired. Its tokens are refused from now on.')}>Retire</button>}</td>
+                <td>{!p.retired_at && <button className="danger" onClick={() => confirmed(`Retire ${p.name}? Its tokens are refused from then on.`) && void run(() => api('POST', `${I}/service-principals/${encodeURIComponent(p.client_id)}/retire`), principals.reload, 'Retired. Its tokens are refused from now on.')}>Retire</button>}</td>
               </tr>
             ))}
             {principals.data?.length === 0 && <tr><td colSpan={5} className="empty">No service principals.</td></tr>}
@@ -69,7 +69,7 @@ export function Identity() {
           {maps.data?.map((m) => (
             <li key={m.idp_role + m.workbench_group}>
               <span>{m.idp_role} → {m.workbench_group}</span>
-              <button className="icon" aria-label={`Remove mapping ${m.idp_role} to ${m.workbench_group}`} title="Remove"
+              <button className="icon danger" aria-label={`Remove mapping ${m.idp_role} to ${m.workbench_group}`} title="Remove"
                 onClick={() => confirmed(`Remove the mapping ${m.idp_role} → ${m.workbench_group}?`) && void run(() => api('PUT', `${I}/role-mappings`, { mappings: maps.data!.filter((x) => x !== m), reason: 'removed in admin console' }), maps.reload, 'Mapping removed.')}>×</button>
             </li>
           ))}
@@ -88,7 +88,7 @@ export function Identity() {
           {members.data?.map((m) => (
             <li key={m.user_name + m.workbench_group}>
               <span>{m.workbench_group}: {m.user_name}</span>
-              <button className="icon" aria-label={`Remove ${m.user_name} from ${m.workbench_group}`} title="Remove"
+              <button className="icon danger" aria-label={`Remove ${m.user_name} from ${m.workbench_group}`} title="Remove"
                 onClick={() => confirmed(`Remove ${m.user_name} from ${m.workbench_group}?`) && void run(() => api('DELETE', `${I}/group-members`, m), members.reload, 'Removed.')}>×</button>
             </li>
           ))}
@@ -106,7 +106,7 @@ export function Identity() {
           {roles.data?.map((r) => (
             <li key={r.user_name + r.role}>
               <span>{r.user_name}: {r.role}</span>
-              <button className="icon" aria-label={`Revoke ${r.role} from ${r.user_name}`} title="Revoke"
+              <button className="icon danger" aria-label={`Revoke ${r.role} from ${r.user_name}`} title="Revoke"
                 onClick={() => confirmed(`Revoke ${r.role} from ${r.user_name}?`) && void run(() => api('DELETE', `${I}/admin-roles`, r), roles.reload, 'Revoked.')}>×</button>
             </li>
           ))}

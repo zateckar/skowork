@@ -314,7 +314,9 @@ test('migration: stored audience-token entries become user-token without an audi
     const entry = { id: 'jira-corp', name: 'Jira', owner: 'it', kind: 'remote', spec_version: '2025-06-18', url: 'https://jira.example.test/mcp', auth: 'audience-token', audience: 'api://jira', args: [], env: {}, include_tools: [], exclude_tools: [], risk: {} };
     db.prepare("INSERT INTO mcp_servers (id, entry, enabled, discovery_status, updated_by, updated_at) VALUES ('jira-corp', ?, 1, 'ok', 'admin1', 'now')").run(JSON.stringify(entry));
     db.prepare("INSERT INTO service_signing_keys (kid, purpose, state, private_jwk, public_jwk, created_at) VALUES ('k', 'mcp-token', 'current', '{}', '{}', 'now')").run();
-    db.prepare('UPDATE schema_version SET version = version - 1').run();
+    // Back to before the use-idp-tokens-for-mcp migration; the later skill self_approved migration runs again too.
+    db.exec('ALTER TABLE skill_versions DROP COLUMN self_approved');
+    db.prepare('UPDATE schema_version SET version = version - 2').run();
     db.close();
     db = openDb(path);
     const migrated = JSON.parse((db.prepare("SELECT entry FROM mcp_servers WHERE id = 'jira-corp'").get() as { entry: string }).entry);

@@ -13,6 +13,7 @@ import { Models } from './views/models.tsx';
 import { Policy } from './views/policy.tsx';
 import { Remote } from './views/remote.tsx';
 import { Skills } from './views/skills.tsx';
+import { Notices } from './ui.tsx';
 
 export interface Me {
   user_name: string;
@@ -38,7 +39,32 @@ const TITLES: Record<string, string> = {
   'access-records': 'Access records',
 };
 
-function render(view: string, me: Me): ReactNode {
+const PURPOSES: Record<string, string> = {
+  dashboards: 'Adoption and usage of Workbench per Group.',
+  identity: 'Who gets tokens, who belongs to which Group, and who holds an administrator role.',
+  fleet: 'Installed clients, their versions and policies. Revoke a machine or a user, or set the minimum version.',
+  policy: 'Write, publish, roll out and roll back the policy of the organization and of each Group.',
+  models: 'Which models each Group may use, and its token quotas.',
+  connections: 'The LLM servers the gateway sends requests to, and the models they offer.',
+  mcp: 'MCP servers that clients may connect to, and who may use them.',
+  skills: 'Review Skills submitted for the whole organization, import public Skills, and revoke published ones.',
+  knowledge: 'Knowledge items users have shared with their Groups.',
+  remote: 'Which systems may hand tasks to users, their limits and callback addresses.',
+  audit: 'Every administrative action and refusal, searchable and exportable.',
+  individual: 'Look up one user’s activity, with a recorded reason.',
+  'access-records': 'Who looked at individual data, and why.',
+};
+
+const GROUPS: { title: string; views: string[] }[] = [
+  { title: 'Overview', views: ['dashboards'] },
+  { title: 'Users and devices', views: ['identity', 'fleet'] },
+  { title: 'Policies', views: ['policy', 'models'] },
+  { title: 'AI services', views: ['connections', 'mcp', 'skills', 'knowledge'] },
+  { title: 'Automation', views: ['remote'] },
+  { title: 'Compliance', views: ['audit', 'individual', 'access-records'] },
+];
+
+function render(view: string, me: Me, onQueue: (n: number) => void): ReactNode {
   switch (view) {
     case 'dashboards': return <Dashboards />;
     case 'policy': return <Policy me={me} />;
@@ -48,7 +74,7 @@ function render(view: string, me: Me): ReactNode {
     case 'identity': return <Identity />;
     case 'remote': return <Remote />;
     case 'mcp': return <Mcp />;
-    case 'skills': return <Skills me={me} />;
+    case 'skills': return <Skills me={me} onQueue={onQueue} />;
     case 'fleet': return <Fleet me={me} />;
     case 'audit': return <Audit />;
     case 'individual': return <Individual />;
@@ -64,6 +90,12 @@ export function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [error, setError] = useState('');
   const [view, setView] = useState(hashView());
+  const [pending, setPending] = useState(0);
+
+  useEffect(() => {
+    if (!me?.views.includes('skills')) return;
+    api<unknown[]>('GET', '/api/v1/admin/skills/queue').then((q) => setPending(q.length), () => {});
+  }, [me]);
 
   useEffect(() => {
     const onHash = () => setView(hashView());
@@ -101,20 +133,43 @@ export function App() {
 
   const views = me!.views;
   const current = views.includes(view) ? view : (views[0] ?? '');
+  const groups = GROUPS.map((g) => ({ ...g, views: g.views.filter((v) => views.includes(v)) })).filter((g) => g.views.length);
+  const other = views.filter((v) => !GROUPS.some((g) => g.views.includes(v)));
+  if (other.length) groups.push({ title: 'More', views: other });
   return (
     <div className="shell">
       <header>
-        <strong>Workbench admin</strong>
-        <nav data-testid="nav">
-          {views.map((v) => (
-            <a key={v} href={`#/${v}`} className={v === current ? 'active' : ''} data-testid={`nav-${v}`}>{TITLES[v] ?? v}</a>
-          ))}
-        </nav>
+        <strong className="brand">Workbench admin</strong>
         <span className="me" data-testid="me">
-          {me!.display_name} ({me!.admin_roles.join(', ')}) <button onClick={() => void signOut()}>Sign out</button>
+          <span>{me!.display_name} <small>({me!.admin_roles.join(', ')})</small></span>
+          <button onClick={() => void signOut()}>Sign out</button>
         </span>
       </header>
-      <main data-testid={`view-${current}`}>{current ? render(current, me!) : <p>No views are available for your roles yet.</p>}</main>
+      <nav data-testid="nav" aria-label="Views">
+        {groups.map((g) => (
+          <div key={g.title} className="nav-group">
+            <h2>{g.title}</h2>
+            {g.views.map((v) => (
+              <a key={v} href={`#/${v}`} className={v === current ? 'active' : ''} aria-current={v === current ? 'page' : undefined} data-testid={`nav-${v}`}>
+                {TITLES[v] ?? v}
+                {v === 'skills' && pending > 0 && <span className="count" data-testid="nav-skills-count" aria-label={`${pending} waiting for review`}>{pending}</span>}
+              </a>
+            ))}
+          </div>
+        ))}
+      </nav>
+      <Notices />
+      <main data-testid={`view-${current}`}>
+        {current ? (
+          <>
+            <div className="view-head">
+              <h1>{TITLES[current] ?? current}</h1>
+              {PURPOSES[current] && <p className="muted">{PURPOSES[current]}</p>}
+            </div>
+            {render(current, me!, setPending)}
+          </>
+        ) : <p>No views are available for your roles yet.</p>}
+      </main>
     </div>
   );
 }
