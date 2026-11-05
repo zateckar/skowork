@@ -119,7 +119,11 @@ export function createControlPlane(
   const adminDist = opts.adminDist ?? fileURLToPath(new URL('../dist/admin', import.meta.url));
   const consoleBuilt = existsSync(adminDist);
   if (consoleBuilt) {
-    app.get('/', (_req, res) => res.redirect(302, '/admin/'));
+    // The query is kept: with the redirect URI at the root, the sign-in response (?code=…&state=…) arrives here.
+    app.get('/', (req, res) => {
+      const q = req.originalUrl.indexOf('?');
+      res.redirect(302, '/admin/' + (q >= 0 ? req.originalUrl.slice(q) : ''));
+    });
     app.use('/admin', express.static(adminDist, { index: 'index.html', maxAge: '1h' }));
     app.get(/^\/admin(\/.*)?$/, (_req, res) => res.sendFile('index.html', { root: adminDist }));
   }

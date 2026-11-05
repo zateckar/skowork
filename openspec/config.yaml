@@ -179,6 +179,7 @@ context: |
   28 add-dictation                    [Productivity]
   29 improve-deployment-guidance      [Hardening]
   30 simplify-secret-key              [Hardening]
+  31 keep-sign-in-response-on-root    [Hardening]
 
 rules:
   proposal:

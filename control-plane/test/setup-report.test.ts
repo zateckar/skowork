@@ -54,6 +54,10 @@ test('console entry point: the root redirects to /admin/ when the console is bui
     const root = await fetch(`http://127.0.0.1:${port}/`, { redirect: 'manual' });
     assert.equal(root.status, 302);
     assert.equal(root.headers.get('location'), '/admin/');
+    // A sign-in response sent to the root keeps its code and state.
+    const signIn = await fetch(`http://127.0.0.1:${port}/?state=s1&session_state=x&iss=https%3A%2F%2Fidp&code=c1`, { redirect: 'manual' });
+    assert.equal(signIn.status, 302);
+    assert.equal(signIn.headers.get('location'), '/admin/?state=s1&session_state=x&iss=https%3A%2F%2Fidp&code=c1');
     const page = await fetch(`http://127.0.0.1:${port}/admin/`);
     assert.equal(page.status, 200);
     assert.match(await page.text(), /Workbench admin/);

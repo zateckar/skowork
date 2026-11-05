@@ -70,7 +70,7 @@ Fill in `.env`. [`deploy/.env.example`](deploy/.env.example) explains each value
 | `WORKBENCH_TELEMETRY_SECRET` | yes, refuses to start without it | Any long random text, for example four or five random words |
 | `WORKBENCH_SECRET_KEY` | yes, once an LLM connection exists | A passphrase of at least 16 characters, for example four or five random words. It encrypts LLM credentials. If it is missing while connections exist or `OPENAI_BASE_URL` is set, the control plane refuses to start. Keep it safe and unchanged: with a different value, stored credentials cannot be read and must be entered again. |
 | `OPENAI_BASE_URL`, `OPENAI_KEY` | no | An OpenAI-compatible upstream that becomes the first LLM connection. Alternatively, add connections in the admin console. Without any, the gateway answers `MODEL_UNAVAILABLE`. |
-| `WORKBENCH_ADMIN_REDIRECT_URI` | no | Admin console redirect. Default: `<console origin>/admin/` |
+| `WORKBENCH_ADMIN_REDIRECT_URI` | no | Admin console redirect. Default: `<console origin>/admin/`. The site root (`https://<control plane>`) also works, because `/` forwards the sign-in response to the console. It must match a valid redirect URI of the client exactly. |
 | `WORKBENCH_TELEMETRY_FORWARD_URL`, `WORKBENCH_TELEMETRY_FORWARD_HEADERS` | no | Forward client telemetry to an OTLP/HTTP logs endpoint |
 
 ### 3. Start
