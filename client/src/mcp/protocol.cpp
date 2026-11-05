@@ -289,9 +289,8 @@ Result<ServerEntry> parse_entry(const json& j) {
     if (e.kind == "remote") {
         e.url = jstr(j, "url");
         e.auth = jstr(j, "auth", "none");
-        e.audience = jstr(j, "audience");
         if (e.url.empty()) return make_error("invalid_entry", e.id + ": a remote server has no url");
-        if (e.auth == "audience-token" && e.audience.empty()) e.audience = e.url;
+        if (e.auth != "user-token" && e.auth != "none") return make_error("invalid_entry", e.id + ": unknown authentication " + e.auth);
     } else if (e.kind == "local") {
         e.package = jstr(j, "package");
         if (e.package.size() != 64 || !std::all_of(e.package.begin(), e.package.end(), [](char c) {

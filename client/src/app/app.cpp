@@ -2110,13 +2110,12 @@ void App::start_mcp() {
         if (r->status != 200) return make_error("http", "package download: HTTP " + std::to_string(r->status));
         return std::move(r->body);
     };
-    me.exchange_token = [this](const std::string& audience) -> Result<std::pair<std::string, long long>> {
-        if (!cp) return make_error("unavailable", "not registered with the control plane");
-        auto r = cp->call_json("POST", "/api/v1/identity/token-exchange", json{{"audience", audience}});
-        if (!r) return r.error();
-        const std::string token = jstr(*r, "access_token");
-        if (token.empty() || jstr(*r, "audience") != audience) return make_error("token_exchange", "the token exchange returned no token for the audience");
-        return std::make_pair(token, jint(*r, "expires_at"));
+    // use-idp-tokens-for-mcp D1: the same identity-provider token the control plane gets.
+    me.user_token = [this](bool force) -> Result<std::string> {
+        if (!tokens) return make_error("unavailable", "not signed in");
+        auto t = tokens->access_token();
+        if (!t || !force) return t;
+        return tokens->refresh_after_unauthorized(*t);
     };
     me.security_event = [this](const std::string& kind, const json& detail) {
         if (store) (void)store->security_event(kind, detail.dump());

@@ -23,11 +23,15 @@ These fields are optional: tools, risk, network, requires_mcp, interrupt_on and 
 - **THEN** the client does not load the Skill and shows the validation error in the Skills view
 
 ### Requirement: Agent Skills Compatibility
-The client SHALL load SKILL.md packages that follow the agentskills.io format, which needs only name and description. When version is missing, the client treats it as 0.0.0.
+The client SHALL load SKILL.md packages that follow the agentskills.io format, which needs only name and description. A version given as metadata.version counts as the version when the version field is absent. When both are missing, the client treats the version as 0.0.0.
 
 #### Scenario: Minimal external skill
 - **WHEN** a private Skill has only name and description in its frontmatter
 - **THEN** it loads with version 0.0.0 and with the default Skill tool set
+
+#### Scenario: Version in metadata
+- **WHEN** a SKILL.md has no version field and its metadata block holds version 1.0.0
+- **THEN** the Skill loads with version 1.0.0
 
 ### Requirement: Skill Tool Scope
 When a Skill runs, the client SHALL limit its tools to the intersection of the Skill's declared tools and the tools the user's policy allows. A Skill that declares no tools gets the default Skill tool set: the read-class tools the user's policy allows. A Skill MUST NOT gain any tool or approval exemption that policy does not already grant.

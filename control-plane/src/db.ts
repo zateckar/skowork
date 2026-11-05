@@ -449,6 +449,12 @@ const migrations: string[] = [
   );
   CREATE INDEX chat_messages_at ON chat_messages(at);
   `,
+  // use-idp-tokens-for-mcp D4: remote entries present the caller's identity-provider token; no control-plane token keys.
+  `
+  UPDATE mcp_servers SET entry = json_remove(json_set(entry, '$.auth', 'user-token'), '$.audience')
+    WHERE json_extract(entry, '$.auth') = 'audience-token';
+  DELETE FROM service_signing_keys WHERE purpose = 'mcp-token';
+  `,
 ];
 
 export function openDb(path: string): Db {

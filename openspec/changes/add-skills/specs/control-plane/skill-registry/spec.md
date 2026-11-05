@@ -55,11 +55,23 @@ The skill registry SHALL make an org-scope Skill version available only after a 
 - **THEN** the registry refuses the approval
 
 ### Requirement: Public Skill Import
-The skill registry SHALL accept externally sourced Skills, such as those from agentskills.io, only as submissions to org review. The original source and licence are recorded on the version.
+The skill registry SHALL accept externally sourced Skills, such as those from agentskills.io, only as submissions to org review. A platform-admin gives either the HTTPS URL of the package, which the registry downloads, or the package itself, with an optional source URL. The licence is the one given, or else the license field of SKILL.md; an import without either is refused. The source URL, when known, and the licence are recorded on the version.
 
 #### Scenario: Import public skill
 - **WHEN** a platform-admin imports a public Skill
 - **THEN** it enters the org review queue with its source URL and licence, and it is not distributed until approved
+
+#### Scenario: Import from a URL
+- **WHEN** a platform-admin imports a public Skill by the HTTPS URL of its zip archive
+- **THEN** the registry downloads the archive within the package size limit and validates it as if it had been uploaded
+
+#### Scenario: URL and package both given
+- **WHEN** a platform-admin gives a package and asks the registry to download from a URL in the same import
+- **THEN** the import is refused with a validation error
+
+#### Scenario: Licence from SKILL.md
+- **WHEN** a platform-admin uploads a package whose SKILL.md has license MIT and gives no licence
+- **THEN** the version is recorded with the licence MIT
 
 ### Requirement: Skill Distribution
 The skill registry SHALL give each client the list of Skill versions in its user's shared, group and org scopes, and the content of each version on request, authenticated with the user's access token.
@@ -90,11 +102,15 @@ The skill registry SHALL show each author aggregate usage counts for their Skill
 - **THEN** they see weekly install and run counts with no user names
 
 ### Requirement: Skill Package Validation
-The skill registry SHALL accept a Skill as a zip archive with SKILL.md at its root, or inside one top-level folder. SKILL.md MUST have a kebab-case name, a description and a semantic version. The registry MUST reject an archive with an unknown top-level entry, an unsafe path, too many entries, or too much content, and MUST reject a package larger than the configured limit.
+The skill registry SHALL accept a Skill as a zip archive with SKILL.md at its root, or inside one top-level folder. SKILL.md MUST have a kebab-case name, a description and a semantic version, given as version or as metadata.version (client/skills Agent Skills Compatibility). The registry MUST reject an archive with an unknown top-level entry, an unsafe path, too many entries, or too much content, and MUST reject a package larger than the configured limit.
 
 #### Scenario: Missing version
 - **WHEN** an author publishes a package whose SKILL.md has no version
 - **THEN** the registry rejects it with a validation error that names the field
+
+#### Scenario: Version in metadata
+- **WHEN** an author publishes a package whose SKILL.md has no version field and whose metadata block holds version 1.0.0
+- **THEN** the registry accepts it as version 1.0.0
 
 #### Scenario: Unsafe archive
 - **WHEN** an archive contains an entry whose path leaves the Skill folder

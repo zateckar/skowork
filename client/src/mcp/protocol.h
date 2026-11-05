@@ -112,7 +112,7 @@ bool valid_name(std::string_view s);
 struct ServerEntry {
     std::string id, name, kind;  // kind: remote | local
     std::string spec_version = kDefaultProtocolVersion;
-    std::string url, auth, audience;   // remote; auth: audience-token | none
+    std::string url, auth;             // remote; auth: user-token | none
     std::string package;               // local: SHA-256 hex of the zip
     std::vector<std::string> args;     // local: args[0] is the executable, relative to the package root
     std::vector<std::pair<std::string, std::string>> env;

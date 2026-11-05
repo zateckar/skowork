@@ -39,7 +39,7 @@ export function Skills({ me }: { me: Me }) {
             <tbody>
               {queue.data.map((v) => (
                 <tr key={v.id} data-testid={`skill-${v.name}-${v.version}`}>
-                  <td><b>{v.name}</b> {v.version}<br /><small>{v.description}</small>{v.source_url && <><br /><small>import: {v.source_url} ({v.licence})</small></>}</td>
+                  <td><b>{v.name}</b> {v.version}<br /><small>{v.description}</small>{v.licence && <><br /><small>import: {v.source_url ?? 'uploaded package'} ({v.licence})</small></>}</td>
                   <td>{v.author}</td>
                   <td><small>risk {v.risk} · tools {v.tools.join(', ') || 'default'}{v.requires_mcp.length ? ` · MCP ${v.requires_mcp.join(', ')}` : ''}</small></td>
                   <td>{v.findings}</td>
@@ -100,7 +100,11 @@ function Review({ id, onDecided }: { id: number; onDecided: (note: string) => vo
         Declared risk <b>{v.risk}</b>, network {v.network}, tools {v.tools.join(', ') || 'default (read-class)'}
         {v.requires_mcp.length ? `, requires MCP ${v.requires_mcp.join(', ')}` : ''}
       </p>
-      {v.source_url && <p data-testid="skill-source">Imported from <a href={v.source_url} rel="noreferrer noopener" target="_blank">{v.source_url}</a> under {v.licence}</p>}
+      {v.licence && (
+        <p data-testid="skill-source">
+          {v.source_url ? <>Imported from <a href={v.source_url} rel="noreferrer noopener" target="_blank">{v.source_url}</a></> : 'Imported as an uploaded package'} under {v.licence}
+        </p>
+      )}
       <h3>Scan findings</h3>
       <ul data-testid="skill-findings">
         {v.scan.findings.length === 0 && <li>None.</li>}
@@ -134,6 +138,7 @@ function Review({ id, onDecided }: { id: number; onDecided: (note: string) => vo
 
 function Import({ onDone }: { onDone: (note: string) => void }) {
   const file = useRef<HTMLInputElement>(null);
+  const [source, setSource] = useState<'url' | 'file'>('url');
   const act = useAction();
   return (
     <Card title="Import a public Skill" id="skill-import">
@@ -141,16 +146,33 @@ function Import({ onDone }: { onDone: (note: string) => void }) {
         id="skill-import-form"
         onSubmit={(f) =>
           act.run(async () => {
-            const pkg = file.current?.files?.[0];
-            if (!pkg) throw new Error('Choose the Skill package (zip).');
-            const v = await upload<Version>(`${S}/import?${qs({ source_url: f.source_url, licence: f.licence })}`, pkg);
+            let v: Version;
+            if (source === 'url') {
+              v = await api<Version>('POST', `${S}/import?${qs({ url: f.url, licence: f.licence })}`);
+            } else {
+              const pkg = file.current?.files?.[0];
+              if (!pkg) throw new Error('Choose the Skill package (zip).');
+              v = await upload<Version>(`${S}/import?${qs({ source_url: f.source_url, licence: f.licence })}`, pkg);
+            }
             onDone(`${v.name} ${v.version} entered the review queue.`);
           })
         }
       >
-        <Field label="Skill package (zip)"><input type="file" accept=".zip,application/zip" ref={file} data-testid="skill-import-file" /></Field>
-        <Field label="Source URL" grow><input name="source_url" placeholder="https://agentskills.io/…" required /></Field>
-        <Field label="Licence"><input name="licence" placeholder="MIT, Apache-2.0" required /></Field>
+        <Field label="Source">
+          <select data-testid="skill-import-source" value={source} onChange={(e) => setSource(e.target.value as 'url' | 'file')}>
+            <option value="url">Download from a URL</option>
+            <option value="file">Upload a zip file</option>
+          </select>
+        </Field>
+        {source === 'url' ? (
+          <Field label="Package URL (zip)" grow><input name="url" type="url" placeholder="https://…/skill.zip" required /></Field>
+        ) : (
+          <>
+            <Field label="Skill package (zip)"><input type="file" accept=".zip,application/zip" ref={file} data-testid="skill-import-file" required /></Field>
+            <Field label="Source URL (optional)" grow><input name="source_url" type="url" placeholder="https://agentskills.io/…" /></Field>
+          </>
+        )}
+        <Field label="Licence (if SKILL.md has none)"><input name="licence" placeholder="MIT, Apache-2.0" /></Field>
         <button>Import for review</button>
       </Form>
       <Err error={act.error} id="skill-import-error" />

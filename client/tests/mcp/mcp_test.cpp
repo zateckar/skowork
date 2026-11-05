@@ -1,5 +1,5 @@
 // client/mcp-client on Windows (add-core-tools-and-mcp tasks 3.1-3.5): the stdio transport against the official SDK's
-// server (dev/mcp-test-server), Streamable HTTP with audience-scoped tokens, pinned packages, namespacing and
+// server (dev/mcp-test-server), Streamable HTTP with the user's identity-provider token, pinned packages, namespacing and
 // filtering, catalog risk classes, untrusted provenance, the lifecycle and health.
 #include "base/encoding.h"
 #include "extract/ooxml_fixtures.h"
@@ -45,9 +45,10 @@ bool reference_server_ready() {
     return !find_node().empty() && fs::exists(fs::path(WORKBENCH_MCP_TEST_SERVER_DIR) / "node_modules" / "@modelcontextprotocol" / "sdk", ec);
 }
 
-std::string fake_jwt(const std::string& aud) {
+// A token as the identity provider issues it (decoded, not verified, by the test server).
+std::string fake_jwt(const std::string& sub, long long exp = 4102444800LL) {
     const json header = {{"alg", "ES256"}, {"typ", "JWT"}};
-    const json payload = {{"aud", aud}, {"sub", "u1"}, {"exp", 4102444800LL}};
+    const json payload = {{"iss", "https://idp.test/realms/workbench"}, {"azp", "workbench"}, {"sub", sub}, {"exp", exp}};
     return base64url_encode(header.dump()) + "." + base64url_encode(payload.dump()) + ".c2ln";
 }
 
@@ -95,7 +96,8 @@ struct McpFixture {
     std::atomic<int> fetches{0};
     std::function<std::string()> serve = [this] { return package; };
     std::vector<std::pair<std::string, json>> events;
-    std::vector<std::string> audiences;
+    std::vector<bool> token_requests;  // force flag of each user_token call
+    std::function<std::string(bool force)> user_token = [](bool) { return fake_jwt("u1"); };
     std::chrono::steady_clock::time_point clock = std::chrono::steady_clock::now();
     std::unique_ptr<McpManager> mgr;
 
@@ -142,9 +144,9 @@ struct McpFixture {
             if (s != sha) return make_error("not_found");
             return serve();
         };
-        env.exchange_token = [this](const std::string& aud) -> Result<std::pair<std::string, long long>> {
-            audiences.push_back(aud);
-            return std::make_pair(fake_jwt(aud), 4102444800LL);
+        env.user_token = [this](bool force) -> Result<std::string> {
+            token_requests.push_back(force);
+            return user_token(force);
         };
         env.security_event = [this](const std::string& kind, const json& d) { events.emplace_back(kind, d); };
         env.add_tool = [this](ToolDef d) { return reg.add(std::move(d)); };
@@ -430,31 +432,30 @@ TEST(McpManager, UnlistedServerIsUnavailable) {
     EXPECT_TRUE(f.mgr->tool_unavailable("mcp:skill-declared/run").has_value());
 }
 
-// ---- 3.2 Streamable HTTP with audience-scoped tokens --------------------------------------------------------------------
+// ---- 3.2 Streamable HTTP with the user's identity-provider token ------------------------------------------------------
 
-TEST(McpHttp, RemoteServerGetsATokenWhoseOnlyAudienceIsTheServer) {
+TEST(McpHttp, RemoteServerGetsTheUsersToken) {
 #ifndef WORKBENCH_DEV_ENDPOINTS
   GTEST_SKIP() << "the test server listens on loopback http, which only debug and test builds accept";
 #endif
     if (!reference_server_ready()) GTEST_SKIP() << "node or dev/mcp-test-server/node_modules missing (npm install there)";
-    ChildProcess server(find_node(), L"\"" + reference_server().wstring() + L"\" --http 0");
+    ChildProcess server(find_node(), L"\"" + reference_server().wstring() + L"\" --http 0 --issuer https://idp.test/realms/workbench");
     const auto j = parse_json(server.first_line);
     ASSERT_TRUE(j.has_value()) << server.first_line;
     const std::string url = jstr(*j, "listening");
     McpFixture f;
-    f.set_policy(json::array({{{"id", "jira-corp"}, {"name", "Jira"}, {"kind", "remote"}, {"url", url}, {"auth", "audience-token"},
+    f.set_policy(json::array({{{"id", "jira-corp"}, {"name", "Jira"}, {"kind", "remote"}, {"url", url}, {"auth", "user-token"},
                                {"exclude_tools", {"delete_issue"}}, {"risk", json::object()}}}));
     f.start();
     f.apply();
     const json st = f.server_status("jira-corp");
     EXPECT_EQ(st["state"], "connected") << st.dump();
     EXPECT_EQ(st["usable_tools"], 3);
-    // Scenario: Token scoped to server.
+    // Scenario: User token presented.
     auto who = f.call("mcp:jira-corp/whoami", json::object());
-    EXPECT_EQ(who.content, "aud=" + url);
-    ASSERT_FALSE(f.audiences.empty());
-    for (const auto& a : f.audiences) EXPECT_EQ(a, url);
-    EXPECT_EQ(f.audiences.size(), 1u);  // cached until shortly before expiry
+    EXPECT_EQ(who.content, "sub=u1");
+    ASSERT_FALSE(f.token_requests.empty());
+    for (const bool force : f.token_requests) EXPECT_FALSE(force);
     auto search = f.call("mcp:jira-corp/search_issues", {{"query", "DEMO-102"}});
     EXPECT_TRUE(search.ok);
     EXPECT_NE(search.content.find("onboarding"), std::string::npos);
@@ -464,7 +465,7 @@ TEST(McpHttp, RemoteServerGetsATokenWhoseOnlyAudienceIsTheServer) {
     EXPECT_EQ(f.reg.get("mcp:jira-corp/search_issues")->risk, Risk::external);
 }
 
-TEST(McpHttp, WrongAudienceAndBlockedEgressAreReported) {
+TEST(McpHttp, TokenIsRefreshedOnceAfter401) {
 #ifndef WORKBENCH_DEV_ENDPOINTS
   GTEST_SKIP() << "the test server listens on loopback http, which only debug and test builds accept";
 #endif
@@ -472,14 +473,35 @@ TEST(McpHttp, WrongAudienceAndBlockedEgressAreReported) {
     ChildProcess server(find_node(), L"\"" + reference_server().wstring() + L"\" --http 0");
     const std::string url = jstr(*parse_json(server.first_line), "listening");
     McpFixture f;
-    f.set_policy(json::array({{{"id", "jira-corp"}, {"kind", "remote"}, {"url", url}, {"auth", "audience-token"}, {"audience", "https://other"}}}));
+    // Scenario: Token refreshed after 401. The cached token has expired; the refreshed one is accepted.
+    f.user_token = [](bool force) { return force ? fake_jwt("u1") : fake_jwt("u1", 1000); };
+    f.set_policy(json::array({{{"id", "jira-corp"}, {"kind", "remote"}, {"url", url}, {"auth", "user-token"}}}));
+    f.start();
+    f.apply();
+    EXPECT_EQ(f.server_status("jira-corp")["state"], "connected") << f.server_status("jira-corp").dump();
+    ASSERT_GE(f.token_requests.size(), 2u);
+    EXPECT_FALSE(f.token_requests[0]);
+    EXPECT_TRUE(f.token_requests[1]);
+}
+
+TEST(McpHttp, RefusedTokenAndBlockedEgressAreReported) {
+#ifndef WORKBENCH_DEV_ENDPOINTS
+  GTEST_SKIP() << "the test server listens on loopback http, which only debug and test builds accept";
+#endif
+    if (!reference_server_ready()) GTEST_SKIP() << "node or dev/mcp-test-server/node_modules missing (npm install there)";
+    ChildProcess server(find_node(), L"\"" + reference_server().wstring() + L"\" --http 0");
+    const std::string url = jstr(*parse_json(server.first_line), "listening");
+    McpFixture f;
+    f.user_token = [](bool) { return fake_jwt("u1", 1000); };  // refused even after the refresh
+    f.set_policy(json::array({{{"id", "jira-corp"}, {"kind", "remote"}, {"url", url}, {"auth", "user-token"}}}));
     f.start();
     f.apply();
     json st = f.server_status("jira-corp");
     EXPECT_EQ(st["state"], "unavailable");
     EXPECT_NE(st["error"].get<std::string>().find("refused the token"), std::string::npos) << st.dump();
 
-    f.set_policy(json::array({{{"id", "jira-corp"}, {"kind", "remote"}, {"url", url}, {"auth", "audience-token"}}}),
+    f.user_token = [](bool) { return fake_jwt("u1"); };
+    f.set_policy(json::array({{{"id", "jira-corp"}, {"kind", "remote"}, {"url", url}, {"auth", "user-token"}}}),
                  {{"network", {{"egress_allow", {"jira.example"}}}}});
     f.apply();
     st = f.server_status("jira-corp");
@@ -487,7 +509,7 @@ TEST(McpHttp, WrongAudienceAndBlockedEgressAreReported) {
     EXPECT_NE(st["error"].get<std::string>().find("blocked by the network policy"), std::string::npos) << st.dump();
 
     // The same catalog entry, and a policy that now allows the address: discovered again without a restart.
-    f.set_policy(json::array({{{"id", "jira-corp"}, {"kind", "remote"}, {"url", url}, {"auth", "audience-token"}}}),
+    f.set_policy(json::array({{{"id", "jira-corp"}, {"kind", "remote"}, {"url", url}, {"auth", "user-token"}}}),
                  {{"network", {{"egress_allow", {"127.0.0.1"}}}}});
     f.apply();
     st = f.server_status("jira-corp");

@@ -441,7 +441,7 @@ TEST(AppE2E, DeveloperSearchesJiraEditsAFileAndRunsABuild) {
         (void)cp_call("DELETE", catalog + "/e2e-jira", *admin);
         (void)cp_call("DELETE", "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"workbench_group", group_name}});
     }};
-    // The catalog entry: discovery runs against the mock with an audience-scoped token.
+    // The catalog entry: discovery runs against the mock with the administrator's identity-provider token.
     auto created = cp_call("POST", catalog, *admin,
                            {{"id", "e2e-jira"}, {"name", "Jira (e2e)"}, {"owner", "e2e"}, {"kind", "remote"}, {"url", jira.url},
                             {"groups", {group_name}}, {"exclude_tools", {"delete_issue"}}, {"risk", {{"search_issues", "read"}, {"get_issue", "read"}}}});

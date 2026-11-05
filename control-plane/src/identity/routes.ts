@@ -3,9 +3,8 @@
 import { Router } from 'express';
 import type { Db } from '../db.ts';
 import { nowIso, tx } from '../db.ts';
-import { clientIp, sendError, str } from '../http.ts';
+import { sendError, str } from '../http.ts';
 import type { Audit } from './audit.ts';
-import type { TokenExchange } from './tokens.ts';
 import { ADMIN_ROLES, type AdminRole, requireRole } from './identity.ts';
 
 export interface DenyHooks {
@@ -17,25 +16,8 @@ export interface DenyHooks {
   onAssignmentChanged?(userName: string): void;
 }
 
-export function identityRoutes(tokens: TokenExchange): Router {
+export function identityRoutes(): Router {
   const r = Router();
-  // Exchanged Token Signing Key Publication: current, next and recently retired keys (public, no token).
-  r.get('/.well-known/workbench-token-keys.json', async (_req, res, next) => {
-    try {
-      res.setHeader('Cache-Control', 'public, max-age=300');
-      res.json({ issuer: tokens.issuer, ...(await tokens.publicKeys()) });
-    } catch (err) {
-      next(err);
-    }
-  });
-  // Audience-Scoped Token Exchange (behind requireUser, which refuses tokens of clients that are not allowed).
-  r.post('/api/v1/identity/token-exchange', async (req, res, next) => {
-    try {
-      res.json(await tokens.exchange(req.user!, str(req.body?.audience) ?? '', clientIp(req)));
-    } catch (err) {
-      next(err);
-    }
-  });
   r.get('/api/v1/identity/whoami', (req, res) => {
     const u = req.user!;
     res.json({

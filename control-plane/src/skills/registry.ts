@@ -20,6 +20,7 @@ export type State = 'in-review' | 'published' | 'rejected' | 'withdrawn' | 'revo
 
 export interface SkillsConfig extends PackageLimits {
   revocationRetentionDays: number;
+  allowInsecureDownload: boolean;
 }
 
 type Actor = Pick<User, 'subject' | 'userName' | 'groups' | 'adminRoles'>;
@@ -56,6 +57,69 @@ const COLUMNS = 'id, name, version, scope, audience, digest, size, manifest, sca
 const lower = (s: string) => s.toLowerCase();
 const same = (a: string, b: string) => lower(a) === lower(b);
 const isReviewer = (a: Actor) => a.adminRoles.includes('platform-admin') || a.adminRoles.includes('skill-reviewer');
+
+const DOWNLOAD_REDIRECTS = 5;
+const DOWNLOAD_TIMEOUT_MS = 30_000;
+
+function httpsUrl(v: string, field: string, allowHttp = false): URL {
+  let url: URL;
+  try {
+    url = new URL(v);
+  } catch {
+    throw new ApiError(400, 'VALIDATION_FAILED', `The URL ${v} is not valid.`, { field });
+  }
+  if (url.protocol !== 'https:' && !(allowHttp && url.protocol === 'http:')) throw new ApiError(400, 'VALIDATION_FAILED', `The URL ${url.href} must use HTTPS.`, { field });
+  return url;
+}
+
+/** Downloads a Skill package: HTTPS only (redirects too), no credentials, cut at the package size limit. */
+async function download(start: URL, maxBytes: number, allowHttp: boolean): Promise<Buffer> {
+  const failed = (why: string) => new ApiError(400, 'VALIDATION_FAILED', `The package could not be downloaded from ${start.href}: ${why}.`, { field: 'url' });
+  const signal = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
+  let url = start;
+  for (let hop = 0; ; hop++) {
+    let res: Response;
+    try {
+      res = await fetch(url, { redirect: 'manual', signal, headers: { accept: 'application/zip, application/octet-stream;q=0.9, */*;q=0.1' } });
+    } catch (err) {
+      const e = err as Error & { cause?: { code?: string; message?: string } };
+      throw failed(e.name === 'TimeoutError' ? 'it took longer than 30 seconds' : (e.cause?.code ?? e.cause?.message ?? e.message));
+    }
+    if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+      await res.body?.cancel();
+      if (hop >= DOWNLOAD_REDIRECTS) throw failed('too many redirects');
+      const next = new URL(res.headers.get('location')!, url);
+      if (next.protocol !== 'https:' && !(allowHttp && next.protocol === 'http:')) throw failed(`it redirects to ${next.href}, which does not use HTTPS`);
+      url = next;
+      continue;
+    }
+    if (!res.ok) {
+      await res.body?.cancel();
+      throw failed(`the server answered HTTP ${res.status}`);
+    }
+    if (Number(res.headers.get('content-length') ?? 0) > maxBytes) {
+      await res.body?.cancel();
+      throw new ApiError(413, 'TOO_LARGE', `The package is larger than the limit of ${maxBytes} bytes.`);
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const reader = res.body?.getReader();
+    try {
+      for (let r = await reader?.read(); r && !r.done; r = await reader!.read()) {
+        size += r.value.length;
+        if (size > maxBytes) {
+          await reader!.cancel();
+          throw new ApiError(413, 'TOO_LARGE', `The package is larger than the limit of ${maxBytes} bytes.`);
+        }
+        chunks.push(Buffer.from(r.value));
+      }
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      throw failed((err as Error).message);
+    }
+    return Buffer.concat(chunks);
+  }
+}
 
 /** The Monday (UTC) of the ISO week that contains `d`, as YYYY-MM-DD. */
 export function isoWeek(d = new Date()): string {
@@ -161,7 +225,7 @@ export class SkillRegistry {
    * Publishes a version (Skill Storage And Versioning, Sharing Scopes, Publish Audience, Skill Name Ownership). An org
    * version, and every import, waits for review.
    */
-  publish(actor: Actor, bytes: Buffer, opts: { scope: unknown; users?: string[]; groups?: string[]; import?: { source_url: string; licence: string } }) {
+  publish(actor: Actor, bytes: Buffer, opts: { scope: unknown; users?: string[]; groups?: string[]; import?: { source_url: string | null; licence: string } }) {
     const scope = opts.scope as Scope;
     if (!SCOPES.includes(scope)) throw new ApiError(400, 'VALIDATION_FAILED', 'scope must be shared, group or org.', { field: 'scope' });
     if (opts.import) {
@@ -174,6 +238,13 @@ export class SkillRegistry {
     const pkg = readPackage(bytes, this.#cfg);
     const m = pkg.manifest;
     const digest = createHash('sha256').update(bytes).digest('hex');
+    if (opts.import && !opts.import.licence) {
+      const declared = m.frontmatter.license;
+      if (typeof declared !== 'string' || !declared.trim()) {
+        throw new ApiError(400, 'VALIDATION_FAILED', 'The licence of an imported Skill is required: give one, or declare license in SKILL.md.', { field: 'licence' });
+      }
+      opts.import.licence = declared.trim();
+    }
 
     const owner = this.#owner(m.name);
     if (owner && !same(owner, actor.userName)) {
@@ -218,19 +289,22 @@ export class SkillRegistry {
     return this.#summary(row);
   }
 
-  /** Public Skill Import: a platform-admin submits an external Skill to org review with its source and licence. */
-  import(actor: Actor, bytes: Buffer, sourceUrl: unknown, licence: unknown) {
+  /**
+   * Public Skill Import: a platform-admin submits an external Skill to org review, either as the package bytes (with an
+   * optional source URL) or as the HTTPS URL of the package, which the registry downloads.
+   */
+  async import(actor: Actor, bytes: Buffer, opts: { url?: string; source_url?: string; licence?: string }) {
     if (!actor.adminRoles.includes('platform-admin')) throw new ApiError(403, 'FORBIDDEN', 'Only a platform-admin can import a public Skill.');
-    let url: URL;
-    try {
-      url = new URL(String(sourceUrl ?? ''));
-    } catch {
-      throw new ApiError(400, 'VALIDATION_FAILED', 'The source URL is not valid.', { field: 'source_url' });
+    const lic = opts.licence?.trim() ?? '';
+    if (opts.url) {
+      if (bytes.length) throw new ApiError(400, 'VALIDATION_FAILED', 'Give either a package or a URL to download, not both.', { field: 'url' });
+      const url = httpsUrl(opts.url, 'url', this.#cfg.allowInsecureDownload);
+      const pkg = await download(url, this.#cfg.maxPackageBytes, this.#cfg.allowInsecureDownload);
+      return this.publish(actor, pkg, { scope: 'org', import: { source_url: url.href, licence: lic } });
     }
-    if (url.protocol !== 'https:') throw new ApiError(400, 'VALIDATION_FAILED', 'The source URL must use HTTPS.', { field: 'source_url' });
-    const lic = typeof licence === 'string' ? licence.trim() : '';
-    if (!lic) throw new ApiError(400, 'VALIDATION_FAILED', 'The licence of an imported Skill is required.', { field: 'licence' });
-    return this.publish(actor, bytes, { scope: 'org', import: { source_url: url.href, licence: lic } });
+    if (!bytes.length) throw new ApiError(400, 'VALIDATION_FAILED', 'Give the Skill package (zip) or a URL to download it from.', { field: 'url' });
+    const source = opts.source_url ? httpsUrl(opts.source_url, 'source_url').href : null;
+    return this.publish(actor, bytes, { scope: 'org', import: { source_url: source, licence: lic } });
   }
 
   // ---- review ---------------------------------------------------------------------------------------------------------

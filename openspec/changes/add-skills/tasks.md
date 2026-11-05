@@ -32,6 +32,8 @@
 - [x] 5.3 Implement the org review state machine, self-review block, ES256 signing and public import with source and licence, and fill the admin console's skill review queue view (scan results, diff against the previous version, approve or reject with a comment, public import for platform-admins; control-plane/admin-console Skill Review Queue). Verify with end-to-end tests through the admin-console review queue
 - [x] 5.4 Implement the distribution API, skills-changed and skill-revoked pushes, revocations in sync responses, and aggregate usage counts. Verify that a revocation removes the skill from a connected client on push, and from an offline client at its next sync
 
+- [x] 5.5 Public import from a URL or from an uploaded package (one of them), licence from SKILL.md, and `metadata.version` in the registry and client parsers (D6, revised 2026-11-05). Verify with registry tests (download, both sources refused, redirect to HTTP refused, size limit, licence fallback), a client parser test, and the admin end-to-end import test
+
 ## 6. Client installation and lifecycle
 
 - [x] 6.1 Implement sync (start, reconnect, push, every 24 h), install by digest, signature verification, pinning, auto-update by policy and rollback. Verify with tests for signature mismatch and rollback

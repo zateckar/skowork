@@ -33,8 +33,6 @@ export interface Config {
      * automated tests that need a second user or an expired token, which the real identity provider cannot give.
      */
     testIssuer?: { issuer: string; jwks: { keys: object[] } };
-    /** Audiences every user may exchange a token for, in addition to the catalog's (add-core-tools-and-mcp design D6). */
-    mcpAudiences: string[];
   };
   mcpCatalog: {
     /** Accept plain-HTTP remote entries (development and tests only). */
@@ -53,6 +51,8 @@ export interface Config {
     maxEntries: number;
     maxUnpackedBytes: number;
     revocationRetentionDays: number;
+    /** Download public imports over plain HTTP (development and tests only). */
+    allowInsecureDownload: boolean;
   };
   fleet: {
     heartbeatIntervalS: number;
@@ -173,7 +173,6 @@ export function loadConfig(e: NodeJS.ProcessEnv = process.env): Config {
       clockSkewS: 30,
       bootstrapAdmins: list(e.WORKBENCH_BOOTSTRAP_ADMINS, []).map((s) => s.toLowerCase()),
       testIssuer,
-      mcpAudiences: list(e.WORKBENCH_MCP_AUDIENCES, []),
     },
     mcpCatalog: {
       allowInsecureHttp: e.WORKBENCH_MCP_ALLOW_INSECURE_HTTP === '1' || e.WORKBENCH_MCP_ALLOW_INSECURE_HTTP === 'true',
@@ -188,6 +187,7 @@ export function loadConfig(e: NodeJS.ProcessEnv = process.env): Config {
       maxEntries: 200,
       maxUnpackedBytes: 20 * 1024 * 1024,
       revocationRetentionDays: num(e.WORKBENCH_SKILLS_REVOCATION_RETENTION_DAYS, 180),
+      allowInsecureDownload: e.WORKBENCH_SKILLS_ALLOW_INSECURE_DOWNLOAD === '1' || e.WORKBENCH_SKILLS_ALLOW_INSECURE_DOWNLOAD === 'true',
     },
     fleet: {
       heartbeatIntervalS: num(e.WORKBENCH_HEARTBEAT_INTERVAL_S, 300),

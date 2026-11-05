@@ -129,6 +129,12 @@ TEST(SkillMd, AgentSkillsCompatibility) {
     EXPECT_EQ(p.manifest.network, "proxy");
     // The registry tiers need the version.
     EXPECT_EQ(bad("---\nname: pdf\ndescription: d\n---\n", true).field, "version");
+    // agentskills.io packages declare the version under metadata; a top-level version wins.
+    const Parsed meta = ok("---\nname: pdf\ndescription: d\nlicense: MIT\nmetadata:\n  version: 1.2.0\n  author: A\n---\n", true);
+    EXPECT_EQ(meta.manifest.version, "1.2.0");
+    EXPECT_TRUE(meta.manifest.version_declared);
+    EXPECT_EQ(ok("---\nname: pdf\ndescription: d\nversion: 2.0.0\nmetadata:\n  version: 1.2.0\n---\n", true).manifest.version, "2.0.0");
+    EXPECT_EQ(bad("---\nname: pdf\ndescription: d\nmetadata:\n  version: one\n---\n", true).field, "version");
 }
 
 TEST(SkillMd, ValidationNamesTheField) {

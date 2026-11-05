@@ -104,6 +104,16 @@ Open `https://<control plane>/` (it redirects to `/admin/`) and sign in as one o
 2. Under **Models & quotas**, map the models.
 3. Under **Policies**, publish a policy for `everyone`.
 
+### 6. Remote MCP servers
+
+A remote MCP server registered with the authentication **user's sign-in token** receives the Keycloak access token of the person using it, the same token the control plane gets. When an admin adds the server or runs discovery, that is the admin's token. When a desktop client calls it, it is the user's token. The control plane issues no tokens of its own. The MCP server must accept:
+
+- tokens from the realm's issuer, verified against the realm's published keys;
+- the authorized party (`azp`) of the client from step 1;
+- the `aud` it checks, if it checks one. Add a second **Audience** mapper to the client from step 1 that puts the MCP server's audience into the token.
+
+Discovery that fails with `the server answered HTTP 401` means the server refused the admin's token. Check these three points.
+
 ### Troubleshooting
 
 | Symptom | Cause |

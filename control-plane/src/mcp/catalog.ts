@@ -19,8 +19,7 @@ export interface Entry {
   kind: 'remote' | 'local';
   spec_version: string;
   url?: string;
-  auth?: 'audience-token' | 'none';
-  audience?: string;
+  auth?: 'user-token' | 'none';
   package?: string;
   args: string[];
   env: Record<string, string>;
@@ -76,20 +75,18 @@ export class McpCatalog {
   readonly #db: Db;
   readonly #audit: Audit;
   readonly #onChanged: (groups: string[] | 'everyone') => void;
-  readonly #discoveryToken: (audience: string) => Promise<string>;
   #cache = new Map<string, { at: number; entries: unknown[] }>();
 
   constructor(
     cfg: Config,
     db: Db,
     audit: Audit,
-    hooks: { onChanged: (groups: string[] | 'everyone') => void; discoveryToken: (audience: string) => Promise<string> },
+    hooks: { onChanged: (groups: string[] | 'everyone') => void },
   ) {
     this.#cfg = cfg;
     this.#db = db;
     this.#audit = audit;
     this.#onChanged = hooks.onChanged;
-    this.#discoveryToken = hooks.discoveryToken;
   }
 
   // ---- validation -----------------------------------------------------------------------------------------------------
@@ -129,11 +126,10 @@ export class McpCatalog {
       if (url.protocol !== 'https:' && !(url.protocol === 'http:' && this.#cfg.mcpCatalog.allowInsecureHttp)) {
         throw invalid('url', `The URL ${url.href} must use HTTPS.`);
       }
-      const auth = body.auth ?? 'audience-token';
-      if (auth !== 'audience-token' && auth !== 'none') throw invalid('auth', 'auth must be audience-token or none.');
+      const auth = body.auth ?? 'user-token';
+      if (auth !== 'user-token' && auth !== 'none') throw invalid('auth', 'auth must be user-token or none.');
       e.url = url.href;
       e.auth = auth;
-      if (auth === 'audience-token') e.audience = typeof body.audience === 'string' && body.audience ? body.audience : url.href;
     } else {
       const sha = typeof body.package === 'string' ? body.package.toLowerCase() : '';
       if (!SHA256.test(sha) || !this.#db.prepare('SELECT 1 FROM mcp_packages WHERE sha256 = ?').get(sha)) {
@@ -233,22 +229,12 @@ export class McpCatalog {
         for (const t of tools) if (t.status === 'included' && !include.some((p) => matchTool(p, t.name))) include.push(t.name);
       }
       const out: Record<string, unknown> = { id: e.id, name: e.name, kind: e.kind, spec_version: e.spec_version };
-      if (e.kind === 'remote') Object.assign(out, { url: e.url, auth: e.auth, ...(e.audience ? { audience: e.audience } : {}) });
+      if (e.kind === 'remote') Object.assign(out, { url: e.url, auth: e.auth });
       else Object.assign(out, { package: e.package, args: e.args, env: e.env });
       return { ...out, include_tools: include, exclude_tools: [...exclude].sort(), risk: e.risk };
     });
     this.#cache.set(key, { at: Date.now(), entries });
     return entries;
-  }
-
-  /** Remote Audience Authorization: audiences of enabled audience-token entries assigned to the Groups. */
-  audiencesFor(groups: string[]): string[] {
-    const out = new Set<string>();
-    for (const row of this.#enabledFor(groups)) {
-      const e = JSON.parse(row.entry) as Entry;
-      if (e.kind === 'remote' && e.auth === 'audience-token' && e.audience) out.add(e.audience);
-    }
-    return [...out];
   }
 
   // ---- changes --------------------------------------------------------------------------------------------------------
@@ -267,10 +253,10 @@ export class McpCatalog {
   }
 
   /** Runs discovery and stores the snapshot (Tool Discovery Snapshot, Tool Review Decisions, Discovery Failure). */
-  async #discover(e: Entry): Promise<{ ok: true; tools: DiscoveredTool[] } | { ok: false; error: string }> {
+  async #discover(e: Entry, token: string | null): Promise<{ ok: true; tools: DiscoveredTool[] } | { ok: false; error: string }> {
     try {
-      const token = e.auth === 'audience-token' ? await this.#discoveryToken(e.audience!) : undefined;
-      return { ok: true, tools: await discoverTools(e.url!, { token, timeoutMs: this.#cfg.mcpCatalog.discoveryTimeoutMs, specVersion: e.spec_version }) };
+      if (e.auth === 'user-token' && !token) throw new DiscoveryError('no access token of the administrator to present');
+      return { ok: true, tools: await discoverTools(e.url!, { token: e.auth === 'user-token' ? token! : undefined, timeoutMs: this.#cfg.mcpCatalog.discoveryTimeoutMs, specVersion: e.spec_version }) };
     } catch (err) {
       return { ok: false, error: err instanceof DiscoveryError ? err.message : `discovery failed: ${(err as Error).message}` };
     }
@@ -303,12 +289,13 @@ export class McpCatalog {
     }
   }
 
-  async create(actor: Actor, body: Record<string, unknown>) {
+  /** 	oken is the administrator's identity-provider access token, presented during discovery (Tool Discovery Snapshot). */
+  async create(actor: Actor, body: Record<string, unknown>, token: string | null) {
     const e = this.validate(body);
     const groups = this.#groups(body.groups) ?? [];
     if (this.#row(e.id)) throw new ApiError(409, 'CONFLICT', `A catalog entry ${e.id} already exists.`);
     const wantEnabled = body.enabled === undefined ? true : body.enabled === true;
-    const discovery = e.kind === 'remote' ? await this.#discover(e) : null;
+    const discovery = e.kind === 'remote' ? await this.#discover(e, token) : null;
     tx(this.#db, () => {
       this.#db
         .prepare('INSERT INTO mcp_servers (id, entry, enabled, discovery_status, updated_by, updated_at) VALUES (?, ?, 0, ?, ?, ?)')
@@ -321,7 +308,7 @@ export class McpCatalog {
     return this.get(e.id);
   }
 
-  async update(actor: Actor, id: string, body: Record<string, unknown>) {
+  async update(actor: Actor, id: string, body: Record<string, unknown>, token: string | null) {
     const row = this.#row(id);
     if (!row) throw new ApiError(404, 'NOT_FOUND', `No catalog entry ${id}.`);
     const before = this.#view(row);
@@ -329,7 +316,7 @@ export class McpCatalog {
     const e = this.validate({ ...current, ...body, id });
     const groups = this.#groups(body.groups);
     const wantEnabled = body.enabled === undefined ? before.enabled : body.enabled === true;
-    const discovery = e.kind === 'remote' ? await this.#discover(e) : null;
+    const discovery = e.kind === 'remote' ? await this.#discover(e, token) : null;
     if (wantEnabled && discovery && !discovery.ok && body.enabled === true) {
       // Enabling requires a successful discovery; store the failure and refuse.
       this.#storeDiscovery(id, discovery);
@@ -351,13 +338,13 @@ export class McpCatalog {
     return this.get(id);
   }
 
-  async rediscover(actor: Actor, id: string) {
+  async rediscover(actor: Actor, id: string, token: string | null) {
     const row = this.#row(id);
     if (!row) throw new ApiError(404, 'NOT_FOUND', `No catalog entry ${id}.`);
     const e = JSON.parse(row.entry) as Entry;
     if (e.kind !== 'remote') throw new ApiError(400, 'INVALID_REQUEST', 'A local entry cannot be discovered by the server.');
     const before = this.#view(row);
-    this.#storeDiscovery(id, await this.#discover(e));
+    this.#storeDiscovery(id, await this.#discover(e, token));
     this.#changed(actor, id, 'mcp.server.discover', before, before.groups);
     return this.get(id);
   }

@@ -426,6 +426,7 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     await signInAs('admin1');
     await open('skills');
     const pkg = writeZip({ 'pdf-tools/SKILL.md': '---\nname: pdf-tools\ndescription: Work with PDF files\nversion: 2.0.0\n---\nSteps.\n' }).toString('base64');
+    await b.fill('skill-import-source', 'file');
     await b.waitFor(`!!document.querySelector('[data-testid="skill-import-file"]')`);
     await b.eval(`(() => {
       const bytes = Uint8Array.from(atob(${JSON.stringify(pkg)}), (c) => c.charCodeAt(0));

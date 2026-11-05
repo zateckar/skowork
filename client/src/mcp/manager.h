@@ -31,8 +31,9 @@ struct McpEnv {
     std::string client_version;
     // The package bytes for a SHA-256 from the control plane (GET /api/v1/mcp/packages/{sha256}).
     std::function<Result<std::string>(const std::string& sha256)> fetch_package;
-    // An audience-scoped token from control-plane/identity: {access_token, expires_at (Unix seconds)}.
-    std::function<Result<std::pair<std::string, long long>>(const std::string& audience)> exchange_token;
+    // The user's identity-provider access token (client/mcp-client Remote Server User Token); orce: a fresh one,
+    // after a server answered 401.
+    std::function<Result<std::string>(bool force)> user_token;
     std::function<void(const std::string& kind, const json& detail)> security_event;
     // The agent runtime's registry.
     std::function<Status(runtime::ToolDef)> add_tool;
@@ -87,7 +88,6 @@ private:
     Result<std::unique_ptr<Transport>> open_remote(const ServerPtr& s);
     // The package bytes, checked against the catalog hash (fetched again once when the stored copy does not match).
     Result<std::string> verified_package(const ServerEntry& e);
-    Result<std::string> audience_token(const std::string& audience, bool force);
     void post(std::function<void()> fn);
     void worker();
     void changed();
@@ -95,9 +95,6 @@ private:
     McpEnv env_;
     mutable std::mutex mx_;
     std::map<std::string, ServerPtr> servers_;
-
-    std::mutex tokens_mx_;
-    std::map<std::string, std::pair<std::string, long long>> tokens_;  // audience -> token, expiry
 
     std::mutex work_mx_;
     std::condition_variable work_cv_;

@@ -17,7 +17,6 @@ import { Messaging, messagingRoutes } from './messaging/messaging.ts';
 import { TeamKnowledge, teamKnowledgeAdminRoutes, teamKnowledgeRoutes } from './knowledge/team.ts';
 import { PolicyService } from './policy/service.ts';
 import { policyAdminRoutes, policyRoutes } from './policy/routes.ts';
-import { TokenExchange } from './identity/tokens.ts';
 import { McpCatalog } from './mcp/catalog.ts';
 import { mcpAdminRoutes, mcpRoutes } from './mcp/routes.ts';
 import { TelemetryIngest, type TelemetryLevel } from './telemetry/ingest.ts';
@@ -37,7 +36,6 @@ export interface ControlPlane {
   fleet: FleetRegistry;
   gateway: Gateway;
   policy: PolicyService;
-  tokens: TokenExchange;
   catalog: McpCatalog;
   telemetry: TelemetryIngest;
   skills: SkillRegistry;
@@ -73,13 +71,8 @@ export function createControlPlane(
     ...policy.modelUses(),
     ...Object.entries(cfg.gateway.models).map(([role, model]) => ({ scope: 'server default', role, model })),
   ]);
-  const tokens = new TokenExchange(cfg, db, audit);
-  const catalog = new McpCatalog(cfg, db, audit, {
-    onChanged: (groups) => policy.catalogChanged(groups),
-    discoveryToken: (aud) => tokens.discoveryToken(aud),
-  });
+  const catalog = new McpCatalog(cfg, db, audit, { onChanged: (groups) => policy.catalogChanged(groups) });
   policy.setCatalogSource(catalog);
-  tokens.setAudienceSource((groups) => catalog.audiencesFor(groups));
   const telemetry = new TelemetryIngest(cfg.telemetry, db, audit, (u) => {
     const level = policy.compileFor(u.groups, u.userName).flat.get('telemetry.level');
     return level === 'off' || level === 'content' ? (level as TelemetryLevel) : 'metadata';
@@ -140,7 +133,7 @@ export function createControlPlane(
   app.use('/api/v1/messaging', user, messagingRoutes(messaging));
   app.use('/llm/v1', user);
 
-  app.use(identityRoutes(tokens));
+  app.use(identityRoutes());
   app.use(mcpRoutes(catalog));
   app.use(policyRoutes(policy));
   app.use(fleetRoutes(cfg, fleet, (u, inst) => Boolean(identity.findDenied(u.userName, inst))));
@@ -172,13 +165,6 @@ export function createControlPlane(
   app.get('/api/v1/admin/messaging/counts', requireView('dashboards'), (_req, res) => void res.json(messaging.counts()));
   app.use('/api/v1/admin/mcp', requireRole('platform-admin'), mcpAdminRoutes(catalog, cfg.mcpCatalog.maxPackageBytes));
   app.use('/api/v1/admin/skills', requireView('skills'), skillAdminRoutes(skills, cfg.skills.maxPackageBytes));
-  app.post('/api/v1/admin/identity/token-keys/rotate', requireRole('platform-admin'), async (req, res, next) => {
-    try {
-      res.json(await tokens.rotate(req.user!));
-    } catch (err) {
-      next(err);
-    }
-  });
 
   app.use((_req, res) => sendError(res, 404, 'NOT_FOUND', 'No such endpoint.'));
   app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
@@ -221,7 +207,7 @@ export function createControlPlane(
   void identity.warmUp(log);
 
   return {
-    server, db, identity, push, fleet, gateway, policy, tokens, catalog, telemetry, skills, tasks, audit, team, messaging, consoleBuilt,
+    server, db, identity, push, fleet, gateway, policy, catalog, telemetry, skills, tasks, audit, team, messaging, consoleBuilt,
     async listen(port = cfg.port, host = cfg.host) {
       const hosts = host.split(',').map((h) => h.trim()).filter(Boolean);
       let bound = port;

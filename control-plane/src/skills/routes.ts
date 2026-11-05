@@ -73,8 +73,14 @@ export function skillAdminRoutes(reg: SkillRegistry, maxPackageBytes: number): R
   r.post('/versions/:id/approve', wrap((req) => reg.approve(req.user!, Number(req.params.id), body(req).comment)));
   r.post('/versions/:id/reject', wrap((req) => reg.reject(req.user!, Number(req.params.id), body(req).comment)));
   r.post('/:name/revoke', wrap((req) => reg.revoke(req.user!, String(req.params.name), str(body(req).version), body(req).reason)));
-  // Public import: the zip is the body; ?source_url=...&licence=... (platform-admin only).
-  r.post('/import', requireRole('platform-admin'), raw(maxPackageBytes), wrap((req) => reg.import(req.user!, bytesOf(req), str(req.query.source_url), str(req.query.licence))));
+  // Public import (platform-admin only): ?url=... to download, or the zip as the body with an optional ?source_url=...;
+  // &licence=... unless SKILL.md declares license.
+  r.post(
+    '/import',
+    requireRole('platform-admin'),
+    raw(maxPackageBytes),
+    wrap((req) => reg.import(req.user!, bytesOf(req), { url: str(req.query.url), source_url: str(req.query.source_url), licence: str(req.query.licence) })),
+  );
   r.post('/keys/rotate', requireRole('platform-admin'), wrap(() => reg.keys.rotate()));
   return r;
 }

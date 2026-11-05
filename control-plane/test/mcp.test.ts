@@ -1,10 +1,14 @@
-// MCP catalog and audience-scoped token exchange (add-core-tools-and-mcp tasks 4.1-4.5; control-plane/mcp-catalog,
+// MCP catalog (add-core-tools-and-mcp tasks 4.1-4.5, use-idp-tokens-for-mcp tasks 1.1-1.3; control-plane/mcp-catalog,
 // control-plane/identity).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { createLocalJWKSet, decodeJwt, decodeProtectedHeader, jwtVerify } from 'jose';
-import { CLIENT_ID, PushClient, fakeMcp, register, sleep, startHarness, type Harness } from './helpers.ts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { decodeJwt } from 'jose';
+import { openDb } from '../src/db.ts';
+import { PushClient, fakeMcp, register, sleep, startHarness, type Harness } from './helpers.ts';
 
 const BASE = '/api/v1/admin/mcp';
 
@@ -83,18 +87,17 @@ test('mcp catalog: a remote entry is discovered, versioned, audited and delivere
     assert.equal(created.status, 200, JSON.stringify(created.body));
     assert.equal(created.body.enabled, true);
     assert.equal(created.body.discovery.status, 'ok');
-    assert.equal(created.body.audience, mcp.url, 'the audience defaults to the URL');
+    assert.equal(created.body.auth, 'user-token', 'remote entries present the user token by default');
+    assert.equal(created.body.audience, undefined);
     assert.deepEqual(created.body.tools.map((t: any) => [t.name, t.status]), [['delete_issue', 'baseline'], ['get_issue', 'baseline'], ['search_issues', 'baseline']]);
 
-    // Discovery presented a short-lived token for the entry's audience with the discovery subject.
-    const disc = decodeJwt(mcp.authorizations[0]!.replace(/^Bearer /, ''));
-    assert.equal(disc.sub, 'workbench-catalog-discovery');
-    assert.equal(disc.aud, mcp.url);
-    assert.ok(disc.exp! - disc.iat! <= 60);
+    // Discovery presented the administrator's own identity-provider token on every request.
+    assert.ok(mcp.authorizations.length >= 2);
+    for (const a of mcp.authorizations) assert.equal(a, `Bearer ${admin}`);
 
     const [jira] = await mcpServers(h, 'dev1');
     assert.deepEqual(jira, {
-      id: 'jira-corp', name: 'Jira', kind: 'remote', spec_version: '2025-06-18', url: mcp.url, auth: 'audience-token', audience: mcp.url,
+      id: 'jira-corp', name: 'Jira', kind: 'remote', spec_version: '2025-06-18', url: mcp.url, auth: 'user-token',
       include_tools: [], exclude_tools: ['delete_issue'], risk: { search_issues: 'read' },
     });
     assert.equal((await mcpServers(h, 'pow1')).length, 0, 'another Group does not see the entry');
@@ -104,7 +107,8 @@ test('mcp catalog: a remote entry is discovered, versioned, audited and delivere
     const conf = await h.call('POST', `${BASE}/servers`, admin, { id: 'confluence-corp', owner: 'it-tools', kind: 'remote', url: mcp.url, auth: 'none', groups: ['power-users'] });
     assert.equal(conf.status, 200);
     assert.deepEqual((await mcpServers(h, 'both1')).map((s) => s.id), ['confluence-corp', 'jira-corp']);
-    assert.equal((await mcpServers(h, 'both1'))[0].audience, undefined, 'auth none has no audience');
+    assert.equal((await mcpServers(h, 'both1'))[0].auth, 'none');
+    assert.equal(mcp.authorizations.at(-1), undefined, 'auth none sends no token');
 
     // Tool Risk Annotations reach the next bundle.
     const annotated = await h.call('PUT', `${BASE}/servers/jira-corp`, admin, { risk: { search_issues: 'read', get_issue: 'read' } });
@@ -273,64 +277,53 @@ test('mcp catalog: a catalog edit reaches a connected client of the affected Gro
   }
 });
 
-test('token exchange: an assigned audience is granted, others are refused and audited, and key rotation keeps tokens valid', async () => {
+test('identity-provider tokens only: no token exchange, no token keys, and re-discovery presents the calling admin token', async () => {
   const mcp = await fakeMcp();
   mcp.tools = [{ name: 'search_issues' }];
-  const h = await startHarness((c) => (insecure(c), (c.identity.mcpAudiences = ['https://static.example.test'])));
+  const h = await startHarness(insecure);
   try {
-    const { admin, assign } = await setup(h);
-    await assign('dev1', 'developers');
-    await h.call('POST', `${BASE}/servers`, admin, { id: 'jira-corp', owner: 'it', kind: 'remote', url: mcp.url, audience: 'api://jira-corp', groups: ['developers'] });
-    await h.call('POST', `${BASE}/servers`, admin, { id: 'hr-corp', owner: 'it', kind: 'remote', url: mcp.url, audience: 'api://hr-corp', groups: ['hr'] });
+    const { admin } = await setup(h);
+    const dev = await h.token('dev1');
+    assert.equal((await h.call('POST', '/api/v1/identity/token-exchange', dev, { audience: 'api://jira-corp' })).status, 404);
+    assert.equal((await h.call('GET', '/.well-known/workbench-token-keys.json', null)).status, 404);
+    assert.equal((await h.call('POST', '/api/v1/admin/identity/token-keys/rotate', admin)).status, 404);
 
-    const presented = await h.token('dev1', {}, { lifetimeS: 200 });
-    const presentedExp = decodeJwt(presented).exp!;
-    const ex = await h.call('POST', '/api/v1/identity/token-exchange', presented, { audience: 'api://jira-corp' });
-    assert.equal(ex.status, 200, JSON.stringify(ex.body));
-    const keys = async () => createLocalJWKSet((await h.call('GET', '/.well-known/workbench-token-keys.json', null)).body);
-    const wellKnown = (await h.call('GET', '/.well-known/workbench-token-keys.json', null)).body;
-    assert.equal(wellKnown.keys.length, 2, 'current and next keys are published');
-    const { payload } = await jwtVerify(ex.body.access_token, await keys(), { issuer: h.cp.tokens.issuer, audience: 'api://jira-corp' });
-    assert.equal(payload.aud, 'api://jira-corp', 'the server is the only audience');
-    assert.equal(payload.sub, decodeJwt(presented).sub);
-    assert.ok(payload.exp! <= presentedExp);
-    // The keys are not the policy keys.
-    const policyKids = (await h.call('GET', '/.well-known/policy-keys.json', null)).body.keys.map((k: any) => k.kid);
-    assert.ok(!policyKids.includes(decodeProtectedHeader(ex.body.access_token).kid));
+    const old = await h.call('POST', `${BASE}/servers`, admin, { id: 'jira-corp', owner: 'it', kind: 'remote', url: mcp.url, auth: 'audience-token' });
+    assert.equal(old.status, 400);
+    assert.equal(old.body.error.field, 'auth');
 
-    assert.equal((await h.call('POST', '/api/v1/identity/token-exchange', presented, { audience: 'https://static.example.test' })).status, 200);
-    const refused = await h.call('POST', '/api/v1/identity/token-exchange', presented, { audience: 'api://hr-corp' });
-    assert.equal(refused.status, 403);
-    const refusals = h.cp.audit.query({ action: 'identity.token-exchange', outcome: 'refused' }) as any[];
-    assert.equal(refusals.length, 1);
-    assert.equal(refusals[0].user_name, 'dev1');
-    assert.equal(refusals[0].details.audience, 'api://hr-corp');
-
-    // A disabled entry's audience is no longer granted.
-    await h.call('PUT', `${BASE}/servers/jira-corp`, admin, { enabled: false });
-    assert.equal((await h.call('POST', '/api/v1/identity/token-exchange', presented, { audience: 'api://jira-corp' })).status, 403);
-    await h.call('PUT', `${BASE}/servers/jira-corp`, admin, { enabled: true });
-
-    // A token whose authorized party is not an allowed client: 401 and audited.
-    const foreign = await h.token('dev1', { azp: 'some-other-app' });
-    const bad = await h.call('POST', '/api/v1/identity/token-exchange', foreign, { audience: 'api://jira-corp' });
-    assert.equal(bad.status, 401);
-    const idRefusals = h.cp.audit.query({ action: 'identity.refused' }) as any[];
-    assert.ok(idRefusals.some((a: any) => /some-other-app/.test(a.reason) && a.details?.path === '/token-exchange'), JSON.stringify(idRefusals));
-    assert.notEqual(CLIENT_ID, 'some-other-app');
-
-    // Rotation: the old token still verifies, new tokens use the promoted key.
-    const oldKid = decodeProtectedHeader(ex.body.access_token).kid;
-    assert.equal((await h.call('POST', '/api/v1/admin/identity/token-keys/rotate', await h.token('dev1'))).status, 403);
-    const rot = await h.call('POST', '/api/v1/admin/identity/token-keys/rotate', admin);
-    assert.equal(rot.status, 200);
-    assert.equal(rot.body.retired, oldKid);
-    await jwtVerify(ex.body.access_token, await keys(), { issuer: h.cp.tokens.issuer, audience: 'api://jira-corp' });
-    const fresh = await h.call('POST', '/api/v1/identity/token-exchange', presented, { audience: 'api://jira-corp' });
-    assert.equal(decodeProtectedHeader(fresh.body.access_token).kid, rot.body.current);
-    await jwtVerify(fresh.body.access_token, await keys(), { issuer: h.cp.tokens.issuer, audience: 'api://jira-corp' });
+    assert.equal((await h.call('POST', `${BASE}/servers`, admin, { id: 'jira-corp', owner: 'it', kind: 'remote', url: mcp.url })).status, 200);
+    await h.call('POST', '/api/v1/admin/identity/admin-roles', admin, { user_name: 'admin2', role: 'platform-admin' });
+    const admin2 = await h.token('admin2');
+    mcp.authorizations.length = 0;
+    const again = await h.call('POST', `${BASE}/servers/jira-corp/discover`, admin2);
+    assert.equal(again.body.discovery.status, 'ok', JSON.stringify(again.body));
+    assert.ok(mcp.authorizations.length > 0);
+    for (const a of mcp.authorizations) assert.equal(a, `Bearer ${admin2}`);
   } finally {
     await h.close();
     await mcp.close();
+  }
+});
+
+test('migration: stored audience-token entries become user-token without an audience, and the token keys are deleted', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wb-mcp-migration-'));
+  try {
+    const path = join(dir, 'cp.db');
+    let db = openDb(path);
+    const entry = { id: 'jira-corp', name: 'Jira', owner: 'it', kind: 'remote', spec_version: '2025-06-18', url: 'https://jira.example.test/mcp', auth: 'audience-token', audience: 'api://jira', args: [], env: {}, include_tools: [], exclude_tools: [], risk: {} };
+    db.prepare("INSERT INTO mcp_servers (id, entry, enabled, discovery_status, updated_by, updated_at) VALUES ('jira-corp', ?, 1, 'ok', 'admin1', 'now')").run(JSON.stringify(entry));
+    db.prepare("INSERT INTO service_signing_keys (kid, purpose, state, private_jwk, public_jwk, created_at) VALUES ('k', 'mcp-token', 'current', '{}', '{}', 'now')").run();
+    db.prepare('UPDATE schema_version SET version = version - 1').run();
+    db.close();
+    db = openDb(path);
+    const migrated = JSON.parse((db.prepare("SELECT entry FROM mcp_servers WHERE id = 'jira-corp'").get() as { entry: string }).entry);
+    assert.equal(migrated.auth, 'user-token');
+    assert.equal(migrated.audience, undefined);
+    assert.equal(migrated.url, entry.url);
+    assert.equal((db.prepare("SELECT COUNT(*) AS n FROM service_signing_keys WHERE purpose = 'mcp-token'").get() as { n: number }).n, 0);
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

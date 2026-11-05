@@ -2,6 +2,7 @@
 // (control-plane/mcp-catalog Catalog Administration, platform-admin only).
 import express, { Router, type NextFunction, type Request, type Response } from 'express';
 import { sendError, str } from '../http.ts';
+import { bearer } from '../identity/identity.ts';
 import type { McpCatalog } from './catalog.ts';
 
 const wrap =
@@ -33,12 +34,12 @@ export function mcpAdminRoutes(catalog: McpCatalog, maxPackageBytes: number): Ro
   const r = Router();
   const body = (req: Request) => (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body) ? (req.body as Record<string, unknown>) : {});
   r.get('/servers', wrap(() => catalog.list()));
-  r.post('/servers', wrap((req) => catalog.create(req.user!, body(req))));
+  r.post('/servers', wrap((req) => catalog.create(req.user!, body(req), bearer(req))));
   r.get('/servers/:id', wrap((req) => catalog.get(String(req.params.id))));
-  r.put('/servers/:id', wrap((req) => catalog.update(req.user!, String(req.params.id), body(req))));
+  r.put('/servers/:id', wrap((req) => catalog.update(req.user!, String(req.params.id), body(req), bearer(req))));
   r.delete('/servers/:id', wrap((req) => catalog.remove(req.user!, String(req.params.id))));
   r.get('/servers/:id/versions', wrap((req) => catalog.versions(String(req.params.id))));
-  r.post('/servers/:id/discover', wrap((req) => catalog.rediscover(req.user!, String(req.params.id))));
+  r.post('/servers/:id/discover', wrap((req) => catalog.rediscover(req.user!, String(req.params.id), bearer(req))));
   r.put('/servers/:id/tools/:tool', wrap((req) => catalog.decideTool(req.user!, String(req.params.id), String(req.params.tool), body(req).decision)));
   r.get('/packages', wrap(() => catalog.listPackages()));
   r.put(

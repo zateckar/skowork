@@ -160,8 +160,18 @@ std::variant<Parsed, ParseError> parse_skill_md(std::string_view text, bool requ
     if (!desc || desc->empty()) return err("description", "SKILL.md needs a description.");
     if (desc->size() > 1024) return err("description", "The description is longer than 1024 characters.");
     m.description = *desc;
-    const auto version = scalar("version");
+    auto version = scalar("version");
     if (!version) return err("version", "The version must be a single value.");
+    // agentskills.io packages declare it as metadata.version.
+    if (version->empty() && f.contains("metadata") && f["metadata"].is_object()) {
+        const json& meta = f["metadata"];
+        if (meta.contains("version") && meta["version"].is_string()) {
+            std::string s = meta["version"].get<std::string>();
+            s.erase(0, s.find_first_not_of(" \t\r\n"));
+            s.erase(s.find_last_not_of(" \t\r\n") + 1);
+            version = s;
+        }
+    }
     if (version->empty()) {
         if (require_version) return err("version", "SKILL.md needs a version (semantic, for example 1.0.0).");
     } else {

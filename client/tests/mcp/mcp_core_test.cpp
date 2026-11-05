@@ -99,7 +99,8 @@ TEST(McpProtocol, CatalogEntriesAreValidated) {
     const std::string sha(64, 'a');
     std::vector<std::string> problems;
     const json servers = json::array({
-        {{"id", "jira-corp"}, {"name", "Jira"}, {"kind", "remote"}, {"url", "https://jira.example/mcp"}, {"auth", "audience-token"}},
+        {{"id", "jira-corp"}, {"name", "Jira"}, {"kind", "remote"}, {"url", "https://jira.example/mcp"}, {"auth", "user-token"}},
+        {{"id", "old-auth"}, {"kind", "remote"}, {"url", "https://x"}, {"auth", "audience-token"}},
         {{"id", "local-tool"}, {"kind", "local"}, {"package", sha}, {"args", {"bin\\server.exe", "--stdio"}}, {"env", {{"MODE", "ro"}}}},
         {{"id", "evil"}, {"kind", "local"}, {"package", sha}, {"args", {"..\\..\\cmd.exe"}}},
         {{"id", "abs"}, {"kind", "local"}, {"package", sha}, {"args", {"C:\\Windows\\cmd.exe"}}},
@@ -109,9 +110,9 @@ TEST(McpProtocol, CatalogEntriesAreValidated) {
     });
     const auto entries = parse_entries(&servers, &problems);
     ASSERT_EQ(entries.size(), 2u);
-    EXPECT_EQ(entries[0].audience, "https://jira.example/mcp");  // the URL when no audience is given
+    EXPECT_EQ(entries[0].auth, "user-token");
     EXPECT_EQ(entries[1].env.size(), 1u);
-    EXPECT_EQ(problems.size(), 5u);
+    EXPECT_EQ(problems.size(), 6u);  // audience-token is no longer an authentication mode
     EXPECT_TRUE(safe_relative_path("bin/server.exe"));
     EXPECT_FALSE(safe_relative_path("/server.exe"));
     EXPECT_FALSE(safe_relative_path("a/./b"));

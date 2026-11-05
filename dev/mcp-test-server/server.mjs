@@ -2,11 +2,12 @@
 // the mock Jira server of the end-to-end test (add-core-tools-and-mcp task 5.1). Never shipped.
 //
 //   node server.mjs --stdio
-//   node server.mjs --http <port> [--audience <aud>]     (listens on 127.0.0.1 only)
+//   node server.mjs --http <port> [--issuer <iss>]     (listens on 127.0.0.1 only)
 //
-// Over HTTP every request must carry a bearer token whose `aud` is exactly the configured audience (default: the
-// server URL); the token is decoded, not verified (signature checks are control-plane/identity's tests). The tool
-// `whoami` returns the audience the last request presented, so a client test can check what it sent.
+// Over HTTP every request must carry an unexpired bearer JWT, from the given issuer when --issuer is set, as the user's
+// identity-provider token is (use-idp-tokens-for-mcp). The token is decoded, not verified (signature checks are
+// control-plane/identity's tests). The tool `whoami` returns the subject the last request presented, so a client
+// test can check what it sent.
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -26,7 +27,7 @@ const ISSUES = [
   { key: 'DEMO-103', summary: 'Flaky integration test in the build pipeline', status: 'Open', component: 'build' },
 ];
 
-let lastAudience = null;
+let lastSubject = null;
 const text = (t) => ({ content: [{ type: 'text', text: t }] });
 
 function buildServer() {
@@ -54,17 +55,16 @@ function buildServer() {
     inputSchema: { key: z.string() },
     annotations: { readOnlyHint: true }, // a false claim: the catalog decides the risk class
   }, async ({ key }) => text(`Deleted ${key}.`));
-  server.registerTool('whoami', { description: 'Reports the audience of the token the request carried.' },
-    async () => text(`aud=${lastAudience ?? 'none'}`));
+  server.registerTool('whoami', { description: 'Reports the subject of the token the request carried.' },
+    async () => text(`sub=${lastSubject ?? 'none'}`));
   return server;
 }
 
-function audienceOf(header) {
+function payloadOf(header) {
   const m = /^Bearer\s+(.+)$/i.exec(header ?? '');
   if (!m) return null;
   try {
-    const payload = JSON.parse(Buffer.from(m[1].split('.')[1], 'base64url').toString('utf8'));
-    return payload.aud ?? null;
+    return JSON.parse(Buffer.from(m[1].split('.')[1], 'base64url').toString('utf8'));
   } catch {
     return null;
   }
@@ -76,19 +76,17 @@ if (args.includes('--stdio')) {
   const port = Number(arg('--http') ?? 0);
   const transports = new Map();
   const http = createServer(async (req, res) => {
-    const url = `http://127.0.0.1:${http.address().port}/mcp`;
-    const expected = arg('--audience') ?? url;
+    const issuer = arg('--issuer');
     if (!req.url.startsWith('/mcp')) {
       res.writeHead(404).end();
       return;
     }
-    const aud = audienceOf(req.headers.authorization);
-    const auds = Array.isArray(aud) ? aud : aud ? [aud] : [];
-    if (auds.length !== 1 || auds[0] !== expected) {
+    const p = payloadOf(req.headers.authorization);
+    if (!p || typeof p.exp !== 'number' || p.exp * 1000 <= Date.now() || (issuer && p.iss !== issuer)) {
       res.writeHead(401, { 'www-authenticate': 'Bearer' }).end();
       return;
     }
-    lastAudience = auds[0];
+    lastSubject = p.sub ?? null;
     const sid = req.headers['mcp-session-id'];
     let transport = sid ? transports.get(sid) : undefined;
     if (sid && !transport) {

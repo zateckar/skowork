@@ -62,7 +62,7 @@ export function Mcp() {
           <Field label="Id"><input name="id" placeholder="jira-corp" required /></Field>
           <Field label="Owner"><input name="owner" required /></Field>
           <Field label="URL" grow><input name="url" placeholder="https://…/mcp" required /></Field>
-          <Field label="Authentication"><select name="auth"><option value="none">none</option><option value="audience-token">audience token</option></select></Field>
+          <Field label="Authentication"><select name="auth"><option value="user-token">user's sign-in token</option><option value="none">none</option></select></Field>
           <Field label="Groups (comma-separated)" grow><input name="groups" /></Field>
           <button>Add</button>
         </Form>

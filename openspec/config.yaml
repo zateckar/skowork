@@ -69,6 +69,9 @@ context: |
     plane accepts the desktop client's access tokens (issuer, authorized party and audience checked).
     Tokens carry no group claim: Groups come from the token's roles where present and from Group
     membership administered in the control plane.
+    Every application trusts only this identity provider: no Workbench component issues tokens or
+    identities for other services, and calls to other services (for example MCP servers) carry the
+    user's own access token. (Decided 2026-11-05; use-idp-tokens-for-mcp.)
   - CI/CD: GitHub Actions. Two release artifacts: the control plane as a container image and the
     desktop client as a zip package. (Decided 2026-10-22.) Both are published for every version
     tag, and as a dev build for every change on main. (Decided 2026-11-04; add-client-foundation D9.)
@@ -180,6 +183,7 @@ context: |
   29 improve-deployment-guidance      [Hardening]
   30 simplify-secret-key              [Hardening]
   31 keep-sign-in-response-on-root    [Hardening]
+  32 use-idp-tokens-for-mcp           [Hardening]
 
 rules:
   proposal:

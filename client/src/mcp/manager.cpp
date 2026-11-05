@@ -566,9 +566,13 @@ Result<std::unique_ptr<Transport>> McpManager::open_remote(const ServerPtr& s) {
     o.url = e.url;
     o.client = env_.http ? env_.http : &http();
     o.guard = env_.guard;
-    if (e.auth == "audience-token") {
-        const std::string audience = e.audience;
-        o.token = [this, audience](bool force) { return audience_token(audience, force); };
+    if (e.auth == "user-token") {
+        o.token = [this](bool force) -> Result<std::string> {
+            if (!env_.user_token) return make_error("unauthorized", "no access token");
+            auto t = env_.user_token(force);
+            if (!t) return make_error("unauthorized", "no access token for the MCP server: " + t.error().message);
+            return t;
+        };
     }
     return std::unique_ptr<Transport>(std::make_unique<HttpTransport>(std::move(o)));
 }
@@ -591,23 +595,6 @@ Result<std::string> McpManager::verified_package(const ServerEntry& e) {
     }
     if (!write_file_atomic(file, *fetched)) log::warn(kLog, "server " + e.id + ": the package could not be stored");
     return std::move(*fetched);
-}
-
-Result<std::string> McpManager::audience_token(const std::string& audience, bool force) {
-    const long long now = unix_millis_now() / 1000;
-    {
-        const std::lock_guard lock(tokens_mx_);
-        const auto it = tokens_.find(audience);
-        if (!force && it != tokens_.end() && it->second.second - 60 > now) return it->second.first;
-    }
-    if (!env_.exchange_token) return make_error("unauthorized", "no token exchange");
-    auto t = env_.exchange_token(audience);
-    if (!t) return make_error("unauthorized", "no token for the MCP server: " + t.error().message);
-    long long exp = t->second;
-    if (exp > 100000000000LL) exp /= 1000;  // milliseconds
-    const std::lock_guard lock(tokens_mx_);
-    tokens_[audience] = {t->first, exp};
-    return t->first;
 }
 
 // ---- Lifecycle ------------------------------------------------------------------------------------------------------

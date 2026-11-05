@@ -71,7 +71,7 @@ struct HttpTransportOptions {
     std::string url;
     HttpClient* client = nullptr;
     const policy::EgressGuard* guard = nullptr;
-    // The bearer token for the server (audience-scoped); `force` asks for a fresh one after a 401. Unset: no
+    // The bearer token for the server (the user's access token); `force` asks for a fresh one after a 401. Unset: no
     // Authorization header (auth "none").
     std::function<Result<std::string>(bool force)> token;
 };

@@ -2,6 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { createLocalJWKSet, jwtVerify } from 'jose';
 import { PushClient, register, sleep, startHarness, type Harness } from './helpers.ts';
 import { writeZip } from '../src/skills/zip.ts';
@@ -217,8 +219,6 @@ test('skills: public import goes to org review with source and licence, platform
     assert.equal((await upload(h, '/api/v1/admin/skills/import?source_url=https://agentskills.io/pdf-tools&licence=Apache-2.0', rita, bytes)).status, 403);
     const http = await upload(h, '/api/v1/admin/skills/import?source_url=http://agentskills.io/x&licence=MIT', admin, bytes);
     assert.equal(http.body.error.field, 'source_url');
-    const noLicence = await upload(h, '/api/v1/admin/skills/import?source_url=https://agentskills.io/pdf-tools', admin, bytes);
-    assert.equal(noLicence.body.error.field, 'licence');
     const imp = await upload(h, '/api/v1/admin/skills/import?source_url=https://agentskills.io/pdf-tools&licence=Apache-2.0', admin, bytes);
     assert.equal(imp.status, 200, JSON.stringify(imp.body));
     assert.equal(imp.body.state, 'in-review');
@@ -228,7 +228,55 @@ test('skills: public import goes to org review with source and licence, platform
     // The import counts as the importer's: admin1 cannot approve it, a reviewer can.
     assert.equal((await h.call('POST', `/api/v1/admin/skills/versions/${imp.body.id}/approve`, admin, {})).body.error.code, 'SELF_REVIEW');
     assert.equal((await h.call('POST', `/api/v1/admin/skills/versions/${imp.body.id}/approve`, rita, {})).body.state, 'published');
+
+    // One source only; the licence may come from SKILL.md; downloads need HTTPS.
+    const both = await upload(h, '/api/v1/admin/skills/import?url=https://agentskills.io/pdf-tools.zip&licence=MIT', admin, bytes);
+    assert.equal(both.body.error.field, 'url');
+    const neither = await h.call('POST', '/api/v1/admin/skills/import?licence=MIT', admin);
+    assert.equal(neither.body.error.field, 'url');
+    assert.equal((await h.call('POST', '/api/v1/admin/skills/import?url=http://agentskills.io/x.zip', admin)).body.error.field, 'url');
+    const fromMd = await upload(h, '/api/v1/admin/skills/import', admin, zip({ 'SKILL.md': skillMd('pdf-tools', '2.1.0', 'license: Apache-2.0\n') }));
+    assert.equal(fromMd.status, 200, JSON.stringify(fromMd.body));
+    assert.equal(fromMd.body.licence, 'Apache-2.0');
+    assert.equal(fromMd.body.source_url, null);
+    const noLicenceAnywhere = await upload(h, '/api/v1/admin/skills/import', admin, zip({ 'SKILL.md': skillMd('pdf-tools', '2.2.0') }));
+    assert.equal(noLicenceAnywhere.body.error.field, 'licence');
   } finally {
+    await h.close();
+  }
+});
+
+test('skills: public import downloads the package from a URL, with redirects and the size limit', async () => {
+  const h = await startHarness((c) => ((c.skills.allowInsecureDownload = true), (c.skills.maxPackageBytes = 64 * 1024)));
+  // The layout and frontmatter of an agentskills.io package: version under metadata, license at the top.
+  const md = '---\nname: "competitor-alternatives"\ndescription: "Builds comparison pages."\nlicense: MIT\nmetadata:\n  version: 1.0.0\n  author: A. Author\n---\n# Pages\n';
+  const pkg = zip({ 'competitor-alternatives/SKILL.md': md, 'competitor-alternatives/references/templates.md': 'templates' });
+  const served = await new Promise<{ url: string; close: () => void }>((resolve) => {
+    const s = createServer((req, res) => {
+      if (req.url === '/skill.zip') return void res.writeHead(200, { 'content-type': 'application/zip' }).end(pkg);
+      if (req.url === '/moved') return void res.writeHead(302, { location: '/skill.zip' }).end();
+      if (req.url === '/loop') return void res.writeHead(302, { location: '/loop' }).end();
+      if (req.url === '/big') return void res.writeHead(200).end(Buffer.alloc(70 * 1024, 1));
+      res.writeHead(404).end();
+    });
+    s.listen(0, '127.0.0.1', () => resolve({ url: `http://127.0.0.1:${(s.address() as AddressInfo).port}`, close: () => s.close() }));
+  });
+  try {
+    const { admin } = await setup(h);
+    const imp = await h.call('POST', `/api/v1/admin/skills/import?url=${encodeURIComponent(`${served.url}/moved`)}`, admin);
+    assert.equal(imp.status, 200, JSON.stringify(imp.body));
+    assert.equal(imp.body.name, 'competitor-alternatives');
+    assert.equal(imp.body.version, '1.0.0');
+    assert.equal(imp.body.licence, 'MIT');
+    assert.equal(imp.body.source_url, `${served.url}/moved`);
+    assert.equal(imp.body.state, 'in-review');
+    const missing = await h.call('POST', `/api/v1/admin/skills/import?url=${encodeURIComponent(`${served.url}/gone`)}`, admin);
+    assert.equal(missing.status, 400);
+    assert.match(missing.body.error.message, /HTTP 404/);
+    assert.match((await h.call('POST', `/api/v1/admin/skills/import?url=${encodeURIComponent(`${served.url}/loop`)}`, admin)).body.error.message, /too many redirects/);
+    assert.equal((await h.call('POST', `/api/v1/admin/skills/import?url=${encodeURIComponent(`${served.url}/big`)}`, admin)).status, 413);
+  } finally {
+    served.close();
     await h.close();
   }
 });
