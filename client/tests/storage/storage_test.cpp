@@ -887,6 +887,147 @@ INSERT INTO knowledge_support_evidence(support_id,evidence_id) VALUES(1,1);
     EXPECT_FALSE(store.bind_analysis_evidence(1, {1, 0, 7}, *generation));
 }
 
+TEST(Database, SourceRevisionKeepsUnchangedEvidenceAndIndependentSupport) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get_or_create("revisions.db");
+    ASSERT_TRUE(key);
+    auto migrations = knowledge::kg_migrations();
+    migrations.push_back({5, knowledge::kg_evidence_migration_sql()});
+    MigrationOutcome outcome;
+    auto db = open_and_migrate_consistently(root->file("revisions.db"), *key, migrations, outcome, knowledge::register_kg_writer);
+    ASSERT_TRUE(db) << db.error().message;
+    ASSERT_FALSE(outcome.degraded) << outcome.failure;
+    knowledge::KgStore store(std::move(*db));
+    const auto put = [&](const std::string& ext, const std::string& hash, std::vector<knowledge::Chunk> chunks) {
+        knowledge::ItemInput in;
+        in.source = "files";
+        in.ext_id = ext;
+        in.title = ext;
+        in.hash = hash;
+        in.updated_at = 1000;
+        in.chunks = std::move(chunks);
+        auto id = store.put_item(in, 2000);
+        EXPECT_TRUE(id) << (id ? "" : id.error().message);
+        return id ? *id : 0;
+    };
+    const auto number = [&](const std::string& sql) -> long long {
+        auto s = store.db().prepare(sql);
+        return s.step() ? s.col_int(0) : -1;
+    };
+    const auto text = [&](const std::string& sql) {
+        auto s = store.db().prepare(sql);
+        return s.step() ? s.col_text(0) : std::string("<none>");
+    };
+    const std::string starts = "Project Atlas starts on 1 May.", budget = "Budget is approved.";
+    const long long a = put("a", "h1", {{"", starts, 0}, {"", budget, 0}});
+    const long long b = put("b", "h1", {{"", "Atlas kicks off on 1 May.", 0}});
+    ASSERT_TRUE(a && b);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_revisions WHERE current=1 AND sequence=1"), 2);
+    const long long a_starts = number("SELECT id FROM chunks WHERE item_id=" + std::to_string(a) + " AND ord=0");
+    const long long a_budget = number("SELECT id FROM chunks WHERE item_id=" + std::to_string(a) + " AND ord=1");
+    const long long b_starts = number("SELECT id FROM chunks WHERE item_id=" + std::to_string(b));
+    const long long atlas = store.resolve_entity("project", "Atlas", "", 1), may = store.resolve_entity("date", "1 May", "", 1);
+    ASSERT_TRUE(atlas && may);
+
+    // Two Sources state one fact; a repeated finding from the same passage adds no second support.
+    ASSERT_TRUE(store.add_relation(atlas, "starts", may, 0.9, "2026", "", a_starts));
+    ASSERT_TRUE(store.add_relation(atlas, "starts", may, 0.9, "2026", "", a_starts));
+    ASSERT_TRUE(store.add_relation(atlas, "starts", may, 0.9, "2026", "", b_starts));
+    ASSERT_TRUE(store.add_relation(atlas, "budget", may, 0.9, "2026", "", a_budget));
+    ASSERT_TRUE(store.add_relation(atlas, "reports_to", may, 1.0, "", "", 0));
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_facts"), 2);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state='unverified' AND legacy_relation_id IS NOT NULL"), 3);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_evidence WHERE precision='passage'"), 3);
+    const long long starts_fact = number("SELECT id FROM knowledge_facts WHERE predicate='starts'");
+    const long long budget_fact = number("SELECT id FROM knowledge_facts WHERE predicate='budget'");
+    const std::string active = " AND state IN ('current','unverified')";
+
+    // An exact excerpt and an automatic category on the passage that will change; an explicit support, an exact
+    // excerpt and an automatic category on the passage that will only move.
+    auto generation = store.knowledge_generation();
+    ASSERT_TRUE(generation);
+    auto changing = store.bind_analysis_evidence(starts_fact, {a_starts, 0, 13}, *generation);
+    ASSERT_TRUE(changing) << changing.error().message;
+    auto projects = store.create_category("Projects");
+    ASSERT_TRUE(projects);
+    ASSERT_TRUE(store.set_category_assignment(starts_fact, *projects, "automatic", "names a project", changing->evidence_id,
+                                               store.knowledge_generation()));
+    ASSERT_TRUE(store.db().exec(
+        "INSERT INTO knowledge_evidence(id,revision_id,chunk_id,excerpt,precision,byte_start,byte_end) "
+        "SELECT 900,v.id," + std::to_string(a_budget) + ",'Budget','exact',0,6 FROM knowledge_revisions v WHERE v.item_id=" +
+        std::to_string(a) + ";"
+        "INSERT INTO knowledge_support_sets(id,fact_id,state) VALUES(900," + std::to_string(budget_fact) + ",'current');"
+        "INSERT INTO knowledge_support_evidence(support_id,evidence_id) VALUES(900,900);"));
+    ASSERT_TRUE(store.set_category_assignment(budget_fact, *projects, "automatic", "a project budget", 900, store.knowledge_generation()));
+    ASSERT_TRUE(store.add_fact(atlas, "Atlas is the internal name.", "", 1, "files", "a"));
+
+    // Checking the same content again creates no revision and changes no support.
+    generation = store.knowledge_generation();
+    ASSERT_EQ(put("a", "h1", {{"", starts, 0}, {"", budget, 0}}), a);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_revisions WHERE item_id=" + std::to_string(a)), 1);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE 1=1" + active), 4);
+
+    // The revision moves the budget passage unchanged and replaces the passage that stated the start.
+    ASSERT_EQ(put("a", "h2", {{"", budget, 0}, {"", "Project Atlas starts on 1 June.", 0}}), a);
+    EXPECT_GT(*store.knowledge_generation(), *generation);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_revisions WHERE item_id=" + std::to_string(a)), 2);
+    EXPECT_EQ(text("SELECT source_hash||':'||sequence FROM knowledge_revisions WHERE current=1 AND item_id=" + std::to_string(a)), "h2:2");
+    const std::string current_a = "(SELECT id FROM knowledge_revisions WHERE current=1 AND item_id=" + std::to_string(a) + ")";
+    // The explicit support stays current on the new revision, with its excerpt and its automatic category.
+    EXPECT_EQ(text("SELECT state FROM knowledge_support_sets WHERE id=900"), "current");
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_evidence se JOIN knowledge_evidence e ON e.id=se.evidence_id "
+                     "WHERE se.support_id=900 AND e.excerpt='Budget' AND e.chunk_id=" + std::to_string(a_budget) +
+                     " AND e.revision_id=" + current_a),
+              1);
+    auto kept = store.category_assignments(budget_fact);
+    ASSERT_EQ(kept.size(), 1u);
+    EXPECT_EQ(kept[0].decision, "automatic");
+    EXPECT_TRUE(store.set_category_assignment(budget_fact, *projects, "automatic", "still a project budget",
+                                              number("SELECT evidence_id FROM knowledge_support_evidence WHERE support_id=900"),
+                                              store.knowledge_generation()));
+    // The previous revision keeps its own excerpt as history.
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_evidence WHERE id=900 AND revision_id<>" + current_a), 1);
+    // Extraction cannot tell which passages a finding relied on, so the moved passage's finding awaits a recheck.
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE legacy_relation_id IS NULL AND state='unsupported' AND fact_id=" +
+                     std::to_string(budget_fact)),
+              1);
+    EXPECT_EQ(number("SELECT count(*) FROM extract_queue WHERE chunk_id=" + std::to_string(a_budget)), 1);
+    // The replaced passage no longer supports the start; the other Source still does.
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE fact_id=" + std::to_string(starts_fact) + active), 1);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets s JOIN knowledge_support_evidence se ON se.support_id=s.id "
+                     "JOIN knowledge_evidence e ON e.id=se.evidence_id WHERE s.fact_id=" + std::to_string(starts_fact) + active +
+                     " AND e.chunk_id=" + std::to_string(b_starts)),
+              1);
+    EXPECT_TRUE(store.category_assignments(starts_fact).empty());
+    generation = store.knowledge_generation();
+    EXPECT_FALSE(store.bind_analysis_evidence(starts_fact, {a_starts, 0, 13}, *generation));
+    // The correction follows the item to its current revision.
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_annotations WHERE revision_id=" + current_a), 1);
+
+    // Extraction finds the budget again in the moved passage and the start in the new one.
+    const long long supports = number("SELECT count(*) FROM knowledge_support_sets");
+    ASSERT_TRUE(store.add_relation(atlas, "budget", may, 0.9, "2026", "", a_budget));
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets"), supports);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE fact_id=" + std::to_string(budget_fact) + active), 2);
+    const long long a_new = number("SELECT id FROM chunks WHERE item_id=" + std::to_string(a) + " AND ord=1");
+    ASSERT_NE(a_new, a_starts);
+    ASSERT_TRUE(store.add_relation(atlas, "starts", may, 0.9, "2026", "", a_new));
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE fact_id=" + std::to_string(starts_fact) + active), 2);
+
+    // Forgetting the other Source leaves the fact with the support that remains; forgetting both removes it.
+    ASSERT_TRUE(store.db().exec("DELETE FROM items WHERE id=" + std::to_string(b)));
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE fact_id=" + std::to_string(starts_fact) + active), 1);
+    ASSERT_TRUE(store.db().exec("DELETE FROM items WHERE id=" + std::to_string(a)));
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_facts"), 0);
+    EXPECT_EQ(number("SELECT (SELECT count(*) FROM knowledge_revisions)+(SELECT count(*) FROM knowledge_evidence)+"
+                     "(SELECT count(*) FROM knowledge_support_sets)+(SELECT count(*) FROM knowledge_annotations)"),
+              0);
+}
+
 TEST(Database, KnowledgeConflictDecisionRechecksEvidenceAndForgetsHistory) {
     TempRoot t;
     auto root = DataRoot::open(t.path);

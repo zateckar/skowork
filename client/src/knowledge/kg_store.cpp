@@ -502,6 +502,114 @@ Status delete_orphan_entities(Database& db) {
     return db.exec(sql);
 }
 
+// Versioned evidence (design D6), called inside the transaction that replaces an item's passages and before any
+// passage is dropped. Evidence is immutable, so an unchanged passage's evidence is copied to the replacement
+// revision and every live reference follows the copy. What still references the previous revision when it stops
+// being current is superseded by the schema; the previous rows remain as that revision's history.
+Status advance_revision(Database& db, long long item, const std::string& hash, long long now, bool changed,
+                        const std::vector<long long>& unchanged_chunks) {
+    long long previous = 0;
+    {
+        auto current = db.prepare("SELECT id FROM knowledge_revisions WHERE item_id=?1 AND current=1");
+        current.bind(1, item);
+        if (current.step()) previous = current.col_int(0);
+    }
+    if (previous && !changed) return {};
+    auto insert = db.prepare("INSERT INTO knowledge_revisions(item_id,sequence,source_hash,indexed_at,current) "
+                             "SELECT ?1,ifnull(max(sequence),0)+1,?2,?3,?4 FROM knowledge_revisions WHERE item_id=?1");
+    insert.bind(1, item).bind(2, hash).bind(3, now).bind(4, previous ? 0 : 1);
+    if (Status s = insert.run(); !s) return s;
+    if (!previous) return {};
+    const std::string next = std::to_string(db.last_insert_id()), old = std::to_string(previous);
+    if (!unchanged_chunks.empty()) {
+        if (Status s = db.exec(
+                "INSERT INTO knowledge_evidence(revision_id,chunk_id,excerpt,precision,byte_start,byte_end) "
+                "SELECT " + next + ",e.chunk_id,e.excerpt,e.precision,e.byte_start,e.byte_end FROM knowledge_evidence e "
+                "JOIN chunks c ON c.id=e.chunk_id WHERE e.revision_id=" + old + " AND e.chunk_id IN (" + id_list(unchanged_chunks) + ") "
+                "AND ((e.precision='passage' AND e.excerpt=c.text) OR (e.precision='exact' AND "
+                "substr(CAST(c.text AS BLOB),e.byte_start+1,e.byte_end-e.byte_start)=CAST(e.excerpt AS BLOB)))");
+            !s)
+            return s;
+        const std::string pair = "FROM knowledge_evidence o JOIN knowledge_evidence n ON n.revision_id=" + next +
+                                 " AND n.chunk_id=o.chunk_id AND n.precision=o.precision AND n.byte_start IS o.byte_start"
+                                 " AND n.byte_end IS o.byte_end WHERE o.revision_id=" + old;
+        for (const auto& [table, column] : std::vector<std::pair<std::string, std::string>>{
+                 {"knowledge_support_evidence", "evidence_id"}, {"knowledge_category_assignments", "evidence_id"},
+                 {"knowledge_conflicts", "left_evidence"}, {"knowledge_conflicts", "right_evidence"}}) {
+            if (Status s = db.exec("UPDATE " + table + " SET " + column + "=(SELECT n.id " + pair + " AND o.id=" + table + "." +
+                                   column + ") WHERE " + column + " IN (SELECT o.id " + pair + ")");
+                !s)
+                return s;
+        }
+    }
+    // A correction or user-stated fact belongs to the item, not to one version of its text.
+    if (Status s = db.exec("UPDATE knowledge_annotations SET revision_id=" + next + " WHERE revision_id=" + old); !s) return s;
+    if (Status s = db.exec("UPDATE knowledge_revisions SET current=0 WHERE id=" + old); !s) return s;
+    return db.exec("UPDATE knowledge_revisions SET current=1 WHERE id=" + next);
+}
+
+// Records a newly extracted relation as passage-level, unverified support of its canonical fact, exactly as the
+// migration backfills an existing one: the extractor names one passage, not the exact words or every input.
+Status record_relation_support(Database& db, long long relation, long long subject, const std::string& predicate, long long object,
+                               const std::string& valid_from, const std::string& valid_to, long long chunk_id) {
+    long long revision = 0;
+    std::string text;
+    {
+        auto passage = db.prepare("SELECT v.id,c.text FROM chunks c JOIN knowledge_revisions v ON v.item_id=c.item_id AND v.current=1 "
+                                  "WHERE c.id=?1");
+        passage.bind(1, chunk_id);
+        if (!passage.step()) return make_error("storage", "the passage has no current revision");
+        revision = passage.col_int(0);
+        text = passage.col_text(1);
+    }
+    auto fact_insert = db.prepare("INSERT OR IGNORE INTO knowledge_facts(subject,predicate,object,valid_from,valid_to) VALUES(?1,?2,?3,?4,?5)");
+    fact_insert.bind(1, subject).bind(2, predicate).bind(3, object).bind(4, valid_from).bind(5, valid_to);
+    if (Status s = fact_insert.run(); !s) return s;
+    long long fact = 0, evidence = 0;
+    {
+        auto find = db.prepare("SELECT id FROM knowledge_facts WHERE subject=?1 AND predicate=?2 AND object=?3 AND unit='' AND scope='' "
+                               "AND valid_from=?4 AND valid_to=?5");
+        find.bind(1, subject).bind(2, predicate).bind(3, object).bind(4, valid_from).bind(5, valid_to);
+        if (!find.step()) return make_error("storage", "the fact could not be recorded");
+        fact = find.col_int(0);
+    }
+    auto evidence_insert = db.prepare("INSERT OR IGNORE INTO knowledge_evidence(revision_id,chunk_id,excerpt,precision) VALUES(?1,?2,?3,'passage')");
+    evidence_insert.bind(1, revision).bind(2, chunk_id).bind(3, text);
+    if (Status s = evidence_insert.run(); !s) return s;
+    {
+        auto find = db.prepare("SELECT id FROM knowledge_evidence WHERE revision_id=?1 AND chunk_id=?2 AND precision='passage'");
+        find.bind(1, revision).bind(2, chunk_id);
+        if (!find.step()) return make_error("storage", "the evidence could not be recorded");
+        evidence = find.col_int(0);
+    }
+    // A duplicate relation from the same passage shares the existing support; the schema moves the link when the
+    // linked relation is deleted. A support that lost its relation to a recheck is restored by the same finding.
+    long long revive = 0;
+    {
+        auto same = db.prepare("SELECT s.id,s.legacy_relation_id IS NOT NULL FROM knowledge_support_sets s "
+                               "JOIN knowledge_support_evidence se ON se.support_id=s.id "
+                               "WHERE s.fact_id=?1 AND se.evidence_id=?2 AND (s.legacy_relation_id IS NOT NULL OR (s.state='unsupported' "
+                               "AND NOT EXISTS(SELECT 1 FROM knowledge_support_facts d WHERE d.support_id=s.id))) "
+                               "ORDER BY s.legacy_relation_id IS NULL,s.id LIMIT 1");
+        same.bind(1, fact).bind(2, evidence);
+        if (same.step()) {
+            if (same.col_int(1)) return {};
+            revive = same.col_int(0);
+        }
+    }
+    if (revive) {
+        auto restore = db.prepare("UPDATE knowledge_support_sets SET legacy_relation_id=?1,state='unverified' WHERE id=?2");
+        restore.bind(1, relation).bind(2, revive);
+        return restore.run();
+    }
+    auto support = db.prepare("INSERT INTO knowledge_support_sets(fact_id,legacy_relation_id,state) VALUES(?1,?2,'unverified')");
+    support.bind(1, fact).bind(2, relation);
+    if (Status s = support.run(); !s) return s;
+    auto link = db.prepare("INSERT INTO knowledge_support_evidence(support_id,evidence_id) VALUES(?1,?2)");
+    link.bind(1, db.last_insert_id()).bind(2, evidence);
+    return link.run();
+}
+
 // Called inside the same transaction as the local forget. Retain only the identity needed to withdraw a share.
 Status queue_item_withdrawals(Database& db, const std::string& source, const std::optional<std::string>& ext_id) {
     // Older clients inferred administrator removal from absence in a username-scoped list. It was not proof of removal.
@@ -1364,6 +1472,16 @@ Result<long long> KgStore::put_item(const ItemInput& in, long long now) {
                 used.insert(chunk_id);
             }
         }
+        if (db_->user_version() >= 5) {
+            // A passage keeps its evidence only when its heading, text and date are all unchanged.
+            std::vector<long long> unchanged;
+            bool changed = !previous || previous->hash != in.hash || used.size() != old_ids.size();
+            for (size_t n = 0; n < in.chunks.size(); ++n) {
+                if (retained[n] && old_dates[retained[n]] == in.chunks[n].at) unchanged.push_back(retained[n]);
+                else changed = true;
+            }
+            if (Status s = advance_revision(*db_, id, in.hash, now, changed, unchanged); !s) return s;
+        }
         for (const long long chunk_id : old_ids) {
             if (used.count(chunk_id)) continue;
             auto drop = db_->prepare("DELETE FROM chunks WHERE id=?1");
@@ -2036,13 +2154,28 @@ void KgStore::add_mention(long long chunk_id, long long entity_id, const std::st
 long long KgStore::add_relation(long long subject, const std::string& predicate, long long object, double confidence,
                                 const std::string& valid_from, const std::string& valid_to, long long chunk_id) {
     const std::lock_guard lock(db_->mutex());
-    auto s = db_->prepare(
-        "INSERT INTO relations(subject, predicate, object, confidence, valid_from, valid_to, chunk_id) VALUES(?1,?2,?3,?4,?5,?6,?7)");
-    s.bind(1, subject).bind(2, predicate).bind(3, object).bind(4, confidence).bind(5, valid_from).bind(6, valid_to);
-    if (chunk_id) s.bind(7, chunk_id);
-    else s.bind_null(7);
-    if (!s.run()) return 0;
-    return db_->last_insert_id();
+    long long id = 0;
+    const auto write = [&]() -> Status {
+        auto s = db_->prepare(
+            "INSERT INTO relations(subject, predicate, object, confidence, valid_from, valid_to, chunk_id) VALUES(?1,?2,?3,?4,?5,?6,?7)");
+        s.bind(1, subject).bind(2, predicate).bind(3, object).bind(4, confidence).bind(5, valid_from).bind(6, valid_to);
+        if (chunk_id) s.bind(7, chunk_id);
+        else s.bind_null(7);
+        if (Status st = s.run(); !st) return st;
+        id = db_->last_insert_id();
+        // A relation without a passage (directory enrichment) has no item evidence to record.
+        if (!chunk_id || db_->user_version() < 5) return {};
+        return record_relation_support(*db_, id, subject, predicate, object, valid_from, valid_to, chunk_id);
+    };
+    // The relation and its evidence are one write; join the caller's transaction when there is one.
+    if (sqlite3_get_autocommit(db_->raw())) return db_->transaction(write) ? id : 0;
+    if (write()) return id;
+    if (id) {
+        auto undo = db_->prepare("DELETE FROM relations WHERE id=?1");
+        undo.bind(1, id);
+        (void)undo.run();
+    }
+    return 0;
 }
 
 namespace {
@@ -2280,7 +2413,22 @@ long long KgStore::add_fact(long long entity_id, const std::string& text, const 
     auto s = db_->prepare("INSERT INTO facts_user(entity_id, text, thread_id, created_at, item_source, item_ext_id) VALUES(?1,?2,?3,?4,?5,?6)");
     s.bind(1, entity_id).bind(2, text).bind(3, thread_id).bind(4, now).bind(5, item_source).bind(6, item_ext_id);
     if (!s.run()) return 0;
-    return db_->last_insert_id();
+    const long long id = db_->last_insert_id();
+    if (db_->user_version() >= 5) {
+        // The same link the migration backfills: the stated item, else the Thread the fact was stated in, else none.
+        auto note = db_->prepare(
+            "INSERT INTO knowledge_annotations(user_fact_id,revision_id) VALUES(?1,(SELECT v.id FROM items i "
+            "JOIN knowledge_revisions v ON v.item_id=i.id AND v.current=1 WHERE (?2<>'' AND i.source=?2 AND i.ext_id=?3) "
+            "OR (?2='' AND ?4<>'' AND i.source='threads' AND i.ext_id=?4)))");
+        note.bind(1, id).bind(2, item_source).bind(3, item_ext_id).bind(4, thread_id);
+        if (!note.run()) {
+            auto undo = db_->prepare("DELETE FROM facts_user WHERE id=?1");
+            undo.bind(1, id);
+            (void)undo.run();
+            return 0;
+        }
+    }
+    return id;
 }
 
 std::vector<FactRow> KgStore::facts_of(long long entity_id) {
@@ -2482,6 +2630,8 @@ Status KgStore::clear(bool all) {
         if (auto s = purge_recovery_copy(); !s) return s;
         if (auto s = db_->exec("DELETE FROM items; DELETE FROM entities; DELETE FROM skipped; DELETE FROM meta; DELETE FROM fact_tombstones;"); !s)
             return s;
+        if (all && db_->user_version() >= 5)
+            if (auto s = db_->exec("DELETE FROM knowledge_categories;"); !s) return s;
         if (all)
             return db_->exec("DELETE FROM sources; DELETE FROM folders; DELETE FROM user_exclusions; DELETE FROM documents; DELETE FROM notes; "
                              "DELETE FROM shares; DELETE FROM share_rules;");
