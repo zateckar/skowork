@@ -48,3 +48,19 @@ A view with several independent record sets SHALL show them as tabs, one record 
 #### Scenario: Reload keeps the tab
 - **WHEN** an admin opens the Deny list tab of the Identity view and reloads the page
 - **THEN** the Deny list tab is shown
+
+### Requirement: Notice Lifetime
+A success notice (Action Feedback) SHALL go away by itself after a few seconds; an error notice stays until it is dismissed. A notice belongs to the view it was raised in and is cleared when the admin opens another view.
+
+#### Scenario: Notice does not follow the admin
+- **WHEN** an admin grants a role in the Identity view and then opens the Policies view
+- **THEN** the notice about the grant is no longer shown
+
+## MODIFIED Requirements
+
+### Requirement: Skill Review Workflow
+The Skill review view SHALL open the review of a queued version in a dialog titled with the Skill and version, let the reviewer close the review without deciding, show Approve as the primary action, and list every Skill version, whatever its state, under All Skill versions with a state label.
+
+#### Scenario: Open and close a review
+- **WHEN** a reviewer opens the review of a queued version and then closes it
+- **THEN** the review is shown in a dialog named after the version while it is open, and the version stays in the queue undecided when it is closed

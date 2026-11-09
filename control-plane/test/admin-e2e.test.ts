@@ -65,6 +65,11 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     await b.waitFor(`!!document.querySelector('[data-testid="me"], [data-testid="forbidden"]')`);
   }
   const navOf = () => b.eval<string[]>(`[...document.querySelectorAll('[data-testid="nav"] a')].map((a) => a.dataset.testid.slice(4))`);
+  /** Opens the publish dialog once the saved draft has enabled it. */
+  const publishOpen = async () => {
+    await b.waitFor(`document.querySelector('[data-testid="publish-open"]')?.disabled === false`);
+    await b.click('publish-open');
+  };
   const open = async (view: string) => {
     await b.click(`nav-${view}`);
     await b.waitFor(`!!document.querySelector('[data-testid="view-${view}"]')`);
@@ -116,6 +121,7 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
 
     await signInAs('admin1');
     await open('policy');
+    await b.click('define-group-open');
     await b.submit('define-group', { name: 'developers', description: 'Developers', owners: 'owner1' });
     await b.waitFor(`document.querySelector('[data-testid="scope-developers"]')?.classList.contains('active')`);
 
@@ -157,6 +163,8 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     assert.equal(await b.has('field-errors'), false);
     await b.click('diff');
     assert.match(await b.text('policy-diff'), /\+ policy\.tools\.shell\.mode\s+"?sandboxed/);
+    await b.click('diff-dialog-cancel');
+    await publishOpen();
     await b.submit('publish', { reason: 'first version', rollout: 'all' });
     await b.waitFor(`document.querySelector('[data-testid="scope-state"]')?.innerText.includes('In force: 1')`);
     await sync();
@@ -167,7 +175,9 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     await b.fill('draft-text', JSON.stringify({ tools: { shell: { mode: 'off' } } }));
     await b.submit('draft-save', { reason: 'shell off' });
     await b.waitFor(`document.querySelector('[data-testid="policy-note"]')?.innerText.includes('Draft saved')`);
-    await b.submit('publish', { reason: 'pilot first', rollout: 'pilot', value: 'pilot' });
+    await publishOpen();
+    await b.fill('rollout-kind', 'pilot');
+    await b.submit('publish', { reason: 'pilot first', value: 'pilot' });
     await b.waitFor(`document.querySelector('[data-testid="scope-state"]')?.innerText.includes('rolling out 2 to pilot Group pilot')`);
     await sync();
     await b.clickButton('policy-adoption', 'Refresh');
@@ -177,6 +187,8 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
 
     // Promoted: d1 runs version 1 until it fetches its new bundle, and is not yet updated until it reports it.
     await b.click('promote');
+    assert.match(await b.text('confirm-text'), /Every user of Group developers gets version 2/);
+    await b.click('confirm-submit');
     await b.waitFor(`document.querySelector('[data-testid="scope-state"]')?.innerText.includes('In force: 2')`);
     await b.clickButton('policy-adoption', 'Refresh');
     await b.waitFor(`document.querySelector('[data-testid="adoption-v1"]')?.innerText.includes(': 1 installation')`);
@@ -201,7 +213,7 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     await signInAs('owner1');
     await b.click('scope-developers');
     await b.waitFor(`document.querySelector('[data-testid="scope-state"]')?.innerText.includes('In force: 2')`);
-    assert.equal(await b.has('define-group'), false);
+    assert.equal(await b.has('define-group-open'), false);
     await b.click('scope-guardrail');
     await b.waitFor(`!!document.querySelector('[data-testid="policy-error"]') || !!document.querySelector('[data-testid="scope-panel"] .err')`);
   });
@@ -211,15 +223,17 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
 
     // LLM connections: add one; its models are listed, the credential is shown by its last four characters only.
     await open('connections');
+    await b.click('connection-add-open');
     await b.submit('connection-add', { name: 'organization', base_url: llm.url, credential: 'sk-console-test-0000wxyz' });
     await b.waitFor(`document.querySelector('[data-testid="connections-note"]')?.innerText.includes('models listed')`);
     assert.match(await b.text('conn-organization'), /ok[\s\S]*…wxyz[\s\S]*3 models/);
     assert.doesNotMatch(await b.eval<string>('document.body.innerHTML'), /sk-console-test/);
-    // The add form is cleared once the connection is saved.
-    assert.equal(await b.eval<string>(`document.querySelector('[data-testid="connection-add"] [name="name"]').value`), '');
+    // The add dialog closes once the connection is saved.
+    assert.equal(await b.has('connection-add'), false);
     assert.equal(llm.requests.find((r) => r.path.endsWith('/models'))!.headers.authorization, 'Bearer sk-console-test-0000wxyz');
     // Capabilities per model.
-    await b.click('conn-open-organization');
+    // The new connection is open on its models.
+    await b.click('model-organization-acme-llm-secondary-edit');
     await b.submit('model-organization-acme-llm-secondary-form', { context_window: '40000' });
     await b.waitFor(`document.querySelector('[data-testid="conn-detail-note-organization"]')?.innerText.includes('Saved acme-llm-secondary')`);
 
@@ -228,6 +242,8 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     await open('models');
     await b.waitFor(`[...document.querySelectorAll('[data-testid="models-group"] option')].some((o) => o.value === 'developers')`);
     await b.fill('models-group', 'developers');
+    await b.waitFor(`document.querySelector('[data-testid="models-edit-open"]')?.disabled === false`);
+    await b.click('models-edit-open');
     await b.waitFor(`[...document.querySelectorAll('[data-testid="model-embed"] option')].some((o) => o.textContent.includes('acme-llm-secondary · organization · chat ⚠ chat model, not embed'))`);
     await b.submit('models-form', { 'model.main': 'acme-llm-secondary', 'budget.tokens': '5000', period: 'week', reason: 'cheaper main model', publish: true });
     await b.waitFor(`document.querySelector('[data-testid="models-note"]')?.innerText.includes('published')`);
@@ -247,39 +263,49 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
 
     // Deleting a connection in use names the Groups and roles and asks first.
     await open('connections');
-    await b.eval(`window.confirm = (q) => ((window.__asked = q), false)`);
     await b.click('conn-delete-organization');
-    await b.waitFor(`typeof window.__asked === 'string'`);
-    assert.match(await b.eval<string>('window.__asked'), /Group developers: main → acme-llm-secondary/);
+    assert.match(await b.text('confirm-text'), /Group developers: main → acme-llm-secondary/);
+    await b.click('confirm-cancel');
+    await b.waitFor(`!document.querySelector('[data-testid="confirm"]')`);
     assert.equal(h.cp.gateway.connections.list().connections.length, 1);
-    await b.eval(`window.confirm = () => true`);
 
     // Identity: register a service principal for task dispatch; its tokens are accepted there only. Retire another.
     await open('identity');
+    await b.click('tab-principals');
+    await b.click('sp-add-open');
     await b.submit('sp-add', { name: 'ci-bot', client_id: 'ci-bot-client', api: 'tasks' });
     assert.match(await b.text('sp-ci-bot'), /ci-bot\s+ci-bot-client\s+tasks/);
     assert.deepEqual(h.cp.identity.servicePrincipal('ci-bot-client')?.apis, ['tasks']);
     assert.equal((h.cp.audit.query({ action: 'identity.service-principal.register' }) as any[])[0].user_name, 'admin1');
+    await b.click('sp-add-open');
     await b.submit('sp-add', { name: 'old-bot', client_id: 'old-bot-client', api: 'tasks' });
     await b.click(`css:[data-testid="sp-old-bot"] button`);
+    await b.click('confirm-submit');
     await b.waitFor(`document.querySelector('[data-testid="sp-old-bot"]')?.innerText.includes('retired')`);
     assert.ok(h.cp.identity.servicePrincipal('old-bot-client')?.retired_at);
     // Deny a user; their next request is refused.
-    await b.submit('deny-add', { kind: 'user', value: 'bad1', reason: 'left the organization' });
+    await b.click('tab-deny');
+    await b.click('deny-add-open');
+    await b.submit('deny-add', { value: 'bad1', reason: 'left the organization' });
     await b.text('deny-bad1');
     assert.equal((await h.call('GET', '/api/v1/identity/whoami', await h.token('bad1'))).status, 403);
     assert.equal((h.cp.audit.query({ action: 'identity.deny-list.add' }) as any[])[0].user_name, 'admin1');
 
     // Remote tasks: a dispatch rule for a service principal.
     await open('remote');
+    await b.click('rule-add-open');
     await b.submit('rule-add', { issuer_kind: 'service-principal', issuer: 'ci-bot', target_kind: 'group', target: 'developers' });
     assert.match(await b.text('rule-ci-bot'), /service-principal ci-bot\s+group developers/);
     assert.deepEqual(h.cp.policy.listDispatchRules().map((r) => r.issuer), ['ci-bot']);
     // Lower the issuer's rate limit to 20 per hour; task dispatch applies it to the next request.
+    await b.click('tab-limits');
+    await b.click('limit-set-open');
     await b.submit('limit-set', { issuer: 'service:ci-bot', per_hour: '20' });
     assert.match(await b.text('limit-service:ci-bot'), /service:ci-bot\s+20/);
     assert.equal(h.cp.tasks.rateLimit('service:ci-bot'), 20);
     // The callback allowlist.
+    await b.click('tab-callbacks');
+    await b.click('callback-add-open');
     await b.submit('callback-add', { prefix: 'https://ci.example.test/hooks/' });
     assert.match(await b.text('callback-https://ci.example.test/hooks/'), /https:\/\/ci\.example\.test\/hooks\//);
     assert.ok(h.cp.tasks.callbackAllowed('https://ci.example.test/hooks/build/7'));
@@ -287,6 +313,7 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
 
     // MCP catalog: add a server for developers (enabled after a successful discovery), disable it; the client bundle follows.
     await open('mcp');
+    await b.click('mcp-add-open');
     await b.submit('mcp-add-form', { id: 'jira-corp', owner: 'it', url: mcp.url, auth: 'none', groups: 'developers' });
     await b.waitFor(`document.querySelector('[data-testid="mcp-state-jira-corp"]')?.innerText === 'enabled'`);
     assert.match(await b.text('mcp-jira-corp'), /search_issues/);
@@ -296,9 +323,11 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     };
     assert.deepEqual(await servers(), ['jira-corp']);
     await b.click('mcp-toggle-jira-corp');
+    await b.click('confirm-submit');
     await b.waitFor(`document.querySelector('[data-testid="mcp-state-jira-corp"]')?.innerText === 'disabled'`);
     assert.deepEqual(await servers(), []);
     // Re-assigned to another Group: developers no longer get it even when enabled.
+    await b.click('mcp-edit-jira-corp');
     await b.submit('mcp-groups-jira-corp', { groups: 'pilot' });
     await b.click('mcp-toggle-jira-corp');
     await b.waitFor(`document.querySelector('[data-testid="mcp-state-jira-corp"]')?.innerText === 'enabled'`);
@@ -306,17 +335,18 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
 
     // Fleet: filter by Group, revoke an installation.
     await open('fleet');
-    await b.submit('fleet-filter', { group: 'pilot' });
+    await b.waitFor(`[...document.querySelectorAll('[data-testid="fleet-group"] option')].some((o) => o.value === 'pilot')`);
+    await b.fill('fleet-group', 'pilot');
     const pilotInst = (h.cp.db.prepare("SELECT id FROM installations WHERE user_name = 'p1'").get() as { id: string }).id;
     await b.waitFor(`document.querySelectorAll('[data-testid^="inst-state-"]').length === 1 && !!document.querySelector('[data-testid="inst-${pilotInst}"]')`);
     // Cancelling the confirmation changes nothing (improve-usability Console Usability).
-    await b.eval(`window.confirm = () => false`);
     await b.click(`revoke-${pilotInst}`);
+    await b.click('confirm-cancel');
     await sleep(300);
     assert.notEqual(await b.text(`inst-state-${pilotInst}`), 'revoked');
     assert.equal((h.cp.db.prepare('SELECT revoked_at FROM installations WHERE id = ?').get(pilotInst) as { revoked_at: string | null }).revoked_at, null);
-    await b.eval(`window.confirm = () => true`);
     await b.click(`revoke-${pilotInst}`);
+    await b.click('confirm-submit');
     await b.waitFor(`document.querySelector('[data-testid="inst-state-${pilotInst}"]')?.innerText === 'revoked'`);
     assert.ok((h.cp.db.prepare('SELECT revoked_at FROM installations WHERE id = ?').get(pilotInst) as { revoked_at: string | null }).revoked_at);
     assert.deepEqual(b.errors, []);
@@ -327,7 +357,7 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     await signInAs('auditor1');
     await open('audit');
     await b.submit('audit-filter', { action: 'policy.publish' });
-    await b.waitFor(`document.querySelectorAll('[data-testid^="audit-"]').length >= 3`);
+    await b.waitFor(`document.querySelectorAll('tr[data-testid^="audit-"]').length >= 2`);
     // Searching a user's events needs a reason.
     await b.submit('audit-filter', { user: 'dev9', reason: '' });
     await b.waitFor(`document.body.innerText.includes('State a reason to search the events of a user')`);
@@ -341,7 +371,7 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
 
     await signInAs('council1');
     await open('access-records');
-    const rows = await b.waitFor<string>(`[...document.querySelectorAll('[data-testid^="access-"]')].map((r) => r.innerText).join('\\n')`);
+    const rows = await b.waitFor<string>(`[...document.querySelectorAll('tr[data-testid^="access-"]')].map((r) => r.innerText).join('\\n')`);
     assert.match(rows, /auditor1\s+dev9\s+telemetry\s+INC-7 suspicious tool use/);
     assert.deepEqual(b.errors, []);
   });
@@ -373,7 +403,9 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     await b.fill('knowledge-group', 'design');
     assert.match(await b.text('knowledge-item-note-1'), /Colour palette 2027[\s\S]*kim · notes · 26 B · design · updated /);
     await b.click('knowledge-remove-open-note-1');
-    await b.submit('knowledge-remove-note-1', { reason: 'contains customer data' });
+    assert.match(await b.text('confirm-text'), /Shared by kim with design/);
+    await b.fill('confirm-reason', 'contains customer data');
+    await b.click('confirm-submit');
     await b.waitFor(`document.querySelector('[data-testid="knowledge-note"]')?.innerText.includes('Removed')`);
     const rec = (h.cp.audit.query({ action: 'knowledge.remove' }) as any[])[0];
     assert.equal(rec.reason, 'contains customer data');
@@ -426,6 +458,7 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     await signInAs('admin1');
     await open('skills');
     const pkg = writeZip({ 'pdf-tools/SKILL.md': '---\nname: pdf-tools\ndescription: Work with PDF files\nversion: 2.0.0\n---\nSteps.\n' }).toString('base64');
+    await b.click('skill-import-open');
     await b.fill('skill-import-source', 'file');
     await b.waitFor(`!!document.querySelector('[data-testid="skill-import-file"]')`);
     await b.eval(`(() => {
@@ -439,7 +472,9 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     assert.match(await b.text('skill-pdf-tools-2.0.0'), /Imported from https:\/\/agentskills\.io\/skills\/pdf-tools \(Apache-2\.0\)/);
 
     // Revocation from the console.
-    await b.submit('skill-revoke-supplier-triage-1.0.0', { reason: 'superseded' });
+    await b.click('skill-revoke-supplier-triage-1.0.0');
+    await b.fill('confirm-reason', 'superseded');
+    await b.click('confirm-submit');
     await b.waitFor(`document.querySelector('[data-testid="skill-state-supplier-triage-1.0.0"]')?.innerText === 'revoked (superseded)'`);
     assert.deepEqual((await h.call('GET', '/api/v1/skills/sync', await h.token('bob'))).body.revocations.map((r: any) => r.version), ['1.0.0']);
     assert.deepEqual(b.errors, []);

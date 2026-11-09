@@ -317,8 +317,8 @@ function DenyList() {
           <tr key={d.id} data-testid={`deny-${d.value}`}>
             <td><b>{d.value}</b><small>{d.kind}</small></td><td>{d.reason}</td><td>{d.created_by}<small>{time(d.created_at)}</small></td>
             <td className="acts">
-              <button className="link" onClick={async () => {
-                if ((await ask({ title: `Lift the denial of ${d.value}?`, body: <p>{d.kind === 'user' ? 'The user' : 'The installation'} gets tokens again{d.kind === 'installation' ? ', and its revocation is lifted' : ''}.</p>, action: 'Lift', danger: false })) === null) return;
+              <button className="link danger" onClick={async () => {
+                if ((await ask({ title: `Lift the denial of ${d.value}?`, body: <p>{d.kind === 'user' ? 'The user' : 'The installation'} gets tokens again{d.kind === 'installation' ? ', and its revocation is lifted' : ''}.</p>, action: 'Lift' })) === null) return;
                 await api('DELETE', `${I}/deny-list/${d.id}`);
                 deny.reload();
                 notify('Lifted.', 'identity-note');

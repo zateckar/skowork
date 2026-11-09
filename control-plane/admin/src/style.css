@@ -200,7 +200,8 @@ dialog.modal.wide { width: min(64rem, 96vw); }
 dialog.modal::backdrop { background: rgb(14 30 25 / 0.45); }
 @media (prefers-reduced-motion: no-preference) {
   dialog.modal[open] { animation: rise 160ms ease-out; }
-  @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+  /* Opacity only: a transform would make the dialog the frame of the pickers' fixed option lists. */
+  @keyframes rise { from { opacity: 0; } }
 }
 dialog.modal header { display: flex; align-items: center; justify-content: space-between; padding: 0.9rem 1.2rem 0.6rem; }
 dialog.modal header button { border: 0; font-size: 20px; color: var(--muted); }

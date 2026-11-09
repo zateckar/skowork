@@ -1,6 +1,6 @@
 // Shared pieces of the admin console views (redesign-admin-console-records D1): data hooks, notices, records tables,
 // dialogs, the confirmation dialog, pickers and tabs.
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { api, ApiError } from './auth.ts';
 
 /** GET `path` (null: nothing to load); `reload` fetches again. */
@@ -77,8 +77,19 @@ export function Notices() {
       setNotice({ text: e.reason.message, kind: 'err', id: 'action-error', owner: {} });
     };
     addEventListener('unhandledrejection', on);
-    return () => removeEventListener('unhandledrejection', on);
+    // A notice belongs to the view it was raised in.
+    const view = () => location.hash.replace(/^#\/?/, '').split(/[/?]/)[0];
+    let shown = view();
+    const onHash = () => (view() !== shown && setNotice(null), (shown = view()));
+    addEventListener('hashchange', onHash);
+    return () => (removeEventListener('unhandledrejection', on), removeEventListener('hashchange', onHash));
   }, []);
+  // A success note goes away by itself; an error stays until dismissed.
+  useEffect(() => {
+    if (n?.kind !== 'ok') return;
+    const t = setTimeout(() => notice === n && setNotice(null), 8000);
+    return () => clearTimeout(t);
+  }, [n]);
   if (!n) return null;
   return (
     <div className={`toast ${n.kind}`} role={n.kind === 'err' ? 'alert' : 'status'} data-testid={n.id}>
@@ -223,7 +234,7 @@ export function Dialog({ title, id, onClose, onSubmit, submit = 'Save', danger, 
     e.preventDefault();
     if (!onSubmit) return onClose();
     if (!pickersFilled(e.currentTarget)) return;
-    const f =Object.fromEntries([...new FormData(e.currentTarget)].map(([k, v]) => [k, String(v)]));
+    const f = Object.fromEntries([...new FormData(e.currentTarget)].map(([k, v]) => [k, String(v)]));
     setBusy(true);
     try {
       const note = await onSubmit(f);
@@ -316,11 +327,26 @@ export function Picker({ name, options, multiple, allowNew, defaultValue = [], p
   const [open, setOpen] = useState(false);
   const [hi, setHi] = useState(0);
   const listId = useId();
+  // The list is placed against the window, so a scrolling dialog body does not clip it.
+  const box = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const r = box.current!.getBoundingClientRect();
+      const below = innerHeight - r.bottom - 8;
+      setPos({ left: r.left, width: r.width, top: r.bottom + 4, maxHeight: Math.max(120, Math.min(240, below)) });
+    };
+    place();
+    addEventListener('scroll', place, true);
+    addEventListener('resize', place);
+    return () => (removeEventListener('scroll', place, true), removeEventListener('resize', place));
+  }, [open, chosen.length]);
   const known = useMemo(() => new Map(options.map((o) => [o.value.toLowerCase(), o])), [options]);
   const query = q.trim().toLowerCase();
   const matches = options
     .filter((o) => !(multiple && chosen.some((c) => c.toLowerCase() === o.value.toLowerCase())))
-    .filter((o) => !query || `${o.value} ${o.label ?? ''} ${o.hint ?? ''}`.toLowerCase().includes(query))
+    .filter((o) => !query || `${o.value} ${o.label ?? ''}`.toLowerCase().includes(query))
     .slice(0, 50);
   const offerNew = allowNew && query && !known.has(query) && !chosen.some((c) => c.toLowerCase() === query);
   const items: (Option & { isNew?: boolean })[] = [...matches, ...(offerNew ? [{ value: q.trim(), isNew: true }] : [])];
@@ -362,7 +388,7 @@ export function Picker({ name, options, multiple, allowNew, defaultValue = [], p
     ? [...chosen, ...(typedValue && !chosen.some((c) => c.toLowerCase() === typedValue.toLowerCase()) ? [typedValue] : [])].join(',')
     : typedValue;
   return (
-    <div className={`picker${multiple ? ' multi' : ''}`} data-testid={testid}>
+    <div ref={box} className={`picker${multiple ? ' multi' : ''}`} data-testid={testid}>
       {multiple && chosen.map((c) => (
         <span key={c} className={`chip${isNew(c) ? ' new' : ''}`} title={isNew(c) ? newHint : undefined}>
           {c}{isNew(c) && <small> ({newHint})</small>}
@@ -389,7 +415,7 @@ export function Picker({ name, options, multiple, allowNew, defaultValue = [], p
       {!multiple && q && chosen[0] === q && isNew(q) && allowNew && <small className="new-mark">{newHint}</small>}
       <input type="hidden" name={name} value={value} readOnly data-required={required ? (label ?? name) : undefined} />
       {open && items.length > 0 && (
-        <ul id={listId} role="listbox" className="options">
+        <ul id={listId} role="listbox" className="options" style={pos ? { position: 'fixed', ...pos, right: 'auto' } : undefined}>
           {items.map((o, i) => (
             <li
               key={`${o.value}-${i}`}

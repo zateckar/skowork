@@ -11,6 +11,11 @@ The console is a React single-page app in control-plane/admin, reworked by impro
 - `Dialog`: the native `<dialog>` element opened with `showModal()`, which gives the backdrop, the focus trap, Escape and the accessibility role. Its body is a `Form` whose submit runs the action. On success it closes and raises the notice; on failure it keeps its values and shows the error at its foot. Forms keep their `data-testid` and field names, so the end-to-end test fills them as before after opening the dialog.
 - `ask()`: a promise-based confirmation dialog (title, consequence, action label, optional reason) that replaces `window.confirm`. It resolves to the reason, or null when cancelled.
 - `Picker`: a combobox built from a text input with a filtered list below it (ARIA combobox pattern: arrow keys, Enter, Escape). Single and multiple selection; multiple shows chips. The submitted value is kept in a hidden input with the field's `name`, comma-separated for several. A typed value that is not in the list is accepted where `allowNew` is set and shown as new.
+  - Typed text counts as the value as soon as it is allowed, so pressing Enter in the field without leaving it keeps it.
+  - The search matches the value and its label, not the hint. A hint such as "Group member" would otherwise match almost any letter.
+  - A required picker is checked when the form is submitted, against the hidden value. The visible input carries no native `required`, because a value set from outside, as the end-to-end test does, would never satisfy it. An empty picker gets the browser's message on its input.
+  - The list is positioned `fixed` against the window, so a dialog's scrolling body does not clip it. For that reason the dialog's opening animation changes opacity only; a transform would make the dialog the frame of the fixed list.
+- Notices: a success notice goes away after 8 seconds, and any notice is cleared when the view changes. An error notice stays until dismissed (Notice Lifetime).
 - `Tabs`: a tab list whose selection is written to the address as `#/<view>/<tab>`.
 
 ### D2. Directory

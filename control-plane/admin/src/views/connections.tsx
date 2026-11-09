@@ -95,7 +95,7 @@ export function Connections() {
               <td><b>{c.name}</b><small>{c.base_url}</small></td>
               <td>
                 <span className={`state ${c.enabled ? c.status : ''}`} data-testid={`conn-status-${c.name}`}>{c.enabled ? c.status : 'disabled'}</span>
-                {c.status_detail && <small className="err">{c.status_detail}</small>}
+                {c.status_detail && <small className={c.status === 'ok' ? '' : 'err'}>{c.status_detail}</small>}
               </td>
               <td>{c.credential_set ? <code>…{c.credential_hint || '(set)'}</code> : <span className="muted">not set</span>}</td>
               <td>
