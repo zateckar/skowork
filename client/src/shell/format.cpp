@@ -92,7 +92,7 @@ std::string about_text(const json& v) {
         if (!x || x->is_null()) return std::string();
         return x->is_string() ? x->get<std::string>() : x->dump();
     };
-    return "Workbench " + field("version") + "\nChannel: " + field("channel") + "\nCommit: " + field("commit") +
+    return "SkoWork " + field("version") + "\nChannel: " + field("channel") + "\nCommit: " + field("commit") +
            "\nProcess ID: " + field("pid");
 }
 

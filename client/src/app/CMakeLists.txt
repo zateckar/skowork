@@ -15,11 +15,23 @@ add_library(wb_app STATIC app.cpp agent_service.cpp skill_authoring.cpp automati
 target_include_directories(wb_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_BINARY_DIR}/gen)
 target_link_libraries(wb_app PUBLIC wb_telemetry wb_shell wb_inbox wb_scheduler wb_meeting wb_knowledge wb_mail wb_browser wb_computer wb_apps wb_messaging wb_mcp wb_tools wb_policy wb_sandbox wb_runtime wb_model wb_host wb_channel wb_identity wb_storage wb_platform wb_base secur32 wtsapi32)
 workbench_warnings(wb_app)
+# The host wiring is not a hot path; keep the installed client and its required license notices within the footprint budget.
+target_compile_options(wb_app PRIVATE $<$<CONFIG:Release>:-Os>)
 
 add_executable(Workbench WIN32 main.cpp ${CMAKE_CURRENT_BINARY_DIR}/app.rc)
 target_link_libraries(Workbench PRIVATE wb_app)
 # Our manifest replaces MinGW's default one.
 target_link_options(Workbench PRIVATE -municode -Wl,--no-insert-timestamp)
+if(WORKBENCH_MANIFEST_LINK_OPTION)
+  target_link_options(Workbench PRIVATE "${WORKBENCH_MANIFEST_LINK_OPTION}")
+endif()
 workbench_warnings(Workbench)
 set_target_properties(Workbench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-add_dependencies(Workbench workbench-worker workbench-app-runtime)
+set_target_properties(Workbench PROPERTIES OUTPUT_NAME SkoWork)
+
+# Preserve existing shortcuts without changing the resident process's instance coordination.
+add_executable(Workbench-legacy WIN32 legacy_launcher.cpp)
+target_link_options(Workbench-legacy PRIVATE -municode -Wl,--no-insert-timestamp)
+workbench_warnings(Workbench-legacy)
+set_target_properties(Workbench-legacy PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+add_dependencies(Workbench workbench-worker workbench-app-runtime Workbench-legacy)

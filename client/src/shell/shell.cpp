@@ -22,7 +22,7 @@ using ui::Sizing;
 Shell::Shell(HostLink& host, const MainWindow::Options& options, std::function<void()> on_closed)
     : host_(host), options_(options), on_closed_(std::move(on_closed)) {
     ui::Window::Options wo;
-    wo.title = L"Workbench";
+    wo.title = L"SkoWork";
     wo.width = options.width;
     wo.height = options.height;
     wo.lang = options.lang;

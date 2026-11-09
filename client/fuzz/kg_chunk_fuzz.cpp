@@ -3,6 +3,8 @@
 // valid UTF-8 within the item limit, and parsed extractions only point at chunks that exist.
 #include "fuzz_main.h"
 #include "knowledge/core.h"
+#include "knowledge/analysis.h"
+#include "knowledge/reconcile.h"
 
 using namespace wb;
 using namespace wb::knowledge;
@@ -53,6 +55,38 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
                 if (c < 0 || c >= chunk_count) __builtin_trap();
         for (const auto& r : x->relations)
             if (r.confidence < 0.0 || r.confidence > 1.0 || r.chunk < -1 || r.chunk >= chunk_count) __builtin_trap();
+    }
+    const AnalysisEvidence evidence = {{1, {{10, "Projekt začne v červnu."}}}, {2, {{20, "The project starts in July."}}}};
+    if (const auto x = parse_analysis_proposals(bytes, evidence, {7})) {
+        for (const auto& c : x->categories) {
+            const auto& passage = evidence.at(c.fact_id).at(c.evidence.chunk_id);
+            if (c.evidence.begin >= c.evidence.end || c.evidence.end > passage.size()) __builtin_trap();
+        }
+        for (const auto& c : x->conflicts) {
+            const auto& left = evidence.at(c.left_id).at(c.left.chunk_id);
+            const auto& right = evidence.at(c.right_id).at(c.right.chunk_id);
+            if (c.left.begin >= c.left.end || c.left.end > left.size() || c.right.begin >= c.right.end || c.right.end > right.size())
+                __builtin_trap();
+        }
+    }
+    if (size) {
+        const size_t n = 1 + data[0] % 12;
+        std::vector<ImpactFact> graph;
+        std::unordered_set<long long> known, removed;
+        for (size_t i = 0; i < n; ++i) {
+            const auto id = static_cast<long long>(i + 1);
+            known.insert(id);
+            const auto flags = data[(i + 1) % size];
+            if (flags & 1) removed.insert(id);
+            ImpactSupport support{(flags & 2) == 0, {id}, {}};
+            if (flags & 4) support.required_facts.push_back(1 + (flags % n));
+            graph.push_back({id, {std::move(support)}});
+        }
+        if (const auto impact = reconcile_impact(graph, known, removed)) {
+            if (impact->size() != n) __builtin_trap();
+            for (const auto& fact : *impact)
+                if (fact.before < 0 || fact.after < 0 || fact.after > fact.before) __builtin_trap();
+        }
     }
     return 0;
 }

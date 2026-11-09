@@ -15,3 +15,10 @@ A tool result MAY carry images, such as a browser screenshot. The runtime SHALL 
 #### Scenario: Image not persisted
 - **WHEN** a Run that received an image tool result ends
 - **THEN** the Thread's stored events contain the tool result text and a note that an image was returned, but no image data
+
+### Requirement: Context Compaction
+When the conversation would exceed the context budget of the model role in use, the runtime SHALL compact it. It first lets BeforeCompaction handlers flush durable facts to memory, then replaces older turns with a summary, keeping the system instructions, the latest user message and unresolved tool calls.
+
+#### Scenario: Long run
+- **WHEN** a Run's next request would exceed 85% of the model's context window
+- **THEN** the runtime compacts older turns into a summary before sending the request, and records a compaction event in the Thread's Activity log

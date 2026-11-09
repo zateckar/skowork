@@ -1,7 +1,7 @@
 # client/knowledge-graph (add-knowledge-graph). wb_knowledge_core is portable (file kinds, decoding, chunkers, globs,
 # vector quantisation, the extraction parser and the index worker's requests) so the fuzz job and the worker build it;
 # wb_knowledge is the Windows part (kg.db, the service, retrieval and the tools).
-add_library(wb_knowledge_core STATIC core.cpp index_request.cpp)
+add_library(wb_knowledge_core STATIC core.cpp index_request.cpp analysis.cpp reconcile.cpp)
 target_link_libraries(wb_knowledge_core PUBLIC wb_base)
 workbench_warnings(wb_knowledge_core)
 

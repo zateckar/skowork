@@ -1,0 +1,87 @@
+{
+  "schema": 1,
+  "package": "skowork-speech",
+  "version": "1",
+  "architecture": "windows-x64",
+  "engine": "sherpa-onnx-2.0.1",
+  "files": [
+    {
+      "path": "models/stt/parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx",
+      "bytes": 652184281,
+      "sha256": "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247",
+      "source": "models"
+    },
+    {
+      "path": "models/stt/parakeet-tdt-0.6b-v3-int8/decoder.int8.onnx",
+      "bytes": 11845275,
+      "sha256": "179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e",
+      "source": "models"
+    },
+    {
+      "path": "models/stt/parakeet-tdt-0.6b-v3-int8/joiner.int8.onnx",
+      "bytes": 6355277,
+      "sha256": "3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3",
+      "source": "models"
+    },
+    {
+      "path": "models/stt/parakeet-tdt-0.6b-v3-int8/tokens.txt",
+      "bytes": 93939,
+      "sha256": "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
+      "source": "models"
+    },
+    {
+      "path": "models/stt/whisper-small-int8/small-encoder.int8.onnx",
+      "bytes": 112442483,
+      "sha256": "4cbe7b22fa9026b843b60a68640c747de05bafb1a11b57edc0e66c232d9f33a9",
+      "source": "models"
+    },
+    {
+      "path": "models/stt/whisper-small-int8/small-decoder.int8.onnx",
+      "bytes": 262226114,
+      "sha256": "acad50b5c782696e91b55914cc5ab4f756f1532f76e22aa6fc615f39fb69a8ee",
+      "source": "models"
+    },
+    {
+      "path": "models/stt/whisper-small-int8/small-tokens.txt",
+      "bytes": 816730,
+      "sha256": "b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126",
+      "source": "models"
+    },
+    {
+      "path": "models/stt/pyannote-segmentation-3-0/model.int8.onnx",
+      "bytes": 1540506,
+      "sha256": "d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d",
+      "source": "models"
+    },
+    {
+      "path": "models/stt/pyannote-segmentation-3-0/LICENSE",
+      "bytes": 1061,
+      "sha256": "14d7016ad68e7394d6e6b78d96cc2ae431c905287b89674cfdf021e79e62b8ba",
+      "source": "models"
+    },
+    {
+      "path": "models/stt/silero_vad.onnx",
+      "bytes": 643854,
+      "sha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+      "source": "models"
+    },
+    {
+      "path": "models/stt/wespeaker_en_voxceleb_resnet34_LM.onnx",
+      "bytes": 26530550,
+      "sha256": "e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012",
+      "source": "models"
+    },
+    {
+      "path": "models/stt/sherpa-onnx-c-api.dll",
+      "bytes": 3667968,
+      "sha256": "ee2af9f49b8fc5dae135ad20c0b955cbab90d17b79cc1ad0db91e03b24962f68",
+      "source": "runtime"
+    },
+    {
+      "path": "models/stt/onnxruntime.dll",
+      "bytes": 17799168,
+      "sha256": "7f66f939a881baf4f46a2216496798edf4a1429878b646d12674aa62f27d8a25",
+      "source": "runtime"
+    }
+  ]
+}

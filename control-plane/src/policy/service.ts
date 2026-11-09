@@ -14,6 +14,7 @@ import type { PushHub, PushTarget } from '../fleet/push.ts';
 import { type CompileError, type Compiled, type GroupDoc, compile, crossKeyErrors, entryPath } from './merge.ts';
 import { type Flat, Registry, isPlainObject } from './schema.ts';
 import { KEYS, SCHEMA_VERSION } from './keys.ts';
+import { simulateToolDecision, type SimulatedCall } from './tool-decision.ts';
 
 export const GUARDRAIL_SCOPE = 'guardrail';
 export const groupScope = (name: string) => `group:${name}`;
@@ -593,7 +594,7 @@ export class PolicyService {
   // ---- simulation and diff ------------------------------------------------------------------------------------------
 
   /** The effective policy of a user or a set of Groups, with sources, conflicts and errors (Policy Simulation). */
-  simulate(opts: { user?: string; groups?: string[]; drafts?: boolean }, groupsOfUser: (userName: string) => string[]) {
+  simulate(opts: { user?: string; groups?: string[]; drafts?: boolean; toolCall?: SimulatedCall }, groupsOfUser: (userName: string) => string[]) {
     let groups: string[];
     let userName: string | null = null;
     if (opts.user) {
@@ -613,6 +614,9 @@ export class PolicyService {
     return {
       user: userName, groups, drafts: Boolean(opts.drafts), versions: c.versions, policy: c.policy, src: c.src,
       conflicts: c.conflicts, errors: c.errors, network_enforcement: enforcement, schema: this.registry.version,
+      ...(opts.toolCall && (c.errors.length
+        ? { tool_decision: null, tool_decision_error: 'Resolve policy errors before simulating a tool decision.' }
+        : { tool_decision: simulateToolDecision(c.policy, c.src, opts.toolCall) })),
     };
   }
 

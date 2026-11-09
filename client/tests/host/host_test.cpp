@@ -181,7 +181,7 @@ TEST(Registration, WritesAndRepairsForAMovedExecutable) {
     EXPECT_TRUE(first.ok);
     EXPECT_TRUE(first.run_repaired);
     // The AUMID of the toast notifications (add-work-inbox design D6).
-    EXPECT_EQ(reg_read_string(HKEY_CURRENT_USER, p.aumid_key, L"DisplayName"), L"Workbench");
+    EXPECT_EQ(reg_read_string(HKEY_CURRENT_USER, p.aumid_key, L"DisplayName"), L"SkoWork");
     auto again = ensure_registration(L"C:\\Old\\Workbench.exe", p);
     EXPECT_FALSE(again.run_repaired);
     auto moved = ensure_registration(L"D:\\New Place\\Workbench.exe", p);

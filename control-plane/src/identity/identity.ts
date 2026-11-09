@@ -13,6 +13,7 @@ export type AdminRole = (typeof ADMIN_ROLES)[number];
 export const EVERYONE = 'everyone';
 
 export interface User {
+  issuer: string;
   subject: string;
   userName: string;
   email: string;
@@ -200,6 +201,7 @@ export class IdentityService {
 
     const idpRoles = Array.isArray(payload.roles) ? payload.roles.filter((r): r is string => typeof r === 'string') : [];
     const user: User = {
+      issuer: String(payload.iss ?? ''),
       subject: String(payload.sub),
       userName,
       email: typeof payload.email === 'string' ? payload.email : '',

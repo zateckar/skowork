@@ -90,6 +90,8 @@ bool is_setting_key(const std::string& key) {
     return false;
 }
 
+bool dictation_language(const std::string& v) { return v == "auto" || v == "cs" || v == "de" || v == "en"; }
+
 }  // namespace
 
 std::string title_from(const std::string& text) {
@@ -238,7 +240,7 @@ void InboxService::notify(const std::string& kind, const std::string& thread_id,
     if (!env_.notify || !notification_enabled(kind) || is_focused(thread_id)) return;
     const auto entry = store_.entry(thread_id);
     const ToastTexts& t = texts(env_.language ? env_.language() : "en");
-    std::string title = entry && !entry->title.empty() ? entry->title : "Workbench";
+    std::string title = entry && !entry->title.empty() ? entry->title : "SkoWork";
     std::string body;
     if (kind == "completed") {
         body = t.finished;
@@ -385,7 +387,8 @@ json InboxService::settings() {
     }
     out["ui.language"] = {{"value", store_.setting("ui.language").value_or("system")}, {"managed", false}};
     out["ui.show_work_details"] = {{"value", store_.setting("ui.show_work_details").value_or("false") == "true"}, {"managed", false}};
-    out["dictation.language"] = {{"value", store_.setting("dictation.language").value_or("auto")}, {"managed", false}};
+    const std::string dictation = store_.setting("dictation.language").value_or("auto");
+    out["dictation.language"] = {{"value", dictation_language(dictation) ? dictation : "auto"}, {"managed", false}};
     return out;
 }
 
@@ -400,8 +403,8 @@ Status InboxService::set_setting(const std::string& key, const json& value) {
     }
     if (key == "dictation.language") {  // add-dictation D5: Automatic or a transcript language
         const std::string v = value.is_string() ? value.get<std::string>() : std::string();
-        if (v != "auto" && v != "cs" && v != "de" && v != "en" && v != "pl" && v != "sk")
-            return make_error("invalid_params", "the dictation language must be auto, cs, de, en, pl or sk");
+        if (!dictation_language(v))
+            return make_error("invalid_params", "the dictation language must be auto, cs, de or en");
         return store_.set_setting(key, v);
     }
     if (!value.is_boolean()) return make_error("invalid_params", key + " must be true or false");
@@ -581,6 +584,9 @@ void InboxService::register_rpc(RpcRegistry& rpc, bool expose_on_pipe) {
         if (const auto c = env_.runtime->store().compactions(*id); !c.empty())
             last = {{"kind", c.back().kind}, {"at", c.back().at}, {"messages_compacted", c.back().messages_compacted}};
         return json{{"tokens", u.tokens}, {"window", u.window}, {"compaction_threshold", u.compaction_threshold},
+                    {"input_budget", u.input_budget}, {"trigger", u.trigger}, {"target", u.target},
+                    {"output_reserve", u.output_reserve}, {"estimated", true}, {"includes_tools", u.includes_tools},
+                    {"tool_tokens", u.tool_tokens}, {"tools_snapshot", u.includes_tools ? "last_request" : "unavailable"},
                     {"last_compaction", last}};
     });
     rpc.add("folders.list", ex, [&st](const json&) -> Result<json> {

@@ -79,14 +79,12 @@ Result<const Api*> load_api(const fs::path& runtime_dir) {
     return loaded.get();
 }
 
-// sherpa-onnx opens model files by narrow path, which Windows reads in the ANSI code page.
-Result<std::string> ansi_path(const fs::path& p) {
+// The worker and desktop host opt into UTF-8 as the Windows active code page. The sherpa C API takes narrow paths;
+// passing UTF-8 preserves names that cannot be represented by the user's legacy ANSI code page.
+Result<std::string> model_path(const fs::path& p) {
     const std::wstring w = p.wstring();
-    BOOL lossy = FALSE;
-    const int n = ::WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, &lossy);
-    std::string s(static_cast<size_t>(std::max(n, 0)), '\0');
-    if (n > 0) ::WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, &lossy);
-    if (n <= 0 || lossy) return make_error("model_path", "The speech-to-text models are in a folder whose name the runtime cannot open: " + narrow(w));
+    std::string s = narrow(w);
+    if (s.empty() || widen(s) != w) return make_error("model_path", "The speech-to-text model path is invalid.");
     return s;
 }
 
@@ -113,7 +111,7 @@ Result<Paths> model_paths(const fs::path& dir) {
         const fs::path f = (dir / rel).lexically_normal();
         std::error_code ec;
         if (!fs::is_regular_file(f, ec)) return make_error("model_missing", "The speech-to-text models are not installed.");
-        auto a = ansi_path(f);
+        auto a = model_path(f);
         if (!a) return a.error();
         *out = std::move(*a);
     }

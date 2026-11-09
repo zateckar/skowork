@@ -78,7 +78,7 @@ bool valid_tool_id(const std::string& t) {
 
 // The starter files apps.create writes: a server for public/ and a small JSON API on data.db, and a page that uses it
 // with relative URLs (the app is served under /<app-id>/).
-constexpr const char* kStarterServer = R"JS(// A Workbench Local app: built-in Node.js modules only, no network, files in this folder only.
+constexpr const char* kStarterServer = R"JS(// A SkoWork Local app: built-in Node.js modules only, no network, files in this folder only.
 // The client serves this app to the user alone under /<app-id>/, so pages use relative URLs.
 const http = require('node:http');
 const fs = require('node:fs');

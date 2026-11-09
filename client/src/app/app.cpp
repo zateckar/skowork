@@ -72,6 +72,7 @@
 #include "storage/forget.h"
 #include "storage/keystore.h"
 #include "storage/quota.h"
+#include "storage/withdrawal_outbox.h"
 #include "telemetry/collector.h"
 #include "telemetry/service.h"
 #include "tools/extractor.h"
@@ -247,6 +248,7 @@ struct App {
     StorageUsage usage;
     ForgetRegistry forget;
     std::atomic<bool> wipe_on_exit{false};
+    std::atomic<int> pending_remote_removals{0};
     std::atomic<bool> quitting{false};
     std::string last_status_dump;
     unsigned ticks = 0;
@@ -320,6 +322,7 @@ json App::status() {
     j["storage"] = {{"read_only", store ? store->read_only() : true},
                     {"degraded", migration.degraded},
                     {"error", storage_error.empty() ? migration.failure : storage_error},
+                    {"pending_remote_removals", pending_remote_removals.load()},
                     {"root", root ? narrow(root->root().wstring()) : std::string{}}};
     const auto blocked = run_start_blocked();
     j["agent"] = {{"available", agent != nullptr}, {"executing_runs", agent ? agent->executing_runs() : 0},
@@ -496,6 +499,14 @@ void App::register_rpc() {
     });
     rpc.add("storage.delete_everything", RpcExposure::ui, [this](const json& p) -> Result<json> {
         if (!jbool(p, "confirm")) return make_error("confirmation_required", "confirm must be true");
+        if (knowledge_svc) {
+            if (auto s = knowledge_svc->prepare_delete_all(); !s) return s.error();
+        } else if (root) {
+            std::error_code ec;
+            const bool has_knowledge = std::filesystem::exists(root->file("kg.db"), ec);
+            if (ec || has_knowledge)
+                return make_error("unavailable", "Knowledge could not be checked for shared items. Try again after knowledge is available.");
+        }
         if (tokens) (void)tokens->sign_out();
         wipe_on_exit = true;
         quit();
@@ -601,7 +612,7 @@ void App::register_rpc() {
         // The client's data root is never grantable (Filesystem Defaults).
         const auto data_root = root ? policy::canonicalize(narrow(root->root().wstring())) : Result<std::string>(std::string{});
         if (!data_root || (!data_root->empty() && policy::path_within(*folder, *data_root)))
-            return make_error("policy_denied", "the Workbench data folder cannot be granted");
+            return make_error("policy_denied", "the SkoWork data folder cannot be granted");
         if (Status s = grants->grant(*folder, jbool(p, "write"), grantable); !s) return s.error();
         return json{{"folder", *folder}, {"write", jbool(p, "write")}};
     });
@@ -696,8 +707,14 @@ bool App::start_storage() {
         return false;
     }
     root = *r;
+    const auto pending = WithdrawalOutbox(root->file("withdrawals.dpapi")).load();
+    if (!pending) {
+        storage_error = pending.error().message;
+        return false;
+    }
+    pending_remote_removals = static_cast<int>(pending->entries.size());
     log::init(log::Options{root->logs()});
-    log::info(kLog, std::string("Workbench ") + kVersion + " (" + kChannel + ", " + kCommit + ") starting");
+    log::info(kLog, std::string("SkoWork ") + kVersion + " (" + kChannel + ", " + kCommit + ") starting");
     KeyStore keys(root->keys());
     if (Status s = keys.load(); !s) {
         storage_error = "key store: " + s.error().message;
@@ -970,7 +987,7 @@ json App::policy_summary() {
     if (grants)
         for (const auto& g : grants->list()) j["grants"].push_back({{"folder", g.folder}, {"write", g.write}});
     if (!p) {
-        j["explanation"] = "No valid policy is in force. Only your own Threads can be read until Workbench refreshes its policy.";
+        j["explanation"] = "No valid policy is in force. Only your own Threads can be read until SkoWork refreshes its policy.";
         return j;
     }
     const auto val = [&](const char* key) { const json* v = p->find(key); return v ? *v : json(); };
@@ -997,7 +1014,7 @@ std::optional<std::string> App::run_start_blocked() const {
     if (!tokens || tokens->state() != AuthState::signed_in) return "not signed in";
     if (!channel || channel->services().gateway.empty()) return "not registered with the control plane";
     if (channel->locked()) return "locked";
-    if (channel->version_blocked()) return "this version is below the required minimum; update Workbench";
+    if (channel->version_blocked()) return "this version is below the required minimum; update SkoWork";
     if (!channel->connected()) return "disconnected from the control plane";
     return std::nullopt;
 }
@@ -1314,7 +1331,7 @@ void App::start_mail() {
     me.interaction_required = [this] {
         pool.post([this] {
             if (inbox)
-                (void)inbox->raise("mail", "Your mailbox needs you to sign in again before Workbench can use mail and calendar.",
+                (void)inbox->raise("mail", "Your mailbox needs you to sign in again before SkoWork can use mail and calendar.",
                                    {"Connect", "Not now"}, "");
         });
     };
@@ -1373,7 +1390,7 @@ void App::start_knowledge() {
         return;
     }
     MigrationOutcome outcome;
-    auto db = open_and_migrate(root->file("kg.db"), *key, knowledge::kg_migrations(), outcome);
+    auto db = knowledge::open_kg_database(root->file("kg.db"), *key, outcome);
     if (!db) {
         log::error(kLog, "kg.db: " + db.error().message);
         return;
@@ -1452,6 +1469,11 @@ void App::start_knowledge() {
         if (!cp || !channel || !channel->connected()) return make_error("offline", "The control plane is not connected.");
         return cp->call_json(method, path, body);
     };
+    ke.pending_item_withdrawal = [this](const std::string& remote_id) -> Result<bool> {
+        if (!root || !tokens) return make_error("unavailable", "Cannot check pending shared-data removal.");
+        return WithdrawalOutbox(root->file("withdrawals.dpapi")).has_item(cfg.idp_issuer, cfg.control_plane_url,
+                                                                           tokens->subject(), remote_id);
+    };
     knowledge_svc = std::make_unique<knowledge::KnowledgeService>(std::move(ke), std::make_unique<knowledge::KgStore>(std::move(*db)));
     for (auto& t : knowledge_svc->tools())
         if (Status s = agent->runtime().add_tool(std::move(t)); !s) log::warn(kLog, "knowledge tool: " + s.error().message);
@@ -1460,8 +1482,7 @@ void App::start_knowledge() {
             if (auto* k = knowledge_live.load()) k->mail_event(e.kind, e.id);
         });
     forget.on_forget("thread", "knowledge-graph", [this](const std::string& id) {
-        if (knowledge_svc) knowledge_svc->thread_forgotten(id);
-        return Status{};
+        return knowledge_svc ? knowledge_svc->thread_forgotten(id) : Status{};
     });
     forget.on_forget("source", "knowledge-graph", [this](const std::string& id) {
         if (!knowledge_svc) return Status{};
@@ -2355,7 +2376,7 @@ void App::shutdown() {
     if (wipe_on_exit && root) {
         log::info(kLog, "delete everything: wiping the data root");
         log::shutdown();
-        if (Status s = root->wipe(); !s) ::OutputDebugStringA(("Workbench wipe failed: " + s.error().message).c_str());
+        if (Status s = root->wipe(); !s) ::OutputDebugStringA(("SkoWork wipe failed: " + s.error().message).c_str());
     } else {
         log::info(kLog, "stopped");
         log::shutdown();
@@ -2433,7 +2454,7 @@ int run_app(HINSTANCE inst, const std::vector<std::wstring>& args) {
     wc.hInstance = inst;
     wc.lpszClassName = kWindowClass;
     ::RegisterClassExW(&wc);
-    app.hwnd = ::CreateWindowExW(WS_EX_TOOLWINDOW, kWindowClass, L"Workbench host", WS_POPUP, 0, 0, 0, 0, nullptr,
+    app.hwnd = ::CreateWindowExW(WS_EX_TOOLWINDOW, kWindowClass, L"SkoWork host", WS_POPUP, 0, 0, 0, 0, nullptr,
                                  nullptr, inst, nullptr);
     MainThread::init(app.hwnd);
 
@@ -2447,8 +2468,8 @@ int run_app(HINSTANCE inst, const std::vector<std::wstring>& args) {
     app.tray = std::make_unique<Tray>(app.hwnd, std::move(cb));
 
     if (!app.start_storage()) {
-        const std::wstring msg = L"Workbench cannot use its data folder:\n\n" + widen(app.storage_error);
-        ::MessageBoxW(nullptr, msg.c_str(), L"Workbench", MB_OK | MB_ICONERROR);
+        const std::wstring msg = L"SkoWork cannot use its data folder:\n\n" + widen(app.storage_error);
+        ::MessageBoxW(nullptr, msg.c_str(), L"SkoWork", MB_OK | MB_ICONERROR);
         app.tray.reset();
         app.pipe.reset();
         g_app = nullptr;

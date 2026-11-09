@@ -115,6 +115,7 @@ jobs:
           $publish = if ($env:PUBLISH -eq 'true') { @("-DWORKBENCH_VERSION=$env:VERSION", '-DWORKBENCH_CHANNEL=dev') } else { @() }
           cmake --preset release '-DWORKBENCH_COMMIT=${{ github.sha }}' @publish
           cmake --build --preset release
+          ./tools/check-manifests.ps1 -BuildDir build/release
       - name: Unit tests
         shell: pwsh
         working-directory: client
@@ -145,6 +146,15 @@ jobs:
         run: |
           ./tools/package.ps1 -BuildDir build/release -OutDir build/package -Version $env:VERSION
           ./tools/check-footprint.ps1 -BuildDir build/release
+      - name: Fetch pinned speech assets for dev package
+        if: env.PUBLISH == 'true'
+        shell: pwsh
+        run: ./dev/scripts/fetch-stt-models.ps1
+      - name: Build and verify optional speech package
+        if: env.PUBLISH == 'true'
+        shell: pwsh
+        working-directory: client
+        run: ./tools/package-speech.ps1 -OutDir build/package
       - name: Keep the dev build packages
         if: env.PUBLISH == 'true'
         uses: actions/upload-artifact@v4
@@ -215,6 +225,8 @@ jobs:
       - run: npm ci
       - name: Type check
         run: npm run check
+      - name: Policy schema fixture is current
+        run: npm run policy:schema -- --check
       - name: Telemetry allowlists match telemetry/catalogue.yaml
         run: npm run telemetry:catalogue -- --check
       - name: Tests (in-test issuer and upstream fakes; no organization services, no secrets)
@@ -279,7 +291,7 @@ jobs:
             type=raw,value=${{ needs.version.outputs.version }}
             type=raw,value=main
           labels: |
-            org.opencontainers.image.title=Workbench control plane
+            org.opencontainers.image.title=SkoWork control plane
             org.opencontainers.image.version=${{ needs.version.outputs.version }}
       - uses: docker/build-push-action@v6
         with:
@@ -313,8 +325,8 @@ jobs:
           notes=$(cat <<EOF
           Dev build $VERSION of main at ${GITHUB_SHA::12}, replaced by every change on main that passes CI. Channel: dev.
 
-          Desktop client: \`Workbench-$VERSION-win-x64.zip\` (checksum in the \`.sha256\` file).
-          Optional app runtime for Local apps: \`Workbench-$VERSION-app-runtime-win-x64.zip\`, extracted next to Workbench.exe.
+          Desktop client: \`SkoWork-$VERSION-win-x64.zip\` (checksum in the \`.sha256\` file).
+          Optional app runtime for Local apps: \`SkoWork-$VERSION-app-runtime-win-x64.zip\`, extracted next to SkoWork.exe.
           Control plane image: \`ghcr.io/${GITHUB_REPOSITORY_OWNER}/workbench-control-plane:$VERSION\` (also \`:main\`).
           EOF
           )
@@ -322,7 +334,7 @@ jobs:
           # A `dev` tag left without its release would pin the new release to the old commit.
           gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/dev" 2>/dev/null || true
           gh release create dev dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
-            --title "Workbench $VERSION (dev)" --notes "$notes"
+            --title "SkoWork $VERSION (dev)" --notes "$notes"
 # Not in CI on purpose (design D12): the client end-to-end tests and the control plane's real-LLM tests use the
 # organization Keycloak test realm and the organization LLM API from a developer's .env. They run locally only; the API key
 # is never stored as a repository or Actions secret.

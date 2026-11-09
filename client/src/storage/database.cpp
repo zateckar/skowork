@@ -172,13 +172,18 @@ int Database::user_version() {
 // ------------------------------------------------------------------------------------------ migrations
 
 Result<std::unique_ptr<Database>> open_and_migrate(const std::filesystem::path& file, const db_key& key,
-                                                   std::span<const Migration> migrations, MigrationOutcome& outcome) {
+                                                   std::span<const Migration> migrations, MigrationOutcome& outcome,
+                                                   bool refuse_newer, const std::function<Status(Database&)>& configure) {
     auto db = Database::open(file, key);
     if (!db) return db;
+    if (configure)
+        if (auto s = configure(**db); !s) return s.error();
     std::vector<Migration> ordered(migrations.begin(), migrations.end());
     std::sort(ordered.begin(), ordered.end(), [](const Migration& a, const Migration& b) { return a.version < b.version; });
     outcome.from_version = (*db)->user_version();
     outcome.to_version = outcome.from_version;
+    if (refuse_newer && outcome.from_version > (ordered.empty() ? 0 : ordered.back().version))
+        return make_error("schema_too_new", "This database was created by a newer version of SkoWork. Update SkoWork before opening it.");
     const bool pending = std::any_of(ordered.begin(), ordered.end(),
                                      [&](const Migration& m) { return m.version > outcome.from_version; });
     if (!pending) return db;
@@ -190,7 +195,11 @@ Result<std::unique_ptr<Database>> open_and_migrate(const std::filesystem::path& 
     std::error_code ec;
     const bool has_data = outcome.from_version > 0;
     if (has_data) {
-        (*db)->exec("PRAGMA wal_checkpoint(TRUNCATE);");
+        int log_frames = 0, checkpointed_frames = 0;
+        const int checkpoint = sqlite3_wal_checkpoint_v2((*db)->raw(), "main", SQLITE_CHECKPOINT_TRUNCATE,
+                                                         &log_frames, &checkpointed_frames);
+        if (checkpoint != SQLITE_OK || (log_frames >= 0 && checkpointed_frames < log_frames))
+            return make_error("backup", "cannot create a complete database backup while committed changes are still in use");
         std::filesystem::copy_file(file, backup, std::filesystem::copy_options::overwrite_existing, ec);
         if (ec) return make_error("backup", "cannot back up database before migration: " + ec.message());
     }
@@ -213,12 +222,107 @@ Result<std::unique_ptr<Database>> open_and_migrate(const std::filesystem::path& 
             }
             auto ro = Database::open(file, key, /*read_only=*/true);
             if (!ro) return ro;
+            if (configure)
+                if (auto configured = configure(**ro); !configured) return configured.error();
             outcome.to_version = (*ro)->user_version();
             return ro;
         }
         outcome.to_version = m.version;
         outcome.migrated = true;
     }
+    return db;
+}
+
+Result<std::unique_ptr<Database>> open_and_migrate_consistently(const std::filesystem::path& file, const db_key& key,
+                                                              std::span<const Migration> migrations, MigrationOutcome& outcome,
+                                                              const std::function<Status(Database&)>& configure) {
+    auto db = Database::open(file, key);
+    if (!db) return db;
+    if (configure)
+        if (auto s = configure(**db); !s) return s.error();
+    std::vector<Migration> ordered(migrations.begin(), migrations.end());
+    std::sort(ordered.begin(), ordered.end(), [](const Migration& a, const Migration& b) { return a.version < b.version; });
+    outcome.from_version = (*db)->user_version();
+    outcome.to_version = outcome.from_version;
+    if (outcome.from_version > (ordered.empty() ? 0 : ordered.back().version))
+        return make_error("schema_too_new", "This database was created by a newer version of SkoWork. Update SkoWork before opening it.");
+    if (std::none_of(ordered.begin(), ordered.end(), [&](const Migration& m) { return m.version > outcome.from_version; }))
+        return db;
+
+    bool migration_failed = false;
+    int final_version = outcome.from_version;
+    const Status applied = (*db)->transaction([&]() -> Status {
+        // Another process could have upgraded the database before we acquired the writer reservation.
+        if ((*db)->user_version() != outcome.from_version)
+            return make_error("schema_changed", "The database changed while preparing its migration. Retry opening it.");
+        if (outcome.from_version > 0) {
+            auto backup = file;
+            backup += L".bak";
+            auto staging = file;
+            staging += L".bak.staging";
+            for (const auto& suffix : {L"-wal", L"-shm"}) {
+                std::error_code ec;
+                if (std::filesystem::exists(backup.wstring() + suffix, ec) || ec)
+                    return make_error("backup", "the existing migration recovery copy is in use or needs recovery");
+            }
+            for (const auto& suffix : {L"", L"-wal", L"-shm"}) {
+                std::error_code ec;
+                std::filesystem::remove(staging.wstring() + suffix, ec);
+                if (ec) return make_error("backup", "cannot clear migration staging: " + ec.message());
+            }
+            auto reader = Database::open(file, key, true);
+            if (!reader) return make_error("backup", "cannot open a database snapshot reader");
+            auto snapshot = Database::open(staging, key);
+            if (!snapshot) return make_error("backup", "cannot create an encrypted migration snapshot");
+            sqlite3_backup* copy = sqlite3_backup_init((*snapshot)->raw(), "main", (*reader)->raw(), "main");
+            if (!copy) return make_error("backup", "cannot initialize the encrypted migration snapshot");
+            const int copied = sqlite3_backup_step(copy, -1);
+            const int finished = sqlite3_backup_finish(copy);
+            if (copied != SQLITE_DONE || finished != SQLITE_OK)
+                return make_error("backup", "cannot complete the encrypted migration snapshot");
+            int log_frames = 0, checkpointed_frames = 0;
+            const int checkpoint = sqlite3_wal_checkpoint_v2((*snapshot)->raw(), "main", SQLITE_CHECKPOINT_TRUNCATE,
+                                                             &log_frames, &checkpointed_frames);
+            if (checkpoint != SQLITE_OK || (log_frames >= 0 && checkpointed_frames < log_frames))
+                return make_error("backup", "cannot finish the encrypted migration snapshot");
+            snapshot->reset();
+            reader->reset();
+            auto check = Database::open(staging, key, true);
+            if (!check || (*check)->user_version() != outcome.from_version)
+                return make_error("backup", "the encrypted migration snapshot could not be verified");
+            check->reset();
+            if (!MoveFileExW(staging.c_str(), backup.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                return make_error("backup", "cannot replace the encrypted migration recovery copy");
+        }
+        for (const auto& m : ordered) {
+            if (m.version <= outcome.from_version) continue;
+            if (auto s = (*db)->exec(m.sql); !s) {
+                migration_failed = true;
+                outcome.failure = "migration " + std::to_string(m.version) + ": " + s.error().message;
+                return s;
+            }
+            if (auto s = (*db)->exec("PRAGMA user_version=" + std::to_string(m.version) + ";"); !s) {
+                migration_failed = true;
+                outcome.failure = "migration " + std::to_string(m.version) + ": " + s.error().message;
+                return s;
+            }
+            final_version = m.version;
+        }
+        return {};
+    });
+    if (!applied) {
+        if (!migration_failed) return applied.error();
+        outcome.degraded = true;
+        db->reset();
+        auto ro = Database::open(file, key, true);
+        if (!ro) return ro;
+        if (configure)
+            if (auto s = configure(**ro); !s) return s.error();
+        outcome.to_version = (*ro)->user_version();
+        return ro;
+    }
+    outcome.to_version = final_version;
+    outcome.migrated = final_version != outcome.from_version;
     return db;
 }
 

@@ -37,7 +37,7 @@ struct ComputerEnv {
     std::function<std::wstring(const std::string& thread_title, const std::string& hotkey)> banner;
     // Cancels a Run (the stop hotkey).
     std::function<void(const std::string& run_id, const std::string& reason)> cancel_run;
-    std::vector<std::string> own_executables = {"Workbench.exe", "workbench-worker.exe"};
+    std::vector<std::string> own_executables = {"SkoWork.exe", "Workbench.exe", "Workbench-legacy.exe", "workbench-worker.exe"};
     std::chrono::milliseconds uia_limit = std::chrono::seconds(2);  // per UI Automation call (design Risks)
     std::chrono::milliseconds linger = std::chrono::seconds(3);    // the overlay stays this long after an action
     int max_elements = 400;

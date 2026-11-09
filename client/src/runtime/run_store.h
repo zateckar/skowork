@@ -7,6 +7,7 @@
 #include "runtime/types.h"
 #include "storage/database.h"
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -26,6 +27,7 @@ struct ContextMessage {
 struct ThreadContext {
     std::string summary;
     std::vector<ContextMessage> messages;
+    long long compaction_revision = 0;  // id of the latest checkpoint, even if its boundary is invalid
 };
 
 struct CompactionRecord {
@@ -128,7 +130,9 @@ public:
     [[nodiscard]] ThreadContext context(const std::string& thread_id, const std::string& except_run = {});
 
     // ---- Compaction records ----
-    Result<long long> add_compaction(const CompactionRecord& record);
+    // Rechecks the exact source view and checkpoint revision under the same write transaction as insertion.
+    Result<long long> add_compaction(const CompactionRecord& record, const ThreadContext& expected, const std::string& except_run,
+                                     const std::function<bool()>& cancelled = {});
     [[nodiscard]] std::vector<CompactionRecord> compactions(const std::string& thread_id);
 
     // ---- Thread attachments (Large Tool Results) ----

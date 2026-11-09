@@ -23,6 +23,8 @@ export interface KeyDef {
   path: string;
   /** The capability whose spec defines the key. */
   owner: string;
+  /** Administrator-facing explanation of what this setting controls. */
+  description: string;
   type: KeyType;
   /** The default stated by the owning spec. Used only for the cross-key rule and guardrail comparisons (D9). */
   default?: unknown;
@@ -51,6 +53,8 @@ export class Registry {
     this.version = version;
     const keys = new Map<string, KeyDef>();
     for (const d of defs) {
+      if (typeof d.owner !== 'string' || !d.owner.trim() || typeof d.description !== 'string' || !d.description.trim())
+        throw new Error(`policy key ${d.path} is missing its owner or description`);
       if (keys.has(d.path)) throw new Error(`policy key ${d.path} is declared twice`);
       keys.set(d.path, d);
     }

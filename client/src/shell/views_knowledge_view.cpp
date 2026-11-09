@@ -237,14 +237,19 @@ std::u16string KnowledgeView::size_text(long long n) {
 
 // ---- data ----------------------------------------------------------------------------------------------------------
 
-void KnowledgeView::act(const std::string& method, const json& params, std::function<void(const json&)> done) {
+void KnowledgeView::act(const std::string& method, const json& params, std::function<void(const json&)> done,
+                        std::function<bool()> current) {
     if (busy_) return;
     busy_ = true;
     error_.clear();
     std::weak_ptr<int> alive = alive_;
-    shell_.call(method, params, [this, alive, done = std::move(done)](Result<json> r) {
+    shell_.call(method, params, [this, alive, done = std::move(done), current = std::move(current)](Result<json> r) {
         if (!alive.lock()) return;
         busy_ = false;
+        if (current && !current()) {
+            rebuild();
+            return;
+        }
         if (!r) {
             error_ = u16(r.error().message);
             shell_.announce(shell_.t("common.error_prefix") + u" " + error_);
@@ -260,26 +265,36 @@ void KnowledgeView::act(const std::string& method, const json& params, std::func
 void KnowledgeView::load_list() {
     std::weak_ptr<int> alive = alive_;
     const std::string tab = tab_;
-    shell_.call("knowledge.browse", {{"source", tab}, {"limit", 200}}, [this, alive, tab](Result<json> r) {
-        if (!alive.lock() || tab != tab_) return;
+    const size_t list_request = ++list_request_;
+    shell_.call("knowledge.browse", {{"source", tab}, {"limit", 200}}, [this, alive, tab, list_request](Result<json> r) {
+        if (!alive.lock() || tab != tab_ || list_request != list_request_) return;
         items_ = r ? (*r)["items"] : json::array();
         if (r && r->contains("counts")) counts_ = (*r)["counts"];
         if (!r) error_ = u16(r.error().message);
         rebuild();
     });
-    if (tab == "files")
-        shell_.call("knowledge.status", json::object(), [this, alive](Result<json> r) {
-            if (!alive.lock()) return;
+    {
+        const size_t request = ++file_status_request_;
+        shell_.call("knowledge.status", json::object(), [this, alive, request](Result<json> r) {
+            if (!alive.lock() || request != file_status_request_) return;
             folders_ = r ? json{{"folders", (*r)["folders"]}, {"documents", (*r)["documents"]}} : json(nullptr);
+            file_source_error_ = r ? u"" : u16(r.error().message);
+            if (r) {
+                if (const json* sources = jobj(*r, "sources"); sources && sources->is_array())
+                    for (const auto& source : *sources)
+                        if (jstr(source, "kind") == "files") file_source_error_ = u16(jstr(source, "error"));
+            }
             rebuild();
         });
+    }
 }
 
 void KnowledgeView::load_sharing() {
     std::weak_ptr<int> alive = alive_;
-    shell_.call("knowledge.sharing", json::object(), [this, alive](Result<json> r) {
-        if (!alive.lock()) return;
-        sharing_ = r ? *r : json(nullptr);
+    const size_t request = ++sharing_request_;
+    shell_.call("knowledge.sharing", json::object(), [this, alive, request](Result<json> r) {
+        if (!alive.lock() || request != sharing_request_) return;
+        if (r) sharing_ = *r;
         rebuild();
     });
 }
@@ -287,14 +302,15 @@ void KnowledgeView::load_sharing() {
 void KnowledgeView::open_item(long long id, const std::string& key) {
     if (!id) return;
     if (reader_mode_ != Reader::item || jint(item_, "id") != id) {
-        details_open_ = false;
+        details_open_ = true;
         item_ = nullptr;
     }
     reader_mode_ = Reader::item;
     selected_ = key;
+    const size_t request = ++item_request_;
     std::weak_ptr<int> alive = alive_;
-    shell_.call("knowledge.item", {{"id", id}}, [this, alive, id](Result<json> r) {
-        if (!alive.lock() || reader_mode_ != Reader::item) return;
+    shell_.call("knowledge.item", {{"id", id}}, [this, alive, id, request](Result<json> r) {
+        if (!alive.lock() || reader_mode_ != Reader::item || request != item_request_) return;
         if (r) {
             item_ = *r;
         } else if (jint(item_, "id") == id || item_.is_null()) {
@@ -365,6 +381,7 @@ void KnowledgeView::open_origin(const json& origin) {
     }
     const long long id = jint(origin, "item_id");
     if (!id) return;
+    ++search_request_;
     results_ = nullptr;
     shown_query_.clear();
     if (tab_ != "mail") {
@@ -397,14 +414,17 @@ void KnowledgeView::search() {
         clear_search();
         return;
     }
+    if (busy_) return;
     const std::u16string q = query_;
+    const size_t request = ++search_request_;
     act("knowledge.search", {{"query", ui::to_utf8(q)}, {"limit", 20}}, [this, q](const json& r) {
         results_ = r;
         shown_query_ = q;
-    });
+    }, [this, request] { return request == search_request_; });
 }
 
 void KnowledgeView::clear_search() {
+    ++search_request_;
     results_ = nullptr;
     shown_query_.clear();
     query_.clear();
@@ -426,9 +446,12 @@ void KnowledgeView::show_more_menu() {
     const std::string source = jstr(item_, "source");
     const std::string ext = jstr(item_, "ext_id");
     const std::u16string title = u16(jstr(item_, "title"));
+    std::u16string impact = shell_.t("knowledge.impact_incomplete");
+    if (const auto* facts = jobj(item_, "facts"); facts && facts->is_array())
+        impact = shell_.t("knowledge.impact_listed", {{"count", u16(std::to_string(facts->size()))}});
     auto m = std::make_unique<ui::Menu>("knowledge-more-menu", shell_.t("knowledge.more"));
-    m->add_item(shell_.ui(), "knowledge-item-exclude", shell_.t("knowledge.exclude") + u"…", [this, source, ext, title] {
-        ask_confirm("knowledge-exclude", shell_.t("knowledge.exclude_title"), shell_.t("knowledge.exclude_body", {{"name", title}}),
+    m->add_item(shell_.ui(), "knowledge-item-exclude", shell_.t("knowledge.exclude") + u"…", [this, source, ext, title, impact] {
+        ask_confirm("knowledge-exclude", shell_.t("knowledge.exclude_title"), shell_.t("knowledge.exclude_body", {{"name", title}}) + u"\n\n" + impact,
                     shell_.t("knowledge.exclude"), [this, source, ext] {
                         act("knowledge.exclusion.add", {{"kind", "item"}, {"value", source + ":" + ext}}, [this](const json&) {
                             reader_mode_ = Reader::empty;
@@ -438,8 +461,9 @@ void KnowledgeView::show_more_menu() {
                         });
                     });
     });
-    m->add_item(shell_.ui(), "knowledge-item-forget", shell_.t("knowledge.forget") + u"…", [this, id, title] {
-        ask_confirm("knowledge-forget", shell_.t("knowledge.forget_title"), shell_.t("knowledge.forget_body", {{"name", title}}),
+    m->add_item(shell_.ui(), "knowledge-item-forget", shell_.t("knowledge.forget") + u"…", [this, id, title, source, impact] {
+        const auto body = shell_.t(source == "notes" ? "knowledge.delete_note_body" : "knowledge.forget_body", {{"name", title}}) + u"\n\n" + impact;
+        ask_confirm("knowledge-forget", shell_.t("knowledge.forget_title"), body,
                     shell_.t("knowledge.forget"), [this, id] {
                         act("knowledge.item.forget", {{"item_id", id}}, [this](const json&) {
                             reader_mode_ = Reader::empty;
@@ -497,7 +521,7 @@ void KnowledgeView::save_note() {
 void KnowledgeView::ask_confirm(const std::string& id, const std::u16string& title, const std::u16string& body,
                                 const std::u16string& action, std::function<void()> confirmed) {
     auto d = std::make_unique<ui::Dialog>(shell_.ui(), id, title);
-    d->body().emplace<ui::Label>(shell_.ui(), body);
+    d->body().emplace<ui::Label>(shell_.ui(), body, TextStyle::body, Paint::text, true, id + "-body");
     ui::Dialog* dp = d.get();
     d->add_button(id + "-cancel", shell_.t("knowledge.cancel"), ui::Button::Kind::standard, [dp] { dp->close(); });
     d->add_button(id + "-ok", action, ui::Button::Kind::primary, [dp, confirmed = std::move(confirmed)] {
@@ -570,9 +594,15 @@ void KnowledgeView::rebuild() {
 
 void KnowledgeView::rebuild_messages() {
     messages_->clear_children();
+    if (const json* items = jobj(sharing_, "items"); items && items->is_array() &&
+        std::any_of(items->begin(), items->end(), [](const json& item) { return jstr(item, "state") == "unsharing"; }))
+        text(*messages_, shell_.t("knowledge.pending_withdrawal"), Paint::warning, "knowledge-pending-withdrawal");
     if (sharing_.is_object() && !jbool(sharing_, "enabled"))
         messages_->emplace<ui::Label>(shell_.ui(), shell_.t("knowledge.sharing_off"), TextStyle::caption, Paint::text_secondary, true,
                                       "knowledge-sharing-off");
+    if (!file_source_error_.empty() && (tab_ == "files" || results_.is_object()))
+        text(*messages_, shell_.t("knowledge.file_source_warning", {{"reason", file_source_error_}}), Paint::warning,
+             "knowledge-source-warning-files");
     if (!notice_.empty()) messages_->emplace<ui::Label>(shell_.ui(), notice_, TextStyle::caption, Paint::text_secondary, true, "knowledge-notice");
     if (!error_.empty()) text(*messages_, shell_.t("common.error_prefix") + u" " + error_, Paint::error, "knowledge-error");
     messages_->visible = !messages_->children().empty();
@@ -588,6 +618,7 @@ void KnowledgeView::rebuild_tabs() {
         const bool on = tab == tab_ && !results_.is_object();
         auto* b = button(*tabs_, "knowledge-tab-" + tab, label, [this, tab] {
             if (tab_ == tab && !results_.is_object()) return;
+            ++search_request_;
             if (tab_ != tab) {
                 tab_ = tab;
                 items_ = nullptr;
@@ -675,8 +706,11 @@ void KnowledgeView::rebuild_list() {
         const std::u16string title = u16(jstr(it, "title"));
         const std::u16string meta = shell_.t("knowledge.row_meta", {{"date", day(jstr(it, "date"))}, {"size", size_text(jint(it, "size"))}});
         std::u16string accessible = shell_.t("knowledge.row", {{"title", title}, {"date", day(jstr(it, "date"))}, {"size", size_text(jint(it, "size"))}});
+        const json* row_share = jobj(it, "sharing");
+        const bool unverified = row_share && jstr(*row_share, "state") == "unverified";
         if (jbool(it, "pending")) accessible += u" · " + shell_.t("knowledge.state_pending");
         if (jbool(it, "shared")) accessible += u" · " + shell_.t("knowledge.state_shared");
+        if (unverified) accessible += u" · " + shell_.t("knowledge.state_unverified");
         auto* row = list_->add(std::make_unique<Row>(u, "knowledge-row-" + key, accessible, selected_ == key && reader_mode_ != Reader::empty,
                                                      [this, id, note_id, key] {
                                                          if (id) open_item(id, key);
@@ -691,6 +725,8 @@ void KnowledgeView::rebuild_list() {
             b->role = ui::Role::none;
             if (const json* s = jobj(it, "sharing")) b->help = shell_.t("knowledge.shared_with", {{"groups", joined(s->value("groups", json::array()))}});
         }
+        if (unverified)
+            line->emplace<ui::Badge>(u, shell_.t("knowledge.state_unverified"), Paint::surface_alt, Paint::warning)->role = ui::Role::none;
         if (jbool(it, "pending"))
             line->emplace<ui::Badge>(u, shell_.t("knowledge.badge_pending"), Paint::surface_alt, Paint::text_secondary)->role = ui::Role::none;
     }
@@ -862,10 +898,14 @@ void KnowledgeView::build_item(Node& parent) {
                             TextStyle::caption, Paint::text_secondary, true, "knowledge-item-meta");
     if (jbool(item_, "pending"))
         box->emplace<ui::Label>(u, shell_.t("knowledge.pending"), TextStyle::caption, Paint::text_secondary, true, "knowledge-item-pending");
+    if (jstr(item_, "freshness") == "paused")
+        text(*box, shell_.t("knowledge.file_indexing_paused"), Paint::warning, "knowledge-file-indexing-paused");
+    else if (jstr(item_, "freshness") == "uncertain")
+        text(*box, shell_.t("knowledge.file_freshness_uncertain"), Paint::warning, "knowledge-file-freshness-uncertain");
 
     const json* share = jobj(item_, "sharing");
     const std::string state = share ? jstr(*share, "state") : std::string();
-    const bool shared = state == "shared" || state == "error" || state == "unsharing";
+    const bool shared = state == "shared" || state == "error" || state == "unsharing" || state == "unverified";
     // A note saved from mail or a Chat (add-save-as-note D4): where it came from, as a link while that still exists.
     const json origin = item_.value("origin", json(nullptr));
     std::u16string copied;
@@ -924,6 +964,9 @@ void KnowledgeView::build_item(Node& parent) {
         ink = Paint::warning;
     } else if (state == "unsharing") {
         line = shell_.t("knowledge.share_unsharing");
+    } else if (state == "unverified") {
+        line = shell_.t("knowledge.share_unverified");
+        ink = Paint::warning;
     } else {
         line = shell_.t("knowledge.shared_with", {{"groups", joined(share->value("groups", json::array()))}});
         ink = Paint::text;
@@ -933,6 +976,9 @@ void KnowledgeView::build_item(Node& parent) {
         box->emplace<ui::Label>(u, shell_.t("knowledge.share_error", {{"reason", u16(jstr(*share, "error"))}}), TextStyle::caption, Paint::warning,
                                 true, "knowledge-item-share-error");
 
+    // Show extracted knowledge before the potentially long source text; it remains collapsible.
+    build_details(*box, id);
+
     // The indexed text.
     std::string body = jstr(item_, "text");
     if (body.size() > 8000) body = utf8_truncate(body, 8000) + "…";
@@ -940,54 +986,34 @@ void KnowledgeView::build_item(Node& parent) {
     t->padding = ui::Insets::xy(0, 8);
     t->emplace<ui::Label>(u, u16(body), TextStyle::body, Paint::text, true, "knowledge-item-text");
 
-    build_details(*box, id);
 }
 
-// Details (D5), collapsed by default: the entities with rename, and the facts with edit and delete.
+// Extracted knowledge: entities with rename, and facts with edit and delete.
 void KnowledgeView::build_details(Node& parent, long long id) {
     ui::Ui& u = shell_.ui();
     const json ents = item_.value("entities", json::array());
     const json fl = item_.value("facts", json::array());
+    const std::string extraction_state = jstr(item_, "extraction_state");
+    const bool extraction_pending = extraction_state == "pending" || extraction_state == "delayed";
     auto* card = parent.add(std::make_unique<ui::Card>(u, "knowledge-item-details",
-                                                       shell_.t("knowledge.details", {{"entities", shell_.count("knowledge.entity_count", static_cast<long long>(ents.size()))},
-                                                                                      {"facts", shell_.count("knowledge.fact_count", static_cast<long long>(fl.size()))}}),
+                                                       extraction_pending ? shell_.t("knowledge.details_pending") :
+                                                           shell_.t("knowledge.details", {{"entities", shell_.count("knowledge.entity_count", static_cast<long long>(ents.size()))},
+                                                                                          {"facts", shell_.count("knowledge.fact_count", static_cast<long long>(fl.size()))}}),
                                                        true, details_open_));
     auto* c = static_cast<ui::Card*>(card);
     c->on_expand = [this](bool on) { details_open_ = on; };
     Node& b = c->body();
 
-    b.emplace<ui::Label>(u, shell_.t("knowledge.entities"), TextStyle::body_strong)->role = ui::Role::heading;
-    auto* el = b.emplace<Node>("knowledge-item-entities");
-    el->role = ui::Role::list;
-    el->name = shell_.t("knowledge.entities");
-    el->gap = 2;
-    if (ents.empty()) text(*el, shell_.t("knowledge.no_entities"), Paint::text_secondary, "knowledge-no-entities");
-    for (const auto& e : ents) {
-        const long long eid = jint(e, "id");
-        const std::string sid = std::to_string(eid);
-        const std::u16string ename = u16(jstr(e, "name"));
-        const std::u16string what = ename + u" (" + u16(jstr(e, "type")) + u")";
-        auto* line = row_box(*el, "knowledge-entity-" + sid);
-        line->role = ui::Role::list_item;
-        line->name = what;
-        auto* l = line->emplace<ui::Label>(u, what, TextStyle::body, Paint::text, true);
-        l->role = ui::Role::none;
-        l->padding.top = 6;
-        auto* rb = button(*line, "knowledge-entity-rename-" + sid, shell_.t("knowledge.rename"), [this, eid, ename, id] {
-            shell_.ask_text_value("knowledge-rename", shell_.t("knowledge.rename_title"), shell_.t("knowledge.name"), ename,
-                                  [this, eid, id](const std::string& v) {
-                                      act("knowledge.entity.rename", {{"id", eid}, {"name", v}}, [this, id](const json&) { open_item(id, selected_); });
-                                  });
-        }, ui::Button::Kind::subtle);
-        rb->name = shell_.t("knowledge.rename_named", {{"name", ename}});
-    }
+    if (extraction_state == "delayed") text(b, shell_.t("knowledge.extraction_delayed"), Paint::warning, "knowledge-extraction-delayed");
+    else if (extraction_pending) text(b, shell_.t("knowledge.extraction_pending"), Paint::text_secondary, "knowledge-extraction-pending");
+    else if (extraction_state == "off") text(b, shell_.t("knowledge.extraction_off"), Paint::text_secondary, "knowledge-extraction-off");
 
     b.emplace<ui::Label>(u, shell_.t("knowledge.facts"), TextStyle::body_strong)->role = ui::Role::heading;
     auto* facts = b.emplace<Node>("knowledge-item-facts");
     facts->role = ui::Role::list;
     facts->name = shell_.t("knowledge.facts");
     facts->gap = 2;
-    if (fl.empty()) text(*facts, shell_.t("knowledge.no_facts"), Paint::text_secondary, "knowledge-no-facts");
+    if (fl.empty() && !extraction_pending) text(*facts, shell_.t("knowledge.no_facts"), Paint::text_secondary, "knowledge-no-facts");
     for (const auto& f : fl) {
         const std::string kind = jstr(f, "kind");
         const long long fid = jint(f, "id");
@@ -1011,6 +1037,37 @@ void KnowledgeView::build_details(Node& parent, long long id) {
             act("knowledge.fact.delete", {{"kind", kind}, {"id", fid}}, [this, id](const json&) { open_item(id, selected_); });
         }, ui::Button::Kind::subtle);
         d->name = shell_.t("knowledge.delete_named", {{"name", ftext}});
+        if (const std::string passage = jstr(f, "source_passage"); !passage.empty()) {
+            auto* source = facts->add(std::make_unique<ui::Card>(u, "knowledge-fact-source-" + key,
+                                                                 shell_.t("knowledge.source_passage"), true, false));
+            text(static_cast<ui::Card*>(source)->body(), u16(passage), Paint::text_secondary, "knowledge-fact-passage-" + key);
+        }
+    }
+
+    b.emplace<ui::Label>(u, shell_.t("knowledge.entities"), TextStyle::body_strong)->role = ui::Role::heading;
+    auto* el = b.emplace<Node>("knowledge-item-entities");
+    el->role = ui::Role::list;
+    el->name = shell_.t("knowledge.entities");
+    el->gap = 2;
+    if (ents.empty() && !extraction_pending) text(*el, shell_.t("knowledge.no_entities"), Paint::text_secondary, "knowledge-no-entities");
+    for (const auto& e : ents) {
+        const long long eid = jint(e, "id");
+        const std::string sid = std::to_string(eid);
+        const std::u16string ename = u16(jstr(e, "name"));
+        const std::u16string what = ename + u" (" + u16(jstr(e, "type")) + u")";
+        auto* line = row_box(*el, "knowledge-entity-" + sid);
+        line->role = ui::Role::list_item;
+        line->name = what;
+        auto* l = line->emplace<ui::Label>(u, what, TextStyle::body, Paint::text, true);
+        l->role = ui::Role::none;
+        l->padding.top = 6;
+        auto* rb = button(*line, "knowledge-entity-rename-" + sid, shell_.t("knowledge.rename"), [this, eid, ename, id] {
+            shell_.ask_text_value("knowledge-rename", shell_.t("knowledge.rename_title"), shell_.t("knowledge.name"), ename,
+                                  [this, eid, id](const std::string& v) {
+                                      act("knowledge.entity.rename", {{"id", eid}, {"name", v}}, [this, id](const json&) { open_item(id, selected_); });
+                                  });
+        }, ui::Button::Kind::subtle);
+        rb->name = shell_.t("knowledge.rename_named", {{"name", ename}});
     }
 }
 

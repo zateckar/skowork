@@ -60,7 +60,7 @@ void MeetingService::start() {
             if (!m.ended_at) m.ended_at = now();
             (void)store_->put(m);
         }
-        for (auto m : store_->in_states({"offered", "notice"})) decline(m, "Workbench restarted");
+        for (auto m : store_->in_states({"offered", "notice"})) decline(m, "SkoWork restarted");
     }
     policy_changed();
     if (!env_.background) return;
@@ -89,7 +89,7 @@ void MeetingService::stop() {
     if (ticker_.joinable()) ticker_.join();
     if (transcriber_.joinable()) transcriber_.join();
     const std::lock_guard lock(mx_);
-    finish_capture(false, "Workbench stopped");
+    finish_capture(false, "SkoWork stopped");
 }
 
 Config MeetingService::config() {

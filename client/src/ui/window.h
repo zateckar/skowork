@@ -37,7 +37,7 @@ LRESULT frame_hit(const FrameLayout& f, float x, float y);
 class Window : public UiaSite {
 public:
     struct Options {
-        std::wstring title = L"Workbench";
+        std::wstring title = L"SkoWork";
         int width = 1100, height = 720;  // DIPs
         std::string lang = "system";     // "cs", "de", "en" or "system"
         bool show = true;

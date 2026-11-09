@@ -107,6 +107,14 @@ struct MigrationOutcome {
 // Opens `file`, applies pending `migrations` in version order after taking a backup copy, and on failure restores
 // the copy and reopens read-only (client/local-storage Schema Migration).
 Result<std::unique_ptr<Database>> open_and_migrate(const std::filesystem::path& file, const db_key& key,
-                                                   std::span<const Migration> migrations, MigrationOutcome& outcome);
+                                                   std::span<const Migration> migrations, MigrationOutcome& outcome,
+                                                   bool refuse_newer = false,
+                                                   const std::function<Status(Database&)>& configure = {});
+
+// For knowledge: hold a writer reservation across an encrypted snapshot and all pending migrations. A failure
+// rolls back the whole migration instead of replacing a live database file from another connection.
+Result<std::unique_ptr<Database>> open_and_migrate_consistently(const std::filesystem::path& file, const db_key& key,
+                                                              std::span<const Migration> migrations, MigrationOutcome& outcome,
+                                                              const std::function<Status(Database&)>& configure = {});
 
 }  // namespace wb

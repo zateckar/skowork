@@ -568,6 +568,7 @@ ThreadContext RunStore::context(const std::string& thread_id, const std::string&
         return ctx;
     }
     const CompactionRecord& last = records.back();
+    ctx.compaction_revision = last.id;
     // Order of the Runs in the Thread, to compare positions across Runs.
     std::map<std::string, size_t> order;
     for (const auto& r : runs_in_thread(thread_id)) order.emplace(r.id, order.size());
@@ -599,15 +600,34 @@ ThreadContext RunStore::context(const std::string& thread_id, const std::string&
 
 // ---- Compaction records ------------------------------------------------------------------------------------------------
 
-Result<long long> RunStore::add_compaction(const CompactionRecord& c) {
-    const std::lock_guard lock(db_.mutex());
-    auto st = db_.prepare(
-        "INSERT INTO thread_compactions(thread_id,at,kind,run_id,summary,boundary_run,boundary_seq,carried,messages_compacted,"
-        "tokens_before,tokens_after) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)");
-    st.bind(1, c.thread_id).bind(2, now()).bind(3, c.kind).bind(4, c.run_id).bind(5, c.summary).bind(6, c.boundary_run);
-    st.bind(7, c.boundary_seq).bind(8, c.carried.dump()).bind(9, c.messages_compacted).bind(10, c.tokens_before).bind(11, c.tokens_after);
-    if (auto s = st.run(); !s) return s.error();
-    return db_.last_insert_id();
+Result<long long> RunStore::add_compaction(const CompactionRecord& c, const ThreadContext& expected, const std::string& except_run,
+                                           const std::function<bool()>& cancelled) {
+    long long id = 0;
+    auto result = db_.transaction([&]() -> Status {
+        const auto current = context(c.thread_id, except_run);
+        bool same = current.compaction_revision == expected.compaction_revision && current.summary == expected.summary &&
+                    current.messages.size() == expected.messages.size();
+        for (size_t i = 0; same && i < current.messages.size(); ++i) {
+            const auto& a = current.messages[i];
+            const auto& b = expected.messages[i];
+            same = a.run_id == b.run_id && a.seq == b.seq && a.carried == b.carried &&
+                   message_to_event(a.msg) == message_to_event(b.msg);
+        }
+        if (!same) return make_error("context_changed", "the conversation changed while it was being summarised");
+        if (cancelled && cancelled()) return make_error("cancelled", "compaction was cancelled");
+        auto st = db_.prepare(
+            "INSERT INTO thread_compactions(thread_id,at,kind,run_id,summary,boundary_run,boundary_seq,carried,messages_compacted,"
+            "tokens_before,tokens_after) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)");
+        st.bind(1, c.thread_id).bind(2, now()).bind(3, c.kind).bind(4, c.run_id).bind(5, c.summary).bind(6, c.boundary_run);
+        st.bind(7, c.boundary_seq).bind(8, c.carried.dump()).bind(9, c.messages_compacted).bind(10, c.tokens_before).bind(11, c.tokens_after);
+        if (auto s = st.run(); !s) return s;
+        // Returning an error rolls the insertion back if cancellation arrived while the record was written.
+        if (cancelled && cancelled()) return make_error("cancelled", "compaction was cancelled");
+        id = db_.last_insert_id();
+        return {};
+    });
+    if (!result) return result.error();
+    return id;
 }
 
 std::vector<CompactionRecord> RunStore::compactions(const std::string& thread_id) {

@@ -2,7 +2,7 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadConfig, productionGuard } from '../src/config.ts';
-import { CLIENT_ID, makeIssuer, startHarness, type Harness } from './helpers.ts';
+import { CLIENT_ID, TEST_ISSUER, makeIssuer, startHarness, type Harness } from './helpers.ts';
 
 describe('identity: provider trust', () => {
   let h: Harness;
@@ -12,6 +12,7 @@ describe('identity: provider trust', () => {
   it('authenticates a valid token as its subject with the user name from preferred_username', async () => {
     const r = await h.call('GET', '/api/v1/identity/whoami', await h.token('dev1'));
     assert.equal(r.status, 200);
+    assert.equal(r.body.issuer, TEST_ISSUER);
     assert.equal(r.body.subject, 'sub-dev1');
     assert.equal(r.body.user_name, 'dev1');
   });
@@ -166,5 +167,34 @@ describe('identity: production issuer guard', () => {
     } finally {
       await h.close();
     }
+  });
+});
+
+describe('identity: admin directory', () => {
+  let h: Harness;
+  before(async () => (h = await startHarness()));
+  after(() => h.close());
+
+  it('lists the users and identity-provider roles the control plane knows, for any administrator', async () => {
+    const admin = await h.token('admin1');
+    const { register } = await import('./helpers.ts');
+    await register(h, await h.token('alice', { roles: ['wb-sales'] }));
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'bob', workbench_group: 'sales' });
+    await h.call('POST', '/api/v1/admin/identity/admin-roles', admin, { user_name: 'rita', role: 'skill-reviewer' });
+    await h.call('POST', '/api/v1/admin/identity/deny-list', admin, { kind: 'user', value: 'mallory', reason: 'left' });
+    await h.call('PUT', '/api/v1/admin/policy/groups/sales', admin, { description: 'Sales', owners: ['olga'] });
+    await h.call('PUT', '/api/v1/admin/identity/role-mappings', admin, { mappings: [{ idp_role: 'wb-dev', workbench_group: 'developers' }] });
+
+    const d = await h.call('GET', '/api/v1/admin/identity/directory', await h.token('rita'));
+    assert.equal(d.status, 200, JSON.stringify(d.body));
+    const by = Object.fromEntries(d.body.users.map((u: any) => [u.name, u]));
+    assert.deepEqual(Object.keys(by).sort(), ['admin1', 'alice', 'bob', 'mallory', 'olga', 'rita']);
+    assert.deepEqual(by.alice.sources, ['installation']);
+    assert.deepEqual(by.bob.sources, ['member']);
+    assert.deepEqual(by.olga.sources, ['owner']);
+    assert.equal(by.admin1.bootstrap, true);
+    assert.equal(by.rita.bootstrap, false);
+    assert.deepEqual(d.body.idp_roles, ['wb-dev', 'wb-sales']);
+    assert.equal((await h.call('GET', '/api/v1/admin/identity/directory', await h.token('dev1'))).status, 403);
   });
 });

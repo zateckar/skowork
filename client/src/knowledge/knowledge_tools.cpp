@@ -55,11 +55,11 @@ public:
             if (!digits.empty() && std::all_of(digits.begin(), digits.end(), [](char c) { return c >= '0' && c <= '9'; }) && digits.size() < 15)
                 id = std::stoll(digits);
         }
-        if (id) return svc_.store().entity(id);
+        if (id) return svc_.entity_visible(id) ? svc_.store().entity(id) : std::nullopt;
         if (ref.empty()) return std::nullopt;
-        const auto hits = svc_.store().find_entities(ref, 1);
-        if (hits.empty()) return std::nullopt;
-        return svc_.store().entity(hits[0].id);
+        for (const auto& hit : svc_.visible_entities(ref, 5))
+            return svc_.store().entity(hit.id);
+        return std::nullopt;
     }
 
     ToolOutput search(ToolContext& ctx, const json& a) {
@@ -99,8 +99,10 @@ public:
         for (const auto& f : r.facts) facts.push_back(fact_json(f));
         json body = {{"results", results}, {"user_facts", facts}};
         if (!r.semantic) body["note"] = "Semantic search is unavailable right now; these results come from full-text and graph search only.";
-        if (results.empty() && facts.empty()) body["note"] = "Nothing in the user's knowledge matches this query.";
+        if (results.empty() && facts.empty()) body["note"] = "No indexed knowledge matches this query.";
         if (!r.team_note.empty()) body["team_note"] = r.team_note;
+        if (r.file_source_problem)
+            body["file_source_note"] = "Some file sources could not be updated or checked. File knowledge may be out of date or incomplete.";
         body["cite"] = "Cite each passage you use with its title and ref; name the owner of a team passage.";
         if (results.empty()) {
             auto out = ToolOutput::success(body.dump(2));
@@ -117,7 +119,7 @@ public:
         json others = json::array();
         const std::string ref = jstr(a, "entity", jstr(a, "name"));
         if (!ref.empty())
-            for (const auto& o : svc_.store().find_entities(ref, 5))
+            for (const auto& o : svc_.visible_entities(ref, 5))
                 if (o.id != e->id) others.push_back({{"id", o.id}, {"type", o.type}, {"name", o.name}});
         if (!others.empty()) profile["other_matches"] = others;
         return untrusted(std::move(profile), "entity:" + std::to_string(e->id));
@@ -135,6 +137,7 @@ public:
             std::vector<long long> next;
             for (long long id : frontier) {
                 for (const auto& r : svc_.store().relations_of(id, 50)) {
+                    if (!svc_.relation_visible(r)) continue;
                     const long long other = r.subject == id ? r.object : r.subject;
                     if (seen.count(other) || static_cast<int>(out.size()) >= limit) continue;
                     seen.insert(other);
@@ -161,6 +164,7 @@ public:
         const auto e = find(a);
         if (e) {
             for (const auto& r : svc_.store().relations_of(e->id, 200)) {
+                if (!svc_.relation_visible(r)) continue;
                 const std::string date = !r.valid_from.empty() ? r.valid_from : r.valid_to;
                 if (date.empty()) continue;
                 const auto ms = parse_iso8601_ms(date);
@@ -178,6 +182,7 @@ public:
             }
             std::set<long long> items;
             for (const auto& c : svc_.store().chunks(svc_.store().chunks_mentioning({e->id}, 200))) {
+                if (!svc_.chunk_visible(c.id)) continue;
                 if (!items.insert(c.item_id).second) continue;
                 const auto it = svc_.store().item(c.item_id);
                 if (!it) continue;
@@ -187,6 +192,7 @@ public:
                                                     {"ref", it->ref}, {"passage", c.text}, {"provenance", item_provenance(it->source, it->ref)}});
             }
             for (const auto& f : svc_.store().facts_of(e->id)) {
+                if (!svc_.fact_visible(f)) continue;
                 json x = fact_json(f);
                 x["date"] = iso(f.created_at);
                 x["kind"] = "user_fact";

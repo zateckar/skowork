@@ -174,7 +174,7 @@ std::optional<std::string> app_refusal(std::string_view process, const std::vect
                                        const std::vector<std::string>& denylist, const std::vector<std::string>& own) {
     const std::string key = exe_key(process);
     if (trim(process).empty()) return "the application of the window is unknown";
-    if (listed(own, key)) return "Workbench's own windows are always out of scope";
+    if (listed(own, key)) return "SkoWork's own windows are always out of scope";
     if (is_credential_process(key)) return key + " is a credential or sign-in prompt, which is always out of scope";
     static constexpr std::string_view security[] = {"sechealthui.exe", "securityhealthhost.exe", "securityhealthsystray.exe", "msascui.exe"};
     if (std::find(std::begin(security), std::end(security), key) != std::end(security))

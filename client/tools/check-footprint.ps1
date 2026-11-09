@@ -7,27 +7,44 @@ param(
     [Parameter(Mandatory)] [string] $BuildDir,
     [double] $MaxInstallMB = 25,
     [double] $MaxIdleWorkingSetMB = 60,
-    [int] $IdleSeconds = 20
+    [int] $IdleSeconds = 20,
+    [switch] $InstallOnly
 )
 $ErrorActionPreference = 'Stop'
 $bin = Join-Path $BuildDir 'bin'
-$files = 'Workbench.exe', 'workbench-worker.exe', 'pdfium.dll' | ForEach-Object { Get-Item (Join-Path $bin $_) }
+$files = 'SkoWork.exe', 'Workbench-legacy.exe', 'workbench-worker.exe', 'pdfium.dll' | ForEach-Object { Get-Item (Join-Path $bin $_) }
 $installMB = ($files | Measure-Object Length -Sum).Sum / 1MB
 $failures = @()
 Write-Host ("Install size: {0:N2} MB (budget {1} MB)" -f $installMB, $MaxInstallMB)
 if ($installMB -gt $MaxInstallMB) { $failures += "install size $([math]::Round($installMB, 2)) MB > $MaxInstallMB MB" }
+if ($InstallOnly) {
+    if ($failures) { Write-Error ("Footprint budget exceeded: " + ($failures -join '; ')); exit 1 }
+    Write-Host 'Install size is within budget; idle memory was not measured.'
+    return
+}
+
+# Release binaries ignore the development-only data-root and pipe arguments below. Never launch one against a local
+# user's real profile. A GitHub-hosted runner is disposable, so its own profile is an acceptable release measurement.
+$cachePath = Join-Path $BuildDir 'CMakeCache.txt'
+$hasDevEndpoints = (Test-Path -LiteralPath $cachePath) -and
+    [bool](Select-String -LiteralPath $cachePath -Pattern '^WORKBENCH_DEV_ENDPOINTS:BOOL=ON$' -Quiet)
+$hostedRunner = $env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted'
+if (!$hasDevEndpoints -and !$hostedRunner) {
+    throw 'Cannot safely measure idle memory: this release build ignores isolation arguments. Use -InstallOnly locally or measure on a disposable GitHub-hosted runner.'
+}
+if (!$hasDevEndpoints) { Write-Host 'Measuring the release binary in the disposable GitHub-hosted runner profile.' }
 
 # Idle working set: an isolated instance (own data root and pipe, no control plane), window closed.
 $root = Join-Path ([IO.Path]::GetTempPath()) ("workbench-footprint-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory $root | Out-Null
-$exe = Join-Path $bin 'Workbench.exe'
-$p = Start-Process $exe -ArgumentList '--background', '--no-register', '--data-root', "`"$root\data`"", '--pipe-name', 'workbench-footprint', '--config', "`"$root\none.json`"" -PassThru
+$exe = Join-Path $bin 'SkoWork.exe'
+$p = Start-Process $exe -ArgumentList '--background', '--no-register', '--data-root', "`"$root\data`"", '--pipe-name', 'workbench-footprint', '--config', "`"$root\none.json`"" -PassThru -WindowStyle Hidden
 try {
     $samples = @()
     for ($i = 0; $i -lt $IdleSeconds; $i++) {
         Start-Sleep 1
         $p.Refresh()
-        if ($p.HasExited) { throw "Workbench.exe exited with code $($p.ExitCode)" }
+        if ($p.HasExited) { throw "SkoWork.exe exited with code $($p.ExitCode)" }
         $samples += $p.WorkingSet64 / 1MB
     }
     $cpu = $p.TotalProcessorTime.TotalSeconds

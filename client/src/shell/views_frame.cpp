@@ -436,13 +436,20 @@ void StatusBarView::rebuild() {
     const json& ctx = shell_.context();
     if (!shell_.open_id().empty() && ctx.is_object()) {
         const double tokens = static_cast<double>(jint(ctx, "tokens")), window = static_cast<double>(jint(ctx, "window"));
-        const double fraction = window > 0 ? std::min(1.0, tokens / window) : 0;
+        const double budget = static_cast<double>(jint(ctx, "input_budget"));
+        const bool budget_known = ctx.contains("input_budget") && ctx["input_budget"].is_number_integer();
+        const double capacity = budget_known ? budget : window;  // Older runtimes report only the model window.
+        const double fraction = capacity > 0 ? std::min(1.0, tokens / capacity) : (budget_known ? 1.0 : 0.0);
         const std::u16string pct = ui::to_utf16(format_percent(fraction, shell_.decimal()));
         const bool warn = fraction >= 0.75;
         auto* meter = emplace<ContextMeter>(fraction, warn);
-        meter->name = shell_.t("status_bar.context", {{"pct", pct}}) + (warn ? u", " + shell_.t("status_bar.context_warn") : u"");
-        meter->help = shell_.t("status_bar.context_title", {{"pct", pct}});
-        meter->emplace<ui::Label>(shell_.ui(), shell_.t("status_bar.context", {{"pct", pct}}), TextStyle::caption,
+        const auto context_label = shell_.t(budget_known ? "status_bar.context_estimate" : "status_bar.context", {{"pct", pct}});
+        const auto warning = shell_.t(budget_known ? "status_bar.context_budget_warn" : "status_bar.context_warn");
+        meter->name = context_label + (warn ? u", " + warning : u"");
+        const char* context_help = !budget_known ? "status_bar.context_title" :
+            (jbool(ctx, "includes_tools") ? "status_bar.context_budget_tools_title" : "status_bar.context_budget_title");
+        meter->help = shell_.t(context_help, {{"pct", pct}});
+        meter->emplace<ui::Label>(shell_.ui(), context_label, TextStyle::caption,
                                   warn ? Paint::warning : Paint::text_secondary, false)
             ->role = ui::Role::none;
         if (const json* last = jobj(ctx, "last_compaction"); last && jstr(*last, "kind") == "automatic")
@@ -450,7 +457,7 @@ void StatusBarView::rebuild() {
         if (warn) {
             auto* b = emplace<ui::Button>(shell_.ui(), "status-compact", shell_.t("status_bar.compact_now"), ui::Button::Kind::subtle);
             b->make_inline();
-            b->help = shell_.t("status_bar.context_warn");
+            b->help = warning;
             b->on_click = [this, id = shell_.open_id()] { shell_.compact(id); };
         }
     }

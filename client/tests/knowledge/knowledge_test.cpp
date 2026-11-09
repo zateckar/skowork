@@ -19,6 +19,7 @@
 
 #include <fstream>
 #include <map>
+#include <set>
 
 using namespace wb::knowledge;
 
@@ -43,7 +44,8 @@ const std::map<std::string, std::string>& concepts() {
 
 struct FakeGateway {
     std::mutex mx;
-    bool offline = false, rerank_down = false, reverse_rerank = false;
+    bool offline = false, rerank_down = false, reverse_rerank = false, malformed_chat = false;
+    std::string chat_failure, reject_passage;
     std::string model = "embed-a";
     int dim = 128;
     int embed_calls = 0, query_embeds = 0, rerank_calls = 0, chat_calls = 0;
@@ -102,6 +104,23 @@ struct FakeGateway {
     model::ModelResult<model::ChatResponse> chat(const model::ChatRequest& req) {
         const std::lock_guard lock(mx);
         ++chat_calls;
+        if (!reject_passage.empty() && req.messages.back().content.find(reject_passage) != std::string::npos) {
+            model::ModelFailure f;
+            f.code = model::code::invalid_request;
+            f.message = "simulated passage-specific failure";
+            return f;
+        }
+        if (!chat_failure.empty()) {
+            model::ModelFailure f;
+            f.code = chat_failure;
+            f.message = "simulated extraction failure";
+            return f;
+        }
+        if (malformed_chat) {
+            model::ChatResponse r;
+            r.text = "not valid extraction JSON";
+            return r;
+        }
         const std::string& user = req.messages.back().content;
         json entities = json::array(), relations = json::array();
         for (int i = 0; i < 16; ++i) {
@@ -156,7 +175,7 @@ struct Kg {
     void make(bool background) {
         svc.reset();
         MigrationOutcome o;
-        auto db = open_and_migrate(file, *key, kg_migrations(), o);
+        auto db = open_kg_database(file, *key, o);
         EXPECT_TRUE(db);
         KnowledgeEnv e;
         e.clock = &clock;
@@ -165,14 +184,33 @@ struct Kg {
             if (policy.contains(k)) return policy[k];
             return std::nullopt;
         };
-        e.index = [](const std::string& m, const json& p) { return index_request(m, p); };
-        e.extract_document = [](const std::string& kind, const std::string& bytes) -> Result<std::string> {
+        e.index = [this](const std::string& m, const json& p) -> Result<json> {
+            if (m == "index.read" && fail_file_reads) return make_error("unavailable", "the index worker is unavailable");
+            auto result = index_request(m, p);
+            if (after_index) after_index(m, p);
+            return result;
+        };
+        e.extract_document = [this](const std::string& kind, const std::string& bytes) -> Result<std::string> {
+            if (fail_document_extract) return make_error("unavailable", "the document worker is unavailable");
+            if (after_extract) after_extract(kind, bytes);
             if (bytes.rfind("DOC:", 0) != 0) return make_error("corrupt", kind + " could not be read");
             return bytes.substr(4);
         };
-        e.embed = [this](const std::vector<std::string>& t, const model::RequestContext& c) { return gw.embed(t, c); };
-        e.rerank = [this](const std::string& q, const std::vector<std::string>& p, const model::RequestContext&) { return gw.rerank(q, p); };
-        e.chat = [this](const model::ChatRequest& r) { return gw.chat(r); };
+        e.embed = [this](const std::vector<std::string>& t, const model::RequestContext& c) {
+            auto result = gw.embed(t, c);
+            if (after_embed && c.feature == "knowledge.embed") after_embed();
+            return result;
+        };
+        e.rerank = [this](const std::string& q, const std::vector<std::string>& p, const model::RequestContext&) {
+            auto result = gw.rerank(q, p);
+            if (after_rerank) after_rerank(p);
+            return result;
+        };
+        e.chat = [this](const model::ChatRequest& r) {
+            auto result = gw.chat(r);
+            if (after_chat) after_chat();
+            return result;
+        };
         e.directory = [this](const std::string& upn) -> Result<json> {
             const std::lock_guard lock(mx);
             ++directory_calls;
@@ -181,7 +219,15 @@ struct Kg {
                             {"manager", {{"displayName", "Tom Baker"}, {"mail", "tom.baker@acme-test.example"}}}};
             return make_error("not_found", "no such user");
         };
-        e.read_permitted = [](const std::string&) { return true; };
+        e.read_permitted = [this](const std::string& path) {
+            bool allowed;
+            {
+                const std::lock_guard lock(mx);
+                allowed = denied_read_paths.count(path) == 0;
+            }
+            if (after_read_permission) after_read_permission(path);
+            return allowed;
+        };
         e.mail_item = [this](const std::string& kind, const std::string& id) -> std::optional<json> {
             const std::lock_guard lock(mx);
             const auto it = mail.find(kind + ":" + id);
@@ -222,6 +268,7 @@ struct Kg {
         e.user = [] { return std::pair<std::string, std::string>{"Jan Novák", "jan.novak@acme-test.example"}; };
         e.deferred = [this] { return deferred.load(); };
         if (team) e.team = [this](const std::string& m, const std::string& p, const json& b) { return team(m, p, b); };
+        if (pending_withdrawal) e.pending_item_withdrawal = [this](const std::string& id) { return pending_withdrawal(id); };
         e.background = background;
         svc = std::make_unique<KnowledgeService>(std::move(e), std::make_unique<KgStore>(std::move(*db)));
     }
@@ -267,10 +314,20 @@ struct Kg {
     json policy;
     FakeGateway gw;
     std::map<std::string, json> threads, mail, mail_messages, chats;
+    std::set<std::string> denied_read_paths;
     std::atomic<bool> deferred{false};
+    std::atomic<bool> fail_file_reads{false};
+    std::atomic<bool> fail_document_extract{false};
+    std::function<void(const std::string&, const json&)> after_index;
+    std::function<void(const std::string&, const std::string&)> after_extract;
+    std::function<void(const std::string&)> after_read_permission;
+    std::function<void()> after_chat;
+    std::function<void()> after_embed;
+    std::function<void(const std::vector<std::string>&)> after_rerank;
     int directory_calls = 0;
     // control-plane/team-knowledge (add-knowledge-sharing); set it, then make() again.
     std::function<Result<json>(const std::string&, const std::string&, const json&)> team;
+    std::function<Result<bool>(const std::string&)> pending_withdrawal;
     std::unique_ptr<KnowledgeService> svc;
 };
 
@@ -400,6 +457,301 @@ TEST(KnowledgeCore, ExtractionOutputIsChecked) {
 }
 
 // ==== kg.db (2.1) and the forget cascade (2.4) ==========================================================================
+
+TEST(KnowledgeStore, ReindexPreservesItemIdentityAndRemovesOldPassages) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    ItemInput input;
+    input.source = "files";
+    input.ext_id = "project-plan";
+    input.title = "Project plan";
+    input.hash = "revision-one";
+    input.chunks = {{"", "Original deadline was June", 0}};
+    auto first = kg.svc->store().put_item(input, 1);
+    ASSERT_TRUE(first);
+    input.hash = "revision-two";
+    input.chunks = {{"", "Revised deadline is July", 0}};
+    auto second = kg.svc->store().put_item(input, 2);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(*first, *second);
+    EXPECT_TRUE(kg.svc->store().fts("Original", 10).empty());
+    EXPECT_EQ(kg.svc->store().fts("Revised", 10).size(), 1u);
+    EXPECT_EQ(kg.svc->store().item(*first)->hash, "revision-two");
+}
+
+TEST(KnowledgeStore, ReindexRechecksMovedPassageAndKeepsIndependentEvidence) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.directory_enrichment", "off"}});
+    auto& store = kg.svc->store();
+    ItemInput input;
+    input.source = "files";
+    input.ext_id = "first";
+    input.hash = "first-revision";
+    input.chunks = {{"Plan", "Jana leads Phoenix.", 1}, {"Dates", "The old date is June.", 2}};
+    auto first = store.put_item(input, 1);
+    ASSERT_TRUE(first);
+    const auto before = store.chunks_of_item(*first);
+    ASSERT_EQ(before.size(), 2u);
+    input.ext_id = "second";
+    input.chunks = {{"Plan", "Jana leads Phoenix.", 3}};
+    auto second = store.put_item(input, 1);
+    ASSERT_TRUE(second);
+    const auto independent = store.chunks_of_item(*second);
+    ASSERT_EQ(independent.size(), 1u);
+    const auto jana = store.resolve_entity("Person", "Jana", "", 1);
+    const auto phoenix = store.resolve_entity("Project", "Phoenix", "", 1);
+    const auto kept_relation = store.add_relation(jana, "leads", phoenix, 0.9, "", "", before[0].id);
+    const auto removed_relation = store.add_relation(jana, "old_date", phoenix, 0.9, "", "", before[1].id);
+    const auto independent_relation = store.add_relation(jana, "leads", phoenix, 0.9, "", "", independent[0].id);
+    store.store_vectors({{before[0].id, {1.0f, 0.0f}}, {before[1].id, {1.0f, 0.0f}},
+                         {independent[0].id, {1.0f, 0.0f}}}, "test", 2);
+    store.mark_extracted({before[0].id, before[1].id, independent[0].id});
+    input.ext_id = "first";
+    input.hash = "second-revision";
+    input.chunks = {{"Dates", "The new date is July.", 4}, {"Plan", "Jana leads Phoenix.", 9}};
+    ASSERT_TRUE(store.put_item(input, 2));
+    const auto after = store.chunks_of_item(*first);
+    ASSERT_EQ(after.size(), 2u);
+    EXPECT_EQ(after[1].id, before[0].id);
+    EXPECT_EQ(after[1].at, 9);
+    EXPECT_FALSE(store.relation(kept_relation));
+    EXPECT_FALSE(store.relation(removed_relation));
+    EXPECT_TRUE(store.relation(independent_relation));
+    EXPECT_EQ(store.vectors_of("test", 2), 2);
+    EXPECT_EQ(store.extract_pending(), 2);
+    EXPECT_TRUE(store.fts("old", 10).empty());
+    EXPECT_EQ(store.fts("new", 10).size(), 1u);
+}
+
+TEST(KnowledgeCuration, ForgetRemovesItemCorrectionsAndEncryptedRecoveryCopy) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    auto& store = kg.svc->store();
+    ItemInput input;
+    input.source = "files";
+    input.ext_id = "first";
+    input.hash = "v1";
+    input.chunks = {{"", "First source passage.", 0}};
+    const auto first = store.put_item(input, 1);
+    ASSERT_TRUE(first);
+    input.ext_id = "second";
+    input.chunks = {{"", "Second source passage.", 0}};
+    ASSERT_TRUE(store.put_item(input, 1));
+    const auto entity = store.resolve_entity("Project", "Phoenix", "", 1);
+    const auto forgotten = store.add_fact(entity, "First correction", "", 1, "files", "first");
+    const auto surviving = store.add_fact(entity, "Second correction", "", 1, "files", "second");
+    store.add_tombstone("files", "first", "v1", "private|fact|value");
+    ASSERT_TRUE(store.db().exec("PRAGMA wal_checkpoint(TRUNCATE)"));
+    auto backup = kg.file;
+    backup += L".bak";
+    ASSERT_TRUE(std::filesystem::copy_file(kg.file, backup));
+    write_file(std::filesystem::path(backup.wstring() + L"-wal"), "backup sidecar");
+    write_file(std::filesystem::path(backup.wstring() + L"-shm"), "backup sidecar");
+    auto staging = kg.file;
+    staging += L".bak.staging";
+    ASSERT_TRUE(std::filesystem::copy_file(kg.file, staging));
+    write_file(std::filesystem::path(staging.wstring() + L"-wal"), "encrypted staging sidecar");
+    write_file(std::filesystem::path(staging.wstring() + L"-shm"), "staging sidecar");
+    ASSERT_TRUE(kg.svc->forget_item(*first));
+    EXPECT_FALSE(std::filesystem::exists(backup));
+    EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(backup.wstring() + L"-wal")));
+    EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(backup.wstring() + L"-shm")));
+    EXPECT_FALSE(std::filesystem::exists(staging));
+    EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(staging.wstring() + L"-wal")));
+    EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(staging.wstring() + L"-shm")));
+    EXPECT_FALSE(store.item(*first));
+    EXPECT_FALSE(store.fact(forgotten));
+    EXPECT_FALSE(store.tombstoned("files", "first", "v1", "private|fact|value"));
+    EXPECT_TRUE(store.fact(surviving));
+    EXPECT_TRUE(store.item("files", "second"));
+}
+
+TEST(KnowledgeCuration, ForgetReportsRecoveryRemovalFailureWithoutDeletingItem) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    ItemInput input;
+    input.source = "files";
+    input.ext_id = "first";
+    input.hash = "v1";
+    input.chunks = {{"", "Source passage.", 0}};
+    const auto item = kg.svc->store().put_item(input, 1);
+    ASSERT_TRUE(item);
+    auto backup = kg.file;
+    backup += L".bak";
+    std::filesystem::create_directories(backup);
+    write_file(backup / "locked", "prevent removal");
+    const auto result = kg.svc->forget_item(*item);
+    EXPECT_FALSE(result);
+    EXPECT_TRUE(kg.svc->store().item(*item));
+    const auto exclusions = kg.svc->store().user_exclusions();
+    EXPECT_EQ(std::find(exclusions.begin(), exclusions.end(), std::pair<std::string, std::string>{"item", "files:first"}), exclusions.end());
+}
+
+TEST(KnowledgeCuration, ExclusionReportsFailureAndCanRetryRemoval) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    ItemInput input;
+    input.source = "files";
+    input.ext_id = "private.txt";
+    input.hash = "v1";
+    input.chunks = {{"", "Private source passage.", 0}};
+    ASSERT_TRUE(kg.svc->store().put_item(input, 1));
+    ASSERT_TRUE(kg.svc->store().db().exec(
+        "CREATE TRIGGER reject_item_delete BEFORE DELETE ON items BEGIN SELECT RAISE(ABORT,'test failure'); END"));
+    EXPECT_FALSE(kg.svc->add_exclusion("item", "files:private.txt"));
+    EXPECT_TRUE(kg.svc->store().item("files", "private.txt"));
+    ASSERT_TRUE(kg.svc->store().db().exec("DROP TRIGGER reject_item_delete"));
+    ASSERT_TRUE(kg.svc->add_exclusion("item", "files:private.txt"));
+    EXPECT_FALSE(kg.svc->store().item("files", "private.txt"));
+}
+
+TEST(KnowledgeCuration, ForgetNoteDeletesOriginalTextAsWellAsItsIndex) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto id = kg.svc->save_note(0, "Private note", "Sensitive private note text.");
+    ASSERT_TRUE(id);
+    kg.idle();
+    const auto indexed = kg.svc->store().item("notes", std::to_string(*id));
+    ASSERT_TRUE(indexed);
+    ASSERT_TRUE(kg.svc->forget_item(indexed->id));
+    EXPECT_FALSE(kg.svc->store().note(*id));
+    EXPECT_FALSE(kg.svc->store().item(indexed->id));
+    kg.svc->sweep_now();
+    kg.idle();
+    EXPECT_FALSE(kg.svc->store().item("notes", std::to_string(*id)));
+    EXPECT_TRUE(kg.svc->store().fts("sensitive", 10).empty());
+}
+
+TEST(KnowledgeCuration, DeleteUnindexedNoteRemovesDependentTextAndRollsBackOnFailure) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    auto& store = kg.svc->store();
+    const auto id = store.save_note(0, "Private", "Original note text", 1);
+    ASSERT_GT(id, 0);
+    const auto sid = std::to_string(id);
+    const auto entity = store.resolve_entity("Project", "Phoenix", "", 1);
+    const auto fact = store.add_fact(entity, "Private correction", "", 1, "notes", sid);
+    store.add_tombstone("notes", sid, "v1", "private fact text");
+    ShareRow share;
+    share.source = "notes";
+    share.ext_id = sid;
+    share.remote_id = "remote-note";
+    share.title = "Private";
+    share.state = "shared";
+    store.put_share(share);
+    ASSERT_TRUE(store.db().exec("CREATE TRIGGER reject_note_delete BEFORE DELETE ON notes BEGIN SELECT RAISE(ABORT,'test failure'); END"));
+    EXPECT_FALSE(kg.svc->delete_note(id));
+    EXPECT_TRUE(store.note(id));
+    EXPECT_TRUE(store.fact(fact));
+    EXPECT_TRUE(store.tombstoned("notes", sid, "v1", "private fact text"));
+    ASSERT_TRUE(store.share("notes", sid));
+    EXPECT_EQ(store.share("notes", sid)->state, "shared");
+    ASSERT_TRUE(store.db().exec("DROP TRIGGER reject_note_delete"));
+    ASSERT_TRUE(kg.svc->delete_note(id));
+    EXPECT_FALSE(store.note(id));
+    EXPECT_FALSE(store.fact(fact));
+    EXPECT_FALSE(store.tombstoned("notes", sid, "v1", "private fact text"));
+    ASSERT_EQ(store.shares().size(), 1u);
+    EXPECT_EQ(store.shares()[0].state, "unsharing");
+    EXPECT_TRUE(store.shares()[0].title.empty());
+}
+
+TEST(KnowledgeCuration, ForgetNotesSourceDeletesNotesAndDisablesReindexing) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    ASSERT_TRUE(kg.svc->save_note(0, "First", "First private note."));
+    ASSERT_TRUE(kg.svc->save_note(0, "Second", "Second private note."));
+    kg.idle();
+    ASSERT_EQ(kg.svc->store().counts("notes").items, 2);
+    ASSERT_TRUE(kg.svc->forget_source("notes"));
+    EXPECT_FALSE(kg.svc->store().source("notes").user_enabled);
+    EXPECT_TRUE(kg.svc->store().notes().empty());
+    EXPECT_EQ(kg.svc->store().counts("notes").items, 0);
+    kg.svc->sweep_now();
+    kg.idle();
+    EXPECT_EQ(kg.svc->store().counts("notes").items, 0);
+}
+
+TEST(KnowledgeCuration, ForgetSourceDuringIndexingCannotRestoreThread) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    kg.add_thread("thread-one", {{"user", "Original thread text."}});
+    kg.svc->thread_finished("thread-one");
+    kg.idle();
+    ASSERT_TRUE(kg.svc->store().item("threads", "thread-one"));
+    kg.add_thread("thread-one", {{"user", "Updated thread text."}});
+    bool forgotten = false;
+    kg.after_index = [&](const std::string& method, const json&) {
+        if (method == "index.chunk" && !forgotten) {
+            forgotten = true;
+            EXPECT_TRUE(kg.svc->forget_source("threads"));
+        }
+    };
+    kg.svc->thread_finished("thread-one");
+    kg.idle();
+    ASSERT_TRUE(forgotten);
+    EXPECT_FALSE(kg.svc->store().item("threads", "thread-one"));
+    EXPECT_FALSE(kg.svc->store().source("threads").user_enabled);
+    kg.after_index = {};
+    kg.svc->sweep_now();
+    kg.idle();
+    EXPECT_FALSE(kg.svc->store().item("threads", "thread-one"));
+}
+
+TEST(KnowledgeCuration, ForgetThreadDuringIndexingCannotRestoreIt) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    kg.add_thread("thread-one", {{"user", "Original private thread."}});
+    kg.svc->thread_finished("thread-one");
+    kg.idle();
+    ASSERT_TRUE(kg.svc->store().item("threads", "thread-one"));
+    const auto entity = kg.svc->store().resolve_entity("Project", "Phoenix", "", 1);
+    const auto fact = kg.svc->store().add_fact(entity, "Private correction", "thread-one", 1);
+    kg.svc->store().add_tombstone("threads", "thread-one", "v1", "private fact");
+    kg.add_thread("thread-one", {{"user", "Updated private thread."}});
+    bool forgotten = false;
+    kg.after_index = [&](const std::string& method, const json&) {
+        if (method == "index.chunk" && !forgotten) {
+            forgotten = true;
+            EXPECT_TRUE(kg.svc->thread_forgotten("thread-one"));
+        }
+    };
+    kg.svc->thread_finished("thread-one");
+    kg.idle();
+    ASSERT_TRUE(forgotten);
+    EXPECT_FALSE(kg.svc->store().item("threads", "thread-one"));
+    EXPECT_FALSE(kg.svc->store().fact(fact));
+    EXPECT_FALSE(kg.svc->store().tombstoned("threads", "thread-one", "v1", "private fact"));
+    kg.after_index = {};
+    kg.svc->thread_finished("thread-one");
+    kg.idle();
+    EXPECT_FALSE(kg.svc->store().item("threads", "thread-one"));
+}
+
+TEST(KnowledgeCuration, ForgetThreadReportsRecoveryRemovalFailure) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    kg.add_thread("thread-one", {{"user", "Private thread."}});
+    kg.svc->thread_finished("thread-one");
+    kg.idle();
+    ASSERT_TRUE(kg.svc->store().item("threads", "thread-one"));
+    auto backup = kg.file;
+    backup += L".bak";
+    std::filesystem::create_directories(backup);
+    write_file(backup / "locked", "prevent removal");
+    EXPECT_FALSE(kg.svc->thread_forgotten("thread-one"));
+    EXPECT_TRUE(kg.svc->store().item("threads", "thread-one"));
+    const auto exclusions = kg.svc->store().user_exclusions();
+    EXPECT_EQ(std::find(exclusions.begin(), exclusions.end(), std::pair<std::string, std::string>{"item", "threads:thread-one"}), exclusions.end());
+}
+
+TEST(KnowledgeCuration, ForgetThreadRollsBackWhenOrphanCleanupFails) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    auto& store = kg.svc->store();
+    ItemInput input;
+    input.source = "threads";
+    input.ext_id = "one";
+    input.hash = "v1";
+    input.chunks = {{"", "Private passage", 0}};
+    ASSERT_TRUE(store.put_item(input, 1));
+    const auto entity = store.resolve_entity("person", "Private name", "", 1);
+    ASSERT_NE(entity, 0);
+    ASSERT_NE(store.add_fact(entity, "private correction", "one", 1), 0);
+    ASSERT_TRUE(store.db().exec("CREATE TRIGGER fail_orphan_cleanup BEFORE DELETE ON entities BEGIN SELECT RAISE(ABORT,'test'); END"));
+    EXPECT_FALSE(store.forget_thread("one"));
+    EXPECT_TRUE(store.item("threads", "one"));
+    EXPECT_EQ(kg.count("SELECT count(*) FROM facts_user"), 1);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM user_exclusions WHERE kind='item' AND value='threads:one'"), 0);
+}
 
 TEST(KnowledgeStore, MigrationsAndForgetCascadeLeaveNoDerivedRows) {
     Kg kg({{"knowledge.directory_enrichment", "off"}});
@@ -542,6 +894,383 @@ TEST(KnowledgeFiles, TypesSizesPolicyGlobsLaterExclusionsAndChanges) {
     EXPECT_EQ(kg.svc->store().counts("files").items, 1);
 }
 
+TEST(KnowledgeFiles, UnavailableFolderKeepsItsIndexedItemsWhileOtherDeletionsProceed) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto other = kg.tmp.path / L"other";
+    std::filesystem::create_directories(other);
+    write_file(kg.folder / "retained.txt", "Previously indexed project notes.");
+    write_file(other / "removed.txt", "Another project note.");
+    write_file(other / "updated.txt", "Original version.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    ASSERT_TRUE(kg.svc->add_folder(u8(other)));
+    kg.idle();
+    ASSERT_EQ(kg.svc->store().counts("files").items, 3);
+    const auto original = kg.svc->store().item("files", kg.file_path("retained.txt"));
+    ASSERT_TRUE(original);
+    const auto offline = kg.tmp.path / L"docs-temporarily-offline";
+    std::filesystem::rename(kg.folder, offline);
+    std::filesystem::remove(other / "removed.txt");
+    write_file(other / "updated.txt", "Updated version with more detail.");
+    kg.svc->sweep_now();
+    kg.idle();
+    const auto retained = kg.svc->store().item("files", kg.file_path("retained.txt"));
+    ASSERT_TRUE(retained);
+    EXPECT_EQ(retained->id, original->id);
+    EXPECT_EQ(kg.svc->store().counts("files").items, 2);
+    EXPECT_FALSE(kg.svc->store().source("files").last_error.empty());
+    EXPECT_TRUE(kg.found(kg.svc->search("previously indexed project notes", {}), "retained.txt"));
+    auto tools = kg.svc->tools();
+    runtime::ToolContext ctx;
+    const auto search = [&](const json& args) { return json::parse(tool(tools, "knowledge.search").run(ctx, args).content); };
+    auto result = search({{"query", "previously indexed project notes"}});
+    EXPECT_TRUE(result.contains("file_source_note"));
+    EXPECT_EQ(result["file_source_note"].get<std::string>().find(kg.file_path("retained.txt")), std::string::npos);
+    kg.gw.offline = true;  // Force an empty full-text result instead of a semantic nearest neighbour.
+    result = search({{"query", "nothingmatchesxyz"}, {"sources", {"files"}}});
+    EXPECT_TRUE(result.contains("file_source_note"));
+    EXPECT_EQ(result["note"], "No indexed knowledge matches this query.");
+    kg.gw.offline = false;
+    result = search({{"query", "previously indexed project notes"}, {"sources", {"notes"}}});
+    EXPECT_FALSE(result.contains("file_source_note"));
+    std::filesystem::rename(offline, kg.folder);
+    kg.svc->sweep_now();
+    EXPECT_TRUE(kg.svc->store().item("files", kg.file_path("retained.txt")));
+    EXPECT_TRUE(kg.svc->store().source("files").last_error.empty());
+    EXPECT_FALSE(search({{"query", "previously indexed project notes"}}).contains("file_source_note"));
+}
+
+TEST(KnowledgeFiles, TransientIndexReadFailureKeepsLastIndexedRevision) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto file = kg.folder / "plan.txt";
+    write_file(file, "Original launch plan.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    const auto original = kg.svc->store().item("files", kg.file_path("plan.txt"));
+    ASSERT_TRUE(original);
+    kg.fail_file_reads = true;
+    write_file(file, "Revised launch plan for autumn.");
+    kg.svc->sweep_now();
+    kg.idle();
+    const auto retained = kg.svc->store().item("files", kg.file_path("plan.txt"));
+    ASSERT_TRUE(retained);
+    EXPECT_EQ(retained->id, original->id);
+    EXPECT_EQ(retained->hash, original->hash);
+    EXPECT_TRUE(kg.found(kg.svc->search("original launch plan", {}), "plan.txt"));
+    EXPECT_NE(kg.svc->store().source("files").last_error.find("unavailable"), std::string::npos);
+    kg.fail_file_reads = false;
+    kg.svc->sweep_now();
+    kg.idle();
+    const auto updated = kg.svc->store().item("files", kg.file_path("plan.txt"));
+    ASSERT_TRUE(updated);
+    EXPECT_EQ(updated->id, original->id);
+    EXPECT_NE(updated->hash, original->hash);
+    EXPECT_TRUE(kg.found(kg.svc->search("autumn", {}), "plan.txt"));
+}
+
+TEST(KnowledgeFiles, ContentChangeWithSameSizeAndTimestampIsIndexed) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto file = kg.folder / "plan.txt";
+    write_file(file, "Launch is in June.");
+    ASSERT_TRUE(kg.svc->add_document(u8(file)));
+    kg.idle();
+    const auto original = kg.svc->store().item("files", u8(file));
+    ASSERT_TRUE(original);
+    const auto original_chunks = kg.svc->store().chunks_of_item(original->id);
+    const auto timestamp = std::filesystem::last_write_time(file);
+    kg.svc->sweep_now();
+    kg.idle();
+    ASSERT_EQ(kg.svc->store().chunks_of_item(original->id).at(0).id, original_chunks.at(0).id);
+    write_file(file, "Launch is in July.");
+    std::filesystem::last_write_time(file, timestamp);
+    kg.svc->sweep_now();
+    kg.idle();
+    const auto changed = kg.svc->store().item("files", u8(file));
+    ASSERT_TRUE(changed);
+    EXPECT_EQ(changed->id, original->id);
+    EXPECT_NE(changed->hash, original->hash);
+    const auto chunks = kg.svc->store().chunks_of_item(changed->id);
+    ASSERT_EQ(chunks.size(), 1u);
+    EXPECT_NE(chunks[0].text.find("July"), std::string::npos);
+    EXPECT_EQ(chunks[0].text.find("June"), std::string::npos);
+}
+
+TEST(KnowledgeFiles, SameMetadataChangeDuringReadCannotCommitStaleContent) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto file = kg.folder / "plan.txt";
+    write_file(file, "Launch is in June.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    const auto original = kg.svc->store().item("files", u8(file));
+    ASSERT_TRUE(original);
+    const auto timestamp = std::filesystem::last_write_time(file);
+    write_file(file, "Launch is in July.");
+    std::filesystem::last_write_time(file, timestamp);
+    bool changed = false;
+    kg.after_index = [&](const std::string& method, const json&) {
+        if (method == "index.read" && !changed) {
+            changed = true;
+            write_file(file, "Launch is in May!.");
+            std::filesystem::last_write_time(file, timestamp);
+        }
+    };
+    kg.svc->sweep_now();
+    kg.idle();
+    ASSERT_TRUE(changed);
+    ASSERT_TRUE(kg.svc->store().item("files", u8(file)));
+    EXPECT_EQ(kg.svc->store().item("files", u8(file))->hash, original->hash);
+    EXPECT_NE(kg.svc->store().source("files").last_error.find("changed while indexing"), std::string::npos);
+    kg.after_index = {};
+    kg.svc->sweep_now();
+    kg.idle();
+    const auto chunks = kg.svc->store().chunks_of_item(original->id);
+    ASSERT_EQ(chunks.size(), 1u);
+    EXPECT_NE(chunks[0].text.find("May"), std::string::npos);
+}
+
+TEST(KnowledgeFiles, FingerprintUpgradePreservesDeletedFactProtection) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto file = kg.folder / "plan.txt";
+    write_file(file, "Launch is in June.");
+    ASSERT_TRUE(kg.svc->add_document(u8(file)));
+    kg.idle();
+    const auto original = kg.svc->store().item("files", u8(file));
+    ASSERT_TRUE(original);
+    const std::string legacy = std::to_string(std::filesystem::file_size(file)) + ":" +
+        std::to_string(std::filesystem::last_write_time(file).time_since_epoch().count());
+    auto update = kg.svc->store().db().prepare("UPDATE items SET hash=?1 WHERE id=?2");
+    update.bind(1, legacy).bind(2, original->id);
+    ASSERT_TRUE(update.run());
+    kg.svc->store().add_tombstone("files", u8(file), legacy, "launch|is|june");
+    const auto chunks = kg.svc->store().chunks_of_item(original->id);
+    ASSERT_EQ(chunks.size(), 1u);
+    const auto launch = kg.svc->store().resolve_entity("Project", "Launch", "", 1);
+    const auto june = kg.svc->store().resolve_entity("Event", "June", "", 1);
+    const auto relation = kg.svc->store().add_relation(launch, "planned_for", june, 0.9, "", "", chunks[0].id);
+    kg.svc->sweep_now();
+    kg.idle();
+    const auto upgraded = kg.svc->store().item("files", u8(file));
+    ASSERT_TRUE(upgraded);
+    EXPECT_EQ(upgraded->id, original->id);
+    EXPECT_EQ(upgraded->hash.rfind("sha256:", 0), 0u);
+    EXPECT_TRUE(kg.svc->store().tombstoned("files", u8(file), upgraded->hash, "launch|is|june"));
+    EXPECT_TRUE(kg.svc->store().relation(relation));
+}
+
+TEST(KnowledgeFiles, DocumentWorkerFailureKeepsItemAndWarningUntilThatDocumentRecovers) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto doc = kg.folder / "plan.docx";
+    const auto other = kg.folder / "other.txt";
+    write_file(doc, "DOC:Original launch plan.");
+    write_file(other, "Original other file.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    const auto original = kg.svc->store().item("files", kg.file_path("plan.docx"));
+    ASSERT_TRUE(original);
+    kg.fail_document_extract = true;
+    write_file(doc, "DOC:Revised launch plan for autumn.");
+    kg.svc->sweep_now();
+    kg.idle();
+    auto retained = kg.svc->store().item("files", kg.file_path("plan.docx"));
+    ASSERT_TRUE(retained);
+    EXPECT_EQ(retained->id, original->id);
+    EXPECT_EQ(retained->hash, original->hash);
+    EXPECT_TRUE(kg.found(kg.svc->search("original launch plan", {}), "plan.docx"));
+    EXPECT_NE(kg.svc->store().source("files").last_error.find("document worker"), std::string::npos);
+    write_file(other, "Changed other file with unrelated content.");
+    kg.svc->sweep_now();
+    kg.idle();
+    EXPECT_NE(kg.svc->store().source("files").last_error.find("document worker"), std::string::npos);
+    kg.fail_document_extract = false;
+    kg.svc->sweep_now();
+    kg.idle();
+    retained = kg.svc->store().item("files", kg.file_path("plan.docx"));
+    ASSERT_TRUE(retained);
+    EXPECT_EQ(retained->id, original->id);
+    EXPECT_NE(retained->hash, original->hash);
+    EXPECT_TRUE(kg.found(kg.svc->search("autumn", {}), "plan.docx"));
+    EXPECT_TRUE(kg.svc->store().source("files").last_error.empty());
+}
+
+TEST(KnowledgeFiles, ChangedDuringReadKeepsLastItemUntilRetry) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto file = kg.folder / "plan.txt";
+    write_file(file, "Original launch plan.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    const auto original = kg.svc->store().item("files", kg.file_path("plan.txt"));
+    ASSERT_TRUE(original);
+    write_file(file, "Intermediate launch plan for autumn.");
+    bool changed = false;
+    kg.after_index = [&](const std::string& method, const json&) {
+        if (method == "index.read" && !changed) {
+            changed = true;
+            write_file(file, "Final launch plan for a later winter release.");
+        }
+    };
+    kg.svc->sweep_now();
+    kg.idle();
+    ASSERT_TRUE(changed);
+    auto retained = kg.svc->store().item("files", kg.file_path("plan.txt"));
+    ASSERT_TRUE(retained);
+    EXPECT_EQ(retained->id, original->id);
+    EXPECT_EQ(retained->hash, original->hash);
+    EXPECT_TRUE(kg.found(kg.svc->search("original launch plan", {}), "plan.txt"));
+    EXPECT_NE(kg.svc->store().source("files").last_error.find("changed while indexing"), std::string::npos);
+    kg.after_index = {};
+    kg.svc->sweep_now();
+    kg.idle();
+    retained = kg.svc->store().item("files", kg.file_path("plan.txt"));
+    ASSERT_TRUE(retained);
+    EXPECT_EQ(retained->id, original->id);
+    EXPECT_NE(retained->hash, original->hash);
+    EXPECT_TRUE(kg.found(kg.svc->search("winter release", {}), "plan.txt"));
+    EXPECT_TRUE(kg.svc->store().source("files").last_error.empty());
+}
+
+TEST(KnowledgeFiles, ChangedDuringCorruptExtractionDoesNotDeleteLastItem) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto file = kg.folder / "plan.docx";
+    write_file(file, "DOC:Original launch plan.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    const auto original = kg.svc->store().item("files", kg.file_path("plan.docx"));
+    ASSERT_TRUE(original);
+    write_file(file, "Incomplete document contents");
+    bool changed = false;
+    kg.after_extract = [&](const std::string&, const std::string&) {
+        changed = true;
+        write_file(file, "DOC:Final launch plan for winter release.");
+    };
+    kg.svc->sweep_now();
+    kg.idle();
+    ASSERT_TRUE(changed);
+    auto retained = kg.svc->store().item("files", kg.file_path("plan.docx"));
+    ASSERT_TRUE(retained);
+    EXPECT_EQ(retained->hash, original->hash);
+    EXPECT_NE(kg.svc->store().source("files").last_error.find("changed while indexing"), std::string::npos);
+    kg.after_extract = {};
+    kg.svc->sweep_now();
+    kg.idle();
+    retained = kg.svc->store().item("files", kg.file_path("plan.docx"));
+    ASSERT_TRUE(retained);
+    EXPECT_EQ(retained->id, original->id);
+    EXPECT_NE(retained->hash, original->hash);
+    EXPECT_TRUE(kg.found(kg.svc->search("winter release", {}), "plan.docx"));
+}
+
+TEST(KnowledgeFiles, PolicyRevokedDuringReadRemovesLastItem) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto file = kg.folder / "restricted.txt";
+    write_file(file, "Original restricted document.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    ASSERT_TRUE(kg.svc->store().item("files", kg.file_path("restricted.txt")));
+    write_file(file, "Changed restricted document with additional content.");
+    bool revoked = false;
+    kg.after_index = [&](const std::string& method, const json&) {
+        if (method == "index.read" && !revoked) {
+            const std::lock_guard lock(kg.mx);
+            kg.denied_read_paths.insert(kg.file_path("restricted.txt"));
+            revoked = true;
+        }
+    };
+    kg.svc->sweep_now();
+    kg.idle();
+    ASSERT_TRUE(revoked);
+    EXPECT_FALSE(kg.svc->store().item("files", kg.file_path("restricted.txt")));
+    EXPECT_FALSE(kg.found(kg.svc->search("restricted document", {}), "restricted.txt"));
+}
+
+TEST(KnowledgeFiles, ForgetDuringReadDoesNotRestoreItem) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto file = kg.folder / "plan.txt";
+    write_file(file, "Original project plan.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    const auto original = kg.svc->store().item("files", kg.file_path("plan.txt"));
+    ASSERT_TRUE(original);
+    write_file(file, "Revised project plan with private details.");
+    bool forgotten = false;
+    kg.after_index = [&](const std::string& method, const json&) {
+        if (method == "index.read" && !forgotten) {
+            forgotten = true;
+            EXPECT_TRUE(kg.svc->forget_item(original->id));
+        }
+    };
+    kg.svc->sweep_now();
+    kg.idle();
+    ASSERT_TRUE(forgotten);
+    EXPECT_TRUE(std::filesystem::exists(file));
+    EXPECT_FALSE(kg.svc->store().item("files", kg.file_path("plan.txt")));
+    EXPECT_FALSE(kg.found(kg.svc->search("project plan", {}), "plan.txt"));
+    kg.after_index = {};
+    kg.svc->sweep_now();
+    kg.idle();
+    EXPECT_FALSE(kg.svc->store().item("files", kg.file_path("plan.txt")));
+}
+
+TEST(KnowledgeFiles, RemovingLastImportDuringReadDoesNotRestoreItem) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto file = kg.folder / "plan.txt";
+    const auto path = kg.file_path("plan.txt");
+    write_file(file, "Original project plan.");
+    ASSERT_TRUE(kg.svc->add_document(path));
+    kg.idle();
+    ASSERT_TRUE(kg.svc->store().item("files", path));
+    write_file(file, "Revised project plan with private details.");
+    bool removed = false;
+    kg.after_index = [&](const std::string& method, const json&) {
+        if (method == "index.read" && !removed) {
+            removed = true;
+            EXPECT_TRUE(kg.svc->remove_document(path));
+        }
+    };
+    kg.svc->sweep_now();
+    kg.idle();
+    ASSERT_TRUE(removed);
+    EXPECT_TRUE(std::filesystem::exists(file));
+    EXPECT_FALSE(kg.svc->store().item("files", path));
+    EXPECT_FALSE(kg.found(kg.svc->search("project plan", {}), "plan.txt"));
+}
+
+TEST(KnowledgeFiles, SingleDocumentSurvivesUnavailableParentButNotConfirmedDeletion) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto file = kg.folder / "plan.txt";
+    write_file(file, "Indexed single document.");
+    ASSERT_TRUE(kg.svc->add_document(kg.file_path("plan.txt")));
+    kg.idle();
+    ASSERT_TRUE(kg.svc->store().item("files", kg.file_path("plan.txt")));
+    const auto offline = kg.tmp.path / L"document-folder-offline";
+    std::filesystem::rename(kg.folder, offline);
+    kg.svc->sweep_now();
+    EXPECT_TRUE(kg.svc->store().item("files", kg.file_path("plan.txt")));
+    EXPECT_FALSE(kg.svc->store().source("files").last_error.empty());
+    std::filesystem::rename(offline, kg.folder);
+    std::filesystem::remove(file);
+    kg.svc->sweep_now();
+    EXPECT_FALSE(kg.svc->store().item("files", kg.file_path("plan.txt")));
+}
+
+TEST(KnowledgeFiles, PolicyRevocationStillRemovesAnItemDuringFolderOutage) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    write_file(kg.folder / "restricted.txt", "A restricted document.");
+    write_file(kg.folder / "retained.txt", "An unrelated document.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    ASSERT_EQ(kg.svc->store().counts("files").items, 2);
+    const auto offline = kg.tmp.path / L"policy-folder-offline";
+    std::filesystem::rename(kg.folder, offline);
+    {
+        const std::lock_guard lock(kg.mx);
+        kg.denied_read_paths.insert(kg.file_path("restricted.txt"));
+    }
+    kg.svc->sweep_now();
+    EXPECT_FALSE(kg.svc->store().item("files", kg.file_path("restricted.txt")));
+    EXPECT_TRUE(kg.svc->store().item("files", kg.file_path("retained.txt")));
+    EXPECT_FALSE(kg.svc->store().source("files").last_error.empty());
+    std::filesystem::rename(offline, kg.folder);
+}
+
 // ==== The indexer (2.3) ===================================================================================================
 
 TEST(KnowledgeIndexer, DeferralStopsNewWorkAndBackfillStaysLight) {
@@ -621,6 +1350,42 @@ TEST(KnowledgeEmbedding, CzechQueryFindsGermanDocument) {
     EXPECT_EQ(kg.svc->store().vectors_of("embed-a", 128), kg.count("SELECT count(*) FROM chunks"));
 }
 
+TEST(KnowledgeEmbedding, ReplacedChunkDoesNotReceiveOldVectorWhenItsIdIsReused) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.directory_enrichment", "off"}});
+    const auto path = kg.file_path("plan.txt");
+    write_file(kg.folder / "plan.txt", "Original launch plan.");
+    bool replaced = false;
+    kg.after_embed = [&] {
+        if (replaced) return;
+        replaced = true;
+        const auto item = kg.svc->store().item("files", path);
+        ASSERT_TRUE(item);
+        const auto before = kg.svc->store().chunks_of_item(item->id);
+        ASSERT_EQ(before.size(), 1u);
+        // A periodic content check can run before the retry; keep the backing file consistent with this replacement.
+        write_file(kg.folder / "plan.txt", "Entirely different updated passage.");
+        ItemInput replacement{"files", path, "plan.txt", path, "replacement-version", 0, 0, 1,
+                              {{"", "Entirely different updated passage.", 0}}, false};
+        ASSERT_TRUE(kg.svc->store().put_item(replacement, kg.clock.unix_millis()));
+        const auto after = kg.svc->store().chunks_of_item(item->id);
+        ASSERT_EQ(after.size(), 1u);
+        EXPECT_EQ(after[0].id, before[0].id);  // SQLite can reuse the deleted row id.
+    };
+    ASSERT_TRUE(kg.svc->add_document(path));
+    kg.svc->step();
+    ASSERT_TRUE(replaced);
+    EXPECT_EQ(kg.svc->store().vectors_of("embed-a", 128), 0);
+    EXPECT_EQ(kg.svc->store().embed_pending(), 1);
+    kg.after_embed = {};
+    kg.idle();
+    EXPECT_EQ(kg.svc->store().embed_pending(), 0);
+    EXPECT_EQ(kg.svc->store().vectors_of("embed-a", 128), 1);
+    EXPECT_GE(kg.gw.embed_calls, 2);
+    const auto hits = kg.svc->store().vector_search(kg.gw.vector_of("Entirely different updated passage."), "embed-a", 128, 10);
+    ASSERT_EQ(hits.size(), 1u);
+    EXPECT_GT(hits[0].second, 0.95);
+}
+
 TEST(KnowledgeEmbedding, OfflineQueueDailyBudgetAndModelChange) {
     Kg kg({{"knowledge.extraction", "off"}, {"knowledge.embedding_daily_tokens", 120}});
     // Indexing while offline: found by full text at once, semantic search after the connection returns.
@@ -677,6 +1442,105 @@ TEST(KnowledgeEmbedding, OfflineQueueDailyBudgetAndModelChange) {
 
 // ==== Extraction (4.2) and the meetings connector (3.4) ===================================================================
 
+TEST(KnowledgeExtraction, ItemDetailDistinguishesDisabledPendingAndDequeued) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.directory_enrichment", "off"}});
+    const auto path = kg.file_path("pending.txt");
+    write_file(kg.folder / "pending.txt", "Jana Nováková leads Phoenix.");
+    ASSERT_TRUE(kg.svc->add_document(path));
+    kg.idle();
+    const auto item = kg.svc->store().item("files", path);
+    ASSERT_TRUE(item);
+    EXPECT_EQ(kg.svc->item_detail(item->id)["extraction_state"], "off");
+
+    kg.set("knowledge.extraction", "on");
+    EXPECT_EQ(kg.svc->item_detail(item->id)["extraction_state"], "pending");
+    kg.idle();
+    EXPECT_EQ(kg.svc->item_detail(item->id)["extraction_state"], "not_pending");
+}
+
+TEST(KnowledgeExtraction, RejectedAndMalformedResponsesRemainPendingUntilRetrySucceeds) {
+    for (const std::string mode : std::vector<std::string>{"malformed", model::code::invalid_request, model::code::context_length}) {
+        SCOPED_TRACE(mode);
+        Kg kg({{"knowledge.extraction", "off"}, {"knowledge.directory_enrichment", "off"}});
+        const auto path = kg.file_path("pending.txt");
+        write_file(kg.folder / "pending.txt", "Jana Nováková leads Phoenix.");
+        ASSERT_TRUE(kg.svc->add_document(path));
+        kg.idle();
+        const auto item = kg.svc->store().item("files", path);
+        ASSERT_TRUE(item);
+        if (mode == "malformed") kg.gw.malformed_chat = true;
+        else kg.gw.chat_failure = mode;
+        kg.set("knowledge.extraction", "on");
+        kg.idle();
+        EXPECT_EQ(kg.svc->item_detail(item->id)["extraction_state"], "delayed");
+        EXPECT_GT(kg.svc->store().item_extraction_pending(item->id), 0);
+        EXPECT_EQ(kg.svc->status()["errors"]["extract"], mode == "malformed" ? "invalid_response" : mode);
+        EXPECT_TRUE(kg.found(kg.svc->search("Phoenix", {}), "pending.txt"));
+        const auto calls = kg.gw.chat_calls;
+        kg.clock.advance(std::chrono::seconds(61));
+        kg.idle();
+        EXPECT_EQ(kg.gw.chat_calls, calls + 1);
+        kg.clock.advance(std::chrono::seconds(61));
+        kg.idle();
+        EXPECT_EQ(kg.gw.chat_calls, calls + 1);
+        kg.gw.malformed_chat = false;
+        kg.gw.chat_failure.clear();
+        kg.clock.advance(std::chrono::seconds(61));
+        kg.idle();
+        EXPECT_EQ(kg.svc->item_detail(item->id)["extraction_state"], "not_pending");
+        EXPECT_EQ(kg.svc->status()["errors"]["extract"], "");
+    }
+}
+
+TEST(KnowledgeExtraction, FailingPassageDoesNotBlockOtherSources) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.directory_enrichment", "off"}});
+    const auto bad_path = kg.file_path("bad.txt"), good_path = kg.file_path("good.txt");
+    write_file(kg.folder / "bad.txt", "Passage rejected by test gateway.");
+    write_file(kg.folder / "good.txt", "Jana Nováková leads Phoenix.");
+    ASSERT_TRUE(kg.svc->add_document(good_path));
+    ASSERT_TRUE(kg.svc->add_document(bad_path));
+    kg.idle();
+    const auto bad = kg.svc->store().item("files", bad_path), good = kg.svc->store().item("files", good_path);
+    ASSERT_TRUE(bad);
+    ASSERT_TRUE(good);
+    kg.gw.reject_passage = "Passage rejected by test gateway";
+    kg.set("knowledge.extraction", "on");
+    kg.idle();
+    EXPECT_EQ(kg.svc->item_detail(bad->id)["extraction_state"], "delayed");
+    EXPECT_EQ(kg.svc->item_detail(good->id)["extraction_state"], "not_pending");
+    EXPECT_GT(kg.svc->store().relations_of_item(good->id).size(), 0u);
+    EXPECT_GT(kg.svc->store().item_extraction_pending(bad->id), 0);
+    const auto calls = kg.gw.chat_calls;
+    kg.idle();
+    EXPECT_EQ(kg.gw.chat_calls, calls);
+    kg.gw.reject_passage.clear();
+    kg.clock.advance(std::chrono::seconds(61));
+    kg.idle();
+    EXPECT_EQ(kg.svc->item_detail(bad->id)["extraction_state"], "not_pending");
+}
+
+TEST(KnowledgeExtraction, RepeatedRejectionsBackOffWithoutExhaustingDailyBudget) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.directory_enrichment", "off"}});
+    for (int i = 0; i < 8; ++i) {
+        const auto name = "blocked-" + std::to_string(i) + ".txt";
+        write_file(kg.folder / name, "A distinct passage " + std::to_string(i));
+        ASSERT_TRUE(kg.svc->add_document(kg.file_path(name)));
+    }
+    kg.idle();
+    kg.gw.chat_failure = model::code::invalid_request;
+    kg.set("knowledge.extraction", "on");
+    kg.idle();
+    EXPECT_LE(kg.gw.chat_calls, 5);
+    EXPECT_EQ(kg.svc->store().extract_pending(), 8);
+    const auto calls = kg.gw.chat_calls;
+    kg.idle();
+    EXPECT_EQ(kg.gw.chat_calls, calls);
+    kg.gw.chat_failure.clear();
+    kg.clock.advance(std::chrono::seconds(61));
+    kg.idle();
+    EXPECT_EQ(kg.svc->store().extract_pending(), 0);
+}
+
 TEST(KnowledgeExtraction, OffSendsNothingOnStoresFactsWithProvenanceAndBudget) {
     Kg kg({{"knowledge.extraction", "off"}, {"knowledge.directory_enrichment", "off"}});
     // A fixture transcript from client/meeting-capture.
@@ -720,6 +1584,63 @@ TEST(KnowledgeExtraction, OffSendsNothingOnStoresFactsWithProvenanceAndBudget) {
     kg.next_day();
     kg.idle();
     EXPECT_EQ(kg.gw.chat_calls, before + 2);
+}
+
+TEST(KnowledgeExtraction, ForgottenInputCannotRecreateEntitiesWhenModelReturns) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.directory_enrichment", "off"}});
+    const auto path = kg.file_path("private.txt");
+    write_file(kg.folder / "private.txt", "Jana Nováková leads Phoenix.");
+    ASSERT_TRUE(kg.svc->add_document(path));
+    kg.idle();
+    const auto item = kg.svc->store().item("files", path);
+    ASSERT_TRUE(item);
+    bool forgotten = false;
+    kg.after_chat = [&] {
+        if (!forgotten) {
+            forgotten = true;
+            EXPECT_TRUE(kg.svc->forget_item(item->id));
+        }
+    };
+    kg.set("knowledge.extraction", "on");
+    kg.idle();
+    ASSERT_TRUE(forgotten);
+    EXPECT_FALSE(kg.svc->store().item("files", path));
+    EXPECT_TRUE(kg.svc->store().find_entities("Jana Nováková", 10).empty());
+    EXPECT_TRUE(kg.svc->store().find_entities("Phoenix", 10).empty());
+    EXPECT_EQ(kg.count("SELECT count(*) FROM relations"), 0);
+}
+
+TEST(KnowledgeExtraction, SurvivingBatchInputsAreRetriedAfterAnotherIsForgotten) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.directory_enrichment", "off"}});
+    const auto removed = kg.file_path("private.txt");
+    const auto retained = kg.file_path("retained.txt");
+    write_file(kg.folder / "private.txt", "A confidential plan.");
+    write_file(kg.folder / "retained.txt", "Jana Nováková leads Phoenix.");
+    ASSERT_TRUE(kg.svc->add_document(removed));
+    ASSERT_TRUE(kg.svc->add_document(retained));
+    kg.idle();
+    const auto item = kg.svc->store().item("files", removed);
+    ASSERT_TRUE(item);
+    bool forgotten = false;
+    kg.after_chat = [&] {
+        if (!forgotten) {
+            forgotten = true;
+            EXPECT_TRUE(kg.svc->forget_item(item->id));
+        }
+    };
+    kg.set("knowledge.extraction", "on");
+    kg.idle();
+    ASSERT_TRUE(forgotten);
+    EXPECT_GE(kg.gw.chat_calls, 2);
+    const auto jana = kg.svc->store().find_entities("Jana Nováková", 10);
+    ASSERT_EQ(jana.size(), 1u);
+    const auto relations = kg.svc->store().relations_of(jana[0].id, 10);
+    ASSERT_EQ(relations.size(), 1u);
+    const auto chunks = kg.svc->store().chunks({relations[0].chunk_id});
+    ASSERT_EQ(chunks.size(), 1u);
+    const auto source = kg.svc->store().item(chunks[0].item_id);
+    ASSERT_TRUE(source);
+    EXPECT_EQ(source->ext_id, retained);
 }
 
 // ==== People resolution and enrichment (4.3) ==============================================================================
@@ -782,6 +1703,546 @@ TEST(KnowledgePeople, DirectoryEnrichmentForInternalPeopleIsCachedForSevenDays) 
 }
 
 // ==== Retrieval (5.1) and tools (5.2) =====================================================================================
+
+TEST(KnowledgeRetrieval, ForgottenDuringRerankIsNotReturned) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    write_file(kg.folder / "private.txt", "Launch plan with private details.");
+    write_file(kg.folder / "retained.txt", "Launch plan with public details.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    const auto item = kg.svc->store().item("files", kg.file_path("private.txt"));
+    ASSERT_TRUE(item);
+    bool forgotten = false;
+    kg.after_rerank = [&](const std::vector<std::string>&) {
+        forgotten = true;
+        EXPECT_TRUE(kg.svc->forget_item(item->id));
+    };
+    const auto result = kg.svc->search("launch plan", {});
+    ASSERT_TRUE(forgotten);
+    EXPECT_FALSE(kg.found(result, "private.txt"));
+    EXPECT_TRUE(kg.found(result, "retained.txt"));
+}
+
+TEST(KnowledgeRetrieval, ForgottenDuringTeamSearchIsNotSentToRerank) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    bool forgotten = false, reranked = false;
+    kg.team = [&](const std::string&, const std::string&, const json&) -> Result<json> {
+        const auto item = kg.svc->store().item("files", kg.file_path("private.txt"));
+        if (item) {
+            forgotten = true;
+            EXPECT_TRUE(kg.svc->forget_item(item->id));
+        }
+        return json{{"passages", json::array({{{"title", "Team plan"}, {"owner", "teammate"}, {"item_id", "item"}, {"text", "Team launch plan."}}})}};
+    };
+    kg.make(false);
+    write_file(kg.folder / "private.txt", "Launch plan with private details.");
+    write_file(kg.folder / "retained.txt", "Launch plan with public details.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    kg.after_rerank = [&](const std::vector<std::string>& passages) {
+        reranked = true;
+        for (const auto& p : passages) EXPECT_EQ(p.find("private details"), std::string::npos);
+    };
+    SearchOptions options;
+    options.team = true;
+    const auto result = kg.svc->search("launch plan", options);
+    ASSERT_TRUE(forgotten);
+    ASSERT_TRUE(reranked);
+    EXPECT_FALSE(kg.found(result, "private.txt"));
+    EXPECT_TRUE(kg.found(result, "retained.txt"));
+    EXPECT_TRUE(kg.found(result, "Team plan"));
+}
+
+TEST(KnowledgeRetrieval, FileFreshnessIsRecheckedAfterReranking) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    write_file(kg.folder / "one.txt", "Launch plan first passage.");
+    write_file(kg.folder / "two.txt", "Launch plan second passage.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    bool changed = false;
+    kg.after_rerank = [&](const std::vector<std::string>&) {
+        changed = true;
+        kg.svc->store().touch_source("files", 0, "The source is unavailable.");
+    };
+    const auto result = kg.svc->search("launch plan", {});
+    ASSERT_TRUE(changed);
+    EXPECT_TRUE(result.file_source_problem);
+    EXPECT_FALSE(result.passages.empty());
+}
+
+TEST(KnowledgeRetrieval, PausedFileIndexingKeepsKnowledgeReadableAndShowsStaleness) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto path = kg.file_path("retained.txt");
+    write_file(kg.folder / "retained.txt", "A retained Phoenix plan.");
+    ASSERT_TRUE(kg.svc->add_document(path));
+    kg.idle();
+    const auto item = kg.svc->store().item("files", path);
+    ASSERT_TRUE(item);
+    ASSERT_TRUE(kg.svc->set_source_enabled("files", false));
+    EXPECT_EQ(kg.svc->item_detail(item->id)["freshness"], "paused");
+    EXPECT_EQ(kg.svc->browse("files", "", 10).size(), 1u);
+    auto result = kg.svc->search("Phoenix", {});
+    EXPECT_TRUE(kg.found(result, "retained.txt"));
+    EXPECT_TRUE(result.file_source_problem);
+    ASSERT_TRUE(kg.svc->set_source_enabled("files", true));
+    EXPECT_EQ(kg.svc->item_detail(item->id)["freshness"], "uncertain");
+    write_file(kg.folder / "retained.txt", "A revised Phoenix plan.");
+    ASSERT_TRUE(kg.svc->set_source_paused("files", true));
+    EXPECT_EQ(kg.svc->item_detail(item->id)["freshness"], "paused");
+    result = kg.svc->search("Phoenix", {});
+    EXPECT_TRUE(kg.found(result, "retained.txt"));
+    EXPECT_TRUE(result.file_source_problem);
+    ASSERT_TRUE(kg.svc->set_source_paused("files", false));
+    EXPECT_EQ(kg.svc->item_detail(item->id)["freshness"], "uncertain");
+    EXPECT_TRUE(kg.svc->search("Phoenix", {}).file_source_problem);
+    kg.make(false);
+    EXPECT_EQ(kg.svc->item_detail(item->id)["freshness"], "uncertain");
+    kg.fail_file_reads = true;
+    kg.idle();
+    EXPECT_EQ(kg.svc->item_detail(item->id)["freshness"], "uncertain");
+    kg.fail_file_reads = false;
+    kg.svc->sweep_now();
+    kg.idle();
+    EXPECT_EQ(kg.svc->item_detail(item->id)["freshness"], "current");
+    EXPECT_TRUE(kg.found(kg.svc->search("revised Phoenix", {}), "retained.txt"));
+    EXPECT_FALSE(kg.svc->search("Phoenix", {}).file_source_problem);
+}
+
+TEST(KnowledgeRetrieval, SourcePolicyAppliesBeforeBackgroundCleanupAcrossReaders) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    const auto path = kg.file_path("private.txt");
+    write_file(kg.folder / "private.txt", "Jana Nováková leads Phoenix.");
+    ASSERT_TRUE(kg.svc->add_document(path));
+    kg.idle();
+    const auto item = kg.svc->store().item("files", path);
+    const auto jana = kg.svc->store().find_entities("Jana Nováková", 1);
+    ASSERT_TRUE(item);
+    ASSERT_EQ(jana.size(), 1u);
+    ASSERT_FALSE(kg.svc->store().relations_of_item(item->id).empty());
+    ASSERT_NE(kg.svc->store().add_fact(jana[0].id, "Phoenix confidential correction", "", 1, "files", path), 0);
+    ASSERT_NE(kg.svc->store().add_fact(jana[0].id, "Phoenix independent reminder", "", 2), 0);
+    kg.set("knowledge.sources.files", "off");  // Do not run background reconciliation.
+    ASSERT_TRUE(kg.svc->store().item("files", path));
+    const auto search = kg.svc->search("Phoenix", {});
+    EXPECT_TRUE(search.passages.empty());
+    ASSERT_EQ(search.facts.size(), 1u);
+    EXPECT_EQ(search.facts[0].text, "Phoenix independent reminder");
+    EXPECT_TRUE(kg.svc->item_detail(item->id).is_null());
+    EXPECT_TRUE(kg.svc->browse("files", "", 10).empty());
+    EXPECT_EQ(kg.svc->source_counts()["files"], 0);
+    EXPECT_TRUE(kg.svc->items("private", 10).empty());
+    EXPECT_TRUE(kg.svc->entities("Phoenix", 10).empty());
+    const auto profile = kg.svc->entity_profile(jana[0].id);
+    EXPECT_TRUE(profile["relations"].empty());
+    ASSERT_EQ(profile["facts"].size(), 1u);
+    EXPECT_EQ(profile["facts"][0]["text"], "Phoenix independent reminder");
+    auto tools = kg.svc->tools();
+    runtime::ToolContext ctx;
+    EXPECT_FALSE(tool(tools, "knowledge.entity").run(ctx, {{"entity", "Phoenix"}}).ok);
+    const auto related = json::parse(tool(tools, "knowledge.related").run(ctx, {{"entity", "Jana Nováková"}}).content);
+    EXPECT_TRUE(related["related"].empty());
+    const auto timeline = json::parse(tool(tools, "knowledge.timeline").run(ctx, {{"entity", "Jana Nováková"}}).content);
+    EXPECT_EQ(timeline.dump().find("confidential correction"), std::string::npos);
+    EXPECT_EQ(timeline.dump().find("leads"), std::string::npos);
+
+    kg.set("knowledge.sources.files", "on");
+    EXPECT_FALSE(kg.svc->item_detail(item->id).is_null());
+    ASSERT_TRUE(kg.svc->store().add_user_exclusion("item", "files:" + path));
+    EXPECT_TRUE(kg.svc->item_detail(item->id).is_null());
+    EXPECT_TRUE(kg.svc->entities("Phoenix", 10).empty());
+    EXPECT_TRUE(kg.svc->search("Phoenix", {}).passages.empty());
+    ASSERT_TRUE(kg.svc->store().remove_user_exclusion("item", "files:" + path));
+    {
+        const std::lock_guard lock(kg.mx);
+        kg.denied_read_paths.insert(path);
+    }
+    EXPECT_TRUE(kg.svc->item_detail(item->id).is_null());
+    EXPECT_TRUE(kg.svc->entities("Phoenix", 10).empty());
+    EXPECT_TRUE(kg.svc->search("Phoenix", {}).passages.empty());
+}
+
+TEST(KnowledgeRetrieval, SourceCountsExcludeUnavailableItemsBeforeCleanup) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto first = kg.file_path("first-count.txt");
+    const auto second = kg.file_path("second-count.txt");
+    write_file(kg.folder / "first-count.txt", "First visible document.");
+    write_file(kg.folder / "second-count.txt", "Second visible document.");
+    ASSERT_TRUE(kg.svc->add_document(first));
+    ASSERT_TRUE(kg.svc->add_document(second));
+    const auto note = kg.svc->save_note(0, "Counted note", "Visible note.");
+    ASSERT_TRUE(note);
+    kg.idle();
+    auto& store = kg.svc->store();
+    const auto first_item = store.item("files", first);
+    const auto second_item = store.item("files", second);
+    ASSERT_TRUE(first_item);
+    ASSERT_TRUE(second_item);
+    const auto first_chunks = store.chunks_of_item(first_item->id);
+    const auto second_chunks = store.chunks_of_item(second_item->id);
+    ASSERT_FALSE(first_chunks.empty());
+    ASSERT_FALSE(second_chunks.empty());
+    {
+        const std::lock_guard lock(store.db().mutex());
+        for (const auto id : {first_chunks.front().id, second_chunks.front().id}) {
+            auto embed = store.db().prepare("INSERT OR IGNORE INTO embed_queue(chunk_id, priority) VALUES(?1, 1)");
+            embed.bind(1, id).run();
+            auto extract = store.db().prepare("INSERT OR IGNORE INTO extract_queue(chunk_id, priority) VALUES(?1, 1)");
+            extract.bind(1, id).run();
+        }
+    }
+    EXPECT_EQ(kg.svc->source_counts()["files"], 2);
+    EXPECT_EQ(kg.svc->source_counts()["notes"], 1);
+    ASSERT_TRUE(kg.svc->store().add_user_exclusion("item", "files:" + first));
+    ASSERT_TRUE(kg.svc->store().add_user_exclusion("item", "notes:" + std::to_string(*note)));
+    ASSERT_TRUE(kg.svc->store().item("files", first));  // The background cleanup has not run.
+    EXPECT_EQ(kg.svc->source_counts()["files"], 1);
+    EXPECT_EQ(kg.svc->source_counts()["notes"], 0);
+    const auto check_files = [&](long long items, long long chunks, long long pending) {
+        bool found = false;
+        const auto status = kg.svc->status();
+        for (const auto& source : status["sources"]) {
+            if (source["kind"] != "files") continue;
+            found = true;
+            EXPECT_EQ(source["items"], items);
+            EXPECT_EQ(source["chunks"], chunks);
+            EXPECT_EQ(source["embed_pending"], pending);
+            EXPECT_EQ(source["extract_pending"], pending);
+            EXPECT_EQ(source["pending"], 2 * pending);
+        }
+        EXPECT_TRUE(found);
+    };
+    check_files(1, static_cast<long long>(second_chunks.size()), 1);
+    bool found_notes = false;
+    const auto status = kg.svc->status();
+    for (const auto& source : status["sources"]) {
+        if (source["kind"] != "notes") continue;
+        found_notes = true;
+        EXPECT_EQ(source["items"], 0);
+        EXPECT_EQ(source["chunks"], 0);
+        EXPECT_EQ(source["pending"], 0);
+    }
+    EXPECT_TRUE(found_notes);
+    {
+        const std::lock_guard lock(kg.mx);
+        kg.denied_read_paths.insert(second);
+    }
+    EXPECT_EQ(kg.svc->source_counts()["files"], 0);
+    check_files(0, 0, 0);
+    ASSERT_TRUE(kg.svc->store().remove_user_exclusion("item", "files:" + first));
+    EXPECT_EQ(kg.svc->source_counts()["files"], 1);
+    check_files(1, static_cast<long long>(first_chunks.size()), 1);
+    kg.set("knowledge.sources.files", "off");
+    check_files(0, 0, 0);
+}
+
+TEST(KnowledgeRetrieval, BrowseFillsPagePastUnavailableItemsWithEqualDates) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    for (int i = 0; i < 42; ++i) {
+        const std::string path = kg.file_path("page-" + std::to_string(i) + ".txt");
+        ItemInput in{"files", path, "Item " + std::to_string(i), path, "hash", 100, 100, 1, {{"", "text", 0}}, false};
+        ASSERT_TRUE(kg.svc->store().put_item(in, 100));
+        if (i >= 2 && i % 5 == 0) {
+            ASSERT_TRUE(kg.svc->store().add_user_exclusion("item", "files:" + path));
+        } else if (i >= 2) {
+            const std::lock_guard lock(kg.mx);
+            kg.denied_read_paths.insert(path);
+        }
+    }
+    const auto items = kg.svc->browse("files", "", 2);
+    ASSERT_EQ(items.size(), 2u);
+    EXPECT_EQ(items[0]["title"], "Item 1");
+    EXPECT_EQ(items[1]["title"], "Item 0");
+    EXPECT_EQ(kg.svc->source_counts()["files"], 2);
+    const auto matches = kg.svc->items("Item", 2);
+    ASSERT_EQ(matches.size(), 2u);
+    EXPECT_EQ(matches[0]["title"], "Item 1");
+    EXPECT_EQ(matches[1]["title"], "Item 0");
+    EXPECT_TRUE(kg.svc->items("Item", 0).empty());
+}
+
+TEST(KnowledgeRetrieval, EntityLookupFillsPagePastUnavailableMatches) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    auto& store = kg.svc->store();
+    for (int i = 0; i < 42; ++i) {
+        const std::string suffix = (i < 10 ? "0" : "") + std::to_string(i);
+        const std::string name = "Candidate " + suffix;
+        const std::string id = "candidate-" + suffix;
+        ItemInput in{"threads", id, name, id, "hash", 100, 100, 1, {{"", "text", 0}}, false};
+        ASSERT_TRUE(store.put_item(in, 100));
+        const auto item = store.item("threads", id);
+        ASSERT_TRUE(item);
+        const auto chunks = store.chunks_of_item(item->id);
+        ASSERT_EQ(chunks.size(), 1u);
+        const auto entity = store.resolve_entity("Project", name, "", 100);
+        ASSERT_NE(entity, 0);
+        store.add_mention(chunks[0].id, entity, name);
+        if (i < 40) ASSERT_TRUE(store.add_user_exclusion("item", "threads:" + id));
+    }
+    const auto matches = kg.svc->entities("candidate", 2);
+    ASSERT_EQ(matches.size(), 2u);
+    EXPECT_EQ(matches[0]["name"], "Candidate 40");
+    EXPECT_EQ(matches[1]["name"], "Candidate 41");
+    EXPECT_TRUE(kg.svc->entities("candidate", 0).empty());
+    auto tools = kg.svc->tools();
+    runtime::ToolContext ctx;
+    const auto result = tool(tools, "knowledge.entity").run(ctx, {{"entity", "candidate"}});
+    ASSERT_TRUE(result.ok) << result.content;
+    const auto profile = json::parse(result.content);
+    EXPECT_EQ(profile["name"], "Candidate 40");
+    ASSERT_EQ(profile["other_matches"].size(), 1u);
+    EXPECT_EQ(profile["other_matches"][0]["name"], "Candidate 41");
+}
+
+TEST(KnowledgeRetrieval, EntityVisibilityChecksEvidenceBeyondTheFirstThousand) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    auto& store = kg.svc->store();
+    long long entity = 0;
+    for (int i = 0; i < 1002; ++i) {
+        const std::string id = kg.file_path("evidence-" + std::to_string(i) + ".txt");
+        const long long updated = i == 1001 ? 1 : 100;
+        ItemInput in{"files", id, id, id, "hash", 1, updated, 1, {{"", "text", 0}}, false};
+        ASSERT_TRUE(store.put_item(in, 100));
+        const auto item = store.item("files", id);
+        ASSERT_TRUE(item);
+        const auto chunks = store.chunks_of_item(item->id);
+        ASSERT_EQ(chunks.size(), 1u);
+        if (!entity) entity = store.resolve_entity("Project", "Long lived project", "", 100);
+        ASSERT_NE(entity, 0);
+        store.add_mention(chunks[0].id, entity, "Long lived project");
+        if (i != 1001) {
+            const std::lock_guard lock(kg.mx);
+            kg.denied_read_paths.insert(id);
+        }
+    }
+    EXPECT_TRUE(kg.svc->entity_visible(entity));
+    const auto matches = kg.svc->entities("Long lived project", 1);
+    ASSERT_EQ(matches.size(), 1u);
+    EXPECT_EQ(matches[0]["id"], entity);
+    ASSERT_TRUE(store.add_user_exclusion("item", "files:" + kg.file_path("evidence-1001.txt")));
+    EXPECT_FALSE(kg.svc->entity_visible(entity));
+}
+
+TEST(KnowledgeRetrieval, EntityAliasesRequireAnAccessibleMention) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    auto& store = kg.svc->store();
+    const auto visible_path = kg.file_path("visible.txt");
+    const auto hidden_path = kg.file_path("hidden.txt");
+    ItemInput visible{"files", visible_path, "Visible", visible_path, "v1", 100, 100, 1, {{"", "visible text", 0}}, false};
+    ASSERT_TRUE(store.put_item(visible, 100));
+    const auto entity = store.resolve_entity("Person", "Alex Example", "alex@example.test", 100);
+    ASSERT_NE(entity, 0);
+    const auto visible_item = store.item("files", visible_path);
+    ASSERT_TRUE(visible_item);
+    const auto visible_chunks = store.chunks_of_item(visible_item->id);
+    ASSERT_EQ(visible_chunks.size(), 1u);
+    store.add_mention(visible_chunks[0].id, entity, "Alex Example");
+    ItemInput hidden{"files", hidden_path, "Hidden", hidden_path, "v1", 100, 100, 1, {{"", "hidden text", 0}}, false};
+    ASSERT_TRUE(store.put_item(hidden, 100));
+    EXPECT_EQ(store.resolve_entity("Person", "Secret Codename", "alex@example.test", 100), entity);
+    const auto hidden_item = store.item("files", hidden_path);
+    ASSERT_TRUE(hidden_item);
+    const auto hidden_chunks = store.chunks_of_item(hidden_item->id);
+    ASSERT_EQ(hidden_chunks.size(), 1u);
+    store.add_mention(hidden_chunks[0].id, entity, "Secret Codename");
+    kg.gw.offline = true;
+    {
+        const std::lock_guard lock(kg.mx);
+        kg.denied_read_paths.insert(hidden_path);
+    }
+    EXPECT_TRUE(kg.svc->entities("Secret Codename", 10).empty());
+    const auto profile = kg.svc->entity_profile(entity);
+    EXPECT_EQ(profile["aliases"].dump().find("Secret Codename"), std::string::npos);
+    auto tools = kg.svc->tools();
+    runtime::ToolContext ctx;
+    EXPECT_FALSE(tool(tools, "knowledge.entity").run(ctx, {{"entity", "Secret Codename"}}).ok);
+    EXPECT_TRUE(kg.svc->search("Secret Codename", {}).passages.empty());
+    {
+        const std::lock_guard lock(kg.mx);
+        kg.denied_read_paths.erase(hidden_path);
+    }
+    EXPECT_EQ(kg.svc->entities("Secret Codename", 10).size(), 1u);
+    EXPECT_NE(kg.svc->entity_profile(entity)["aliases"].dump().find("Secret Codename"), std::string::npos);
+    EXPECT_FALSE(kg.svc->search("Secret Codename", {}).passages.empty());
+    ASSERT_TRUE(store.add_user_exclusion("item", "files:" + hidden_path));
+    EXPECT_TRUE(kg.svc->entities("Secret Codename", 10).empty());
+    EXPECT_EQ(kg.svc->entity_profile(entity)["aliases"].dump().find("Secret Codename"), std::string::npos);
+    EXPECT_TRUE(kg.svc->search("Secret Codename", {}).passages.empty());
+}
+
+TEST(KnowledgeRetrieval, GraphSearchDoesNotTraverseInaccessibleRelations) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    auto& store = kg.svc->store();
+    const auto alpha_path = kg.file_path("alpha.txt");
+    const auto beta_path = kg.file_path("beta.txt");
+    const auto relation_path = kg.file_path("relation.txt");
+    ItemInput alpha{"files", alpha_path, "Alpha source", alpha_path, "v1", 100, 100, 1, {{"", "Alpha text", 0}}, false};
+    ASSERT_TRUE(store.put_item(alpha, 100));
+    const auto alpha_entity = store.resolve_entity("Project", "Alpha", "", 100);
+    ASSERT_NE(alpha_entity, 0);
+    const auto alpha_item = store.item("files", alpha_path);
+    ASSERT_TRUE(alpha_item);
+    const auto alpha_chunks = store.chunks_of_item(alpha_item->id);
+    ASSERT_EQ(alpha_chunks.size(), 1u);
+    store.add_mention(alpha_chunks[0].id, alpha_entity, "Alpha");
+    ItemInput beta{"files", beta_path, "Beta source", beta_path, "v1", 100, 100, 1, {{"", "independent data", 0}}, false};
+    ASSERT_TRUE(store.put_item(beta, 100));
+    const auto beta_entity = store.resolve_entity("Project", "Beta", "", 100);
+    ASSERT_NE(beta_entity, 0);
+    const auto beta_item = store.item("files", beta_path);
+    ASSERT_TRUE(beta_item);
+    const auto beta_chunks = store.chunks_of_item(beta_item->id);
+    ASSERT_EQ(beta_chunks.size(), 1u);
+    store.add_mention(beta_chunks[0].id, beta_entity, "Beta");
+    ItemInput relation{"files", relation_path, "Connection", relation_path, "v1", 100, 100, 1, {{"", "private connection", 0}}, false};
+    ASSERT_TRUE(store.put_item(relation, 100));
+    const auto relation_item = store.item("files", relation_path);
+    ASSERT_TRUE(relation_item);
+    const auto relation_chunks = store.chunks_of_item(relation_item->id);
+    ASSERT_EQ(relation_chunks.size(), 1u);
+    ASSERT_NE(store.add_relation(alpha_entity, "related to", beta_entity, 1.0, "", "", relation_chunks[0].id), 0);
+    kg.gw.offline = true;
+    {
+        const std::lock_guard lock(kg.mx);
+        kg.denied_read_paths.insert(relation_path);
+    }
+    auto result = kg.svc->search("Alpha", {});
+    EXPECT_TRUE(kg.found(result, "Alpha source"));
+    EXPECT_FALSE(kg.found(result, "Beta source"));
+    {
+        const std::lock_guard lock(kg.mx);
+        kg.denied_read_paths.erase(relation_path);
+    }
+    result = kg.svc->search("Alpha", {});
+    EXPECT_TRUE(kg.found(result, "Beta source"));
+}
+
+TEST(KnowledgeRetrieval, BrowseRevalidatesExclusionsBeforeReturningAndFillsPage) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    for (int i = 0; i < 3; ++i) {
+        const std::string path = kg.file_path("changing-" + std::to_string(i) + ".txt");
+        ItemInput in{"files", path, "Item " + std::to_string(i), path, "hash", 100, 100, 1, {{"", "text", 0}}, false};
+        ASSERT_TRUE(kg.svc->store().put_item(in, 100));
+    }
+    bool changed = false;
+    kg.after_read_permission = [&](const std::string& path) {
+        if (changed) return;
+        changed = true;
+        EXPECT_TRUE(kg.svc->store().add_user_exclusion("item", "files:" + path));
+    };
+    const auto items = kg.svc->browse("files", "", 2);
+    ASSERT_TRUE(changed);
+    ASSERT_EQ(items.size(), 2u);
+    EXPECT_EQ(items[0]["title"], "Item 1");
+    EXPECT_EQ(items[1]["title"], "Item 0");
+}
+
+TEST(KnowledgeRetrieval, NotesBrowseBatchesMatchAndExcludeWithEqualDates) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    for (int i = 0; i < 40; ++i) {
+        const long long id = kg.svc->store().save_note(0, "Note " + std::to_string(i), "Matching needle", 100);
+        ASSERT_NE(id, 0);
+        if (i >= 2) ASSERT_TRUE(kg.svc->store().add_user_exclusion("item", "notes:" + std::to_string(id)));
+    }
+    for (const auto& query : {"", "needle"}) {
+        const auto notes = kg.svc->browse("notes", query, 2);
+        ASSERT_EQ(notes.size(), 2u);
+        EXPECT_EQ(notes[0]["title"], "Note 1");
+        EXPECT_EQ(notes[1]["title"], "Note 0");
+    }
+    EXPECT_TRUE(kg.svc->browse("notes", "not-present", 2).empty());
+    EXPECT_EQ(kg.svc->source_counts()["notes"], 2);
+}
+
+// Explicit scratch qualification, not part of the ordinary suite. Measures service calls, not UI rendering.
+TEST(KnowledgeRetrieval, DISABLED_SourceListScale) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    auto& db = kg.svc->store().db();
+    const auto setup = db.transaction([&]() -> wb::Status {
+        return db.exec(R"sql(
+INSERT INTO entities(id,type,name,key) VALUES(1,'project','Project','project'),(2,'topic','Topic','topic');
+WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+ INSERT INTO items(id,source,ext_id,title,ref,updated_at)
+ SELECT x,'threads','thread-'||x,'Thread '||x,'workbench://thread/thread-'||x,x FROM n;
+INSERT INTO chunks(id,item_id,ord,text) SELECT id,id,0,'Indexed source passage' FROM items;
+WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+ INSERT INTO relations(subject,predicate,object,confidence,chunk_id) SELECT 1,'fact-'||x,2,1,((x-1)%10000)+1 FROM n;
+)sql");
+    });
+    ASSERT_TRUE(setup) << setup.error().message;
+    const auto measure = [](const auto& f) {
+        std::vector<double> samples;
+        f();  // Warm the database and executable pages.
+        for (int i = 0; i < 20; ++i) {
+            const auto start = std::chrono::steady_clock::now();
+            f();
+            samples.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        }
+        std::sort(samples.begin(), samples.end());
+        return samples[18];  // nearest-rank p95 of 20 measured samples
+    };
+    const double list = measure([&] {
+        EXPECT_EQ(kg.svc->browse("threads", "", 200).size(), 200u);
+        EXPECT_EQ(kg.svc->source_counts()["threads"], 10000);
+    });
+    const double status = measure([&] { EXPECT_EQ(kg.svc->status()["sources"].size(), 6u); });
+    const double reader = measure([&] { EXPECT_EQ(kg.svc->item_detail(5000)["facts"].size(), 10u); });
+    ASSERT_TRUE(db.exec("INSERT INTO user_exclusions(kind,value) SELECT 'item','threads:'||ext_id FROM items WHERE id>200"));
+    const double excluded_list = measure([&] {
+        EXPECT_EQ(kg.svc->browse("threads", "", 200).size(), 200u);
+        EXPECT_EQ(kg.svc->source_counts()["threads"], 200);
+    });
+    std::cout << "[ knowledge list ] encrypted 10000-item / 100000-relation service p95 ms: list+counts " << list
+              << ", status " << status << ", item reader " << reader << ", list+counts with 9800 exclusions " << excluded_list << '\n';
+}
+
+TEST(KnowledgeRetrieval, HiddenSearchCandidatesDoNotCrowdOutVisibleResults) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    auto& store = kg.svc->store();
+    for (int i = 0; i < 37; ++i) {
+        const auto id = "candidate-" + std::to_string(i);
+        ItemInput in{"threads", id, "Candidate " + std::to_string(i), "workbench://thread/" + id,
+                     "hash", 100, 100, 1, {{"", "uniqueneedle", 0}}, false};
+        ASSERT_TRUE(store.put_item(in, 100));
+    }
+    const auto ranked = store.fts("uniqueneedle", 50);
+    ASSERT_EQ(ranked.size(), 37u);
+    for (size_t i = 0; i < 35; ++i) {
+        const auto chunks = store.chunks({ranked[i]});
+        ASSERT_EQ(chunks.size(), 1u);
+        const auto item = store.item(chunks.front().item_id);
+        ASSERT_TRUE(item);
+        ASSERT_TRUE(store.add_user_exclusion("item", "threads:" + item->ext_id));
+    }
+    kg.gw.offline = true;
+    const auto result = kg.svc->search("uniqueneedle", {});
+    ASSERT_EQ(result.passages.size(), 2u);
+    EXPECT_EQ(result.passages[0].chunk_id, ranked[35]);
+    EXPECT_EQ(result.passages[1].chunk_id, ranked[36]);
+}
+
+TEST(KnowledgeRetrieval, DirectNoteReadersRespectExclusionAndPolicyBeforeIndexing) {
+    Kg kg({{"knowledge.extraction", "off"}});
+    const auto hidden = kg.svc->save_note(0, "Hidden", "Hidden text");
+    const auto visible = kg.svc->save_note(0, "Visible", "Visible text");
+    ASSERT_TRUE(hidden);
+    ASSERT_TRUE(visible);
+    ASSERT_FALSE(kg.svc->store().item("notes", std::to_string(*hidden)));
+    ASSERT_TRUE(kg.svc->store().add_user_exclusion("item", "notes:" + std::to_string(*hidden)));
+    EXPECT_TRUE(kg.svc->note(*hidden).is_null());
+    ASSERT_EQ(kg.svc->notes().size(), 1u);
+    EXPECT_EQ(kg.svc->notes()[0]["id"], *visible);
+    EXPECT_EQ(kg.svc->note(*visible)["text"], "Visible text");
+    RpcRegistry rpc;
+    register_knowledge_rpc(rpc, [&kg] { return kg.svc.get(); }, nullptr);
+    const auto hidden_read = (*rpc.find("knowledge.note.get", false))({{"id", *hidden}});
+    ASSERT_FALSE(hidden_read);
+    EXPECT_EQ(hidden_read.error().code, "not_found");
+    kg.set("knowledge.sources.notes", "off");
+    EXPECT_TRUE(kg.svc->notes().empty());
+    EXPECT_TRUE(kg.svc->note(*visible).is_null());
+    kg.set("knowledge.sources.notes", "on");
+    EXPECT_EQ(kg.svc->note(*visible)["text"], "Visible text");
+}
 
 TEST(KnowledgeRetrieval, RerankFallbackCitationsAndGraphExpansion) {
     Kg kg({{"knowledge.extraction", "off"}});
@@ -987,7 +2448,7 @@ TEST(KnowledgeMail, MailAndCalendarFromTheLocalCopyWithoutExcludedLabels) {
     kg.svc.reset();
     {
         MigrationOutcome o;
-        auto db = open_and_migrate(kg.file, *kg.key, kg_migrations(), o);
+        auto db = open_kg_database(kg.file, *kg.key, o);
         ASSERT_TRUE(db);
         e.clock = &system_clock();
         e.policy = [](const std::string&) -> std::optional<json> { return std::nullopt; };
@@ -1087,6 +2548,408 @@ struct FakeTeam {
 void with_team(Kg& kg, FakeTeam& t) {
     kg.team = [&t](const std::string& m, const std::string& p, const json& b) { return t.call(m, p, b); };
     kg.make(false);
+}
+
+TEST(KnowledgeSharing, RestrictedSourceDoesNotUploadAndQueuesOfflineWithdrawal) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+    FakeTeam team;
+    with_team(kg, team);
+    write_file(kg.folder / "shared.txt", "Previously shared document.");
+    write_file(kg.folder / "private.txt", "Private document.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    const auto shared = kg.svc->store().item("files", kg.file_path("shared.txt"));
+    const auto other = kg.svc->store().item("files", kg.file_path("private.txt"));
+    ASSERT_TRUE(shared);
+    ASSERT_TRUE(other);
+    ASSERT_TRUE(kg.svc->share_item(shared->id, {"engineering"}));
+    const auto puts = team.count("PUT");
+    kg.set("knowledge.sources.files", "off");
+    const auto denied = kg.svc->share_item(other->id, {"engineering"});
+    ASSERT_FALSE(denied);
+    EXPECT_EQ(denied.error().code, "policy");
+    EXPECT_FALSE(kg.svc->share_folder(u8(kg.folder), {"engineering"}));
+    EXPECT_TRUE(kg.svc->store().share_rules().empty());
+    EXPECT_EQ(team.count("PUT"), puts);
+    team.offline = true;
+    kg.svc->sync_sharing(true);
+    const auto pending = kg.svc->store().share("files", shared->ext_id);
+    ASSERT_TRUE(pending);
+    EXPECT_EQ(pending->state, "unsharing");
+    kg.make(false);
+    team.offline = false;
+    kg.svc->sync_sharing(true);
+    EXPECT_TRUE(team.items.empty());
+    EXPECT_EQ(team.count("PUT"), puts);
+
+    kg.set("knowledge.sources.files", "on");
+    ASSERT_TRUE(kg.svc->store().add_user_exclusion("item", "files:" + other->ext_id));
+    EXPECT_FALSE(kg.svc->share_item(other->id, {"engineering"}));
+    EXPECT_EQ(team.count("PUT"), puts);
+}
+
+TEST(KnowledgeSharing, RevocationDuringTextExtractionPreventsUpload) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+    FakeTeam team;
+    with_team(kg, team);
+    write_file(kg.folder / "report.pdf", "DOC:Private report contents.");
+    ASSERT_TRUE(kg.svc->add_document(kg.file_path("report.pdf")));
+    kg.idle();
+    const auto item = kg.svc->store().item("files", kg.file_path("report.pdf"));
+    ASSERT_TRUE(item);
+    kg.after_extract = [&](const std::string&, const std::string&) { kg.set("knowledge.sources.files", "off"); };
+    const auto result = kg.svc->share_item(item->id, {"engineering"});
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, "policy");
+    EXPECT_EQ(team.count("PUT"), 0);
+    EXPECT_TRUE(team.items.empty());
+}
+
+TEST(KnowledgeSharing, PendingWithdrawalPreventsItemUpload) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+    FakeTeam team;
+    bool pending = true;
+    kg.pending_withdrawal = [&](const std::string&) -> Result<bool> { return pending; };
+    with_team(kg, team);
+    write_file(kg.folder / "report.pdf", "DOC:Private report contents.");
+    ASSERT_TRUE(kg.svc->add_document(kg.file_path("report.pdf")));
+    kg.idle();
+    const auto item = kg.svc->store().item("files", kg.file_path("report.pdf"));
+    ASSERT_TRUE(item);
+    auto result = kg.svc->share_item(item->id, {"engineering"});
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, "withdrawal_pending");
+    pending = false;
+    kg.after_extract = [&](const std::string&, const std::string&) { pending = true; };
+    result = kg.svc->share_item(item->id, {"engineering"});
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, "withdrawal_pending");
+    EXPECT_EQ(team.count("PUT"), 0);
+}
+
+TEST(KnowledgeSharing, DeleteAllKeepsLocalRecordsUntilRemoteWithdrawalSucceeds) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+    FakeTeam team;
+    with_team(kg, team);
+    const auto note = kg.svc->save_note(0, "Shared note", "Content retained if withdrawal fails.");
+    ASSERT_TRUE(note);
+    kg.idle();
+    const auto item = kg.svc->store().item("notes", std::to_string(*note));
+    ASSERT_TRUE(item);
+    ASSERT_TRUE(kg.svc->share_item(item->id, {"engineering"}));
+    ASSERT_TRUE(kg.svc->store().db().exec("CREATE TRIGGER fail_pending BEFORE UPDATE OF state ON shares BEGIN SELECT RAISE(ABORT,'disk failure'); END"));
+    const auto mark_failed = kg.svc->forget_all();
+    EXPECT_FALSE(mark_failed);
+    EXPECT_EQ(team.count("DELETE"), 0);
+    EXPECT_TRUE(kg.svc->store().note(*note));
+    ASSERT_TRUE(kg.svc->store().db().exec("DROP TRIGGER fail_pending"));
+    team.offline = true;
+    const auto failed = kg.svc->forget_all();
+    ASSERT_FALSE(failed);
+    EXPECT_EQ(failed.error().code, "remote_pending");
+    EXPECT_TRUE(kg.svc->store().note(*note));
+    const auto pending = kg.svc->store().share("notes", std::to_string(*note));
+    ASSERT_TRUE(pending);
+    EXPECT_EQ(pending->state, "unsharing");
+    ASSERT_EQ(team.items.size(), 1u);
+    team.offline = false;
+    ASSERT_TRUE(kg.svc->forget_all());
+    EXPECT_FALSE(kg.svc->store().note(*note));
+    EXPECT_TRUE(kg.svc->store().shares().empty());
+    EXPECT_TRUE(team.items.empty());
+}
+
+TEST(KnowledgeSharing, DeleteAllDoesNotTreatLegacyOwnerNotFoundAsProofOfRemoval) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+    FakeTeam team;
+    with_team(kg, team);
+    const auto note = kg.svc->save_note(0, "Shared note", "Content needing verified withdrawal.");
+    ASSERT_TRUE(note);
+    kg.idle();
+    const auto item = kg.svc->store().item("notes", std::to_string(*note));
+    ASSERT_TRUE(item);
+    ASSERT_TRUE(kg.svc->share_item(item->id, {"engineering"}));
+    auto legacy = kg.svc->store().share("notes", std::to_string(*note));
+    ASSERT_TRUE(legacy);
+    legacy->state = "removed";
+    legacy->error = "Removed from team knowledge by an administrator.";
+    ASSERT_TRUE(kg.svc->store().put_share(*legacy));
+    team.items.clear();  // The current username cannot see the legacy owner's record.
+    const auto result = kg.svc->prepare_delete_all();
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, "remote_pending");
+    EXPECT_TRUE(kg.svc->store().note(*note));
+    const auto pending = kg.svc->store().share("notes", std::to_string(*note));
+    ASSERT_TRUE(pending);
+    EXPECT_EQ(pending->state, "unsharing");
+    kg.svc->sync_sharing(true);
+    EXPECT_TRUE(kg.svc->store().share("notes", std::to_string(*note)));
+}
+
+TEST(KnowledgeSharing, EarlierInferredRemovalRetainsIdentityWhenNoteIsForgotten) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+    FakeTeam team;
+    with_team(kg, team);
+    const auto note = kg.svc->save_note(0, "Old share", "Still potentially published.");
+    ASSERT_TRUE(note);
+    kg.idle();
+    const auto item = kg.svc->store().item("notes", std::to_string(*note));
+    ASSERT_TRUE(item);
+    ASSERT_TRUE(kg.svc->share_item(item->id, {"engineering"}));
+    auto legacy = kg.svc->store().share("notes", std::to_string(*note));
+    ASSERT_TRUE(legacy);
+    legacy->state = "removed";
+    legacy->error = "Removed from team knowledge by an administrator.";
+    ASSERT_TRUE(kg.svc->store().put_share(*legacy));
+    EXPECT_EQ(kg.svc->item_detail(item->id)["sharing"]["state"], "unverified");
+    const auto again = kg.svc->share_item(item->id, {"engineering"});
+    ASSERT_FALSE(again);
+    EXPECT_EQ(again.error().code, "sharing_unverified");
+    team.offline = true;
+    ASSERT_TRUE(kg.svc->delete_note(*note));
+    const auto pending = kg.svc->store().shares();
+    ASSERT_EQ(pending.size(), 1u);
+    EXPECT_EQ(pending[0].state, "unsharing");
+    EXPECT_EQ(pending[0].remote_id, legacy->remote_id);
+    EXPECT_TRUE(pending[0].title.empty());
+}
+
+TEST(KnowledgeSharing, MissingLegacyListEntryIsUnverifiedAndStillBlocksDeleteAll) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+    FakeTeam team;
+    with_team(kg, team);
+    const auto note = kg.svc->save_note(0, "Previously shared", "Content that may still be available.");
+    ASSERT_TRUE(note);
+    kg.idle();
+    const auto item = kg.svc->store().item("notes", std::to_string(*note));
+    ASSERT_TRUE(item);
+    ASSERT_TRUE(kg.svc->share_item(item->id, {"engineering"}));
+    const auto puts = team.count("PUT");
+    team.items.clear();  // This username's list does not prove the original owner's item is absent.
+    kg.svc->sync_sharing(true);
+    const auto share = kg.svc->store().share("notes", std::to_string(*note));
+    ASSERT_TRUE(share);
+    EXPECT_EQ(share->state, "unverified");
+    EXPECT_FALSE(share->remote_id.empty());
+    EXPECT_EQ(kg.svc->item_detail(item->id)["sharing"]["state"], "unverified");
+    const auto again = kg.svc->share_item(item->id, {"engineering"});
+    ASSERT_FALSE(again);
+    EXPECT_EQ(again.error().code, "sharing_unverified");
+    kg.svc->sync_sharing(true);
+    EXPECT_EQ(team.count("PUT"), puts);
+    const auto deletion = kg.svc->prepare_delete_all();
+    ASSERT_FALSE(deletion);
+    EXPECT_EQ(deletion.error().code, "remote_pending");
+    EXPECT_TRUE(kg.svc->store().note(*note));
+}
+
+TEST(KnowledgeSharing, PendingItemWithdrawalSurvivesLegacyNotFoundAndMissingListEntry) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+    FakeTeam team;
+    with_team(kg, team);
+    const auto note = kg.svc->save_note(0, "Private", "Private shared content.");
+    ASSERT_TRUE(note);
+    kg.idle();
+    const auto item = kg.svc->store().item("notes", std::to_string(*note));
+    ASSERT_TRUE(item);
+    ASSERT_TRUE(kg.svc->share_item(item->id, {"engineering"}));
+    ASSERT_EQ(team.items.size(), 1u);
+    const auto original = *team.items.begin();
+    team.offline = true;
+    ASSERT_TRUE(kg.svc->delete_note(*note));
+    ASSERT_EQ(kg.svc->store().shares().size(), 1u);
+    team.items.clear();  // The current legacy username cannot see the original owner's item.
+    team.offline = false;
+    const auto puts = team.count("PUT");
+    kg.svc->sync_sharing(true);
+    ASSERT_EQ(kg.svc->store().shares().size(), 1u);
+    EXPECT_EQ(kg.svc->store().shares()[0].state, "unsharing");
+    EXPECT_EQ(team.count("PUT"), puts);
+    kg.make(false);
+    kg.svc->sync_sharing(false);
+    ASSERT_EQ(kg.svc->store().shares().size(), 1u);
+    team.items.insert(original);  // A later request reaches an owner that can acknowledge deletion.
+    kg.svc->sync_sharing(true);
+    EXPECT_TRUE(team.items.empty());
+    EXPECT_TRUE(kg.svc->store().shares().empty());
+    EXPECT_EQ(team.count("PUT"), puts);
+}
+
+TEST(KnowledgeSharing, OfflineIndividualFolderWithdrawalDoesNotRepublish) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+    FakeTeam team;
+    with_team(kg, team);
+    write_file(kg.folder / "shared.txt", "Folder document.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    ASSERT_TRUE(kg.svc->share_folder(u8(kg.folder), {"engineering"}));
+    const auto item = kg.svc->store().item("files", kg.file_path("shared.txt"));
+    ASSERT_TRUE(item);
+    ASSERT_EQ(team.items.size(), 1u);
+    const auto puts = team.count("PUT");
+    team.offline = true;
+    const auto pending = kg.svc->unshare_item(item->id);
+    ASSERT_FALSE(pending);
+    EXPECT_EQ(pending.error().code, "remote_pending");
+    const auto reshare = kg.svc->share_item(item->id, {"engineering"});
+    ASSERT_FALSE(reshare);
+    EXPECT_EQ(reshare.error().code, "withdrawal_pending");
+    EXPECT_EQ(team.count("PUT"), puts);
+    team.offline = false;
+    kg.svc->sync_sharing(true);
+    EXPECT_TRUE(team.items.empty());
+    ASSERT_TRUE(kg.svc->store().share("files", item->ext_id));
+    EXPECT_EQ(kg.svc->store().share("files", item->ext_id)->state, "withdrawn");
+    EXPECT_EQ(team.count("PUT"), puts);
+    kg.svc->sync_sharing(true);
+    EXPECT_TRUE(team.items.empty());
+    EXPECT_EQ(team.count("PUT"), puts);
+}
+
+TEST(KnowledgeSharing, UnshareRequiresDurablePendingRecordBeforeNetworkRemoval) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+    FakeTeam team;
+    with_team(kg, team);
+    const auto note = kg.svc->save_note(0, "Shared", "Retained until unshared.");
+    ASSERT_TRUE(note);
+    kg.idle();
+    const auto item = kg.svc->store().item("notes", std::to_string(*note));
+    ASSERT_TRUE(item);
+    ASSERT_TRUE(kg.svc->share_item(item->id, {"engineering"}));
+    ASSERT_TRUE(kg.svc->store().db().exec("CREATE TRIGGER reject_pending_insert BEFORE INSERT ON shares BEGIN SELECT RAISE(ABORT,'test failure'); END"));
+    const auto deletes = team.count("DELETE");
+    const auto result = kg.svc->unshare_item(item->id);
+    ASSERT_FALSE(result);
+    EXPECT_EQ(team.count("DELETE"), deletes);
+    EXPECT_EQ(team.items.size(), 1u);
+    ASSERT_TRUE(kg.svc->store().share("notes", std::to_string(*note)));
+    EXPECT_EQ(kg.svc->store().share("notes", std::to_string(*note))->state, "shared");
+    ASSERT_TRUE(kg.svc->store().db().exec("DROP TRIGGER reject_pending_insert"));
+    EXPECT_TRUE(kg.svc->unshare_item(item->id));
+    EXPECT_TRUE(team.items.empty());
+}
+
+TEST(KnowledgeSharing, FolderUnshareRollsBackAllPendingRecordsOnStorageFailure) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+    FakeTeam team;
+    with_team(kg, team);
+    write_file(kg.folder / "a.txt", "First shared document.");
+    write_file(kg.folder / "b.txt", "Second shared document.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    ASSERT_TRUE(kg.svc->share_folder(u8(kg.folder), {"engineering"}));
+    ASSERT_EQ(team.items.size(), 2u);
+    ASSERT_TRUE(kg.svc->store().db().exec(
+        "CREATE TRIGGER reject_second_pending BEFORE INSERT ON shares WHEN new.title='b.txt' "
+        "BEGIN SELECT RAISE(ABORT,'test failure'); END"));
+    const auto deletes = team.count("DELETE");
+    const auto result = kg.svc->unshare_folder(u8(kg.folder));
+    ASSERT_FALSE(result);
+    EXPECT_EQ(team.count("DELETE"), deletes);
+    EXPECT_EQ(team.items.size(), 2u);
+    ASSERT_EQ(kg.svc->store().share_rules().size(), 1u);
+    const auto shares = kg.svc->store().shares();
+    ASSERT_EQ(shares.size(), 2u);
+    for (const auto& share : shares) {
+        EXPECT_EQ(share.state, "shared");
+        EXPECT_FALSE(share.rule.empty());
+    }
+    ASSERT_TRUE(kg.svc->store().db().exec("DROP TRIGGER reject_second_pending"));
+    EXPECT_TRUE(kg.svc->unshare_folder(u8(kg.folder)));
+    EXPECT_TRUE(team.items.empty());
+    EXPECT_TRUE(kg.svc->store().shares().empty());
+    EXPECT_TRUE(kg.svc->store().share_rules().empty());
+}
+
+TEST(KnowledgeSharing, EarlierFolderWithdrawalWithoutAcknowledgmentRemainsUnverified) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+    FakeTeam team;
+    with_team(kg, team);
+    write_file(kg.folder / "shared.txt", "A potentially still shared document.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    ASSERT_TRUE(kg.svc->share_folder(u8(kg.folder), {"engineering"}));
+    const auto item = kg.svc->store().item("files", kg.file_path("shared.txt"));
+    ASSERT_TRUE(item);
+    auto legacy = kg.svc->store().share("files", item->ext_id);
+    ASSERT_TRUE(legacy);
+    legacy->state = "withdrawn";
+    legacy->error.clear();  // Earlier clients recorded both 404 and successful deletion this way.
+    ASSERT_TRUE(kg.svc->store().put_share(*legacy));
+    EXPECT_EQ(kg.svc->item_detail(item->id)["sharing"]["state"], "unverified");
+    const auto again = kg.svc->share_item(item->id, {"engineering"});
+    ASSERT_FALSE(again);
+    EXPECT_EQ(again.error().code, "sharing_unverified");
+    team.offline = true;
+    const auto unshare = kg.svc->unshare_folder(u8(kg.folder));
+    ASSERT_FALSE(unshare);
+    EXPECT_EQ(unshare.error().code, "remote_pending");
+    ASSERT_EQ(kg.svc->store().shares().size(), 1u);
+    EXPECT_EQ(kg.svc->store().shares()[0].state, "unsharing");
+    EXPECT_TRUE(kg.svc->store().share_rules().empty());
+    ASSERT_TRUE(kg.svc->forget_source("files"));
+    const auto pending = kg.svc->store().shares();
+    ASSERT_EQ(pending.size(), 1u);
+    EXPECT_EQ(pending[0].remote_id, legacy->remote_id);
+    EXPECT_TRUE(pending[0].title.empty());
+    EXPECT_TRUE(std::filesystem::exists(kg.folder / "shared.txt"));
+}
+
+TEST(KnowledgeSharing, ForgottenSharedNoteQueuesSanitizedWithdrawalAcrossRestart) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+    FakeTeam team;
+    with_team(kg, team);
+    const auto note = kg.svc->save_note(0, "Private title", "Private shared note text.");
+    ASSERT_TRUE(note);
+    kg.idle();
+    const auto item = kg.svc->store().item("notes", std::to_string(*note));
+    ASSERT_TRUE(item);
+    ASSERT_TRUE(kg.svc->share_item(item->id, {"engineering"}));
+    ASSERT_EQ(team.items.size(), 1u);
+    team.offline = true;
+    ASSERT_TRUE(kg.svc->delete_note(*note));
+    EXPECT_FALSE(kg.svc->store().note(*note));
+    auto pending = kg.svc->store().shares();
+    ASSERT_EQ(pending.size(), 1u);
+    EXPECT_EQ(pending[0].state, "unsharing");
+    EXPECT_TRUE(pending[0].title.empty());
+    EXPECT_TRUE(pending[0].groups.empty());
+    EXPECT_TRUE(pending[0].item_hash.empty());
+    EXPECT_TRUE(pending[0].content_hash.empty());
+    EXPECT_EQ(pending[0].ext_id, "withdrawal:" + pending[0].remote_id);
+    EXPECT_EQ(team.items.size(), 1u);
+    kg.make(false);
+    ASSERT_EQ(kg.svc->store().shares().size(), 1u);
+    team.offline = false;
+    kg.svc->sweep_now();
+    kg.idle();
+    EXPECT_TRUE(team.items.empty());
+    EXPECT_TRUE(kg.svc->store().shares().empty());
+}
+
+TEST(KnowledgeSharing, ForgetFileSourceQueuesWithdrawalsAndRemovesShareRules) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+    FakeTeam team;
+    with_team(kg, team);
+    write_file(kg.folder / "a.txt", "Private document contents.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    ASSERT_TRUE(kg.svc->share_folder(u8(kg.folder), {"engineering"}));
+    ASSERT_EQ(team.items.size(), 1u);
+    team.offline = true;
+    ASSERT_TRUE(kg.svc->forget_source("files"));
+    EXPECT_TRUE(std::filesystem::exists(kg.folder / "a.txt"));
+    EXPECT_TRUE(kg.svc->store().share_rules().empty());
+    const auto pending = kg.svc->store().shares();
+    ASSERT_EQ(pending.size(), 1u);
+    EXPECT_EQ(pending[0].state, "unsharing");
+    EXPECT_TRUE(pending[0].title.empty());
+    EXPECT_EQ(pending[0].ext_id, "withdrawal:" + pending[0].remote_id);
+    team.offline = false;
+    kg.svc->sweep_now();
+    kg.idle();
+    EXPECT_TRUE(team.items.empty());
+    EXPECT_TRUE(kg.svc->store().shares().empty());
 }
 
 // 2.1: File Ingestion Scope, Single document.
@@ -1197,6 +3060,13 @@ TEST(KnowledgeSaveAsNote, DraftsFromMailAndChatPeriodCapAndOrigin) {
     EXPECT_TRUE(kg.svc->notes().empty());
     // Only mail items: a note or an unknown item is refused.
     EXPECT_EQ(kg.svc->draft_from_mail(mail_item + 100).error().code, "not_found");
+    ASSERT_TRUE(kg.svc->store().add_user_exclusion("item", "mail:m1"));
+    EXPECT_EQ(kg.svc->draft_from_mail(mail_item).error().code, "not_found");
+    ASSERT_TRUE(kg.svc->store().remove_user_exclusion("item", "mail:m1"));
+    kg.set("knowledge.sources.mail", "off");
+    EXPECT_EQ(kg.svc->draft_from_mail(mail_item).error().code, "not_found");
+    kg.set("knowledge.sources.mail", "on");
+    EXPECT_TRUE(kg.svc->draft_from_mail(mail_item));
 
     // Chat: the period filters by time, pending messages are left out, senders and times are kept.
     auto week = kg.svc->draft_from_chat("c1", "week");
@@ -1282,6 +3152,7 @@ TEST(KnowledgeCuration, EditAndDeleteFactsWithTombstonesAndRename) {
     json detail = kg.svc->item_detail(item);
     ASSERT_EQ(detail["facts"].size(), 1u);
     EXPECT_EQ(detail["facts"][0]["text"], "Jana Nováková leads Phoenix");
+    EXPECT_EQ(detail["facts"][0]["source_passage"], "Od pondělí vede projekt Phoenix Jana Nováková.");
     EXPECT_GE(detail["entities"].size(), 2u);
     EXPECT_TRUE(detail["shareable"].get<bool>());
 
@@ -1389,13 +3260,13 @@ TEST(KnowledgeSharing, PublishRepublishUnshareRulesAdminRemovalAndRefusal) {
     EXPECT_TRUE(team.items.empty());
     EXPECT_TRUE(store.shares().empty());
 
-    // Removed by an administrator: no longer shared after the next policy refresh.
+    // Missing from a legacy username-scoped list: the prior sharing state is unknown.
     const long long c = store.item("files", kg.file_path("c.md"))->id;
     ASSERT_TRUE(kg.svc->share_item(c, {"engineering"}));
     team.items.clear();
     kg.svc->policy_changed();
     kg.idle();
-    EXPECT_EQ(store.share("files", kg.file_path("c.md"))->state, "removed");
+    EXPECT_EQ(store.share("files", kg.file_path("c.md"))->state, "unverified");
     EXPECT_FALSE(kg.svc->browse("files", "c.md", 10)[0]["shared"].get<bool>());
 
     // A note is shareable; mail is not.
@@ -1415,7 +3286,7 @@ TEST(KnowledgeSharing, PublishRepublishUnshareRulesAdminRemovalAndRefusal) {
 
     // Offline: the share fails and says so.
     team.offline = true;
-    EXPECT_EQ(kg.svc->share_item(c, {"engineering"}).error().code, "offline");
+    EXPECT_EQ(kg.svc->share_item(store.item("notes", std::to_string(*note))->id, {"engineering"}).error().code, "offline");
     team.offline = false;
 
     // Policy permits no Group: no sharing.

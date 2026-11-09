@@ -571,7 +571,7 @@ void PagePane::build_settings() {
             if (settings_.is_object() && jbool(shell_.status().value("dictation", json::object()), "enabled")) {
                 const std::string dl = jstr(setting("dictation.language"), "value", "auto");
                 std::vector<std::pair<std::string, std::u16string>> langs{{"auto", shell_.t("settings.general.dictation_auto")}};
-                for (const char* l : {"cs", "de", "en", "pl", "sk"}) langs.emplace_back(l, shell_.t(std::string("settings.general.dictation_lang.") + l));
+                for (const char* l : {"cs", "de", "en"}) langs.emplace_back(l, shell_.t(std::string("settings.general.dictation_lang.") + l));
                 std::u16string shown = langs.front().second;
                 for (const auto& [k, v] : langs)
                     if (k == dl) shown = v;

@@ -284,6 +284,19 @@ TEST(ModelRetries, TransientOutageIsRetriedWithoutAnErrorAndReportedToTheSink) {
     EXPECT_EQ(rig.sleeps.size(), 1U);
 }
 
+TEST(ModelRetries, BudgetIsRecheckedBeforeEachRetry) {
+    Rig rig;
+    rig.gateway.push(error_response(503, "MODEL_UNAVAILABLE", "backend unavailable"));
+    auto req = simple_request();
+    int checks = 0;
+    req.input_budget_check = [&](const ChatRequest&) { return ++checks == 1; };
+    const auto result = rig.client->chat(req, {});
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.failure().code, code::context_length);
+    EXPECT_EQ(checks, 2);
+    EXPECT_EQ(rig.gateway.request_count(), 1u);
+}
+
 TEST(ModelRetries, UpToThreeRetriesThenTheFailure) {
     Rig rig;
     rig.gateway.push(error_response(503, "MODEL_UNAVAILABLE"));
@@ -434,6 +447,21 @@ TEST(ModelToolCalls, PersistentlyInvalidCallStaysInvalid) {
     EXPECT_FALSE(r->tool_calls[0].valid);
     EXPECT_FALSE(r->tool_calls[0].validation_error.empty());
     EXPECT_EQ(rig.gateway.request_count(), 2U);  // exactly one correction, never more
+}
+
+TEST(ModelToolCalls, OversizedCorrectionIsNotSent) {
+    Rig rig;
+    rig.gateway.push(streamed(tool_stream("c1", "files__read", {"{\"path\":5}"})));
+    auto req = simple_request();
+    req.tools.push_back(read_tool());
+    req.input_budget_check = [](const ChatRequest& request) { return request.messages.size() == 1; };
+    auto r = rig.client->chat(req, {});
+    ASSERT_TRUE(r.ok());
+    ASSERT_EQ(r->tool_calls.size(), 1u);
+    EXPECT_FALSE(r->tool_calls[0].valid);
+    EXPECT_FALSE(r->tool_calls[0].validation_error.empty());
+    EXPECT_FALSE(r->corrected);
+    EXPECT_EQ(rig.gateway.request_count(), 1u);
 }
 
 TEST(ModelToolCalls, ValidCallsAreKeptWhenAnotherCallNeedsCorrection) {

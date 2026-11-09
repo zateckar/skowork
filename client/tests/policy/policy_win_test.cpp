@@ -531,6 +531,30 @@ TEST(PolicyEgressWin, DeniedFirstUrlIsNeverContacted) {
 
 // ---- Enforcer and the approval log ------------------------------------------------------------------------------------
 
+TEST(PolicyEnforcerWin, ComputerModeOverridesAnExplicitAllow) {
+    PolicyBundle bundle;
+    bundle.policy = {{"tools", {{"rules", {{"computer.click", "allow"}}}}}};
+    bundle.src = {{"tools.computer.mode", "guardrail"}};
+    auto policy = std::make_shared<const EffectivePolicy>(bundle);
+    EnforcerEnv env;
+    env.policy = [&policy] { return policy; };
+    PolicyEnforcer enforcer(env);
+    runtime::ToolCallInfo call;
+    call.tool = "computer.click";
+    call.risk = runtime::Risk::external;
+    auto verdict = enforcer.evaluate(call);
+    EXPECT_EQ(verdict.decision, Decision::deny);
+    EXPECT_EQ(verdict.rule, "tools.computer.mode");
+    EXPECT_FALSE(enforcer.tool_permitted(call.tool, call.risk));
+
+    bundle.policy["tools"]["computer"]["mode"] = "allow";
+    policy = std::make_shared<const EffectivePolicy>(bundle);
+    verdict = enforcer.evaluate(call);
+    EXPECT_EQ(verdict.decision, Decision::allow);
+    EXPECT_EQ(verdict.rule, "tools.rules[\"computer.click\"]");
+    EXPECT_TRUE(enforcer.tool_permitted(call.tool, call.risk));
+}
+
 TEST(PolicyEnforcerWin, DecisionsAreLoggedWithRuleAndSource) {
     TestStore ts;
     DecisionLog log(ts.store->db());

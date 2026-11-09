@@ -493,7 +493,7 @@ void Indicator::run(Options o, std::promise<void>& shown) {
         y = work.top + 8;
     }
     // Owned by no window: closing or hiding the main window leaves it on screen (Recording Indicator And Stop).
-    HWND h = ::CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kIndicatorClass, L"Workbench recording",
+    HWND h = ::CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kIndicatorClass, L"SkoWork recording",
                                WS_POPUP | WS_BORDER, x, y, w, hgt, nullptr, nullptr, inst, &st);
     if (!h) {
         shown.set_value();

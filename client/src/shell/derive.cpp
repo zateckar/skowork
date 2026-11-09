@@ -64,6 +64,7 @@ std::vector<BannerSpec> banners(const json& s) {
     std::vector<BannerSpec> out;
     const json& cp = sub(s, "control_plane");
     const json& storage = sub(s, "storage");
+    if (jint(storage, "pending_remote_removals") > 0) out.push_back({"remote_removal_pending", "warning"});
     if (jbool(cp, "locked")) out.push_back({"locked", "error"});
     if (jbool(cp, "version_blocked")) out.push_back({"version_blocked", "error"});
     const std::string auth = auth_state(s);

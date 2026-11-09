@@ -15,8 +15,8 @@ RegistrationOutcome ensure_registration(const std::filesystem::path& exe, const 
         out.run_repaired = true;
         out.ok &= reg_write_string(HKEY_CURRENT_USER, p.run_key, p.run_value, run);
     }
-    if (reg_read_string(HKEY_CURRENT_USER, p.aumid_key, L"DisplayName") != L"Workbench")
-        out.ok &= reg_write_string(HKEY_CURRENT_USER, p.aumid_key, L"DisplayName", L"Workbench");
+    if (reg_read_string(HKEY_CURRENT_USER, p.aumid_key, L"DisplayName") != L"SkoWork")
+        out.ok &= reg_write_string(HKEY_CURRENT_USER, p.aumid_key, L"DisplayName", L"SkoWork");
     return out;
 }
 

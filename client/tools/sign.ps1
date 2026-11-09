@@ -15,7 +15,7 @@ try {
     $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
     if (-not $signtool) { throw 'signtool.exe not found' }
     & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:SIGNING_PASSWORD /tr http://timestamp.digicert.com /td SHA256 `
-        (Join-Path $BuildDir 'bin/Workbench.exe') (Join-Path $BuildDir 'bin/workbench-worker.exe')
+        (Join-Path $BuildDir 'bin/SkoWork.exe') (Join-Path $BuildDir 'bin/Workbench-legacy.exe') (Join-Path $BuildDir 'bin/workbench-worker.exe')
     if ($LASTEXITCODE -ne 0) { throw "signtool failed ($LASTEXITCODE)" }
 } finally {
     Remove-Item $pfx -ErrorAction SilentlyContinue

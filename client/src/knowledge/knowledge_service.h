@@ -17,6 +17,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -81,6 +82,8 @@ struct KnowledgeEnv {
     // JSON answer. Error codes: offline when the control plane is not connected, else the server's code
     // (GROUP_NOT_PERMITTED, TOO_LARGE, QUOTA_EXCEEDED) or http_<status>. Unset: no sharing and no team search.
     std::function<Result<json>(const std::string& method, const std::string& path, const json& body)> team;
+    // Refuse to re-upload an item while an earlier withdrawal for this account is pending.
+    std::function<Result<bool>(const std::string& remote_id)> pending_item_withdrawal;
     bool background = true;         // tests drive step() themselves
     long long sweep_interval_ms = 60'000;  // files rescan and reconciliation
 };
@@ -110,6 +113,7 @@ struct SearchResult {
     bool reranked = false;
     bool team_searched = false;
     std::string team_note;  // why team knowledge was not searched
+    bool file_source_problem = false;  // selected file knowledge may not reflect the current files
 };
 
 // A Save as note draft within the note size limit (add-save-as-note design D2): cut at a character boundary, with a
@@ -130,7 +134,7 @@ public:
     // ---- Connectors ----
     // A Run finished in the Thread (the threads Source).
     void thread_finished(const std::string& thread_id);
-    void thread_forgotten(const std::string& thread_id);
+    Status thread_forgotten(const std::string& thread_id);
     // A mail-calendar event: mail.received, mail.updated, mail.deleted, event.created, event.updated, event.cancelled.
     void mail_event(const std::string& kind, const std::string& id);
     // The meetings connector (client/meeting-capture): a finished transcript, indexed in the meetings Source.
@@ -149,6 +153,14 @@ public:
 
     // ---- Retrieval ----
     SearchResult search(const std::string& query, const SearchOptions& opt);
+    // Apply the same current Source and exclusion checks to graph and reader results.
+    bool item_visible(const ItemRow& item);
+    bool chunk_visible(long long chunk_id);
+    bool relation_visible(const RelationRow& relation);
+    bool fact_visible(const FactRow& fact);
+    bool entity_visible(long long entity_id);
+    std::vector<EntityRow> visible_entities(const std::string& query, int limit);
+    std::vector<std::string> visible_entity_aliases(const EntityRow& entity);
 
     // ---- Tools ----
     std::vector<runtime::ToolDef> tools();
@@ -173,6 +185,10 @@ public:
     json entity_profile(long long id);
     // Forget everything (client/local-storage: forget all).
     Status forget_all();
+    // Stops new item uploads and withdraws existing shares before a whole-profile wipe.
+    Status prepare_delete_all();
+    Result<std::vector<std::string>> freeze_for_delete_all();
+    void cancel_delete_all();
 
     // ---- Knowledge view (add-knowledge-sharing) ----
     // Single documents of the files Source.
@@ -229,11 +245,12 @@ private:
     void enqueue(Task t);
     bool excluded_path(const std::string& path, const KnowledgeConfig& cfg);
     bool excluded_item(const std::string& source, const std::string& id);
-    void apply_exclusions();
+    Status apply_exclusions();
     bool process_task(const Task& t);
     void index_thread(const std::string& id, int priority);
     void index_mail(const std::string& kind, const std::string& id, int priority);
     void index_file(const std::string& path, int priority);
+    void file_error(const std::string& path, const std::string& error, long long updated = 0);
     void index_meeting(const Task& t);
     void index_note(const std::string& id, int priority);
     json origin_json(const NoteRow& n);
@@ -259,11 +276,24 @@ private:
     std::unique_ptr<KgStore> store_;
     std::mutex mx_;
     std::deque<Task> tasks_;
+    std::string file_recheck_scanned_;
+    int file_scans_running_ = 0;
     long long last_sweep_ = 0;
     bool swept_once_ = false;
     bool list_shares_ = true;  // list the shared items at the next sweep (start, policy refresh)
     std::mutex share_mx_;      // one sharing pass at a time
+    std::atomic<bool> deleting_all_{false};
+    std::mutex file_status_mx_;
+    std::string file_scan_error_;  // retained until the next complete file scan
+    std::map<std::string, std::string> file_errors_;  // retained until this file succeeds or is no longer selected
     long long embed_retry_at_ = 0, extract_retry_at_ = 0, enrich_retry_at_ = 0;
+    int extract_failures_ = 0;
+    std::atomic<bool> extraction_delayed_{false};
+    struct DeferredExtraction { long long item_id = 0, retry_at = 0; int failures = 0; std::string text; };
+    std::mutex extraction_deferred_mx_;
+    std::map<long long, DeferredExtraction> extraction_deferred_;
+    bool isolate_extraction_ = false;
+    int isolated_extract_failures_ = 0;
     std::string last_embed_error_, last_extract_error_;
 
     std::thread thread_;

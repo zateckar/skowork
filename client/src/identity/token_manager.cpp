@@ -316,7 +316,7 @@ Status TokenManager::redeem_code(const std::string& code, const PkceAttempt& att
     const std::string bound = subject();
     if (!bound.empty() && bound != id.sub()) {
         security_event("subject_mismatch", "sign-in for a different person was refused");
-        enter_sign_in_required("This Workbench data belongs to " + user_principal() +
+        enter_sign_in_required("This SkoWork data belongs to " + user_principal() +
                                    ". Sign in with that account.",
                                false);
         return make_error("subject_mismatch", "data root is bound to another account");

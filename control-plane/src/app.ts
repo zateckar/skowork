@@ -65,7 +65,7 @@ export function createControlPlane(
   const team = new TeamKnowledge(cfg, db, audit, (u, input) => gateway.embedFor(u, input), (u) => {
     const v = policy.compileFor(u.groups, u.userName).flat.get('knowledge.sharing.groups');
     return Array.isArray(v) ? v.map(String) : [];
-  });
+  }, (u) => identity.groupsFor(u.userName, u.idpRoles));
   const messaging = new Messaging(cfg, db, audit, push, (u) => (policy.compileFor(u.groups, u.userName).flat.get('messaging.mode') === 'off' ? 'off' : 'on'));
   gateway.connections.setUseSource(() => [
     ...policy.modelUses(),
@@ -156,9 +156,10 @@ export function createControlPlane(
     onDenied: (kind, value) => fleet.revoke(kind, value),
     onMappingChanged: () => policy.mappingChanged(),
     onAssignmentChanged: (u) => policy.assignmentChanged(u),
+    bootstrapAdmins: cfg.identity.bootstrapAdmins,
   }));
   app.use('/api/v1/admin/fleet', fleetAdminRoutes(db, audit, fleet, push));
-  app.use('/api/v1/admin/policy', requireView('policy'), policyAdminRoutes(policy, identity, audit));
+  app.use('/api/v1/admin/policy', requireView('policy'), policyAdminRoutes(policy, identity, audit, catalog));
   app.use('/api/v1/admin/telemetry', telemetryAdminRoutes(telemetry));
   app.use('/api/v1/admin/llm', requireRole('platform-admin'), llmAdminRoutes(gateway.connections));
   app.use('/api/v1/admin/knowledge', requireRole('platform-admin'), teamKnowledgeAdminRoutes(team));

@@ -527,6 +527,16 @@ TEST(ShellDerive, StatusDerivations) {
     EXPECT_EQ(mcp_health(json::object()).tone, "");
 }
 
+TEST(ShellDerive, PendingRemoteRemovalIsVisibleOnFirstRun) {
+    json status = {{"storage", {{"pending_remote_removals", 2}}},
+                   {"control_plane", {{"configured", true}}}, {"auth", {{"state", "sign_in_required"}}}};
+    const auto notices = banners(status);
+    EXPECT_NE(std::find(notices.begin(), notices.end(), BannerSpec{"remote_removal_pending", "warning"}), notices.end());
+    status["storage"]["pending_remote_removals"] = 0;
+    const auto cleared = banners(status);
+    EXPECT_EQ(std::find(cleared.begin(), cleared.end(), BannerSpec{"remote_removal_pending", "warning"}), cleared.end());
+}
+
 TEST(ShellFormat, PercentSnippetsAndAboutText) {
     EXPECT_EQ(format_percent(0.42), "42%");
     EXPECT_EQ(format_percent(0.045, ','), "4,5%");

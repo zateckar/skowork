@@ -139,6 +139,9 @@ public:
     // window of the model role, for the context-usage indicator.
     struct ContextUsage {
         long long tokens = 0, window = 0;
+        long long input_budget = 0, trigger = 0, target = 0, output_reserve = 0;
+        long long tool_tokens = 0;
+        bool includes_tools = false;
         double compaction_threshold = 0;
     };
     [[nodiscard]] ContextUsage context_usage(const std::string& thread_id);
@@ -203,6 +206,7 @@ private:
     Result<CompactionResult> compact(const std::string& thread_id, const std::string& run_id, const std::string& except_run,
                                      const std::string& kind, const RunInfo& info, const std::shared_ptr<CancelToken>& cancel);
     [[nodiscard]] long long context_window(model::Role role);
+    [[nodiscard]] int output_limit(model::Role role);
     [[nodiscard]] const RunLimits& limits_for(bool unattended) const { return unattended ? cfg_.unattended : cfg_.attended; }
     Result<std::string> start_run_locked(const std::string& thread_id, const std::string& text, const StartOptions& options);
 
@@ -228,6 +232,8 @@ private:
     bool started_ = false;
 
     std::recursive_mutex emit_mx_;
+    std::mutex context_estimate_mx_;
+    std::map<std::string, long long> context_tool_estimates_;
     EventListener listener_;
     std::mutex standalone_mx_;
     std::function<void(const ActionItem&, const std::string&)> standalone_handler_;

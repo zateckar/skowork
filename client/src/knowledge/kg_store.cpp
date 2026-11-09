@@ -1,14 +1,280 @@
 #include "knowledge/kg_store.h"
 
 #include "base/strings.h"
+#include "platform/crypto.h"
+
+#include <sqlite3mc_amalgamation.h>
 
 #include <algorithm>
 #include <cctype>
+#include <map>
+#include <limits>
 #include <mutex>
 #include <queue>
 #include <set>
+#include <unordered_map>
 
 namespace wb::knowledge {
+
+Status register_kg_writer(Database& db) {
+    // Removing a required fact can remove another support set, whose now-unsupported fact can in turn be required
+    // by further derivations. Recursive triggers are connection-local and must be enabled on every modern writer.
+    if (auto status = db.exec("PRAGMA recursive_triggers=ON"); !status) return status;
+    const int rc = sqlite3_create_function_v2(db.raw(), "skowork_writer_v1", 0, SQLITE_UTF8 | SQLITE_INNOCUOUS,
+                                              nullptr, [](sqlite3_context* ctx, int, sqlite3_value**) { sqlite3_result_int(ctx, 1); },
+                                              nullptr, nullptr, nullptr);
+    if (rc != SQLITE_OK) return make_error("sqlite", db.errmsg());
+    return {};
+}
+
+std::string kg_writer_barrier_sql() {
+    std::string sql;
+    for (const char* table : {"sources", "folders", "user_exclusions", "skipped", "items", "chunks", "embed_queue",
+                              "extract_queue", "entities", "entity_aliases", "mentions", "relations", "facts_user",
+                              "budget", "meta", "vec_models", "vec_bin", "vec_i8", "documents", "notes",
+                              "fact_tombstones", "shares", "share_rules"}) {
+        for (const char* verb : {"INSERT", "UPDATE", "DELETE"})
+            sql += std::string("CREATE TRIGGER skowork_guard_") + table + "_" + verb + " BEFORE " + verb + " ON " + table +
+                   " BEGIN SELECT skowork_writer_v1(); END;\n";
+    }
+    return sql;
+}
+
+std::string kg_evidence_migration_sql() {
+    // A legacy relation records one passage, not the exact words or every input used by the model. Backfill it as
+    // unverified passage-level evidence; do not invent precise spans or claim that the passage is a complete proof.
+    return std::string(R"sql(
+CREATE TABLE knowledge_revisions(
+  id INTEGER PRIMARY KEY,
+  item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL,
+  source_hash TEXT NOT NULL,
+  indexed_at INTEGER NOT NULL,
+  current INTEGER NOT NULL CHECK(current IN (0,1)),
+  UNIQUE(item_id,sequence));
+CREATE UNIQUE INDEX knowledge_revision_current ON knowledge_revisions(item_id) WHERE current=1;
+CREATE TABLE knowledge_evidence(
+  id INTEGER PRIMARY KEY,
+  revision_id INTEGER NOT NULL REFERENCES knowledge_revisions(id) ON DELETE CASCADE,
+  chunk_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL,
+  excerpt TEXT NOT NULL,
+  precision TEXT NOT NULL CHECK(precision IN ('passage','exact')),
+  byte_start INTEGER,
+  byte_end INTEGER,
+  CHECK((precision='passage' AND byte_start IS NULL AND byte_end IS NULL) OR
+        (precision='exact' AND byte_start IS NOT NULL AND byte_end IS NOT NULL AND byte_start>=0 AND byte_end>byte_start)));
+CREATE UNIQUE INDEX knowledge_passage_identity ON knowledge_evidence(revision_id,chunk_id) WHERE precision='passage';
+CREATE UNIQUE INDEX knowledge_exact_identity ON knowledge_evidence(revision_id,chunk_id,byte_start,byte_end) WHERE precision='exact';
+CREATE TRIGGER knowledge_evidence_validate_insert BEFORE INSERT ON knowledge_evidence
+WHEN new.chunk_id IS NULL OR NOT EXISTS (
+  SELECT 1 FROM chunks c JOIN knowledge_revisions v ON v.item_id=c.item_id
+  WHERE c.id=new.chunk_id AND v.id=new.revision_id AND
+    ((new.precision='passage' AND new.excerpt=c.text) OR
+     (new.precision='exact' AND substr(CAST(c.text AS BLOB),new.byte_start+1,new.byte_end-new.byte_start)=CAST(new.excerpt AS BLOB)))
+)
+BEGIN SELECT RAISE(ABORT,'evidence does not match its revision and passage'); END;
+CREATE TRIGGER knowledge_evidence_immutable BEFORE UPDATE OF revision_id,excerpt,precision,byte_start,byte_end ON knowledge_evidence
+BEGIN SELECT RAISE(ABORT,'replace evidence instead of changing it'); END;
+CREATE TRIGGER knowledge_evidence_chunk_immutable BEFORE UPDATE OF chunk_id ON knowledge_evidence
+WHEN new.chunk_id IS NOT NULL AND new.chunk_id IS NOT old.chunk_id
+BEGIN SELECT RAISE(ABORT,'replace evidence instead of changing its passage'); END;
+CREATE TABLE knowledge_facts(
+  id INTEGER PRIMARY KEY,
+  subject INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  predicate TEXT NOT NULL,
+  object INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  unit TEXT NOT NULL DEFAULT '',
+  scope TEXT NOT NULL DEFAULT '',
+  valid_from TEXT NOT NULL DEFAULT '',
+  valid_to TEXT NOT NULL DEFAULT '',
+  UNIQUE(subject,predicate,object,unit,scope,valid_from,valid_to));
+CREATE TABLE knowledge_support_sets(
+  id INTEGER PRIMARY KEY,
+  fact_id INTEGER NOT NULL REFERENCES knowledge_facts(id) ON DELETE CASCADE,
+  legacy_relation_id INTEGER UNIQUE REFERENCES relations(id) ON DELETE SET NULL,
+  state TEXT NOT NULL CHECK(state IN ('unverified','current','superseded','unsupported')));
+CREATE INDEX knowledge_support_fact ON knowledge_support_sets(fact_id,state);
+CREATE TABLE knowledge_support_evidence(
+  support_id INTEGER NOT NULL REFERENCES knowledge_support_sets(id) ON DELETE CASCADE,
+  evidence_id INTEGER NOT NULL REFERENCES knowledge_evidence(id) ON DELETE CASCADE,
+  PRIMARY KEY(support_id,evidence_id));
+CREATE INDEX knowledge_evidence_reverse ON knowledge_support_evidence(evidence_id,support_id);
+CREATE TABLE knowledge_support_facts(
+  support_id INTEGER NOT NULL REFERENCES knowledge_support_sets(id) ON DELETE CASCADE,
+  required_fact_id INTEGER NOT NULL REFERENCES knowledge_facts(id) ON DELETE CASCADE,
+  PRIMARY KEY(support_id,required_fact_id));
+CREATE INDEX knowledge_fact_reverse ON knowledge_support_facts(required_fact_id,support_id);
+CREATE TRIGGER knowledge_no_dependency_cycle BEFORE INSERT ON knowledge_support_facts
+WHEN EXISTS(
+  WITH RECURSIVE required(id) AS (
+    SELECT new.required_fact_id
+    UNION
+    SELECT d.required_fact_id FROM required r
+      JOIN knowledge_support_sets s ON s.fact_id=r.id
+      JOIN knowledge_support_facts d ON d.support_id=s.id
+  )
+  SELECT 1 FROM required WHERE id=(SELECT fact_id FROM knowledge_support_sets WHERE id=new.support_id)
+)
+BEGIN SELECT RAISE(ABORT,'cyclic knowledge dependency'); END;
+CREATE TRIGGER knowledge_immutable_dependency BEFORE UPDATE ON knowledge_support_facts
+BEGIN SELECT RAISE(ABORT,'replace knowledge dependencies instead of updating them'); END;
+CREATE TABLE knowledge_annotations(
+  user_fact_id INTEGER PRIMARY KEY REFERENCES facts_user(id) ON DELETE CASCADE,
+  revision_id INTEGER REFERENCES knowledge_revisions(id) ON DELETE CASCADE);
+CREATE TABLE knowledge_categories(
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  normalized_name TEXT NOT NULL UNIQUE);
+CREATE TABLE knowledge_category_assignments(
+  fact_id INTEGER NOT NULL REFERENCES knowledge_facts(id) ON DELETE CASCADE,
+  category_id INTEGER NOT NULL REFERENCES knowledge_categories(id) ON DELETE CASCADE,
+  decision TEXT NOT NULL CHECK(decision IN ('automatic','manual','rejected')),
+  reason TEXT NOT NULL DEFAULT '',
+  evidence_id INTEGER REFERENCES knowledge_evidence(id) ON DELETE CASCADE,
+  CHECK((decision='automatic' AND evidence_id IS NOT NULL AND reason<>'') OR
+        (decision IN ('manual','rejected') AND evidence_id IS NULL)),
+  PRIMARY KEY(fact_id,category_id));
+CREATE INDEX knowledge_category_members ON knowledge_category_assignments(category_id,decision,fact_id);
+CREATE TABLE knowledge_conflicts(
+  id INTEGER PRIMARY KEY,
+  left_fact INTEGER NOT NULL REFERENCES knowledge_facts(id) ON DELETE CASCADE,
+  right_fact INTEGER NOT NULL REFERENCES knowledge_facts(id) ON DELETE CASCADE,
+  left_evidence INTEGER NOT NULL REFERENCES knowledge_evidence(id) ON DELETE CASCADE,
+  right_evidence INTEGER NOT NULL REFERENCES knowledge_evidence(id) ON DELETE CASCADE,
+  explanation TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('open','needs_recheck','resolved','deferred')),
+  decision TEXT NOT NULL DEFAULT '',
+  decision_reason TEXT NOT NULL DEFAULT '',
+  CHECK(left_fact<right_fact),
+  UNIQUE(left_fact,right_fact));
+CREATE INDEX knowledge_conflict_left_evidence ON knowledge_conflicts(left_evidence);
+CREATE INDEX knowledge_conflict_right_evidence ON knowledge_conflicts(right_evidence);
+CREATE TABLE knowledge_conflict_history(
+  id INTEGER PRIMARY KEY,
+  conflict_id INTEGER NOT NULL REFERENCES knowledge_conflicts(id) ON DELETE CASCADE,
+  left_evidence INTEGER NOT NULL REFERENCES knowledge_evidence(id) ON DELETE CASCADE,
+  right_evidence INTEGER NOT NULL REFERENCES knowledge_evidence(id) ON DELETE CASCADE,
+  decision TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  decided_at INTEGER NOT NULL);
+CREATE TABLE knowledge_previews(
+  token TEXT PRIMARY KEY,
+  operation TEXT NOT NULL CHECK(operation='forget_item'),
+  item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  generation INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL);
+CREATE TABLE knowledge_generation(id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL);
+INSERT INTO knowledge_generation(id,value) VALUES(1,0);
+
+INSERT INTO knowledge_revisions(item_id,sequence,source_hash,indexed_at,current)
+  SELECT id,1,hash,indexed_at,1 FROM items;
+INSERT INTO knowledge_evidence(revision_id,chunk_id,excerpt,precision)
+  SELECT DISTINCT v.id,c.id,c.text,'passage' FROM relations r
+  JOIN chunks c ON c.id=r.chunk_id JOIN knowledge_revisions v ON v.item_id=c.item_id AND v.current=1;
+INSERT OR IGNORE INTO knowledge_facts(subject,predicate,object,valid_from,valid_to)
+  SELECT subject,predicate,object,valid_from,valid_to FROM relations WHERE chunk_id IS NOT NULL;
+INSERT INTO knowledge_support_sets(fact_id,legacy_relation_id,state)
+  SELECT f.id,min(r.id),'unverified' FROM relations r
+  JOIN knowledge_facts f ON f.subject=r.subject AND f.predicate=r.predicate AND f.object=r.object
+    AND f.unit='' AND f.scope='' AND f.valid_from=r.valid_from AND f.valid_to=r.valid_to
+  WHERE r.chunk_id IS NOT NULL GROUP BY f.id,r.chunk_id;
+INSERT INTO knowledge_support_evidence(support_id,evidence_id)
+  SELECT s.id,e.id FROM knowledge_support_sets s JOIN relations r ON r.id=s.legacy_relation_id
+  JOIN chunks c ON c.id=r.chunk_id JOIN knowledge_revisions v ON v.item_id=c.item_id AND v.current=1
+  JOIN knowledge_evidence e ON e.revision_id=v.id AND e.chunk_id=c.id;
+INSERT INTO knowledge_annotations(user_fact_id,revision_id)
+  SELECT u.id,v.id FROM facts_user u
+  LEFT JOIN items i ON (i.source=u.item_source AND i.ext_id=u.item_ext_id AND u.item_source<>'') OR
+                       (i.source='threads' AND i.ext_id=u.thread_id AND u.item_source='' AND u.thread_id<>'')
+  LEFT JOIN knowledge_revisions v ON v.item_id=i.id AND v.current=1;
+
+CREATE TRIGGER knowledge_legacy_relation_removed BEFORE DELETE ON relations BEGIN
+  UPDATE knowledge_support_sets SET legacy_relation_id=(
+    SELECT min(r.id) FROM relations r WHERE r.id<>old.id AND r.chunk_id=old.chunk_id
+      AND r.subject=old.subject AND r.predicate=old.predicate AND r.object=old.object
+      AND r.valid_from=old.valid_from AND r.valid_to=old.valid_to),
+    state=CASE WHEN EXISTS(SELECT 1 FROM relations r WHERE r.id<>old.id AND r.chunk_id=old.chunk_id
+      AND r.subject=old.subject AND r.predicate=old.predicate AND r.object=old.object
+      AND r.valid_from=old.valid_from AND r.valid_to=old.valid_to) THEN state ELSE 'unsupported' END
+    WHERE legacy_relation_id=old.id;
+END;
+CREATE TRIGGER knowledge_forget_evidence BEFORE DELETE ON knowledge_evidence BEGIN
+  DELETE FROM knowledge_support_sets WHERE id IN
+    (SELECT support_id FROM knowledge_support_evidence WHERE evidence_id=old.id);
+END;
+CREATE TRIGGER knowledge_forget_required_fact BEFORE DELETE ON knowledge_facts BEGIN
+  DELETE FROM knowledge_support_sets WHERE id IN
+    (SELECT support_id FROM knowledge_support_facts WHERE required_fact_id=old.id);
+END;
+CREATE TRIGGER knowledge_support_member_removed AFTER DELETE ON knowledge_support_evidence BEGIN
+  DELETE FROM knowledge_support_sets WHERE id=old.support_id;
+END;
+CREATE TRIGGER knowledge_required_member_removed AFTER DELETE ON knowledge_support_facts BEGIN
+  DELETE FROM knowledge_support_sets WHERE id=old.support_id;
+END;
+CREATE TRIGGER knowledge_supersede_revision AFTER UPDATE OF current ON knowledge_revisions
+WHEN old.current=1 AND new.current=0
+BEGIN
+  UPDATE knowledge_support_sets SET state='superseded' WHERE state IN ('current','unverified') AND id IN
+    (SELECT se.support_id FROM knowledge_support_evidence se
+     JOIN knowledge_evidence e ON e.id=se.evidence_id WHERE e.revision_id=old.id);
+END;
+CREATE TRIGGER knowledge_invalidated_support AFTER UPDATE OF state ON knowledge_support_sets
+WHEN new.state IN ('superseded','unsupported') AND old.state IN ('current','unverified')
+BEGIN
+  DELETE FROM knowledge_category_assignments WHERE fact_id=new.fact_id AND decision='automatic'
+    AND NOT EXISTS(SELECT 1 FROM knowledge_support_sets s JOIN knowledge_support_evidence se ON se.support_id=s.id
+      WHERE s.fact_id=new.fact_id AND s.state IN ('current','unverified')
+        AND se.evidence_id=knowledge_category_assignments.evidence_id);
+  UPDATE knowledge_conflicts SET state='needs_recheck',decision='',decision_reason=''
+    WHERE state<>'needs_recheck' AND
+      ((left_fact=new.fact_id AND NOT EXISTS(SELECT 1 FROM knowledge_support_sets s JOIN knowledge_support_evidence se ON se.support_id=s.id
+        WHERE s.fact_id=new.fact_id AND s.state IN ('current','unverified') AND se.evidence_id=knowledge_conflicts.left_evidence)) OR
+       (right_fact=new.fact_id AND NOT EXISTS(SELECT 1 FROM knowledge_support_sets s JOIN knowledge_support_evidence se ON se.support_id=s.id
+        WHERE s.fact_id=new.fact_id AND s.state IN ('current','unverified') AND se.evidence_id=knowledge_conflicts.right_evidence)));
+  UPDATE knowledge_support_sets SET state='unsupported' WHERE state IN ('current','unverified')
+    AND NOT EXISTS(SELECT 1 FROM knowledge_support_sets WHERE fact_id=new.fact_id AND state IN ('current','unverified')) AND id IN
+    (SELECT support_id FROM knowledge_support_facts WHERE required_fact_id=new.fact_id);
+END;
+CREATE TRIGGER knowledge_removed_support AFTER DELETE ON knowledge_support_sets
+BEGIN
+  DELETE FROM knowledge_category_assignments WHERE fact_id=old.fact_id AND decision='automatic'
+    AND NOT EXISTS(SELECT 1 FROM knowledge_support_sets s JOIN knowledge_support_evidence se ON se.support_id=s.id
+      WHERE s.fact_id=old.fact_id AND s.state IN ('current','unverified')
+        AND se.evidence_id=knowledge_category_assignments.evidence_id);
+  UPDATE knowledge_conflicts SET state='needs_recheck',decision='',decision_reason=''
+    WHERE state<>'needs_recheck' AND
+      ((left_fact=old.fact_id AND NOT EXISTS(SELECT 1 FROM knowledge_support_sets s JOIN knowledge_support_evidence se ON se.support_id=s.id
+        WHERE s.fact_id=old.fact_id AND s.state IN ('current','unverified') AND se.evidence_id=knowledge_conflicts.left_evidence)) OR
+       (right_fact=old.fact_id AND NOT EXISTS(SELECT 1 FROM knowledge_support_sets s JOIN knowledge_support_evidence se ON se.support_id=s.id
+        WHERE s.fact_id=old.fact_id AND s.state IN ('current','unverified') AND se.evidence_id=knowledge_conflicts.right_evidence)));
+  UPDATE knowledge_support_sets SET state='unsupported' WHERE state IN ('current','unverified')
+    AND NOT EXISTS(SELECT 1 FROM knowledge_support_sets WHERE fact_id=old.fact_id AND state IN ('current','unverified')) AND id IN
+    (SELECT support_id FROM knowledge_support_facts WHERE required_fact_id=old.fact_id);
+END;
+CREATE TRIGGER knowledge_empty_fact AFTER DELETE ON knowledge_support_sets BEGIN
+  DELETE FROM knowledge_facts WHERE id=old.fact_id AND NOT EXISTS
+    (SELECT 1 FROM knowledge_support_sets WHERE fact_id=old.fact_id);
+END;
+)sql") + kg_writer_barrier_sql() + [] {
+        std::string sql;
+        for (const char* table : {"sources", "folders", "documents", "user_exclusions", "skipped", "items", "chunks",
+                                  "entities", "entity_aliases", "mentions", "relations", "facts_user", "notes", "shares",
+                                  "share_rules", "fact_tombstones", "knowledge_revisions", "knowledge_evidence", "knowledge_facts",
+                                  "knowledge_support_sets", "knowledge_support_evidence", "knowledge_support_facts",
+                                  "knowledge_annotations", "knowledge_categories", "knowledge_category_assignments",
+                                  "knowledge_conflicts", "knowledge_conflict_history"}) {
+            for (const char* verb : {"INSERT", "UPDATE", "DELETE"})
+                sql += std::string("CREATE TRIGGER knowledge_generation_") + table + "_" + verb + " AFTER " + verb +
+                       " ON " + table + " BEGIN UPDATE knowledge_generation SET value=value+1 WHERE id=1; END;\n";
+        }
+        return sql;
+    }();
+}
+
+Result<std::unique_ptr<Database>> open_kg_database(const std::filesystem::path& file, const db_key& key, MigrationOutcome& outcome) {
+    return open_and_migrate_consistently(file, key, kg_migrations(), outcome, register_kg_writer);
+}
 
 const std::vector<Migration>& kg_migrations() {
     static const std::vector<Migration> m = {
@@ -228,10 +494,36 @@ std::string id_list(const std::vector<long long>& ids) {
     return out;
 }
 
-void delete_orphan_entities(Database& db) {
-    (void)db.exec(
-        "DELETE FROM entities WHERE id NOT IN (SELECT entity_id FROM mentions) AND id NOT IN (SELECT entity_id FROM facts_user) "
-        "AND id NOT IN (SELECT subject FROM relations) AND id NOT IN (SELECT object FROM relations)");
+Status delete_orphan_entities(Database& db) {
+    std::string sql = "DELETE FROM entities WHERE id NOT IN (SELECT entity_id FROM mentions) AND id NOT IN (SELECT entity_id FROM facts_user) "
+                      "AND id NOT IN (SELECT subject FROM relations) AND id NOT IN (SELECT object FROM relations)";
+    if (db.user_version() >= 5)
+        sql += " AND id NOT IN (SELECT subject FROM knowledge_facts) AND id NOT IN (SELECT object FROM knowledge_facts)";
+    return db.exec(sql);
+}
+
+// Called inside the same transaction as the local forget. Retain only the identity needed to withdraw a share.
+Status queue_item_withdrawals(Database& db, const std::string& source, const std::optional<std::string>& ext_id) {
+    // Older clients inferred administrator removal from absence in a username-scoped list. It was not proof of removal.
+    if (auto s = db.exec("UPDATE shares SET state='unverified',error='The previous sharing state cannot be verified.' "
+                         "WHERE (state='removed' AND error='Removed from team knowledge by an administrator.') "
+                         "OR (state='withdrawn' AND error<>'acknowledged-delete-v1')"); !s) return s;
+    const std::string where = ext_id ? "source=?1 AND ext_id=?2" : "source=?1";
+    auto missing = db.prepare("SELECT count(*) FROM shares WHERE " + where +
+                              " AND state NOT IN ('removed','withdrawn') AND remote_id=''");
+    missing.bind(1, source);
+    if (ext_id) missing.bind(2, *ext_id);
+    if (!missing.step()) return make_error("storage", "Unable to check the shared item withdrawal identity.");
+    if (missing.col_int(0)) return make_error("storage", "A shared item has no withdrawal identity.");
+    auto removed = db.prepare("DELETE FROM shares WHERE " + where + " AND state IN ('removed','withdrawn')");
+    removed.bind(1, source);
+    if (ext_id) removed.bind(2, *ext_id);
+    if (auto s = removed.run(); !s) return s;
+    auto pending = db.prepare("UPDATE shares SET ext_id='withdrawal:' || remote_id, title='', groups='[]', item_hash='', "
+                              "content_hash='', size=0, state='unsharing', error='', rule='', updated_at=0 WHERE " + where);
+    pending.bind(1, source);
+    if (ext_id) pending.bind(2, *ext_id);
+    return pending.run();
 }
 
 // The key of an embedding model and dimension in vec_models; 0 when unknown and create is false.
@@ -247,6 +539,516 @@ long long model_id(Database& db, const std::string& model, int dim, bool create)
 }
 
 }  // namespace
+
+// ---- Categories ---------------------------------------------------------------------------------------------------------
+
+Result<long long> KgStore::create_category(const std::string& name) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < 5) return make_error("schema", "Knowledge categories are not available yet.");
+    const auto display = trim(name);
+    const auto normalized = normalize_name(display);
+    if (display.empty() || display.size() > 160 || normalized.empty()) return make_error("invalid", "Enter a valid category name.");
+    auto s = db_->prepare("INSERT INTO knowledge_categories(name,normalized_name) VALUES(?1,?2)");
+    s.bind(1, display).bind(2, normalized);
+    if (auto status = s.run(); !status) return status.error();
+    return db_->last_insert_id();
+}
+
+Status KgStore::rename_category(long long id, const std::string& name) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < 5) return make_error("schema", "Knowledge categories are not available yet.");
+    const auto display = trim(name);
+    const auto normalized = normalize_name(display);
+    if (display.empty() || display.size() > 160 || normalized.empty()) return make_error("invalid", "Enter a valid category name.");
+    auto s = db_->prepare("UPDATE knowledge_categories SET name=?2,normalized_name=?3 WHERE id=?1");
+    s.bind(1, id).bind(2, display).bind(3, normalized);
+    if (auto status = s.run(); !status) return status;
+    return db_->changes() ? Status{} : Status(make_error("not_found", "No such category."));
+}
+
+Status KgStore::delete_category(long long id) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < 5) return make_error("schema", "Knowledge categories are not available yet.");
+    auto s = db_->prepare("DELETE FROM knowledge_categories WHERE id=?1");
+    s.bind(1, id);
+    if (auto status = s.run(); !status) return status;
+    return db_->changes() ? Status{} : Status(make_error("not_found", "No such category."));
+}
+
+Status KgStore::merge_categories(long long source, long long destination) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < 5) return make_error("schema", "Knowledge categories are not available yet.");
+    if (source == destination) return make_error("invalid", "Choose two different categories.");
+    return db_->transaction([&]() -> Status {
+        auto count = db_->prepare("SELECT count(*) FROM knowledge_categories WHERE id=?1 OR id=?2");
+        count.bind(1, source).bind(2, destination);
+        if (!count.step() || count.col_int(0) != 2) return make_error("not_found", "No such category.");
+        auto move = db_->prepare(R"sql(
+INSERT INTO knowledge_category_assignments(fact_id,category_id,decision,reason,evidence_id)
+ SELECT fact_id,?2,decision,reason,evidence_id FROM knowledge_category_assignments WHERE category_id=?1
+ ON CONFLICT(fact_id,category_id) DO UPDATE SET decision=excluded.decision,reason=excluded.reason,evidence_id=excluded.evidence_id
+ WHERE knowledge_category_assignments.decision='automatic' AND excluded.decision<>'automatic')sql");
+        move.bind(1, source).bind(2, destination);
+        if (auto status = move.run(); !status) return status;
+        auto remove = db_->prepare("DELETE FROM knowledge_categories WHERE id=?1");
+        remove.bind(1, source);
+        return remove.run();
+    });
+}
+
+Status KgStore::set_category_assignment(long long fact, long long category, const std::string& decision,
+                                        const std::string& reason, long long evidence_id,
+                                        std::optional<long long> expected_generation) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < 5) return make_error("schema", "Knowledge categories are not available yet.");
+    if ((decision != "automatic" && decision != "manual" && decision != "rejected") || reason.size() > 512)
+        return make_error("invalid", "Invalid category decision or explanation.");
+    return db_->transaction([&]() -> Status {
+        if (decision == "automatic") {
+            if (evidence_id <= 0 || trim(reason).empty() || !expected_generation)
+                return make_error("invalid", "Automatic categories need an explanation, evidence and a knowledge snapshot.");
+            const auto current_generation = knowledge_generation();
+            if (!current_generation || *current_generation != *expected_generation)
+                return make_error("stale", "Knowledge changed while the category was being analyzed.");
+            auto evidence = db_->prepare("SELECT 1 FROM knowledge_support_sets s "
+                                         "JOIN knowledge_support_evidence se ON se.support_id=s.id "
+                                         "JOIN knowledge_evidence e ON e.id=se.evidence_id "
+                                         "JOIN knowledge_revisions v ON v.id=e.revision_id "
+                                         "JOIN chunks c ON c.id=e.chunk_id AND c.item_id=v.item_id "
+                                         "WHERE s.fact_id=?1 AND s.state IN ('current','unverified') AND v.current=1 "
+                                         "AND e.id=?2 AND e.precision='exact' AND "
+                                         "CAST(e.excerpt AS BLOB)=substr(CAST(c.text AS BLOB),e.byte_start+1,e.byte_end-e.byte_start)");
+            evidence.bind(1, fact).bind(2, evidence_id);
+            if (!evidence.step()) return make_error("invalid", "Category evidence does not support this fact.");
+        } else if (evidence_id != 0) return make_error("invalid", "Manual category decisions do not take model evidence.");
+        auto s = db_->prepare(R"sql(
+INSERT INTO knowledge_category_assignments(fact_id,category_id,decision,reason,evidence_id) VALUES(?1,?2,?3,?4,?5)
+ ON CONFLICT(fact_id,category_id) DO UPDATE SET decision=excluded.decision,reason=excluded.reason,evidence_id=excluded.evidence_id
+ WHERE excluded.decision<>'automatic' OR knowledge_category_assignments.decision='automatic')sql");
+        s.bind(1, fact).bind(2, category).bind(3, decision).bind(4, reason);
+        if (decision == "automatic") s.bind(5, evidence_id);
+        else s.bind_null(5);
+        return s.run();
+    });
+}
+
+Status KgStore::reset_category_assignment(long long fact, long long category) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < 5) return make_error("schema", "Knowledge categories are not available yet.");
+    auto s = db_->prepare("DELETE FROM knowledge_category_assignments WHERE fact_id=?1 AND category_id=?2");
+    s.bind(1, fact).bind(2, category);
+    return s.run();
+}
+
+std::vector<CategoryRow> KgStore::categories() {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<CategoryRow> result;
+    if (db_->user_version() < 5) return result;
+    auto s = db_->prepare("SELECT id,name FROM knowledge_categories ORDER BY normalized_name,id");
+    while (s.step()) result.push_back({s.col_int(0), s.col_text(1)});
+    return result;
+}
+
+std::vector<CategoryAssignment> KgStore::category_assignments(long long fact) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<CategoryAssignment> result;
+    if (db_->user_version() < 5) return result;
+    auto s = db_->prepare("SELECT fact_id,category_id,ifnull(evidence_id,0),decision,reason "
+                          "FROM knowledge_category_assignments WHERE fact_id=?1 ORDER BY category_id");
+    s.bind(1, fact);
+    while (s.step()) result.push_back({s.col_int(0), s.col_int(1), s.col_int(2), s.col_text(3), s.col_text(4)});
+    return result;
+}
+
+std::vector<long long> KgStore::uncategorized_facts(int limit) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<long long> result;
+    if (db_->user_version() < 5 || limit <= 0) return result;
+    auto s = db_->prepare("SELECT f.id FROM knowledge_facts f WHERE EXISTS (SELECT 1 FROM knowledge_support_sets s "
+                          "WHERE s.fact_id=f.id AND s.state IN ('current','unverified')) "
+                          "AND NOT EXISTS (SELECT 1 FROM knowledge_category_assignments a "
+                          "WHERE a.fact_id=f.id AND a.decision IN ('automatic','manual')) ORDER BY f.id LIMIT ?1");
+    s.bind(1, std::min(limit, 1000));
+    while (s.step()) result.push_back(s.col_int(0));
+    return result;
+}
+
+std::optional<long long> KgStore::knowledge_generation() {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < 5) return std::nullopt;
+    auto s = db_->prepare("SELECT value FROM knowledge_generation WHERE id=1");
+    if (!s.step()) return std::nullopt;
+    return s.col_int(0);
+}
+
+Result<BoundAnalysisEvidence> KgStore::bind_analysis_evidence(long long fact, const AnalysisSpan& span,
+                                                               long long expected_generation) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < 5) return make_error("schema", "Knowledge evidence is not available yet.");
+    if (fact <= 0 || span.chunk_id <= 0 || span.end <= span.begin || span.end - span.begin > 2048 ||
+        span.end > static_cast<size_t>(std::numeric_limits<long long>::max()))
+        return make_error("invalid", "Invalid analysis excerpt.");
+    BoundAnalysisEvidence result;
+    auto status = db_->transaction([&]() -> Status {
+        const auto generation = knowledge_generation();
+        if (!generation || *generation != expected_generation)
+            return make_error("stale", "Knowledge changed while the excerpt was being analyzed.");
+        auto source = db_->prepare(R"sql(
+SELECT s.id,e.revision_id,c.text FROM knowledge_support_sets s
+JOIN knowledge_support_evidence se ON se.support_id=s.id
+JOIN knowledge_evidence e ON e.id=se.evidence_id
+JOIN knowledge_revisions v ON v.id=e.revision_id
+JOIN chunks c ON c.id=e.chunk_id AND c.item_id=v.item_id
+WHERE s.fact_id=?1 AND s.state IN ('current','unverified') AND v.current=1 AND c.id=?2
+ AND ((e.precision='passage' AND CAST(e.excerpt AS BLOB)=CAST(c.text AS BLOB)) OR
+      (e.precision='exact' AND e.byte_start<=?3 AND e.byte_end>=?4 AND
+       CAST(e.excerpt AS BLOB)=substr(CAST(c.text AS BLOB),e.byte_start+1,e.byte_end-e.byte_start)))
+ORDER BY s.id,e.id LIMIT 1)sql");
+        source.bind(1, fact).bind(2, span.chunk_id).bind(3, static_cast<long long>(span.begin))
+              .bind(4, static_cast<long long>(span.end));
+        if (!source.step()) return make_error("invalid", "The excerpt is not part of a current support for this fact.");
+        const auto support_id = source.col_int(0), revision_id = source.col_int(1);
+        const auto content = source.col_text(2);
+        const auto continuation = [](char c) { return (static_cast<unsigned char>(c) & 0xc0) == 0x80; };
+        if (span.end > content.size() || (span.begin && continuation(content[span.begin])) ||
+            (span.end < content.size() && continuation(content[span.end])))
+            return make_error("invalid", "The excerpt is outside the passage or splits a UTF-8 character.");
+        auto insert = db_->prepare("INSERT OR IGNORE INTO knowledge_evidence"
+                                   "(revision_id,chunk_id,excerpt,precision,byte_start,byte_end) "
+                                   "VALUES(?1,?2,?3,'exact',?4,?5)");
+        insert.bind(1, revision_id).bind(2, span.chunk_id).bind(3, content.substr(span.begin, span.end - span.begin))
+              .bind(4, static_cast<long long>(span.begin)).bind(5, static_cast<long long>(span.end));
+        if (auto inserted = insert.run(); !inserted) return inserted;
+        auto find = db_->prepare("SELECT id FROM knowledge_evidence WHERE revision_id=?1 AND chunk_id=?2 "
+                                 "AND precision='exact' AND byte_start=?3 AND byte_end=?4 AND CAST(excerpt AS BLOB)=CAST(?5 AS BLOB)");
+        find.bind(1, revision_id).bind(2, span.chunk_id).bind(3, static_cast<long long>(span.begin))
+            .bind(4, static_cast<long long>(span.end)).bind(5, content.substr(span.begin, span.end - span.begin));
+        if (!find.step()) return make_error("stale", "The stored excerpt no longer matches the passage.");
+        result.evidence_id = find.col_int(0);
+        auto attach = db_->prepare("INSERT OR IGNORE INTO knowledge_support_evidence(support_id,evidence_id) VALUES(?1,?2)");
+        attach.bind(1, support_id).bind(2, result.evidence_id);
+        if (auto attached = attach.run(); !attached) return attached;
+        const auto current = knowledge_generation();
+        if (!current) return make_error("sqlite", "Could not read the knowledge snapshot.");
+        result.generation = *current;
+        return {};
+    });
+    if (!status) return status.error();
+    return result;
+}
+
+namespace {
+bool active_exact_evidence(Database& db, long long fact, long long evidence_id) {
+    auto evidence = db.prepare("SELECT 1 FROM knowledge_support_sets s "
+                               "JOIN knowledge_support_evidence se ON se.support_id=s.id "
+                               "JOIN knowledge_evidence e ON e.id=se.evidence_id "
+                               "JOIN knowledge_revisions v ON v.id=e.revision_id "
+                               "JOIN chunks c ON c.id=e.chunk_id AND c.item_id=v.item_id "
+                               "WHERE s.fact_id=?1 AND s.state IN ('current','unverified') AND v.current=1 "
+                               "AND e.id=?2 AND e.precision='exact' AND "
+                               "CAST(e.excerpt AS BLOB)=substr(CAST(c.text AS BLOB),e.byte_start+1,e.byte_end-e.byte_start)");
+    evidence.bind(1, fact).bind(2, evidence_id);
+    return evidence.step();
+}
+}  // namespace
+
+Result<long long> KgStore::record_conflict(long long left_fact, long long right_fact, long long left_evidence,
+                                           long long right_evidence, const std::string& explanation, long long expected_generation) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < 5) return make_error("schema", "Knowledge review is not available yet.");
+    if (left_fact <= 0 || right_fact <= 0 || left_fact == right_fact || trim(explanation).empty() || explanation.size() > 512)
+        return make_error("invalid", "A possible inconsistency needs two facts and an explanation.");
+    if (left_fact > right_fact) {
+        std::swap(left_fact, right_fact);
+        std::swap(left_evidence, right_evidence);
+    }
+    long long id = 0;
+    auto status = db_->transaction([&]() -> Status {
+        const auto generation = knowledge_generation();
+        if (!generation || *generation != expected_generation) return make_error("stale", "Knowledge changed during consistency analysis.");
+        if (!active_exact_evidence(*db_, left_fact, left_evidence) || !active_exact_evidence(*db_, right_fact, right_evidence))
+            return make_error("invalid", "Both facts need current, exact supporting excerpts.");
+        auto upsert = db_->prepare(R"sql(
+INSERT INTO knowledge_conflicts(left_fact,right_fact,left_evidence,right_evidence,explanation,state)
+ VALUES(?1,?2,?3,?4,?5,'open')
+ ON CONFLICT(left_fact,right_fact) DO UPDATE SET
+ state=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence OR state='needs_recheck'
+            THEN 'open' ELSE state END,
+ decision=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence OR state='needs_recheck'
+               THEN '' ELSE decision END,
+ decision_reason=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence OR state='needs_recheck'
+                      THEN '' ELSE decision_reason END,
+ explanation=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence
+                        OR state IN ('open','needs_recheck') THEN excluded.explanation ELSE explanation END,
+ left_evidence=excluded.left_evidence,right_evidence=excluded.right_evidence)sql");
+        upsert.bind(1, left_fact).bind(2, right_fact).bind(3, left_evidence).bind(4, right_evidence).bind(5, explanation);
+        if (auto result = upsert.run(); !result) return result;
+        auto find = db_->prepare("SELECT id FROM knowledge_conflicts WHERE left_fact=?1 AND right_fact=?2");
+        find.bind(1, left_fact).bind(2, right_fact);
+        if (!find.step()) return make_error("storage", "The review item could not be found.");
+        id = find.col_int(0);
+        return {};
+    });
+    if (!status) return status.error();
+    return id;
+}
+
+Status KgStore::decide_conflict(long long id, const std::string& decision, const std::string& reason,
+                                long long now, long long expected_generation) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < 5) return make_error("schema", "Knowledge review is not available yet.");
+    if ((decision != "keep_both" && decision != "prefer_left" && decision != "prefer_right" && decision != "defer") ||
+        reason.size() > 512 || now <= 0 || ((decision == "prefer_left" || decision == "prefer_right") && trim(reason).empty()))
+        return make_error("invalid", "Invalid review decision or reason.");
+    return db_->transaction([&]() -> Status {
+        const auto generation = knowledge_generation();
+        if (!generation || *generation != expected_generation) return make_error("stale", "Knowledge changed while this decision was open.");
+        auto current = db_->prepare("SELECT left_fact,right_fact,left_evidence,right_evidence,state FROM knowledge_conflicts WHERE id=?1");
+        current.bind(1, id);
+        if (!current.step()) return make_error("not_found", "No such review item.");
+        const auto left = current.col_int(0), right = current.col_int(1);
+        const auto left_evidence = current.col_int(2), right_evidence = current.col_int(3);
+        if (current.col_text(4) == "needs_recheck" || !active_exact_evidence(*db_, left, left_evidence) ||
+            !active_exact_evidence(*db_, right, right_evidence))
+            return make_error("stale", "The reviewed evidence needs to be checked again.");
+        auto history = db_->prepare("INSERT INTO knowledge_conflict_history(conflict_id,left_evidence,right_evidence,decision,reason,decided_at) "
+                                    "VALUES(?1,?2,?3,?4,?5,?6)");
+        history.bind(1, id).bind(2, left_evidence).bind(3, right_evidence).bind(4, decision).bind(5, reason).bind(6, now);
+        if (auto result = history.run(); !result) return result;
+        auto update = db_->prepare("UPDATE knowledge_conflicts SET state=?2,decision=?3,decision_reason=?4 WHERE id=?1");
+        update.bind(1, id).bind(2, decision == "defer" ? "deferred" : "resolved").bind(3, decision).bind(4, reason);
+        return update.run();
+    });
+}
+
+Status KgStore::reopen_conflict(long long id, long long expected_generation) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < 5) return make_error("schema", "Knowledge review is not available yet.");
+    return db_->transaction([&]() -> Status {
+        const auto generation = knowledge_generation();
+        if (!generation || *generation != expected_generation) return make_error("stale", "Knowledge changed while this decision was open.");
+        auto s = db_->prepare("UPDATE knowledge_conflicts SET state='open',decision='',decision_reason='' "
+                              "WHERE id=?1 AND state IN ('resolved','deferred')");
+        s.bind(1, id);
+        if (auto result = s.run(); !result) return result;
+        return db_->changes() ? Status{} : Status(make_error("stale", "The review item cannot be reopened."));
+    });
+}
+
+std::vector<ConflictRow> KgStore::conflicts(int limit) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<ConflictRow> result;
+    if (db_->user_version() < 5 || limit <= 0) return result;
+    auto s = db_->prepare("SELECT id,left_fact,right_fact,left_evidence,right_evidence,explanation,state,decision,decision_reason "
+                          "FROM knowledge_conflicts ORDER BY id DESC LIMIT ?1");
+    s.bind(1, std::min(limit, 1000));
+    while (s.step())
+        result.push_back({s.col_int(0), s.col_int(1), s.col_int(2), s.col_int(3), s.col_int(4), s.col_text(5), s.col_text(6),
+                          s.col_text(7), s.col_text(8)});
+    return result;
+}
+
+std::vector<ConflictDecision> KgStore::conflict_history(long long id) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<ConflictDecision> result;
+    if (db_->user_version() < 5) return result;
+    auto s = db_->prepare("SELECT left_evidence,right_evidence,decided_at,decision,reason "
+                          "FROM knowledge_conflict_history WHERE conflict_id=?1 ORDER BY id");
+    s.bind(1, id);
+    while (s.step()) result.push_back({s.col_int(0), s.col_int(1), s.col_int(2), s.col_text(3), s.col_text(4)});
+    return result;
+}
+
+Result<KnowledgeImpactPreview> KgStore::preview_evidence_removal(const std::unordered_set<long long>& removed) {
+    return preview_evidence_snapshot(removed, std::nullopt);
+}
+
+Result<KnowledgeImpactPreview> KgStore::preview_item_removal(long long item_id) {
+    if (item_id <= 0) return make_error("invalid", "Choose an indexed item.");
+    return preview_evidence_snapshot({}, item_id);
+}
+
+Result<KnowledgeImpactPreview> KgStore::preview_evidence_snapshot(std::unordered_set<long long> removed,
+                                                                  std::optional<long long> item_id) {
+    std::vector<ImpactFact> facts;
+    std::unordered_set<long long> evidence;
+    long long generation = 0;
+    {
+        const std::lock_guard lock(db_->mutex());
+        if (db_->user_version() < 5) return make_error("schema", "Knowledge impact previews are not available yet.");
+        if (auto status = db_->exec("BEGIN"); !status) return status.error();
+        const auto read = [&]() -> Status {
+            const auto g = knowledge_generation();
+            if (!g) return make_error("storage", "The knowledge generation is unavailable.");
+            generation = *g;
+            if (item_id) {
+                auto item = db_->prepare("SELECT 1 FROM items WHERE id=?1");
+                item.bind(1, *item_id);
+                if (!item.step()) {
+                    if (!item.status()) return item.status();
+                    return make_error("not_found", "No such indexed item.");
+                }
+                auto item_evidence = db_->prepare("SELECT e.id FROM knowledge_evidence e "
+                                                  "JOIN knowledge_revisions v ON v.id=e.revision_id WHERE v.item_id=?1");
+                item_evidence.bind(1, *item_id);
+                while (item_evidence.step()) {
+                    if (removed.size() >= 2'000'000) return make_error("too_large", "The knowledge graph exceeds the preview limit.");
+                    removed.insert(item_evidence.col_int(0));
+                }
+                if (!item_evidence.status()) return item_evidence.status();
+            }
+            std::unordered_map<long long, size_t> fact_index;
+            auto fs = db_->prepare("SELECT id FROM knowledge_facts ORDER BY id");
+            while (fs.step()) {
+                if (facts.size() >= 100'000) return make_error("too_large", "The knowledge graph exceeds the preview limit.");
+                const auto id = fs.col_int(0);
+                fact_index.emplace(id, facts.size());
+                facts.push_back({id, {}});
+            }
+            if (!fs.status()) return fs.status();
+            std::unordered_map<long long, std::pair<size_t, size_t>> support_index;
+            auto ss = db_->prepare("SELECT id,fact_id,state FROM knowledge_support_sets ORDER BY id");
+            while (ss.step()) {
+                if (support_index.size() >= 400'000) return make_error("too_large", "The knowledge graph exceeds the preview limit.");
+                const auto fact = fact_index.find(ss.col_int(1));
+                if (fact == fact_index.end()) return make_error("storage", "A support refers to a missing fact.");
+                auto& supports = facts[fact->second].supports;
+                const auto state = ss.col_text(2);
+                support_index.emplace(ss.col_int(0), std::pair{fact->second, supports.size()});
+                supports.push_back({state == "current" || state == "unverified", {}, {}});
+            }
+            if (!ss.status()) return ss.status();
+            auto es = db_->prepare("SELECT id FROM knowledge_evidence");
+            while (es.step()) {
+                if (evidence.size() >= 2'000'000) return make_error("too_large", "The knowledge graph exceeds the preview limit.");
+                evidence.insert(es.col_int(0));
+            }
+            if (!es.status()) return es.status();
+            size_t input_count = 0;
+            auto se = db_->prepare("SELECT support_id,evidence_id FROM knowledge_support_evidence");
+            while (se.step()) {
+                if (++input_count > 2'000'000) return make_error("too_large", "The knowledge graph exceeds the preview limit.");
+                const auto support = support_index.find(se.col_int(0));
+                if (support == support_index.end()) return make_error("storage", "Evidence refers to a missing support.");
+                facts[support->second.first].supports[support->second.second].evidence.push_back(se.col_int(1));
+            }
+            if (!se.status()) return se.status();
+            auto sf = db_->prepare("SELECT support_id,required_fact_id FROM knowledge_support_facts");
+            while (sf.step()) {
+                if (++input_count > 2'000'000) return make_error("too_large", "The knowledge graph exceeds the preview limit.");
+                const auto support = support_index.find(sf.col_int(0));
+                if (support == support_index.end()) return make_error("storage", "A dependency refers to a missing support.");
+                facts[support->second.first].supports[support->second.second].required_facts.push_back(sf.col_int(1));
+            }
+            return sf.status();
+        }();
+        if (!read) {
+            (void)db_->exec("ROLLBACK");
+            return read.error();
+        }
+        if (auto status = db_->exec("COMMIT"); !status) {
+            (void)db_->exec("ROLLBACK");
+            return status.error();
+        }
+    }
+    auto impact = reconcile_impact(facts, evidence, removed);
+    if (!impact) return make_error("invalid_graph", "The knowledge snapshot is incomplete or contains cyclic dependencies.");
+    return KnowledgeImpactPreview{generation, false, std::move(*impact)};
+}
+
+Result<PreparedItemRemoval> KgStore::prepare_item_removal(long long item_id, long long now) {
+    constexpr long long kLifetime = 10 * 60 * 1000;
+    if (now <= 0 || now > std::numeric_limits<long long>::max() - kLifetime)
+        return make_error("invalid", "Invalid preview time.");
+    auto impact = preview_item_removal(item_id);
+    if (!impact) return impact.error();
+    const auto token = random_urlsafe(24);
+    if (token.size() != 32) return make_error("crypto", "Could not create a preview token.");
+    const std::lock_guard lock(db_->mutex());
+    const auto status = db_->transaction([&]() -> Status {
+        const auto generation = knowledge_generation();
+        if (!generation || *generation != impact->generation) return make_error("stale", "Knowledge changed while the preview was prepared.");
+        auto expired = db_->prepare("DELETE FROM knowledge_previews WHERE expires_at<=?1");
+        expired.bind(1, now);
+        if (auto result = expired.run(); !result) return result;
+        auto count = db_->prepare("SELECT count(*) FROM knowledge_previews");
+        if (!count.step()) {
+            if (!count.status()) return count.status();
+            return make_error("database", "Could not count knowledge previews.");
+        }
+        if (count.col_int(0) >= 256) return make_error("capacity", "Too many active knowledge previews; cancel one or try again later.");
+        auto insert = db_->prepare("INSERT INTO knowledge_previews(token,operation,item_id,generation,expires_at) "
+                                   "VALUES(?1,'forget_item',?2,?3,?4)");
+        insert.bind(1, token).bind(2, item_id).bind(3, impact->generation).bind(4, now + kLifetime);
+        return insert.run();
+    });
+    if (!status) return status.error();
+    return PreparedItemRemoval{token, std::move(*impact)};
+}
+
+Status KgStore::cancel_item_removal(const std::string& token) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < 5) return make_error("schema", "Knowledge impact previews are not available yet.");
+    if (token.size() != 32) return make_error("invalid", "Invalid preview token.");
+    auto remove = db_->prepare("DELETE FROM knowledge_previews WHERE token=?1 AND operation='forget_item'");
+    remove.bind(1, token);
+    return remove.run();
+}
+
+Status KgStore::confirm_item_removal(const std::string& token, bool accept_incomplete, long long now) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < 5) return make_error("schema", "Knowledge impact previews are not available yet.");
+    if (token.size() != 32 || now <= 0) return make_error("invalid", "Invalid preview confirmation.");
+    if (!accept_incomplete) return make_error("incomplete", "This preview does not include all analysis or publication effects.");
+    return db_->transaction([&]() -> Status {
+        long long id = 0, expected = 0, expires = 0;
+        std::string source, ext_id;
+        {
+            auto preview = db_->prepare("SELECT p.item_id,p.generation,p.expires_at,i.source,i.ext_id "
+                                        "FROM knowledge_previews p JOIN items i ON i.id=p.item_id "
+                                        "WHERE p.token=?1 AND p.operation='forget_item'");
+            preview.bind(1, token);
+            if (!preview.step()) {
+                if (!preview.status()) return preview.status();
+                return make_error("stale", "The preview is no longer available.");
+            }
+            id = preview.col_int(0);
+            expected = preview.col_int(1);
+            expires = preview.col_int(2);
+            source = preview.col_text(3);
+            ext_id = preview.col_text(4);
+        }
+        const auto generation = knowledge_generation();
+        if (now >= expires || !generation || *generation != expected)
+            return make_error("stale", "Knowledge changed or the preview expired; review it again.");
+        if (auto result = purge_recovery_copy(); !result) return result;
+        if (auto result = queue_item_withdrawals(*db_, source, ext_id); !result) return result;
+        if (source != "notes") {
+            auto exclusion = db_->prepare("INSERT OR IGNORE INTO user_exclusions(kind,value) VALUES('item',?1)");
+            exclusion.bind(1, source + ":" + ext_id);
+            if (auto result = exclusion.run(); !result) return result;
+        }
+        auto facts = db_->prepare("DELETE FROM facts_user WHERE (item_source=?1 AND item_ext_id=?2) OR (?1='threads' AND thread_id=?2)");
+        facts.bind(1, source).bind(2, ext_id);
+        if (auto result = facts.run(); !result) return result;
+        auto tombstones = db_->prepare("DELETE FROM fact_tombstones WHERE source=?1 AND ext_id=?2");
+        tombstones.bind(1, source).bind(2, ext_id);
+        if (auto result = tombstones.run(); !result) return result;
+        auto item = db_->prepare("DELETE FROM items WHERE id=?1");
+        item.bind(1, id);
+        if (auto result = item.run(); !result) return result;
+        if (db_->changes() != 1) return make_error("stale", "The indexed item is no longer available.");
+        if (source == "notes") {
+            auto note = db_->prepare("DELETE FROM notes WHERE CAST(id AS TEXT)=?1");
+            note.bind(1, ext_id);
+            if (auto result = note.run(); !result) return result;
+        }
+        auto skipped = db_->prepare("DELETE FROM skipped WHERE source=?1 AND ext_id=?2");
+        skipped.bind(1, source).bind(2, ext_id);
+        if (auto result = skipped.run(); !result) return result;
+        return delete_orphan_entities(*db_);
+    });
+}
 
 // ---- Sources, folders, exclusions ---------------------------------------------------------------------------------------
 
@@ -270,6 +1072,29 @@ void KgStore::set_source(const SourceState& st) {
     auto s = db_->prepare("INSERT OR REPLACE INTO sources(kind, user_enabled, paused, last_update, last_error) VALUES(?1,?2,?3,?4,?5)");
     s.bind(1, st.kind).bind(2, st.user_enabled ? 1 : 0).bind(3, st.paused ? 1 : 0).bind(4, st.last_update).bind(5, st.last_error);
     (void)s.run();
+}
+
+Status KgStore::set_file_source_with_recheck(const SourceState& st, bool changed) {
+    const auto token = changed ? random_urlsafe(24) : std::string{};
+    if (changed && token.size() != 32) return make_error("crypto", "Could not create a file recheck marker.");
+    const std::lock_guard lock(db_->mutex());
+    return db_->transaction([&]() -> Status {
+        auto source = db_->prepare("INSERT OR REPLACE INTO sources(kind, user_enabled, paused, last_update, last_error) VALUES(?1,?2,?3,?4,?5)");
+        source.bind(1, st.kind).bind(2, st.user_enabled ? 1 : 0).bind(3, st.paused ? 1 : 0).bind(4, st.last_update).bind(5, st.last_error);
+        if (auto result = source.run(); !result) return result;
+        if (!changed) return {};
+        auto marker = db_->prepare("INSERT OR REPLACE INTO meta(key,value) VALUES('files.recheck_required',?1)");
+        marker.bind(1, token);
+        return marker.run();
+    });
+}
+
+Status KgStore::clear_file_recheck(const std::string& token) {
+    const std::lock_guard lock(db_->mutex());
+    auto s = db_->prepare("DELETE FROM meta WHERE key='files.recheck_required' AND value=?1 AND EXISTS "
+                          "(SELECT 1 FROM sources WHERE kind='files' AND user_enabled=1 AND paused=0 AND last_error='')");
+    s.bind(1, token);
+    return s.run();
 }
 
 void KgStore::touch_source(const std::string& kind, long long at, const std::string& error) {
@@ -297,9 +1122,12 @@ Status KgStore::add_folder(const std::string& path) {
 
 Status KgStore::remove_folder(const std::string& path) {
     const std::lock_guard lock(db_->mutex());
-    auto s = db_->prepare("DELETE FROM folders WHERE path=?1");
-    s.bind(1, path);
-    return s.run();
+    return db_->transaction([&]() -> Status {
+        if (auto status = purge_recovery_copy(); !status) return status;
+        auto s = db_->prepare("DELETE FROM folders WHERE path=?1");
+        s.bind(1, path);
+        return s.run();
+    });
 }
 
 std::vector<std::pair<std::string, std::string>> KgStore::user_exclusions() {
@@ -364,9 +1192,12 @@ Status KgStore::add_document(const std::string& path) {
 
 Status KgStore::remove_document(const std::string& path) {
     const std::lock_guard lock(db_->mutex());
-    auto s = db_->prepare("DELETE FROM documents WHERE path=?1");
-    s.bind(1, path);
-    return s.run();
+    return db_->transaction([&]() -> Status {
+        if (auto status = purge_recovery_copy(); !status) return status;
+        auto s = db_->prepare("DELETE FROM documents WHERE path=?1");
+        s.bind(1, path);
+        return s.run();
+    });
 }
 
 // ---- Notes --------------------------------------------------------------------------------------------------------------
@@ -386,12 +1217,33 @@ long long KgStore::save_note(long long id, const std::string& title, const std::
     return db_->last_insert_id();
 }
 
-bool KgStore::delete_note(long long id) {
+Status KgStore::delete_note(long long id) {
     const std::lock_guard lock(db_->mutex());
-    auto s = db_->prepare("DELETE FROM notes WHERE id=?1");
-    s.bind(1, id);
-    (void)s.run();
-    return db_->changes() > 0;
+    if (!note(id)) return make_error("not_found", "no such note");
+    const auto result = db_->transaction([&]() -> Status {
+        if (auto s = purge_recovery_copy(); !s) return s;
+        const auto sid = std::to_string(id);
+        if (auto s = queue_item_withdrawals(*db_, "notes", sid); !s) return s;
+        auto facts = db_->prepare("DELETE FROM facts_user WHERE item_source='notes' AND item_ext_id=?1");
+        facts.bind(1, sid);
+        if (auto s = facts.run(); !s) return s;
+        auto tombstones = db_->prepare("DELETE FROM fact_tombstones WHERE source='notes' AND ext_id=?1");
+        tombstones.bind(1, sid);
+        if (auto s = tombstones.run(); !s) return s;
+        auto item = db_->prepare("DELETE FROM items WHERE source='notes' AND ext_id=?1");
+        item.bind(1, sid);
+        if (auto s = item.run(); !s) return s;
+        auto skipped = db_->prepare("DELETE FROM skipped WHERE source='notes' AND ext_id=?1");
+        skipped.bind(1, sid);
+        if (auto s = skipped.run(); !s) return s;
+        auto original = db_->prepare("DELETE FROM notes WHERE id=?1");
+        original.bind(1, id);
+        if (auto s = original.run(); !s) return s;
+        if (db_->changes() != 1) return make_error("storage", "The note could not be deleted.");
+        return delete_orphan_entities(*db_);
+    });
+    if (!result) return result;
+    return {};
 }
 
 namespace {
@@ -420,6 +1272,25 @@ std::vector<NoteRow> KgStore::notes() {
     return out;
 }
 
+std::vector<long long> KgStore::note_ids() {
+    const std::lock_guard lock(db_->mutex());
+    auto s = db_->prepare("SELECT id FROM notes");
+    std::vector<long long> out;
+    while (s.step()) out.push_back(s.col_int(0));
+    return out;
+}
+
+std::vector<NoteRow> KgStore::notes_page(int limit, std::optional<std::pair<long long, long long>> before) {
+    const std::lock_guard lock(db_->mutex());
+    auto s = db_->prepare(std::string("SELECT ") + kNoteColumns +
+                          " FROM notes WHERE (?1=0 OR updated_at<?2 OR (updated_at=?2 AND id<?1))"
+                          " ORDER BY updated_at DESC, id DESC LIMIT ?3");
+    s.bind(1, before ? before->second : 0).bind(2, before ? before->first : 0).bind(3, static_cast<long long>(limit));
+    std::vector<NoteRow> out;
+    while (s.step()) out.push_back(read_note(s));
+    return out;
+}
+
 // ---- Items and chunks ---------------------------------------------------------------------------------------------------
 
 std::optional<std::string> KgStore::item_hash(const std::string& source, const std::string& ext_id) {
@@ -434,19 +1305,99 @@ Result<long long> KgStore::put_item(const ItemInput& in, long long now) {
     const std::lock_guard lock(db_->mutex());
     long long id = 0;
     Status st = db_->transaction([&]() -> Status {
-        {
-            auto d = db_->prepare("DELETE FROM items WHERE source=?1 AND ext_id=?2");
-            d.bind(1, in.source).bind(2, in.ext_id);
-            if (Status s = d.run(); !s) return s;
+        const auto previous = item(in.source, in.ext_id);
+        if (!in.legacy_tombstone_hash.empty()) {
+            auto carry = db_->prepare(
+                "INSERT OR IGNORE INTO fact_tombstones(source, ext_id, item_hash, fact_key) "
+                "SELECT source, ext_id, ?1, fact_key FROM fact_tombstones "
+                "WHERE source=?2 AND ext_id=?3 AND item_hash=?4 "
+                "AND EXISTS(SELECT 1 FROM items WHERE source=?2 AND ext_id=?3 AND hash=?4)");
+            carry.bind(1, in.hash).bind(2, in.source).bind(3, in.ext_id).bind(4, in.legacy_tombstone_hash);
+            if (Status s = carry.run(); !s) return s;
         }
         auto i = db_->prepare(
-            "INSERT INTO items(source, ext_id, title, ref, hash, created_at, updated_at, indexed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)");
+            "INSERT INTO items(source, ext_id, title, ref, hash, created_at, updated_at, indexed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) "
+            "ON CONFLICT(source, ext_id) DO UPDATE SET title=excluded.title, ref=excluded.ref, hash=excluded.hash, "
+            "created_at=excluded.created_at, updated_at=excluded.updated_at, indexed_at=excluded.indexed_at");
         i.bind(1, in.source).bind(2, in.ext_id).bind(3, in.title).bind(4, in.ref).bind(5, in.hash).bind(6, in.created_at);
         i.bind(7, in.updated_at).bind(8, now);
         if (Status s = i.run(); !s) return s;
-        id = db_->last_insert_id();
+        auto existing = db_->prepare("SELECT id FROM items WHERE source=?1 AND ext_id=?2");
+        existing.bind(1, in.source).bind(2, in.ext_id);
+        if (!existing.step()) return make_error("storage", "the indexed item could not be found");
+        id = existing.col_int(0);
+        // Keep identical passages and their embeddings, including when they move. Legacy relations lack complete
+        // dependency and date provenance, so recheck them when indexed passages or their date context change.
+        // A heading change is changed context; match duplicates one occurrence at a time.
+        std::map<std::pair<std::string, std::string>, std::queue<long long>> available;
+        std::map<long long, long long> old_dates;
+        std::vector<long long> old_ids;
+        std::vector<Chunk> old_passages;
+        auto old = db_->prepare("SELECT id, heading, text, at FROM chunks WHERE item_id=?1 ORDER BY ord, id");
+        old.bind(1, id);
+        while (old.step()) {
+            const long long chunk_id = old.col_int(0);
+            old_ids.push_back(chunk_id);
+            old_dates[chunk_id] = old.col_int(3);
+            old_passages.push_back({old.col_text(1), old.col_text(2), old.col_int(3)});
+            available[{old.col_text(1), old.col_text(2)}].push(chunk_id);
+        }
+        bool unchanged_context = previous && previous->updated_at == in.updated_at && old_passages.size() == in.chunks.size();
+        if (unchanged_context) {
+            for (size_t n = 0; n < in.chunks.size(); ++n) {
+                if (old_passages[n].heading != in.chunks[n].heading || old_passages[n].text != in.chunks[n].text ||
+                    old_passages[n].at != in.chunks[n].at) {
+                    unchanged_context = false;
+                    break;
+                }
+            }
+        }
+        std::vector<long long> retained;
+        std::set<long long> used;
+        for (const auto& c : in.chunks) {
+            auto& matches = available[{c.heading, c.text}];
+            if (matches.empty()) retained.push_back(0);
+            else {
+                const long long chunk_id = matches.front();
+                matches.pop();
+                retained.push_back(chunk_id);
+                used.insert(chunk_id);
+            }
+        }
+        for (const long long chunk_id : old_ids) {
+            if (used.count(chunk_id)) continue;
+            auto drop = db_->prepare("DELETE FROM chunks WHERE id=?1");
+            drop.bind(1, chunk_id);
+            if (Status s = drop.run(); !s) return s;
+        }
         int ord = 0;
         for (const auto& c : in.chunks) {
+            const long long existing_id = retained[static_cast<size_t>(ord)];
+            if (existing_id) {
+                auto update = db_->prepare("UPDATE chunks SET ord=?1, at=?2 WHERE id=?3");
+                update.bind(1, ord++).bind(2, c.at).bind(3, existing_id);
+                if (Status s = update.run(); !s) return s;
+                const bool recheck = previous && (!unchanged_context || old_dates[existing_id] != c.at);
+                if (recheck) {
+                    auto relations = db_->prepare("DELETE FROM relations WHERE chunk_id=?1");
+                    relations.bind(1, existing_id);
+                    if (Status s = relations.run(); !s) return s;
+                    auto mentions = db_->prepare("DELETE FROM mentions WHERE chunk_id=?1");
+                    mentions.bind(1, existing_id);
+                    if (Status s = mentions.run(); !s) return s;
+                    if (in.extract) {
+                        auto x = db_->prepare("INSERT INTO extract_queue(chunk_id, priority) VALUES(?1,?2) "
+                                              "ON CONFLICT(chunk_id) DO UPDATE SET priority=max(priority, excluded.priority)");
+                        x.bind(1, existing_id).bind(2, in.priority);
+                        if (Status s = x.run(); !s) return s;
+                    } else {
+                        auto x = db_->prepare("DELETE FROM extract_queue WHERE chunk_id=?1");
+                        x.bind(1, existing_id);
+                        if (Status s = x.run(); !s) return s;
+                    }
+                }
+                continue;
+            }
             auto ci = db_->prepare("INSERT INTO chunks(item_id, ord, heading, text, at, tokens) VALUES(?1,?2,?3,?4,?5,?6)");
             ci.bind(1, id).bind(2, ord++).bind(3, c.heading).bind(4, c.text).bind(5, c.at).bind(6, estimate_tokens(c.text));
             if (Status s = ci.run(); !s) return s;
@@ -469,27 +1420,83 @@ Result<long long> KgStore::put_item(const ItemInput& in, long long now) {
     return id;
 }
 
-bool KgStore::remove_item(const std::string& source, const std::string& ext_id) {
+Status KgStore::purge_recovery_copy() {
     const std::lock_guard lock(db_->mutex());
-    auto s = db_->prepare("DELETE FROM items WHERE source=?1 AND ext_id=?2");
-    s.bind(1, source).bind(2, ext_id);
-    (void)s.run();
-    const bool removed = db_->changes() > 0;
-    auto k = db_->prepare("DELETE FROM skipped WHERE source=?1 AND ext_id=?2");
-    k.bind(1, source).bind(2, ext_id);
-    (void)k.run();
-    if (removed) delete_orphan_entities(*db_);
+    // Serialize even standalone callers with a concurrent migration snapshot. Callers that delete knowledge
+    // must also hold this writer reservation until their deletion commits.
+    if (sqlite3_get_autocommit(db_->raw()))
+        return db_->transaction([&] { return purge_recovery_copy(); });
+    auto backup = db_->path();
+    backup += ".bak";
+    auto staging = db_->path();
+    staging += ".bak.staging";
+    for (const auto& path : {backup, std::filesystem::path(backup.wstring() + L"-wal"),
+                            std::filesystem::path(backup.wstring() + L"-shm"), staging,
+                            std::filesystem::path(staging.wstring() + L"-wal"), std::filesystem::path(staging.wstring() + L"-shm")}) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        if (ec) return make_error("storage", "Cannot remove the knowledge recovery copy: " + ec.message());
+    }
+    return {};
+}
+
+Status KgStore::forget_thread(const std::string& thread_id) {
+    const std::lock_guard lock(db_->mutex());
+    const auto result = db_->transaction([&]() -> Status {
+        if (auto s = purge_recovery_copy(); !s) return s;
+        auto exclusion = db_->prepare("INSERT OR IGNORE INTO user_exclusions(kind,value) VALUES('item',?1)");
+        exclusion.bind(1, "threads:" + thread_id);
+        if (auto s = exclusion.run(); !s) return s;
+        auto facts = db_->prepare("DELETE FROM facts_user WHERE thread_id=?1 OR (item_source='threads' AND item_ext_id=?1)");
+        facts.bind(1, thread_id);
+        if (auto s = facts.run(); !s) return s;
+        auto tombstones = db_->prepare("DELETE FROM fact_tombstones WHERE source='threads' AND ext_id=?1");
+        tombstones.bind(1, thread_id);
+        if (auto s = tombstones.run(); !s) return s;
+        auto item = db_->prepare("DELETE FROM items WHERE source='threads' AND ext_id=?1");
+        item.bind(1, thread_id);
+        if (auto s = item.run(); !s) return s;
+        auto skipped = db_->prepare("DELETE FROM skipped WHERE source='threads' AND ext_id=?1");
+        skipped.bind(1, thread_id);
+        if (auto s = skipped.run(); !s) return s;
+        return delete_orphan_entities(*db_);
+    });
+    if (!result) return result;
+    return {};
+}
+
+bool KgStore::remove_item(const std::string& source, const std::string& ext_id, bool forget) {
+    const std::lock_guard lock(db_->mutex());
+    bool removed = false;
+    const auto result = db_->transaction([&]() -> Status {
+        if (auto s = purge_recovery_copy(); !s) return s;
+        if (forget)
+            if (auto s = queue_item_withdrawals(*db_, source, ext_id); !s) return s;
+        auto facts = db_->prepare("DELETE FROM facts_user WHERE (item_source=?1 AND item_ext_id=?2) OR (?1='threads' AND thread_id=?2)");
+        facts.bind(1, source).bind(2, ext_id);
+        if (auto s = facts.run(); !s) return s;
+        if (forget) {
+            auto tombstones = db_->prepare("DELETE FROM fact_tombstones WHERE source=?1 AND ext_id=?2");
+            tombstones.bind(1, source).bind(2, ext_id);
+            if (auto s = tombstones.run(); !s) return s;
+        }
+        auto s = db_->prepare("DELETE FROM items WHERE source=?1 AND ext_id=?2");
+        s.bind(1, source).bind(2, ext_id);
+        if (auto status = s.run(); !status) return status;
+        removed = db_->changes() > 0;
+        auto k = db_->prepare("DELETE FROM skipped WHERE source=?1 AND ext_id=?2");
+        k.bind(1, source).bind(2, ext_id);
+        if (auto status = k.run(); !status) return status;
+        return removed ? delete_orphan_entities(*db_) : Status{};
+    });
+    if (!result) return false;
     return removed;
 }
 
-bool KgStore::remove_item(long long id) {
+bool KgStore::remove_item(long long id, bool forget) {
     const std::lock_guard lock(db_->mutex());
-    auto s = db_->prepare("DELETE FROM items WHERE id=?1");
-    s.bind(1, id);
-    (void)s.run();
-    const bool removed = db_->changes() > 0;
-    if (removed) delete_orphan_entities(*db_);
-    return removed;
+    const auto existing = item(id);
+    return existing && remove_item(existing->source, existing->ext_id, forget);
 }
 
 std::vector<std::string> KgStore::item_ids(const std::string& source) {
@@ -501,16 +1508,41 @@ std::vector<std::string> KgStore::item_ids(const std::string& source) {
     return out;
 }
 
-int KgStore::remove_source(const std::string& kind) {
+int KgStore::remove_source(const std::string& kind, bool forget) {
     const std::lock_guard lock(db_->mutex());
-    auto s = db_->prepare("DELETE FROM items WHERE source=?1");
-    s.bind(1, kind);
-    (void)s.run();
-    const int n = db_->changes();
-    auto k = db_->prepare("DELETE FROM skipped WHERE source=?1");
-    k.bind(1, kind);
-    (void)k.run();
-    delete_orphan_entities(*db_);
+    int n = 0;
+    const auto result = db_->transaction([&]() -> Status {
+        if (auto s = purge_recovery_copy(); !s) return s;
+        if (forget) {
+            if (auto s = queue_item_withdrawals(*db_, kind, std::nullopt); !s) return s;
+            if (kind == "files")
+                if (auto s = db_->exec("DELETE FROM share_rules"); !s) return s;
+            auto disable = db_->prepare("INSERT INTO sources(kind,user_enabled) VALUES(?1,0) "
+                                        "ON CONFLICT(kind) DO UPDATE SET user_enabled=0");
+            disable.bind(1, kind);
+            if (auto s = disable.run(); !s) return s;
+        }
+        auto facts = db_->prepare("DELETE FROM facts_user WHERE item_source=?1 OR "
+                                  "(?1='threads' AND thread_id IN (SELECT ext_id FROM items WHERE source='threads'))");
+        facts.bind(1, kind);
+        if (auto s = facts.run(); !s) return s;
+        auto s = db_->prepare("DELETE FROM items WHERE source=?1");
+        s.bind(1, kind);
+        if (auto status = s.run(); !status) return status;
+        n = db_->changes();
+        if (forget && kind == "notes")
+            if (auto status = db_->exec("DELETE FROM notes"); !status) return status;
+        if (forget) {
+            auto tombstones = db_->prepare("DELETE FROM fact_tombstones WHERE source=?1");
+            tombstones.bind(1, kind);
+            if (auto status = tombstones.run(); !status) return status;
+        }
+        auto k = db_->prepare("DELETE FROM skipped WHERE source=?1");
+        k.bind(1, kind);
+        if (auto status = k.run(); !status) return status;
+        return delete_orphan_entities(*db_);
+    });
+    if (!result) return -1;
     return n;
 }
 
@@ -537,13 +1569,16 @@ std::optional<ItemRow> KgStore::item(const std::string& source, const std::strin
     return read_item(s);
 }
 
-std::vector<ItemRow> KgStore::find_items(const std::string& query, int limit) {
+std::vector<ItemRow> KgStore::find_items(const std::string& query, int limit,
+                                         std::optional<std::pair<long long, long long>> before) {
     std::vector<ItemRow> out;
     const std::lock_guard lock(db_->mutex());
     auto s = db_->prepare(std::string("SELECT ") + kItemColumns +
-                          " FROM items WHERE instr(lower(title), lower(?1)) > 0 OR instr(lower(ref), lower(?1)) > 0"
+                          " FROM items WHERE (instr(lower(title), lower(?1)) > 0 OR instr(lower(ref), lower(?1)) > 0)"
+                          " AND NOT EXISTS (SELECT 1 FROM user_exclusions u WHERE u.kind='item' AND u.value=items.source||':'||items.ext_id)"
+                          " AND (?3=0 OR updated_at<?4 OR (updated_at=?4 AND id<?3))"
                           " ORDER BY updated_at DESC, id DESC LIMIT ?2");
-    s.bind(1, query).bind(2, static_cast<long long>(limit));
+    s.bind(1, query).bind(2, static_cast<long long>(limit)).bind(3, before ? before->second : 0).bind(4, before ? before->first : 0);
     while (s.step()) out.push_back(read_item(s));
     return out;
 }
@@ -583,15 +1618,38 @@ SourceCounts KgStore::counts(const std::string& source) {
     return c;
 }
 
-std::vector<BrowseRow> KgStore::browse(const std::string& source, const std::string& query, int limit, bool extraction) {
+std::vector<ItemQueueCounts> KgStore::item_queue_counts(const std::string& source) {
+    const std::lock_guard lock(db_->mutex());
+    auto s = db_->prepare("SELECT i.ext_id, count(c.id), count(e.chunk_id), count(x.chunk_id) FROM items i "
+                          "LEFT JOIN chunks c ON c.item_id=i.id "
+                          "LEFT JOIN embed_queue e ON e.chunk_id=c.id LEFT JOIN extract_queue x ON x.chunk_id=c.id "
+                          "WHERE i.source=?1 GROUP BY i.id");
+    s.bind(1, source);
+    std::vector<ItemQueueCounts> out;
+    while (s.step()) out.push_back({s.col_text(0), s.col_int(1), s.col_int(2), s.col_int(3)});
+    return out;
+}
+
+long long KgStore::skipped_count(const std::string& source) {
+    const std::lock_guard lock(db_->mutex());
+    auto s = db_->prepare("SELECT count(*) FROM skipped WHERE source=?1");
+    s.bind(1, source);
+    return s.step() ? s.col_int(0) : 0;
+}
+
+std::vector<BrowseRow> KgStore::browse(const std::string& source, const std::string& query, int limit, bool extraction,
+                                       std::optional<std::pair<long long, long long>> before) {
     const std::lock_guard lock(db_->mutex());
     auto s = db_->prepare(std::string("SELECT ") + kItemColumns +
                           ", (SELECT ifnull(sum(length(c.text)), 0) FROM chunks c WHERE c.item_id=items.id)"
                           ", (SELECT count(*) FROM chunks c WHERE c.item_id=items.id AND (c.id IN (SELECT chunk_id FROM embed_queue)"
                           " OR (?4 AND c.id IN (SELECT chunk_id FROM extract_queue))))"
                           " FROM items WHERE source=?1 AND (?2='' OR instr(lower(title), lower(?2)) > 0 OR instr(lower(ref), lower(?2)) > 0)"
+                          " AND NOT EXISTS (SELECT 1 FROM user_exclusions u WHERE u.kind='item' AND u.value=items.source||':'||items.ext_id)"
+                          " AND (?5=0 OR updated_at<?6 OR (updated_at=?6 AND id<?5))"
                           " ORDER BY updated_at DESC, id DESC LIMIT ?3");
-    s.bind(1, source).bind(2, query).bind(3, static_cast<long long>(limit)).bind(4, extraction ? 1 : 0);
+    s.bind(1, source).bind(2, query).bind(3, static_cast<long long>(limit)).bind(4, extraction ? 1 : 0)
+        .bind(5, before ? before->second : 0).bind(6, before ? before->first : 0);
     std::vector<BrowseRow> out;
     while (s.step()) out.push_back({read_item(s), s.col_int(9), s.col_int(10)});
     return out;
@@ -602,6 +1660,13 @@ long long KgStore::item_pending(long long item_id, bool extraction) {
     auto s = db_->prepare("SELECT count(*) FROM chunks c WHERE c.item_id=?1 AND (c.id IN (SELECT chunk_id FROM embed_queue)"
                           " OR (?2 AND c.id IN (SELECT chunk_id FROM extract_queue)))");
     s.bind(1, item_id).bind(2, extraction ? 1 : 0);
+    return s.step() ? s.col_int(0) : 0;
+}
+
+long long KgStore::item_extraction_pending(long long item_id) {
+    const std::lock_guard lock(db_->mutex());
+    auto s = db_->prepare("SELECT count(*) FROM chunks c JOIN extract_queue q ON q.chunk_id=c.id WHERE c.item_id=?1");
+    s.bind(1, item_id);
     return s.step() ? s.col_int(0) : 0;
 }
 
@@ -748,10 +1813,11 @@ std::vector<std::pair<long long, double>> KgStore::vector_search(const std::vect
 
 // ---- Extraction ---------------------------------------------------------------------------------------------------------
 
-std::vector<ChunkRow> KgStore::extract_batch(int n) {
+std::vector<ChunkRow> KgStore::extract_batch(int n, const std::vector<long long>& deferred) {
     const std::lock_guard lock(db_->mutex());
-    auto s = db_->prepare(
+    auto s = db_->prepare(std::string(
         "SELECT c.id, c.item_id, c.heading, c.text, c.at FROM extract_queue q JOIN chunks c ON c.id=q.chunk_id "
+        ) + (deferred.empty() ? "" : "WHERE q.chunk_id NOT IN (" + id_list(deferred) + ") ") +
         "ORDER BY q.priority DESC, q.chunk_id DESC LIMIT ?1");
     s.bind(1, n);
     std::vector<ChunkRow> out;
@@ -880,21 +1946,63 @@ std::optional<EntityRow> KgStore::entity(long long id) {
 }
 
 std::vector<EntityRow> KgStore::find_entities(const std::string& query, int limit) {
+    std::vector<EntityRow> out;
+    for (auto& row : find_entities_page(query, limit)) out.push_back(std::move(row.entity));
+    return out;
+}
+
+std::vector<EntitySearchRow> KgStore::find_entities_page(const std::string& query, int limit,
+                                                          const std::optional<EntityCursor>& after) {
+    std::vector<EntitySearchRow> out;
+    if (limit <= 0) return out;
     const std::lock_guard lock(db_->mutex());
     const std::string norm = normalize_name(query);
-    std::vector<EntityRow> out;
-    if (norm.empty()) {
-        auto s = db_->prepare(std::string("SELECT ") + kEntityColumns + " FROM entities ORDER BY name LIMIT ?1");
-        s.bind(1, limit);
-        while (s.step()) out.push_back(read_entity(s));
-        return out;
-    }
-    // Exact alias first, then aliases containing the words, then email.
-    auto s = db_->prepare(std::string("SELECT ") + kEntityColumns +
-                          ", (SELECT max(CASE WHEN a.norm=?1 THEN 2 WHEN a.norm LIKE ?2 THEN 1 ELSE 0 END) FROM entity_aliases a WHERE a.entity_id=entities.id) AS score"
-                          " FROM entities WHERE score>0 OR email=?3 ORDER BY score DESC, name LIMIT ?4");
-    s.bind(1, norm).bind(2, "%" + norm + "%").bind(3, to_lower(trim(query))).bind(4, limit);
-    while (s.step()) out.push_back(read_entity(s));
+    // Stable ordering also lets callers skip inaccessible hits without losing later matches.
+    auto s = db_->prepare(std::string("WITH scored AS (SELECT ") + kEntityColumns +
+                          ", CASE WHEN ?1='' THEN 0 ELSE COALESCE((SELECT max(CASE WHEN a.norm=?1 THEN 2 "
+                          "WHEN a.norm LIKE ?2 THEN 1 ELSE 0 END) FROM entity_aliases a WHERE a.entity_id=entities.id),0) END AS score "
+                          "FROM entities) SELECT " + kEntityColumns + ", score FROM scored "
+                          "WHERE (?1='' OR score>0 OR email=?3) AND (?5=0 OR score<?6 OR "
+                          "(score=?6 AND (name>?7 OR (name=?7 AND id>?5)))) ORDER BY score DESC, name, id LIMIT ?4");
+    s.bind(1, norm).bind(2, "%" + norm + "%").bind(3, to_lower(trim(query))).bind(4, limit)
+        .bind(5, after ? after->id : 0LL).bind(6, after ? after->score : 0LL).bind(7, after ? after->name : std::string{});
+    while (s.step()) out.push_back({read_entity(s), s.col_int(8)});
+    return out;
+}
+
+bool KgStore::entity_has_directory_relation(long long entity_id) {
+    const std::lock_guard lock(db_->mutex());
+    auto s = db_->prepare("SELECT 1 FROM relations WHERE (subject=?1 OR object=?1) AND chunk_id IS NULL LIMIT 1");
+    s.bind(1, entity_id);
+    return s.step();
+}
+
+std::vector<ItemRow> KgStore::entity_evidence_items(long long entity_id, long long after_item_id, int limit) {
+    std::vector<ItemRow> out;
+    if (limit <= 0) return out;
+    const std::lock_guard lock(db_->mutex());
+    auto s = db_->prepare(std::string("SELECT ") + kItemColumns + " FROM items WHERE id>?2 AND id IN ("
+                          "SELECT c.item_id FROM mentions m JOIN chunks c ON c.id=m.chunk_id WHERE m.entity_id=?1 "
+                          "UNION SELECT c.item_id FROM relations r JOIN chunks c ON c.id=r.chunk_id "
+                          "WHERE r.subject=?1 OR r.object=?1) "
+                          "AND NOT EXISTS (SELECT 1 FROM user_exclusions u WHERE u.kind='item' AND u.value=items.source||':'||items.ext_id) "
+                          "ORDER BY id LIMIT ?3");
+    s.bind(1, entity_id).bind(2, after_item_id).bind(3, limit);
+    while (s.step()) out.push_back(read_item(s));
+    return out;
+}
+
+std::vector<ItemRow> KgStore::entity_alias_items(long long entity_id, const std::string& normalized_alias, long long after_item_id, int limit) {
+    std::vector<ItemRow> out;
+    if (limit <= 0 || normalized_alias.empty()) return out;
+    const std::lock_guard lock(db_->mutex());
+    auto s = db_->prepare(std::string("SELECT ") + kItemColumns + " FROM items WHERE id>?3 AND id IN ("
+                          "SELECT c.item_id FROM mentions m JOIN chunks c ON c.id=m.chunk_id "
+                          "WHERE m.entity_id=?1 AND m.alias=?2) "
+                          "AND NOT EXISTS (SELECT 1 FROM user_exclusions u WHERE u.kind='item' AND u.value=items.source||':'||items.ext_id) "
+                          "ORDER BY id LIMIT ?4");
+    s.bind(1, entity_id).bind(2, normalized_alias).bind(3, after_item_id).bind(4, limit);
+    while (s.step()) out.push_back(read_item(s));
     return out;
 }
 
@@ -1147,11 +2255,14 @@ Result<long long> KgStore::split_entity(long long id, const std::string& alias, 
 
 Status KgStore::forget_entity(long long id) {
     const std::lock_guard lock(db_->mutex());
-    auto s = db_->prepare("DELETE FROM entities WHERE id=?1");
-    s.bind(1, id);
-    if (Status st = s.run(); !st) return st;
-    if (db_->changes() == 0) return make_error("not_found", "no such entity");
-    return {};
+    return db_->transaction([&]() -> Status {
+        if (auto status = purge_recovery_copy(); !status) return status;
+        auto s = db_->prepare("DELETE FROM entities WHERE id=?1");
+        s.bind(1, id);
+        if (Status st = s.run(); !st) return st;
+        if (db_->changes() == 0) return make_error("not_found", "no such entity");
+        return {};
+    });
 }
 
 // ---- User-stated facts --------------------------------------------------------------------------------------------------
@@ -1305,19 +2416,41 @@ std::optional<ShareRow> KgStore::share(const std::string& source, const std::str
     return read_share(s);
 }
 
-void KgStore::put_share(const ShareRow& r) {
+Status KgStore::repair_ambiguous_shares() {
+    const std::lock_guard lock(db_->mutex());
+    return db_->exec("UPDATE shares SET state='unverified',error='The previous sharing state cannot be verified.' "
+                     "WHERE (state='removed' AND error='Removed from team knowledge by an administrator.') "
+                     "OR (state='withdrawn' AND error<>'acknowledged-delete-v1')");
+}
+
+Status KgStore::mark_shares_unsharing() {
+    const std::lock_guard lock(db_->mutex());
+    if (auto s = repair_ambiguous_shares(); !s) return s;
+    return db_->exec("UPDATE shares SET state='unsharing',error='Waiting for verified removal.' WHERE state NOT IN ('removed','withdrawn')");
+}
+
+Status KgStore::mark_share_removed(const std::string& source, const std::string& ext_id) {
+    const std::lock_guard lock(db_->mutex());
+    auto s = db_->prepare("UPDATE shares SET state='removed',error='' WHERE source=?1 AND ext_id=?2 AND state='unsharing'");
+    s.bind(1, source).bind(2, ext_id);
+    if (auto result = s.run(); !result) return result;
+    if (db_->changes() != 1) return make_error("stale", "The shared item changed during removal.");
+    return {};
+}
+
+Status KgStore::put_share(const ShareRow& r) {
     const std::lock_guard lock(db_->mutex());
     auto s = db_->prepare(std::string("INSERT OR REPLACE INTO shares(") + kShareColumns + ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)");
     s.bind(1, r.source).bind(2, r.ext_id).bind(3, r.remote_id).bind(4, r.title).bind(5, json(r.groups).dump()).bind(6, r.item_hash);
     s.bind(7, r.content_hash).bind(8, r.size).bind(9, r.state).bind(10, r.error).bind(11, r.rule).bind(12, r.updated_at);
-    (void)s.run();
+    return s.run();
 }
 
-void KgStore::remove_share(const std::string& source, const std::string& ext_id) {
+Status KgStore::remove_share(const std::string& source, const std::string& ext_id) {
     const std::lock_guard lock(db_->mutex());
     auto s = db_->prepare("DELETE FROM shares WHERE source=?1 AND ext_id=?2");
     s.bind(1, source).bind(2, ext_id);
-    (void)s.run();
+    return s.run();
 }
 
 std::vector<std::pair<std::string, std::vector<std::string>>> KgStore::share_rules() {
@@ -1335,20 +2468,25 @@ Status KgStore::put_share_rule(const std::string& folder, const std::vector<std:
     return s.run();
 }
 
-void KgStore::remove_share_rule(const std::string& folder) {
+Status KgStore::remove_share_rule(const std::string& folder) {
     const std::lock_guard lock(db_->mutex());
     auto s = db_->prepare("DELETE FROM share_rules WHERE folder=?1");
     s.bind(1, folder);
-    (void)s.run();
+    return s.run();
 }
 
-void KgStore::clear(bool all) {
+Status KgStore::clear(bool all) {
     const std::lock_guard lock(db_->mutex());
     // The day's budgets stay: forgetting must not let backfill spend the budget a second time.
-    (void)db_->exec("DELETE FROM items; DELETE FROM entities; DELETE FROM skipped; DELETE FROM meta; DELETE FROM fact_tombstones;");
-    if (all)
-        (void)db_->exec("DELETE FROM sources; DELETE FROM folders; DELETE FROM user_exclusions; DELETE FROM documents; DELETE FROM notes; "
-                        "DELETE FROM shares; DELETE FROM share_rules;");
+    return db_->transaction([&]() -> Status {
+        if (auto s = purge_recovery_copy(); !s) return s;
+        if (auto s = db_->exec("DELETE FROM items; DELETE FROM entities; DELETE FROM skipped; DELETE FROM meta; DELETE FROM fact_tombstones;"); !s)
+            return s;
+        if (all)
+            return db_->exec("DELETE FROM sources; DELETE FROM folders; DELETE FROM user_exclusions; DELETE FROM documents; DELETE FROM notes; "
+                             "DELETE FROM shares; DELETE FROM share_rules;");
+        return {};
+    });
 }
 
 }  // namespace wb::knowledge

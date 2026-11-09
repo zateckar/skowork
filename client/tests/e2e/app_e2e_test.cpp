@@ -40,8 +40,8 @@ struct AppProcess {
     DWORD pid = 0;
 };
 
-AppProcess launch(const std::wstring& args) {
-    const auto exe = exe_dir() / L"Workbench.exe";
+AppProcess launch(const std::wstring& args, const wchar_t* executable = L"SkoWork.exe") {
+    const auto exe = exe_dir() / executable;
     std::wstring cmd = L"\"" + exe.wstring() + L"\" " + args;
     STARTUPINFOW si{};
     si.cb = sizeof si;
@@ -161,6 +161,30 @@ TEST(AppE2E, SecondLaunchHandsOverAndExits) {
     AppProcess second = launch(a.common_args());
     DWORD code = 99;
     ASSERT_TRUE(exited_within(second, 10000, &code));
+    EXPECT_EQ(code, 0u);
+    EXPECT_TRUE(process_alive(a.main.pid));
+    bool opened = false;
+    for (int i = 0; i < 50 && !opened; ++i) {
+        auto s = a.call("dev.ui", {{"action", "status"}});
+        opened = s && jbool(*s, "open");
+        if (!opened) std::this_thread::sleep_for(100ms);
+    }
+    EXPECT_TRUE(opened);
+    (void)a.call("dev.ui", {{"action", "close"}});
+}
+
+TEST(AppE2E, LegacyLauncherHandsOverToExistingInstance) {
+    Instance a;
+    a.write_config(json{{"control_plane_url", ""}});
+    ASSERT_TRUE(a.start());
+    auto ui = a.call("dev.ui", {{"action", "status"}});
+    ASSERT_TRUE(ui);
+    ASSERT_FALSE(jbool(*ui, "open"));
+
+    AppProcess legacy = launch(a.common_args(), L"Workbench-legacy.exe");
+    ASSERT_TRUE(legacy.process);
+    DWORD code = 99;
+    ASSERT_TRUE(exited_within(legacy, 10000, &code));
     EXPECT_EQ(code, 0u);
     EXPECT_TRUE(process_alive(a.main.pid));
     bool opened = false;

@@ -27,6 +27,13 @@ ModelFailure cancelled_failure() {
     return f;
 }
 
+ModelFailure input_budget_failure() {
+    ModelFailure f;
+    f.code = code::context_length;
+    f.message = "The prepared request exceeds the estimated input budget.";
+    return f;
+}
+
 ModelFailure malformed(std::string what) {
     ModelFailure f;
     f.code = code::model_unavailable;
@@ -283,7 +290,10 @@ ModelResult<ChatResponse> ModelClient::chat_attempt(const ChatRequest& request, 
 }
 
 ModelResult<ChatResponse> ModelClient::chat_with_retries(const ChatRequest& request, const ChatSink& sink) {
-    auto r = with_retries<ChatResponse>(request.cancel, &sink, [&] { return chat_attempt(request, sink); });
+    auto r = with_retries<ChatResponse>(request.cancel, &sink, [&]() -> ModelResult<ChatResponse> {
+        if (request.input_budget_check && !request.input_budget_check(request)) return input_budget_failure();
+        return chat_attempt(request, sink);
+    });
     if (r.ok()) {
         r.value().usage.requests = 1;
         record(request.run_id, request.thread_id, request.feature, request.role, r.value().usage);
@@ -295,7 +305,6 @@ ModelResult<ChatResponse> ModelClient::chat(const ChatRequest& original, const C
     ChatRequest request = original;
     if (auto f = prepare_images(request)) return *f;
     if (request.cancel && request.cancel->cancelled()) return cancelled_failure();
-
     auto first = chat_with_retries(request, sink);
     if (!first.ok() || !request.validate_tool_calls || first.value().tool_calls.empty()) return first;
 
@@ -326,6 +335,8 @@ ModelResult<ChatResponse> ModelClient::chat(const ChatRequest& original, const C
     }
     correction.messages.push_back(std::move(assistant));
     for (auto& m : results) correction.messages.push_back(std::move(m));
+
+    if (correction.input_budget_check && !correction.input_budget_check(correction)) return resp;
 
     auto second = chat_with_retries(correction, sink);
     resp.corrected = true;

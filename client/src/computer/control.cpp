@@ -98,7 +98,7 @@ void ControlSession::run(std::promise<Status>* ready) {
     const int vx = ::GetSystemMetrics(SM_XVIRTUALSCREEN), vy = ::GetSystemMetrics(SM_YVIRTUALSCREEN);
     const int vw = ::GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = ::GetSystemMetrics(SM_CYVIRTUALSCREEN);
     HWND hwnd = ::CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClass,
-                                  L"Workbench computer use", WS_POPUP, vx, vy, vw, vh, nullptr, nullptr, inst, this);
+                                  L"SkoWork computer use", WS_POPUP, vx, vy, vw, vh, nullptr, nullptr, inst, this);
     if (!hwnd) {
         ::UnregisterHotKey(nullptr, kHotkeyId);
         return fail(make_error("overlay", "the overlay window could not be created"));

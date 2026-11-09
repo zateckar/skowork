@@ -3,6 +3,7 @@
 // full-text index and int8 vectors. Search fuses full-text and vector ranks (reciprocal rank fusion) over the items
 // of the caller's Groups only.
 import { Router, type NextFunction, type Request, type Response } from 'express';
+import { createHash } from 'node:crypto';
 import type { Config } from '../config.ts';
 import type { Db } from '../db.ts';
 import { nowIso, tx } from '../db.ts';
@@ -19,6 +20,7 @@ const ITEM_ID = /^[A-Za-z0-9._:-]{1,200}$/;
 
 export type Embedder = (user: User, input: string[]) => Promise<{ model: string; vectors: number[][] } | null>;
 export type SharingPolicy = (user: User) => string[];
+export type CurrentGroups = (user: User) => string[];
 
 interface ItemRow {
   id: number;
@@ -27,6 +29,7 @@ interface ItemRow {
   title: string;
   kind: 'files' | 'notes';
   content_hash: string;
+  server_content_hash: string;
   size: number;
   embed_model: string | null;
   created_at: string;
@@ -82,13 +85,15 @@ export class TeamKnowledge {
   readonly #audit: Audit;
   readonly #embed: Embedder;
   readonly #sharing: SharingPolicy;
+  readonly #currentGroups: CurrentGroups;
 
-  constructor(cfg: Config, db: Db, audit: Audit, embed: Embedder, sharing: SharingPolicy) {
+  constructor(cfg: Config, db: Db, audit: Audit, embed: Embedder, sharing: SharingPolicy, currentGroups: CurrentGroups) {
     this.#cfg = cfg;
     this.#db = db;
     this.#audit = audit;
     this.#embed = embed;
     this.#sharing = sharing;
+    this.#currentGroups = currentGroups;
   }
 
   /**
@@ -118,6 +123,14 @@ export class TeamKnowledge {
     this.#audit.write({ category: 'knowledge', action, outcome: 'ok', subject: user.subject, userName: user.userName, reason: reason ?? null, details });
   }
 
+  #currentUser(user: User): User {
+    if (user.tokenExpiresAt + this.#cfg.identity.clockSkewS <= Date.now() / 1000)
+      throw new ApiError(401, 'UNAUTHORIZED', 'Your session expired while the request was being prepared.');
+    const revoked = this.#db.prepare("SELECT 1 FROM deny_list WHERE kind = 'user' AND lower(value) = lower(?)").get(user.userName);
+    if (revoked) throw new ApiError(403, 'FORBIDDEN', 'This user is no longer authorized.');
+    return { ...user, groups: this.#currentGroups(user) };
+  }
+
   #item(owner: string, itemId: string): ItemRow | undefined {
     return this.#db.prepare('SELECT * FROM team_items WHERE owner = ? AND item_id = ?').get(owner, itemId) as ItemRow | undefined;
   }
@@ -143,12 +156,15 @@ export class TeamKnowledge {
     if (refused.length) {
       throw new ApiError(403, 'GROUP_NOT_PERMITTED', `You cannot share with ${refused.join(', ')}: you are not a member, or policy.knowledge.sharing.groups does not permit it.`, { groups: refused });
     }
+    const ownerSnapshot = this.#db.prepare('SELECT groups, permitted FROM team_owners WHERE user_name = ?').get(user.userName) as { groups: string; permitted: string };
     const before = this.#item(user.userName, itemId);
+    const beforeState = before ? JSON.stringify([before, this.#groupsOf(before.id)]) : '';
     const others = (this.#db.prepare('SELECT COALESCE(SUM(size), 0) AS s FROM team_items WHERE owner = ? AND item_id != ?').get(user.userName, itemId) as { s: number }).s;
     if (Number(others) + size > limits.quotaBytes) throw new ApiError(413, 'QUOTA_EXCEEDED', 'Your shared knowledge is at its size limit. Unshare items first.');
 
     const target = [...new Set(groups as string[])].sort();
-    const sameText = before?.content_hash === hash;
+    const serverHash = createHash('sha256').update(text, 'utf8').digest('hex');
+    const sameText = before?.server_content_hash === serverHash;
     let chunks: string[] = [];
     let embedded: { model: string; vectors: number[][] } | null = null;
     if (!sameText) {
@@ -167,17 +183,35 @@ export class TeamKnowledge {
       }
       if (model && vectors.length === chunks.length) embedded = { model, vectors };
     }
+    // Refresh the stored owner snapshot before the write transaction, so a rejected
+    // request cannot roll back a newly observed loss of Group or policy access.
+    const freshUser = this.#currentUser(user);
+    const currentOwner = this.#db.prepare('SELECT groups, permitted FROM team_owners WHERE user_name = ?').get(user.userName) as { groups: string; permitted: string } | undefined;
+    if (!currentOwner || currentOwner.groups !== ownerSnapshot.groups || currentOwner.permitted !== ownerSnapshot.permitted)
+      throw new ApiError(409, 'CONFLICT', 'Your sharing permissions changed while the item was being prepared. Refresh and try again.');
+    const stillPermitted = this.permitted(freshUser);
+    if (target.some((g) => !stillPermitted.includes(g)))
+      throw new ApiError(403, 'GROUP_NOT_PERMITTED', 'Sharing permission changed while the item was being prepared.');
     const now = nowIso();
     const id = tx(this.#db, () => {
+      // Nothing yields between the refresh and this transaction. Check the item and
+      // quota again because other requests may have committed while embedding.
+      const current = this.#item(user.userName, itemId);
+      if (before ? !current || current.id !== before.id || JSON.stringify([current, this.#groupsOf(current.id)]) !== beforeState : !!current)
+        throw new ApiError(409, 'CONFLICT', 'The shared item changed while it was being prepared. Refresh and try again.');
+      const currentOthers = (this.#db.prepare('SELECT COALESCE(SUM(size), 0) AS s FROM team_items WHERE owner = ? AND item_id != ?')
+        .get(user.userName, itemId) as { s: number }).s;
+      if (Number(currentOthers) + size > limits.quotaBytes)
+        throw new ApiError(413, 'QUOTA_EXCEEDED', 'Your shared knowledge is at its size limit. Unshare items first.');
       let rowId: number;
       if (before) {
         rowId = before.id;
-        this.#db.prepare('UPDATE team_items SET title = ?, kind = ?, content_hash = ?, size = ?, updated_at = ? WHERE id = ?').run(title.trim(), kind, hash, size, now, rowId);
+        this.#db.prepare('UPDATE team_items SET title = ?, kind = ?, content_hash = ?, server_content_hash = ?, size = ?, updated_at = ? WHERE id = ?').run(title.trim(), kind, hash, serverHash, size, now, rowId);
       } else {
         rowId = Number(
           this.#db
-            .prepare('INSERT INTO team_items (owner, item_id, title, kind, content_hash, size, embed_model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)')
-            .run(user.userName, itemId, title.trim(), kind, hash, size, now, now).lastInsertRowid,
+            .prepare('INSERT INTO team_items (owner, item_id, title, kind, content_hash, server_content_hash, size, embed_model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)')
+            .run(user.userName, itemId, title.trim(), kind, hash, serverHash, size, now, now).lastInsertRowid,
         );
       }
       if (!sameText) {
@@ -285,16 +319,22 @@ export class TeamKnowledge {
     }
     const fused = new Map<number, number>();
     for (const m of ranks) for (const [id, rank] of m) fused.set(id, (fused.get(id) ?? 0) + 1 / (RRF_K + rank + 1));
-    const top = [...fused.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
-    const passages = top.map(([chunkId, score]) => {
+    // The embedding call above yields to other requests. Recheck stored visibility before
+    // materializing results: an item may have been withdrawn, or its owner revoked, meanwhile.
+    const stillVisible = this.#visible(this.#currentUser(user));
+    const top = [...fused.entries()].sort((a, b) => b[1] - a[1]);
+    const passages: { item_id: string; title: string; owner: string; groups: string[]; kind: 'files' | 'notes'; updated_at: string; chunk: number; text: string; score: number }[] = [];
+    for (const [chunkId, score] of top) {
       const c = this.#db
         .prepare('SELECT c.text, c.seq, i.* FROM team_chunks c JOIN team_items i ON i.id = c.item WHERE c.id = ?')
-        .get(chunkId) as unknown as ItemRow & { text: string; seq: number };
-      return {
-        item_id: c.item_id, title: c.title, owner: c.owner, groups: visible.get(c.id) ?? [], kind: c.kind, updated_at: c.updated_at,
+        .get(chunkId) as (ItemRow & { text: string; seq: number }) | undefined;
+      if (!c || !visible.has(c.id) || !stillVisible.has(c.id)) continue;
+      passages.push({
+        item_id: c.item_id, title: c.title, owner: c.owner, groups: stillVisible.get(c.id)!, kind: c.kind, updated_at: c.updated_at,
         chunk: c.seq, text: c.text, score: Number(score.toFixed(5)),
-      };
-    });
+      });
+      if (passages.length >= limit) break;
+    }
     return { passages };
   }
 
@@ -335,6 +375,8 @@ const body = (req: Request) => (req.body && typeof req.body === 'object' ? (req.
 /** Client side, for signed-in users: /api/v1/knowledge. */
 export function teamKnowledgeRoutes(t: TeamKnowledge): Router {
   const r = Router();
+  // Internal publication prototypes are not yet safe to expose as a supported API.
+  r.get('/capabilities', wrap(() => ({ publication_read_versions: [], publication_mutation_versions: [] })));
   r.get('/items', wrap((req) => t.mine(req.user!)));
   r.put('/items/:id', wrap((req) => t.publish(req.user!, String(req.params.id), body(req))));
   r.delete('/items/:id', wrap((req) => t.unshare(req.user!, String(req.params.id))));

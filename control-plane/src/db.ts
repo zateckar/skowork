@@ -459,6 +459,10 @@ const migrations: string[] = [
   `
   ALTER TABLE skill_versions ADD COLUMN self_approved INTEGER NOT NULL DEFAULT 0;
   `,
+  // Existing item shares: independently identify the uploaded bytes without trusting the client's hash.
+  `
+  ALTER TABLE team_items ADD COLUMN server_content_hash TEXT NOT NULL DEFAULT '';
+  `,
 ];
 
 export function openDb(path: string): Db {

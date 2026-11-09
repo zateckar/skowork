@@ -3,6 +3,7 @@
 #include "platform/crypto.h"
 #include "runtime/tools.h"
 
+#include <algorithm>
 #include <set>
 
 namespace wb::runtime {
@@ -56,14 +57,36 @@ std::string wrap_untrusted(std::string_view content, std::string_view nonce, std
     return out;
 }
 
+size_t estimate_context_tokens(std::string_view text) {
+    size_t ascii = 0;
+    for (const unsigned char c : text)
+        if (c < 0x80) ++ascii;
+    const size_t non_ascii = text.size() - ascii;
+    return non_ascii + ascii / 3 + (ascii % 3 != 0);
+}
+
 size_t estimate_request_tokens(const std::vector<model::ChatMessage>& messages, const std::vector<model::ToolSpec>& tools) {
-    size_t n = estimate_tool_tokens(tools);
+    size_t n = 0;
+    for (const auto& t : tools)
+        n += 8 + estimate_context_tokens(t.id) + estimate_context_tokens(t.description) + estimate_context_tokens(t.parameters.dump());
     for (const auto& m : messages) {
-        n += 4 + estimate_tokens(m.content);
-        for (const auto& c : m.tool_calls) n += 4 + estimate_tokens(c.tool) + estimate_tokens(c.arguments);
+        n += 4 + estimate_context_tokens(m.content) + estimate_context_tokens(m.tool_call_id);
+        for (const auto& c : m.tool_calls)
+            n += 4 + estimate_context_tokens(c.tool) + estimate_context_tokens(c.id) + estimate_context_tokens(c.arguments);
         n += m.images.size() * 1000;
     }
     return n;
+}
+
+std::optional<WorkingContextBudget> working_context_budget(long long window, long long output_reserve) {
+    if (window <= 0 || output_reserve < 0) return std::nullopt;
+    const long long margin = std::max(4096LL, window / 50 + (window % 50 != 0 ? 1 : 0));
+    if (output_reserve >= window || margin >= window - output_reserve) return std::nullopt;
+    const long long eighty_percent = (window / 5) * 4 + (window % 5) * 4 / 5;
+    const long long cap = window >= 1'000'000 ? 500'000 : 200'000;
+    const long long input = std::min({cap, eighty_percent, window - output_reserve - margin});
+    if (input <= 0) return std::nullopt;
+    return WorkingContextBudget{input, input * 9 / 10, input * 6 / 10};
 }
 
 std::optional<size_t> compaction_boundary(const std::vector<ContextMessage>& msgs, size_t keep) {
@@ -89,32 +112,55 @@ std::optional<size_t> compaction_boundary(const std::vector<ContextMessage>& msg
     return b;
 }
 
-std::string render_transcript(const std::string& previous_summary, const std::vector<ContextMessage>& msgs, size_t end,
-                              size_t max_chars, size_t per_message) {
-    std::vector<std::string> parts;
-    if (!previous_summary.empty()) parts.push_back("Summary of the conversation before this part:\n" + previous_summary + "\n");
-    for (size_t i = 0; i < end && i < msgs.size(); ++i) {
-        const auto& m = msgs[i].msg;
-        std::string text = std::string(utf8_prefix(m.content, per_message));
-        if (text.size() < m.content.size()) text += " [...]";
-        std::string line = "[" + m.role + "] " + text;
-        for (const auto& c : m.tool_calls) {
-            std::string args = std::string(utf8_prefix(c.arguments, 500));
-            line += "\n  calls " + c.tool + " " + args;
-        }
-        parts.push_back(line + "\n");
-    }
-    // Keep the newest part when the whole is too long; the previous summary goes first and is kept if it fits.
+std::optional<std::string> render_transcript(const std::string& previous_summary, const std::vector<ContextMessage>& msgs,
+                                             size_t end, size_t max_chars) {
+    return render_transcript_range(previous_summary, msgs, 0, end, max_chars);
+}
+
+std::optional<std::string> render_transcript_range(const std::string& previous_summary, const std::vector<ContextMessage>& msgs,
+                                                   size_t begin, size_t end, size_t max_chars) {
+    if (begin > end || end > msgs.size()) return std::nullopt;
     std::string out;
-    size_t total = 0;
-    std::vector<std::string> kept;
-    for (size_t i = parts.size(); i-- > 0;) {
-        if (total + parts[i].size() > max_chars && !kept.empty()) break;
-        total += parts[i].size();
-        kept.push_back(std::move(parts[i]));
+    auto append = [&](std::string_view part) {
+        if (part.size() > max_chars - out.size()) return false;
+        out.append(part);
+        return true;
+    };
+    auto record = [&](const json& value) {
+        try {
+            const std::string encoded = value.dump();
+            return append(encoded) && append("\n");
+        } catch (const json::exception&) {
+            return false;  // Invalid text cannot be represented without losing bytes.
+        }
+    };
+    if (!previous_summary.empty()) {
+        if (previous_summary.size() > max_chars - out.size() ||
+            !record({{"kind", "previous_summary"}, {"content", previous_summary}})) return std::nullopt;
     }
-    for (size_t i = kept.size(); i-- > 0;) out += kept[i];
-    return std::string(utf8_prefix(out, max_chars));
+    for (size_t i = begin; i < end; ++i) {
+        const auto& source = msgs[i];
+        const auto& m = source.msg;
+        if (!m.images.empty()) return std::nullopt;
+        // Bound the raw fields before making JSON copies. Escaping can increase the
+        // encoded length; record() also enforces the final limit.
+        size_t available = max_chars - out.size();
+        const auto take = [&](const std::string& field) {
+            if (field.size() > available) return false;
+            available -= field.size();
+            return true;
+        };
+        if (!take(source.run_id) || !take(m.role) || !take(m.content) || !take(m.tool_call_id)) return std::nullopt;
+        json calls = json::array();
+        for (const auto& c : m.tool_calls) {
+            if (!take(c.tool) || !take(c.id) || !take(c.arguments)) return std::nullopt;
+            calls.push_back({{"tool", c.tool}, {"id", c.id}, {"arguments", c.arguments}});
+        }
+        if (!record({{"kind", "message"}, {"run_id", source.run_id}, {"seq", source.seq}, {"carried", source.carried},
+                     {"role", m.role}, {"content", m.content}, {"tool_call_id", m.tool_call_id}, {"tool_calls", std::move(calls)}}))
+            return std::nullopt;
+    }
+    return out;
 }
 
 std::string_view utf8_prefix(std::string_view text, size_t max_bytes) {

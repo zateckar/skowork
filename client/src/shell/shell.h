@@ -632,7 +632,8 @@ private:
                    std::function<void(const std::vector<std::string>&)> share, const std::u16string& copied = {});
     void ask_confirm(const std::string& id, const std::u16string& title, const std::u16string& body,
                      const std::u16string& action, std::function<void()> confirmed);
-    void act(const std::string& method, const json& params, std::function<void(const json&)> done = {});
+    void act(const std::string& method, const json& params, std::function<void(const json&)> done = {},
+             std::function<bool()> current = {});
     void build_item(ui::Node& parent);
     void build_details(ui::Node& parent, long long id);
     void build_editor(ui::Node& parent);
@@ -666,12 +667,17 @@ private:
     json folders_ = nullptr;   // knowledge.status folders and documents
     Reader reader_mode_ = Reader::empty;
     std::string selected_;      // the row of the open item ("<id>" or "n<note id>")
-    bool details_open_ = false;  // the Details section of the open item
+    bool details_open_ = true;  // the extracted knowledge section of the open item
     long long note_id_ = 0;    // the note being edited (0: new)
     json note_origin_ = nullptr;  // the origin of a Save as note draft, stored with the new note
     bool save_as_note_ = false;   // knowledge.save_as_note
     bool busy_ = false;
-    std::u16string error_, notice_;
+    std::u16string error_, notice_, file_source_error_;
+    size_t file_status_request_ = 0;
+    size_t sharing_request_ = 0;
+    size_t item_request_ = 0;
+    size_t list_request_ = 0;
+    size_t search_request_ = 0;
     std::shared_ptr<int> alive_ = std::make_shared<int>(0);
 };
 

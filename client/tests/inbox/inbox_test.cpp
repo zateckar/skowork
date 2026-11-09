@@ -492,6 +492,12 @@ TEST(InboxNotifications, TogglesAndManagedSettings) {
     EXPECT_EQ(in.toast_list().size(), 1u);
     EXPECT_TRUE(in.svc->set_setting("ui.language", "cs"));
     EXPECT_FALSE(in.svc->set_setting("ui.language", "fr"));
+    ASSERT_TRUE(in.svc->store().set_setting("dictation.language", "sk"));
+    EXPECT_EQ(in.svc->settings()["dictation.language"]["value"], "auto");
+    EXPECT_FALSE(in.svc->set_setting("dictation.language", "pl"));
+    EXPECT_FALSE(in.svc->set_setting("dictation.language", "sk"));
+    EXPECT_TRUE(in.svc->set_setting("dictation.language", "de"));
+    EXPECT_EQ(in.svc->settings()["dictation.language"]["value"], "de");
     EXPECT_FALSE(in.svc->set_setting("unknown.key", true));
 }
 

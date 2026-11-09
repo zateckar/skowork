@@ -1,6 +1,7 @@
 #include "knowledge/knowledge_service.h"
 
 #include "base/strings.h"
+#include "platform/crypto.h"
 #include "platform/log.h"
 #include "platform/win.h"
 
@@ -11,6 +12,10 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
+#include <set>
+#include <unordered_set>
+#include <utility>
 
 namespace wb::knowledge {
 namespace {
@@ -52,6 +57,22 @@ std::string utf8_path(const std::filesystem::path& p) {
 
 std::filesystem::path fs_path(const std::string& s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); }
 
+Result<std::string> read_file_snapshot(const std::filesystem::path& path, std::uintmax_t size) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return make_error("read_failed", "cannot open the file");
+    std::string bytes(static_cast<size_t>(size), '\0');
+    in.read(bytes.data(), static_cast<std::streamsize>(size));
+    if (static_cast<std::uintmax_t>(in.gcount()) != size || in.bad() || in.peek() != std::char_traits<char>::eof())
+        return make_error("read_failed", "the file changed or could not be read completely");
+    return bytes;
+}
+
+Result<std::string> file_content_hash(std::string_view bytes) {
+    const auto digest = sha256(bytes);
+    if (digest.size() != 32) return make_error("crypto", "cannot fingerprint the file");
+    return "sha256:" + hex_encode(digest);
+}
+
 std::string extension_of(const std::string& path) {
     const size_t slash = path.find_last_of("/\\"), dot = path.rfind('.');
     if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) return {};
@@ -69,6 +90,27 @@ std::string path_key(std::string p) {
 bool under(const std::string& path, const std::string& folder) {
     const std::string a = path_key(path), b = path_key(folder);
     return a.size() > b.size() && a.compare(0, b.size(), b) == 0 && (a[b.size()] == '\\' || b.back() == '\\');
+}
+
+using Exclusions = std::vector<std::pair<std::string, std::string>>;
+
+bool path_excluded(const std::string& path, const KnowledgeConfig& cfg, const Exclusions& exclusions) {
+    for (const auto& g : cfg.exclusions)
+        if (glob_match(g, path)) return true;
+    const std::string ext = extension_of(path);
+    for (const auto& [kind, value] : exclusions) {
+        if (kind == "path" && (glob_match(value, path) || under(path, value) || path_key(path) == path_key(value))) return true;
+        if (kind == "type" && !ext.empty() && (to_lower(trim(value)) == ext || to_lower(trim(value)) == "." + ext)) return true;
+        if (kind == "item" && value == "files:" + path) return true;
+    }
+    return false;
+}
+
+bool item_excluded(const std::string& source, const std::string& id, const KnowledgeConfig& cfg, const Exclusions& exclusions) {
+    if (source == "files") return path_excluded(id, cfg, exclusions);
+    for (const auto& [kind, value] : exclusions)
+        if (kind == "item" && value == source + ":" + id) return true;
+    return false;
 }
 
 runtime::Provenance passage_provenance(const std::string& source, const std::string& ref) {
@@ -102,6 +144,22 @@ std::string fact_text(const RelationRow& r) {
 }
 
 bool shareable_source(const std::string& source) { return source == "files" || source == "notes"; }
+
+// Caller holds the local database lock until it has applied or discarded the worker result.
+bool same_chunks(KgStore& store, const std::vector<ChunkRow>& batch) {
+    std::vector<long long> ids;
+    for (const auto& c : batch) ids.push_back(c.id);
+    const auto current = store.chunks(ids);
+    if (current.size() != batch.size()) return false;
+    std::map<long long, ChunkRow> by_id;
+    for (const auto& c : current) by_id.emplace(c.id, c);
+    for (const auto& old : batch) {
+        const auto it = by_id.find(old.id);
+        if (it == by_id.end() || it->second.item_id != old.item_id || it->second.heading != old.heading ||
+            it->second.text != old.text || it->second.at != old.at) return false;
+    }
+    return true;
+}
 
 }  // namespace
 
@@ -205,13 +263,15 @@ void KnowledgeService::enqueue(Task t) {
 
 void KnowledgeService::thread_finished(const std::string& thread_id) { enqueue({"upsert", "threads", thread_id, 2, nullptr}); }
 
-void KnowledgeService::thread_forgotten(const std::string& thread_id) {
-    store_->remove_item("threads", thread_id);
-    // User-stated facts with the Thread as their provenance go with it.
-    const std::lock_guard lock(store_->db().mutex());
-    auto s = store_->db().prepare("DELETE FROM facts_user WHERE thread_id=?1");
-    s.bind(1, thread_id);
-    (void)s.run();
+Status KnowledgeService::thread_forgotten(const std::string& thread_id) {
+    if (auto s = store_->forget_thread(thread_id); !s) return s;
+    {
+        const std::lock_guard lock(mx_);
+        tasks_.erase(std::remove_if(tasks_.begin(), tasks_.end(), [&](const Task& t) {
+            return t.source == "threads" && t.id == thread_id;
+        }), tasks_.end());
+    }
+    return {};
 }
 
 void KnowledgeService::mail_event(const std::string& kind, const std::string& id) {
@@ -233,34 +293,32 @@ void KnowledgeService::meeting_removed(const std::string& meeting_id) { enqueue(
 // ---- Exclusions ---------------------------------------------------------------------------------------------------------
 
 bool KnowledgeService::excluded_path(const std::string& path, const KnowledgeConfig& cfg) {
-    for (const auto& g : cfg.exclusions)
-        if (glob_match(g, path)) return true;
-    const std::string ext = extension_of(path);
-    for (const auto& [kind, value] : store_->user_exclusions()) {
-        if (kind == "path" && (glob_match(value, path) || under(path, value) || path_key(path) == path_key(value))) return true;
-        if (kind == "type" && !ext.empty() && to_lower(trim(value)) == ext) return true;
-        if (kind == "type" && !ext.empty() && to_lower(trim(value)) == "." + ext) return true;
-        if (kind == "item" && value == "files:" + path) return true;
-    }
-    return false;
+    return path_excluded(path, cfg, store_->user_exclusions());
 }
 
 bool KnowledgeService::excluded_item(const std::string& source, const std::string& id) {
-    if (source == "files") return excluded_path(id, config());
-    for (const auto& [kind, value] : store_->user_exclusions())
-        if (kind == "item" && value == source + ":" + id) return true;
-    return false;
+    return item_excluded(source, id, config(), store_->user_exclusions());
 }
 
-void KnowledgeService::apply_exclusions() {
+Status KnowledgeService::apply_exclusions() {
+    const std::lock_guard sharing_lock(share_mx_);
     const auto cfg = config();
+    const auto remove = [&](const std::string& source, const std::string& id) -> Status {
+        const std::lock_guard db_lock(store_->db().mutex());
+        if (store_->item(source, id) && !store_->remove_item(source, id, true))
+            return make_error("storage", "Excluded knowledge could not be removed.");
+        return {};
+    };
     for (const auto& id : store_->item_ids("files"))
-        if (excluded_path(id, cfg)) store_->remove_item("files", id);
+        if (excluded_path(id, cfg))
+            if (auto s = remove("files", id); !s) return s;
     for (const auto& [kind, value] : store_->user_exclusions()) {
         if (kind != "item") continue;
         const size_t colon = value.find(':');
-        if (colon != std::string::npos) store_->remove_item(value.substr(0, colon), value.substr(colon + 1));
+        if (colon != std::string::npos)
+            if (auto s = remove(value.substr(0, colon), value.substr(colon + 1)); !s) return s;
     }
+    return {};
 }
 
 // ---- Indexing -----------------------------------------------------------------------------------------------------------
@@ -295,8 +353,16 @@ void KnowledgeService::index_note(const std::string& id, int priority) {
     for (auto& c : chunks) c.at = n->updated_at;
     if (chunks.empty()) chunks.push_back({{}, title, n->updated_at});
     ItemInput in{"notes", id, title, "workbench://note/" + id, hash, n->created_at, n->updated_at, priority, std::move(chunks), true};
-    if (auto put = store_->put_item(in, now_ms()); !put) store_->touch_source("notes", 0, put.error().message);
-    else store_->touch_source("notes", now_ms(), {});
+    {
+        // A note can be edited, excluded or deleted while its chunks are being prepared.
+        const std::lock_guard lock(store_->db().mutex());
+        const auto current = store_->note(n->id);
+        const auto source = store_->source("notes");
+        if (!current || !source.user_enabled || source.paused || current->updated_at != n->updated_at ||
+            note_hash(*current) != hash || excluded_item("notes", id)) return;
+        if (auto put = store_->put_item(in, now_ms()); !put) store_->touch_source("notes", 0, put.error().message);
+        else store_->touch_source("notes", now_ms(), {});
+    }
 }
 
 void KnowledgeService::index_thread(const std::string& id, int priority) {
@@ -314,7 +380,7 @@ void KnowledgeService::index_thread(const std::string& id, int priority) {
         const long long at = jint(m, "at");
         if (!first) first = at;
         last = std::max(last, at);
-        turns.push_back({{"speaker", role == "user" ? "User" : "Workbench"}, {"text", text}, {"at", at}});
+        turns.push_back({{"speaker", role == "user" ? "User" : "SkoWork"}, {"text", text}, {"at", at}});
     }
     if (turns.empty()) {
         store_->remove_item("threads", id);
@@ -329,6 +395,9 @@ void KnowledgeService::index_thread(const std::string& id, int priority) {
     }
     ItemInput in{"threads", id, jstr(*data, "title", "Thread"), "workbench://thread/" + id, hash, first, last, priority,
                  chunks_from_json(r->value("chunks", json::array())), true};
+    const std::lock_guard lock(store_->db().mutex());
+    const auto source = store_->source("threads");
+    if (!source.user_enabled || source.paused || excluded_item("threads", id)) return;
     if (auto put = store_->put_item(in, now_ms()); !put) store_->touch_source("threads", 0, put.error().message);
     else store_->touch_source("threads", now_ms(), {});
 }
@@ -363,6 +432,9 @@ void KnowledgeService::index_mail(const std::string& kind, const std::string& id
     for (auto& c : chunks) c.at = at;
     if (chunks.empty()) chunks.push_back({{}, jstr(*item, "title"), at});
     ItemInput in{kind, id, jstr(*item, "title"), jstr(*item, "ref"), hash, at, at, priority, std::move(chunks), true};
+    const std::lock_guard lock(store_->db().mutex());
+    const auto source = store_->source(kind);
+    if (!source.user_enabled || source.paused || excluded_item(kind, id)) return;
     auto put = store_->put_item(in, now_ms());
     if (!put) {
         store_->touch_source(kind, 0, put.error().message);
@@ -380,70 +452,165 @@ void KnowledgeService::index_mail(const std::string& kind, const std::string& id
     store_->touch_source(kind, now_ms(), {});
 }
 
+void KnowledgeService::file_error(const std::string& path, const std::string& error, long long updated) {
+    const std::lock_guard lock(file_status_mx_);
+    if (error.empty()) file_errors_.erase(path);
+    else file_errors_[path] = error;
+    const std::string& shown = !file_scan_error_.empty() ? file_scan_error_ :
+                               !file_errors_.empty() ? file_errors_.begin()->second : error;
+    store_->touch_source("files", updated, shown);
+}
+
 void KnowledgeService::index_file(const std::string& path, int priority) {
     const auto cfg = config();
     std::error_code ec;
     const auto p = fs_path(path);
-    const auto size = std::filesystem::file_size(p, ec);
-    if (ec) {
-        store_->remove_item("files", path);
-        store_->clear_skipped("files", path);
-        return;
-    }
     if (env_.read_permitted && !env_.read_permitted(path)) {
         store_->remove_item("files", path);
         store_->set_skipped("files", path, "not permitted by policy");
+        file_error(path, {});
+        return;
+    }
+    const auto size = std::filesystem::file_size(p, ec);
+    if (ec) {
+        // A missing path can also mean an unavailable drive. The next successful folder scan decides deletion.
+        file_error(path, "Cannot read " + path + ": " + ec.message());
         return;
     }
     const std::string kind = file_kind(path);
     if (kind.empty()) {
         store_->remove_item("files", path);
         store_->set_skipped("files", path, "unsupported type");
+        file_error(path, {});
         return;
     }
     if (static_cast<long long>(size) > cfg.max_file_mb * 1024 * 1024) {
         store_->remove_item("files", path);
         store_->set_skipped("files", path, "larger than " + std::to_string(cfg.max_file_mb) + " MB");
+        file_error(path, {});
         return;
     }
-    const auto mtime = std::filesystem::last_write_time(p, ec).time_since_epoch().count();
-    const std::string hash = std::to_string(size) + ":" + std::to_string(mtime);
-    if (store_->item_hash("files", path) == hash) return;
+    const auto write_time = std::filesystem::last_write_time(p, ec);
+    if (ec) {
+        file_error(path, "Cannot read " + path + ": " + ec.message());
+        return;
+    }
+    const auto mtime = write_time.time_since_epoch().count();
+    const std::string legacy_hash = std::to_string(size) + ":" + std::to_string(mtime);
+    auto snapshot = read_file_snapshot(p, size);
+    if (!snapshot) {
+        file_error(path, "Cannot read " + path + ": " + snapshot.error().message);
+        return;
+    }
+    auto fingerprint = file_content_hash(*snapshot);
+    if (!fingerprint) {
+        file_error(path, "Cannot read " + path + ": " + fingerprint.error().message);
+        return;
+    }
+    const std::string hash = *fingerprint;
+    const auto still_current = [&]() {
+        if (env_.read_permitted && !env_.read_permitted(path)) {
+            store_->remove_item("files", path);
+            store_->set_skipped("files", path, "not permitted by policy");
+            file_error(path, {});
+            return false;
+        }
+        std::error_code check_ec;
+        const auto current_size = std::filesystem::file_size(p, check_ec);
+        if (!check_ec) {
+            const auto current_mtime = std::filesystem::last_write_time(p, check_ec);
+            if (!check_ec && current_size == size && current_mtime.time_since_epoch().count() == mtime) {
+                const auto current = read_file_snapshot(p, size);
+                const auto current_hash = current ? file_content_hash(*current) : Result<std::string>(current.error());
+                if (current_hash && *current_hash == hash) return true;
+                if (!current_hash) {
+                    file_error(path, "Cannot read " + path + ": " + current_hash.error().message);
+                    return false;
+                }
+            }
+        }
+        if (check_ec) file_error(path, "Cannot read " + path + ": " + check_ec.message());
+        else file_error(path, "File changed while indexing " + path + "; another indexing attempt is needed.");
+        return false;
+    };
+    if (store_->item_hash("files", path) == hash) {
+        if (still_current()) file_error(path, {});
+        return;
+    }
     std::vector<Chunk> chunks;
     if (is_document_kind(kind)) {
-        if (!env_.extract_document || !env_.index) return;
-        std::ifstream in(p, std::ios::binary);
-        std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        auto text = env_.extract_document(kind, bytes);
+        if (!env_.extract_document || !env_.index) {
+            file_error(path, "Cannot read " + path + ": document extraction is unavailable.");
+            return;
+        }
+        auto text = env_.extract_document(kind, *snapshot);
+        if (!still_current()) return;
         if (!text) {
-            store_->remove_item("files", path);
-            store_->set_skipped("files", path, "text extraction failed (" + text.error().code + ")");
+            if (text.error().code == "corrupt") {
+                store_->remove_item("files", path);
+                store_->set_skipped("files", path, "text extraction failed (" + text.error().code + ")");
+                file_error(path, {});
+            } else file_error(path, "Cannot extract " + path + ": " + text.error().message);
             return;
         }
         auto r = env_.index("index.chunk", {{"kind", kind}, {"text", *text}});
+        if (!still_current()) return;
         if (!r) {
-            store_->touch_source("files", 0, r.error().message);
+            file_error(path, "Cannot index " + path + ": " + r.error().message);
             return;
         }
         chunks = chunks_from_json(r->value("chunks", json::array()));
     } else {
-        if (!env_.index) return;
+        if (!env_.index) {
+            file_error(path, "Cannot read " + path + ": the index worker is unavailable.");
+            return;
+        }
         auto r = env_.index("index.read", {{"path", path}, {"kind", kind}, {"max_bytes", cfg.max_file_mb * 1024 * 1024}});
+        if (!still_current()) return;
         if (!r) {
-            store_->remove_item("files", path);
-            const std::string why = r.error().code == "binary" ? "not text" : r.error().code == "too_large" ? "too large" : r.error().message;
-            store_->set_skipped("files", path, why);
+            if (r.error().code == "binary" || r.error().code == "too_large") {
+                store_->remove_item("files", path);
+                store_->set_skipped("files", path, r.error().code == "binary" ? "not text" : "too large");
+                file_error(path, {});
+            } else {
+                file_error(path, "Cannot read " + path + ": " + r.error().message);
+            }
+            return;
+        }
+        if (jstr(*r, "hash") != content_hash(*snapshot)) {
+            file_error(path, "File changed while indexing " + path + "; another indexing attempt is needed.");
             return;
         }
         chunks = chunks_from_json(r->value("chunks", json::array()));
     }
     const std::string name = utf8_path(p.filename());
     const long long modified = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                   std::chrono::file_clock::to_sys(std::filesystem::last_write_time(p, ec)).time_since_epoch())
+                                   std::chrono::file_clock::to_sys(write_time).time_since_epoch())
                                    .count();
     ItemInput in{"files", path, name, path, hash, modified, modified, priority, std::move(chunks), true};
-    if (auto put = store_->put_item(in, now_ms()); !put) store_->touch_source("files", 0, put.error().message);
-    else store_->touch_source("files", now_ms(), {});
+    in.legacy_tombstone_hash = legacy_hash;
+    const auto current_cfg = config();
+    bool eligible = false;
+    std::string write_error;
+    {
+        // The same database lock protects exclusions and selected imports, and KgStore's write transaction.
+        // Do not hold it while updating file status: file_error takes the status lock before the database lock.
+        const std::lock_guard lock(store_->db().mutex());
+        const auto docs = store_->documents();
+        const auto folders = store_->folders();
+        const auto source = store_->source("files");
+        const auto allowed = current_cfg.source_policy.find("files");
+        const bool selected = std::find(docs.begin(), docs.end(), path) != docs.end() ||
+                              std::any_of(folders.begin(), folders.end(), [&](const std::string& folder) { return under(path, folder); });
+        eligible = selected && source.user_enabled && !source.paused && allowed != current_cfg.source_policy.end() && allowed->second &&
+                   !excluded_path(path, current_cfg);
+        if (eligible) {
+            if (auto put = store_->put_item(in, now_ms()); !put) write_error = "Cannot index " + path + ": " + put.error().message;
+        }
+    }
+    if (!eligible) file_error(path, {});
+    else if (!write_error.empty()) file_error(path, write_error);
+    else file_error(path, {}, now_ms());
 }
 
 void KnowledgeService::index_meeting(const Task& t) {
@@ -459,66 +626,131 @@ void KnowledgeService::index_meeting(const Task& t) {
     const long long start = jint(d, "start");
     ItemInput in{"meetings", t.id, jstr(d, "title", "Meeting"), jstr(d, "ref"), hash, start, start, t.priority,
                  chunks_from_json(r->value("chunks", json::array())), true};
+    const std::lock_guard lock(store_->db().mutex());
+    const auto source = store_->source("meetings");
+    if (!source.user_enabled || source.paused || excluded_item("meetings", t.id)) return;
     if (auto put = store_->put_item(in, now_ms()); !put) store_->touch_source("meetings", 0, put.error().message);
     else store_->touch_source("meetings", now_ms(), {});
 }
 
 void KnowledgeService::scan_files() {
     if (!source_active("files")) return;
+    const auto recheck_token = store_->meta("files.recheck_required");
+    {
+        const std::lock_guard lock(mx_);
+        ++file_scans_running_;
+        file_recheck_scanned_.clear();
+    }
     const auto cfg = config();
     std::set<std::string> seen;
+    std::vector<std::string> incomplete_folders;
+    std::vector<std::string> denied_folders;
+    std::string scan_error;
+    const auto incomplete = [&](const std::string& folder, const std::error_code& error) {
+        incomplete_folders.push_back(folder);
+        if (scan_error.empty()) scan_error = "Cannot read " + folder + ": " + error.message();
+    };
     for (const auto& folder : store_->folders()) {
         if (env_.read_permitted && !env_.read_permitted(folder)) {
-            store_->touch_source("files", 0, "The folder " + folder + " is not permitted by policy.");
+            if (scan_error.empty()) scan_error = "The folder " + folder + " is not permitted by policy.";
+            denied_folders.push_back(folder);
             continue;
         }
         std::error_code ec;
-        std::filesystem::recursive_directory_iterator it(fs_path(folder), std::filesystem::directory_options::skip_permission_denied, ec);
+        std::filesystem::recursive_directory_iterator it(fs_path(folder), std::filesystem::directory_options::none, ec);
         if (ec) {
-            store_->touch_source("files", 0, "Cannot read " + folder + ": " + ec.message());
+            incomplete(folder, ec);
             continue;
         }
         for (; it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
             if (ec) break;
             const std::string path = utf8_path(it->path());
-            if (it->is_directory(ec)) {
+            const bool directory = it->is_directory(ec);
+            if (ec) break;
+            if (directory) {
                 // An excluded folder is not entered at all.
                 if (excluded_path(path + "\\", cfg)) it.disable_recursion_pending();
                 continue;
             }
-            if (!it->is_regular_file(ec)) continue;
+            const bool regular = it->is_regular_file(ec);
+            if (ec) break;
+            if (!regular) continue;
             if (excluded_path(path, cfg)) continue;
             seen.insert(path);
+            if (env_.read_permitted && !env_.read_permitted(path)) {
+                store_->remove_item("files", path);
+                store_->set_skipped("files", path, "not permitted by policy");
+                file_error(path, {});
+                continue;
+            }
             const std::string kind = file_kind(path);
             const auto size = it->file_size(ec);
+            if (ec) break;
             if (kind.empty() || static_cast<long long>(size) > cfg.max_file_mb * 1024 * 1024) {
                 index_file(path, 0);  // records the skip (cheap: nothing is read)
                 continue;
             }
-            const auto mtime = it->last_write_time(ec).time_since_epoch().count();
-            const std::string hash = std::to_string(size) + ":" + std::to_string(mtime);
             const auto old = store_->item_hash("files", path);
-            if (old != hash) enqueue({"upsert", "files", path, old ? 2 : 0, nullptr});
+            enqueue({"upsert", "files", path, old ? 1 : 0, nullptr});
         }
+        if (ec) incomplete(folder, ec);
     }
     // Single documents (File Ingestion Scope: Single document): the file alone, nothing else of its folder.
     for (const auto& path : store_->documents()) {
         if (seen.count(path) || excluded_path(path, cfg)) continue;
+        if (env_.read_permitted && !env_.read_permitted(path)) {
+            seen.insert(path);
+            store_->remove_item("files", path);
+            store_->set_skipped("files", path, "not permitted by policy");
+            file_error(path, {});
+            continue;
+        }
         std::error_code ec;
         const auto p = fs_path(path);
-        if (!std::filesystem::is_regular_file(p, ec)) continue;
+        if (!std::filesystem::is_regular_file(p, ec)) {
+            std::error_code parent_error;
+            const bool parent_available = std::filesystem::is_directory(p.parent_path(), parent_error);
+            if ((ec && ec != std::errc::no_such_file_or_directory) || !parent_available) {
+                seen.insert(path);
+                if (scan_error.empty()) scan_error = "Cannot read " + path + ": " +
+                    (ec ? ec.message() : parent_error ? parent_error.message() : "parent folder is unavailable");
+            }
+            continue;
+        }
         seen.insert(path);
-        const auto size = std::filesystem::file_size(p, ec);
-        const auto mtime = std::filesystem::last_write_time(p, ec).time_since_epoch().count();
-        const std::string hash = std::to_string(size) + ":" + std::to_string(mtime);
-        const auto old = store_->item_hash("files", path);
-        if (old != hash) enqueue({"upsert", "files", path, old ? 2 : 1, nullptr});
+        enqueue({"upsert", "files", path, 1, nullptr});
     }
     // Deleted files, files of folders no longer selected, and newly excluded files leave the store.
+    const auto unavailable = [&](const std::string& id) {
+        return std::any_of(incomplete_folders.begin(), incomplete_folders.end(), [&](const std::string& folder) { return under(id, folder); });
+    };
+    const auto denied = [&](const std::string& id) {
+        return (env_.read_permitted && !env_.read_permitted(id)) ||
+               std::any_of(denied_folders.begin(), denied_folders.end(), [&](const std::string& folder) { return under(id, folder); });
+    };
     for (const auto& id : store_->item_ids("files"))
-        if (!seen.count(id)) store_->remove_item("files", id);
+        if (!seen.count(id) && (denied(id) || !unavailable(id))) store_->remove_item("files", id);
     for (const auto& [id, _] : store_->skipped("files", 1'000'000))
-        if (!seen.count(id)) store_->clear_skipped("files", id);
+        if (!seen.count(id) && (denied(id) || !unavailable(id))) store_->clear_skipped("files", id);
+    {
+        const std::lock_guard lock(file_status_mx_);
+        const std::string previous = std::exchange(file_scan_error_, scan_error);
+        bool removed_error = false;
+        for (auto it = file_errors_.begin(); it != file_errors_.end();) {
+            if (!seen.count(it->first) && (denied(it->first) || !unavailable(it->first))) {
+                it = file_errors_.erase(it);
+                removed_error = true;
+            } else ++it;
+        }
+        if (!file_scan_error_.empty()) store_->touch_source("files", 0, file_scan_error_);
+        else if (!file_errors_.empty()) store_->touch_source("files", 0, file_errors_.begin()->second);
+        else if (removed_error || (!previous.empty() && store_->source("files").last_error == previous)) store_->touch_source("files", 0, {});
+    }
+    {
+        const std::lock_guard lock(mx_);
+        --file_scans_running_;
+        if (!recheck_token.empty()) file_recheck_scanned_ = recheck_token;
+    }
 }
 
 void KnowledgeService::reconcile() {
@@ -526,7 +758,7 @@ void KnowledgeService::reconcile() {
     // A Source disabled by policy keeps nothing in the store.
     for (const auto& k : source_kinds())
         if (!cfg.source_policy.at(k) && !store_->item_ids(k).empty()) store_->remove_source(k);
-    apply_exclusions();
+    if (auto s = apply_exclusions(); !s) log::error(kLog, "Cannot apply knowledge exclusions: " + s.error().message);
     if (source_active("threads") && env_.thread_ids) {
         for (const auto& id : env_.thread_ids())
             if (!store_->item_hash("threads", id)) enqueue({"upsert", "threads", id, 0, nullptr});
@@ -593,7 +825,10 @@ bool KnowledgeService::embed_step() {
             f.message = "vector count mismatch";
         } else f = r.failure();
         last_embed_error_ = f.code;
-        if (f.code == model::code::invalid_request) store_->drop_from_embed_queue(ids);
+        if (f.code == model::code::invalid_request) {
+            const std::lock_guard lock(store_->db().mutex());
+            if (same_chunks(*store_, batch)) store_->drop_from_embed_queue(ids);
+        }
         else if (f.code == model::code::quota_exceeded) embed_retry_at_ = now_ms() + 60 * kMinute;
         else embed_retry_at_ = now_ms() + std::max<long long>(kMinute, f.retry_after_s * 1000ll);
         notify();
@@ -604,6 +839,8 @@ bool KnowledgeService::embed_step() {
     store_->add_used(day, "embed_tokens", used);
     const std::string model = r->model.empty() ? "default" : r->model;
     const int dim = r->dimension ? r->dimension : static_cast<int>(r->vectors.front().size());
+    const std::lock_guard lock(store_->db().mutex());
+    if (!same_chunks(*store_, batch)) return true;  // Retain surviving queue entries for a fresh embedding.
     const auto active = store_->active_embedding();
     std::string target = store_->meta("embed.target");
     const std::string this_one = model + "|" + std::to_string(dim);
@@ -633,7 +870,27 @@ bool KnowledgeService::extract_step() {
     if (!cfg.extraction || !env_.chat || now_ms() < extract_retry_at_) return false;
     const std::string day = today();
     if (store_->used(day, "extract_calls") >= cfg.extraction_daily_calls) return false;
-    const auto batch = store_->extract_batch(kExtractBatch);
+    std::vector<long long> known, deferred;
+    {
+        const std::lock_guard lock(extraction_deferred_mx_);
+        for (const auto& [id, state] : extraction_deferred_) known.push_back(id);
+    }
+    const auto existing = store_->chunks(known);
+    {
+        const std::lock_guard lock(extraction_deferred_mx_);
+        for (auto it = extraction_deferred_.begin(); it != extraction_deferred_.end();) {
+            const auto found = std::find_if(existing.begin(), existing.end(), [&](const auto& c) {
+                return c.id == it->first && c.item_id == it->second.item_id && c.text == it->second.text;
+            });
+            if (found == existing.end()) it = extraction_deferred_.erase(it);
+            else {
+                if (it->second.retry_at > now_ms()) deferred.push_back(it->first);
+                ++it;
+            }
+        }
+        if (extraction_deferred_.empty() && !isolate_extraction_) last_extract_error_.clear();
+    }
+    const auto batch = store_->extract_batch(isolate_extraction_ ? 1 : kExtractBatch, deferred);
     if (batch.empty()) return false;
     model::ChatRequest req;
     req.role = model::Role::small;
@@ -665,18 +922,76 @@ bool KnowledgeService::extract_step() {
     auto r = env_.chat(req);
     std::vector<long long> ids;
     for (const auto& c : batch) ids.push_back(c.id);
+    const auto defer_retry = [&](long long minimum_ms) {
+        extract_failures_ = std::min(extract_failures_ + 1, 7);
+        const long long backoff = (1LL << (extract_failures_ - 1)) * kMinute;
+        extract_retry_at_ = now_ms() + std::max(minimum_ms, backoff);
+    };
+    const auto defer_content = [&]() {
+        if (batch.size() > 1) {
+            isolate_extraction_ = true;
+            notify();
+            return true;
+        }
+        bool at_capacity = false;
+        {
+            const std::lock_guard db_lock(store_->db().mutex());
+            if (!same_chunks(*store_, batch)) return true;
+            const std::lock_guard lock(extraction_deferred_mx_);
+            at_capacity = !extraction_deferred_.count(batch[0].id) && extraction_deferred_.size() >= 512;
+            if (!at_capacity) {
+                auto& state = extraction_deferred_[batch[0].id];
+                state.item_id = batch[0].item_id;
+                state.text = batch[0].text;
+                state.failures = std::min(state.failures + 1, 7);
+                state.retry_at = now_ms() + (1LL << (state.failures - 1)) * kMinute;
+            }
+        }
+        // A rejected request can also be caused by a broken gateway configuration. Avoid
+        // spending the whole daily budget probing every passage when failures keep repeating.
+        if (!at_capacity) ++isolated_extract_failures_;
+        const bool pause_all = at_capacity || isolated_extract_failures_ >= 4;
+        if (pause_all) {
+            defer_retry(0);
+            extraction_delayed_ = true;
+            isolated_extract_failures_ = 0;
+        }
+        isolate_extraction_ = true;
+        notify();
+        return !pause_all;
+    };
     if (!r) {
         const auto& f = r.failure();
         last_extract_error_ = f.code;
-        if (f.code == model::code::invalid_request || f.code == model::code::context_length) store_->mark_extracted(ids);
-        else if (f.code == model::code::quota_exceeded) extract_retry_at_ = now_ms() + 60 * kMinute;
-        else extract_retry_at_ = now_ms() + std::max<long long>(kMinute, f.retry_after_s * 1000ll);
+        if (f.code == model::code::invalid_request || f.code == model::code::context_length) return defer_content();
+        extraction_delayed_ = true;
+        if (f.code == model::code::quota_exceeded) defer_retry(60 * kMinute);
+        else defer_retry(std::clamp<long long>(f.retry_after_s, 0, 3600) * 1000);
         notify();
         return false;
     }
-    last_extract_error_.clear();
-    if (const auto x = parse_extraction(r->text, static_cast<int>(batch.size()))) store_extraction(batch, *x);
-    store_->mark_extracted(ids);
+    const auto extraction = parse_extraction(r->text, static_cast<int>(batch.size()));
+    if (!extraction) {
+        last_extract_error_ = "invalid_response";
+        return defer_content();
+    }
+    extract_failures_ = 0;
+    isolated_extract_failures_ = 0;
+    extraction_delayed_ = false;
+    {
+        const std::lock_guard lock(store_->db().mutex());
+        if (!same_chunks(*store_, batch)) return true;  // The remaining queued passages will be retried.
+        store_extraction(batch, *extraction);
+        store_->mark_extracted(ids);
+    }
+    {
+        const std::lock_guard lock(extraction_deferred_mx_);
+        for (long long id : ids) extraction_deferred_.erase(id);
+        if (extraction_deferred_.empty()) {
+            isolate_extraction_ = false;
+            last_extract_error_.clear();
+        }
+    }
     return true;
 }
 
@@ -779,6 +1094,10 @@ bool KnowledgeService::step() {
             }
         } catch (const std::exception& e) {
             log::warn(kLog, std::string("indexing failed: ") + e.what());
+            if (t.source == "files") {
+                const std::lock_guard lock(mx_);
+                file_recheck_scanned_.clear();
+            }
         }
     }
     // A shared document or note that was just re-indexed is re-published now rather than at the next sweep.
@@ -791,6 +1110,16 @@ bool KnowledgeService::step() {
     if (sweep) {
         sweep_now();
         did = true;
+    }
+    std::string recheck_token;
+    {
+        const std::lock_guard lock(mx_);
+        if (!file_scans_running_ && std::none_of(tasks_.begin(), tasks_.end(), [](const Task& t) { return t.source == "files"; }))
+            recheck_token = file_recheck_scanned_;
+    }
+    if (!recheck_token.empty()) {
+        if (auto result = store_->clear_file_recheck(recheck_token); !result)
+            log::warn(kLog, "Could not clear file recheck marker: " + result.error().message);
     }
     for (bool (KnowledgeService::*batch)() : {&KnowledgeService::embed_step, &KnowledgeService::extract_step, &KnowledgeService::enrich_step}) {
         if (deferred()) break;
@@ -835,14 +1164,80 @@ void KnowledgeService::loop() {
 
 // ---- Retrieval (design D6) ----------------------------------------------------------------------------------------------
 
+bool KnowledgeService::item_visible(const ItemRow& item) {
+    const auto cfg = config();
+    const auto policy = cfg.source_policy.find(item.source);
+    if (policy == cfg.source_policy.end() || !policy->second) return false;
+    if (item.source == "files")
+        return !excluded_path(item.ext_id, cfg) && (!env_.read_permitted || env_.read_permitted(item.ext_id));
+    return !excluded_item(item.source, item.ext_id);
+}
+
+bool KnowledgeService::chunk_visible(long long chunk_id) {
+    const auto chunks = store_->chunks({chunk_id});
+    if (chunks.empty()) return false;
+    const auto item = store_->item(chunks[0].item_id);
+    return item && item_visible(*item);
+}
+
+bool KnowledgeService::relation_visible(const RelationRow& relation) {
+    return !relation.chunk_id || chunk_visible(relation.chunk_id);  // directory relations have no passage
+}
+
+bool KnowledgeService::fact_visible(const FactRow& fact) {
+    if (fact.item_source.empty()) return true;  // independently user-stated knowledge
+    const auto item = store_->item(fact.item_source, fact.item_ext_id);
+    return item && item_visible(*item);
+}
+
+bool KnowledgeService::entity_visible(long long entity_id) {
+    for (const auto& fact : store_->facts_of(entity_id)) if (fact_visible(fact)) return true;
+    if (store_->entity_has_directory_relation(entity_id)) return true;
+    long long after = 0;
+    constexpr int page_size = 128;
+    for (;;) {
+        const auto items = store_->entity_evidence_items(entity_id, after, page_size);
+        if (items.empty()) break;
+        for (const auto& item : items) if (item_visible(item)) return true;
+        if (static_cast<int>(items.size()) < page_size) break;
+        after = items.back().id;
+    }
+    return false;
+}
+
+std::vector<std::string> KnowledgeService::visible_entity_aliases(const EntityRow& entity) {
+    std::vector<std::string> out;
+    const auto canonical = normalize_name(entity.name);
+    for (const auto& alias : entity.aliases) {
+        const auto normalized = normalize_name(alias);
+        if (normalized == canonical) {
+            out.push_back(alias);
+            continue;
+        }
+        long long after = 0;
+        constexpr int page_size = 128;
+        bool visible = false;
+        for (;;) {
+            const auto items = store_->entity_alias_items(entity.id, normalized, after, page_size);
+            if (items.empty()) break;
+            for (const auto& item : items) if (item_visible(item)) { visible = true; break; }
+            if (visible || static_cast<int>(items.size()) < page_size) break;
+            after = items.back().id;
+        }
+        if (visible) out.push_back(alias);
+    }
+    return out;
+}
+
 SearchResult KnowledgeService::search(const std::string& query, const SearchOptions& opt) {
     SearchResult out;
     const auto cfg = config();
     const auto allowed = [&](const std::string& source) {
         const auto it = cfg.source_policy.find(source);
-        if (it == cfg.source_policy.end() || !it->second || !store_->source(source).user_enabled) return false;
+        if (it == cfg.source_policy.end() || !it->second) return false;
         return opt.sources.empty() || std::find(opt.sources.begin(), opt.sources.end(), source) != opt.sources.end();
     };
+    out.file_source_problem = allowed("files") && !store_->source("files").last_error.empty();
     std::vector<std::vector<long long>> lists;
     lists.push_back(store_->fts(query, 50));
     // The query embedding does not count towards the background budget.
@@ -859,10 +1254,48 @@ SearchResult KnowledgeService::search(const std::string& query, const SearchOpti
         }
     }
     // Graph expansion: chunks mentioning the query's entities and the entities up to two relations away.
-    const auto seeds = store_->entities_named_in(query, 5);
+    std::vector<long long> seeds;
+    const std::string normalized_query = " " + normalize_name(query) + " ";
+    for (const auto id : store_->entities_named_in(query, 5)) {
+        if (!entity_visible(id)) continue;
+        const auto entity = store_->entity(id);
+        if (!entity) continue;
+        const auto aliases = visible_entity_aliases(*entity);
+        if (std::any_of(aliases.begin(), aliases.end(), [&](const auto& alias) {
+                const auto normalized = normalize_name(alias);
+                return normalized.size() >= 3 && normalized_query.find(" " + normalized + " ") != std::string::npos;
+            })) seeds.push_back(id);
+    }
     if (!seeds.empty()) {
-        auto hop1 = store_->neighbours(seeds, 10);
-        auto hop2 = store_->neighbours(hop1, 10);
+        const auto visible_neighbours = [&](const std::vector<long long>& ids) {
+            const std::set<long long> from(ids.begin(), ids.end());
+            std::map<long long, int> counts;
+            for (const auto id : ids) {
+                for (const auto& relation : store_->relations_of(id, 2000)) {
+                    const auto other = relation.subject == id ? relation.object : relation.subject;
+                    if (from.count(other)) continue;
+                    if (relation.chunk_id) {
+                        const auto chunks = store_->chunks({relation.chunk_id});
+                        if (chunks.empty()) continue;
+                        const auto item = store_->item(chunks.front().item_id);
+                        if (!item || !allowed(item->source) || !item_visible(*item)) continue;
+                    }
+                    ++counts[other];
+                }
+            }
+            std::vector<std::pair<long long, int>> ranked(counts.begin(), counts.end());
+            std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+                return a.second != b.second ? a.second > b.second : a.first < b.first;
+            });
+            std::vector<long long> neighbours;
+            for (const auto& [id, _] : ranked) {
+                if (neighbours.size() == 10) break;
+                neighbours.push_back(id);
+            }
+            return neighbours;
+        };
+        auto hop1 = visible_neighbours(seeds);
+        auto hop2 = visible_neighbours(hop1);
         std::vector<long long> expanded = store_->chunks_mentioning(seeds, 20);
         std::vector<long long> nearby = hop1;
         nearby.insert(nearby.end(), hop2.begin(), hop2.end());
@@ -881,9 +1314,37 @@ SearchResult KnowledgeService::search(const std::string& query, const SearchOpti
         if (candidates.size() >= 30) break;
         auto& it = items[c.item_id];
         if (!it) it = store_->item(c.item_id);
-        if (!it || !allowed(it->source)) continue;
+        // Hidden candidates must not consume the bounded reranking pool and crowd out visible results.
+        if (!it || !allowed(it->source) || !item_visible(*it)) continue;
         candidates.push_back({c.id, c.item_id, it->source, it->title, it->ref, c.heading, c.text, c.at ? c.at : it->updated_at, fused.at(c.id), {}, {}, {}});
     }
+    const auto filter_current_local = [&] {
+        const auto current_cfg = config();
+        const std::lock_guard lock(store_->db().mutex());
+        std::vector<long long> ids;
+        for (const auto& p : candidates)
+            if (p.source != "team") ids.push_back(p.chunk_id);
+        std::map<long long, ChunkRow> chunks;
+        for (const auto& c : store_->chunks(ids)) chunks.emplace(c.id, c);
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](const Passage& p) {
+            if (p.source == "team") return false;
+            const auto c = chunks.find(p.chunk_id);
+            if (c == chunks.end() || c->second.item_id != p.item_id || c->second.text != p.text || c->second.heading != p.heading) return true;
+            const auto item = store_->item(p.item_id);
+            if (!item || item->source != p.source || item->title != p.title || item->ref != p.ref ||
+                (c->second.at ? c->second.at : item->updated_at) != p.date) return true;
+            const auto policy = current_cfg.source_policy.find(p.source);
+            return policy == current_cfg.source_policy.end() || !policy->second ||
+                   (p.source == "files" ? excluded_path(item->ext_id, current_cfg) : excluded_item(p.source, item->ext_id));
+        }), candidates.end());
+    };
+    const auto filter_current_permissions = [&] {
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](const Passage& p) {
+            if (p.source == "team") return false;
+            const auto item = store_->item(p.item_id);
+            return !item || !item_visible(*item);
+        }), candidates.end());
+    };
     // Team Knowledge In Search: passages colleagues shared with the user's Groups, merged with the local ones (taking
     // turns) and reranked with them.
     search_team(query, opt, out);
@@ -897,6 +1358,8 @@ SearchResult KnowledgeService::search(const std::string& query, const SearchOpti
         candidates = std::move(merged);
         out.passages.clear();
     }
+    filter_current_local();
+    filter_current_permissions();
     if (candidates.size() > 30) candidates.resize(30);  // design D6: the top 30 combined results are reranked
     // Rerank the top 30; on failure the fused order stays.
     if (env_.rerank && candidates.size() > 1) {
@@ -910,9 +1373,25 @@ SearchResult KnowledgeService::search(const std::string& query, const SearchOpti
             out.reranked = true;
         }
     }
+    filter_current_local();
+    filter_current_permissions();
     if (static_cast<int>(candidates.size()) > opt.limit) candidates.resize(static_cast<size_t>(opt.limit));
     out.passages = std::move(candidates);
-    out.facts = store_->find_facts(query, 5);
+    out.facts = store_->find_facts(query, 2000);
+    out.facts.erase(std::remove_if(out.facts.begin(), out.facts.end(), [&](const FactRow& f) {
+        return !fact_visible(f) || (!f.item_source.empty() && !opt.sources.empty() &&
+                                   std::find(opt.sources.begin(), opt.sources.end(), f.item_source) == opt.sources.end());
+    }), out.facts.end());
+    if (out.facts.size() > 5) out.facts.resize(5);
+    // A model call may have taken long enough for a file scan to fail. Report the
+    // latest freshness state rather than only the state observed at search start.
+    const auto current_cfg = config();
+    const auto files = current_cfg.source_policy.find("files");
+    const auto file_source = store_->source("files");
+    const bool files_selected = opt.sources.empty() || std::find(opt.sources.begin(), opt.sources.end(), "files") != opt.sources.end();
+    out.file_source_problem = files_selected && files != current_cfg.source_policy.end() && files->second &&
+                              (!file_source.user_enabled || file_source.paused || !file_source.last_error.empty() ||
+                               !store_->meta("files.recheck_required").empty());
     return out;
 }
 
@@ -948,10 +1427,33 @@ void KnowledgeService::search_team(const std::string& query, const SearchOptions
 json KnowledgeService::status() {
     const auto cfg = config();
     const std::string day = today();
+    const auto exclusions = store_->user_exclusions();
+    std::unordered_set<std::string> excluded_items;
+    Exclusions path_exclusions;
+    for (const auto& [kind, value] : exclusions)
+        if (kind == "item") excluded_items.insert(value);
+        else path_exclusions.emplace_back(kind, value);
     json sources = json::array();
     for (const auto& k : source_kinds()) {
         const auto st = store_->source(k);
-        const auto c = store_->counts(k);
+        SourceCounts c;
+        c.skipped = store_->skipped_count(k);
+        if (cfg.source_policy.at(k)) {
+            for (const auto& item : store_->item_queue_counts(k)) {
+                if (excluded_items.count(k + ":" + item.ext_id)) continue;
+                if (k == "files" && (path_excluded(item.ext_id, cfg, path_exclusions) ||
+                                     (env_.read_permitted && !env_.read_permitted(item.ext_id)))) continue;
+                ++c.items;
+                c.chunks += item.chunks;
+                c.embed_pending += item.embed_pending;
+                c.extract_pending += item.extract_pending;
+            }
+            if (k == "notes") {
+                c.items = 0;  // The Notes Source includes notes that have not been indexed yet.
+                for (const auto id : store_->note_ids())
+                    if (!excluded_items.count("notes:" + std::to_string(id))) ++c.items;
+            }
+        }
         json skipped = json::array();
         for (const auto& [id, reason] : store_->skipped(k, 50)) skipped.push_back({{"id", id}, {"reason", reason}});
         sources.push_back({{"kind", k},
@@ -1006,9 +1508,15 @@ Status KnowledgeService::set_source_enabled(const std::string& kind, bool enable
     const auto it = cfg.source_policy.find(kind);
     if (it == cfg.source_policy.end()) return make_error("invalid", "unknown Source " + kind);
     if (enabled && !it->second) return make_error("policy", "The " + kind + " Source is disabled by policy.");
-    auto st = store_->source(kind);
-    st.user_enabled = enabled;
-    store_->set_source(st);
+    {
+        const std::lock_guard lock(store_->db().mutex());
+        auto st = store_->source(kind);
+        const bool changed = st.user_enabled != enabled;
+        st.user_enabled = enabled;
+        if (kind == "files") {
+            if (auto result = store_->set_file_source_with_recheck(st, changed); !result) return result;
+        } else store_->set_source(st);
+    }
     if (!enabled) {
         const std::lock_guard lock(mx_);
         tasks_.erase(std::remove_if(tasks_.begin(), tasks_.end(), [&](const Task& t) { return t.source == kind && t.op == "upsert"; }), tasks_.end());
@@ -1021,9 +1529,15 @@ Status KnowledgeService::set_source_enabled(const std::string& kind, bool enable
 Status KnowledgeService::set_source_paused(const std::string& kind, bool paused) {
     if (std::find(source_kinds().begin(), source_kinds().end(), kind) == source_kinds().end())
         return make_error("invalid", "unknown Source " + kind);
-    auto st = store_->source(kind);
-    st.paused = paused;
-    store_->set_source(st);
+    {
+        const std::lock_guard lock(store_->db().mutex());
+        auto st = store_->source(kind);
+        const bool changed = st.paused != paused;
+        st.paused = paused;
+        if (kind == "files") {
+            if (auto result = store_->set_file_source_with_recheck(st, changed); !result) return result;
+        } else store_->set_source(st);
+    }
     policy_changed();
     notify();
     return {};
@@ -1047,11 +1561,16 @@ Status KnowledgeService::reindex(const std::string& kind) {
 Status KnowledgeService::forget_source(const std::string& kind) {
     if (std::find(source_kinds().begin(), source_kinds().end(), kind) == source_kinds().end())
         return make_error("invalid", "unknown Source " + kind);
+    if (auto s = store_->purge_recovery_copy(); !s) return s;
     {
         const std::lock_guard lock(mx_);
         tasks_.erase(std::remove_if(tasks_.begin(), tasks_.end(), [&](const Task& t) { return t.source == kind; }), tasks_.end());
     }
-    store_->remove_source(kind);
+    {
+        const std::lock_guard lock(share_mx_);
+        if (store_->remove_source(kind, true) < 0) return make_error("storage", "The Source could not be forgotten.");
+    }
+    sync_sharing(false);
     notify();
     return {};
 }
@@ -1059,23 +1578,21 @@ Status KnowledgeService::forget_source(const std::string& kind) {
 Status KnowledgeService::forget_item(long long item_id) {
     const auto it = store_->item(item_id);
     if (!it) return make_error("not_found", "no such item");
+    if (auto s = store_->purge_recovery_copy(); !s) return s;
+    if (it->source == "notes") return delete_note(std::atoll(it->ext_id.c_str()));
     // A forgotten item is not indexed again: it becomes an item exclusion. A shared one is unshared.
-    (void)store_->add_user_exclusion("item", it->source + ":" + it->ext_id);
-    store_->remove_item(item_id);
-    if (const auto row = store_->share(it->source, it->ext_id)) {
+    if (auto s = store_->add_user_exclusion("item", it->source + ":" + it->ext_id); !s) return s;
+    {
         const std::lock_guard lock(share_mx_);
-        if (unpublish(*row)) store_->remove_share(row->source, row->ext_id);
-        else {
-            auto r = *row;
-            r.state = "unsharing";
-            store_->put_share(r);
-        }
+        if (!store_->remove_item(item_id, true)) return make_error("storage", "The item could not be forgotten.");
     }
+    sync_sharing(false);
     notify();
     return {};
 }
 
 Status KnowledgeService::forget_entity(long long entity_id) {
+    if (auto s = store_->purge_recovery_copy(); !s) return s;
     Status s = store_->forget_entity(entity_id);
     notify();
     return s;
@@ -1107,10 +1624,12 @@ Status KnowledgeService::add_folder(const std::string& path_in) {
 }
 
 Status KnowledgeService::remove_folder(const std::string& path) {
+    if (auto s = store_->purge_recovery_copy(); !s) return s;
     if (Status s = store_->remove_folder(path); !s) return s;
     const auto docs = store_->documents();
     for (const auto& id : store_->item_ids("files"))
-        if (under(id, path) && std::find(docs.begin(), docs.end(), id) == docs.end()) store_->remove_item("files", id);
+        if (under(id, path) && std::find(docs.begin(), docs.end(), id) == docs.end() && !store_->remove_item("files", id))
+            return make_error("storage", "An indexed file could not be removed.");
     for (const auto& [id, _] : store_->skipped("files", 1'000'000))
         if (under(id, path)) store_->clear_skipped("files", id);
     notify();
@@ -1120,9 +1639,11 @@ Status KnowledgeService::remove_folder(const std::string& path) {
 Status KnowledgeService::add_exclusion(const std::string& kind, const std::string& value) {
     if (kind != "path" && kind != "type" && kind != "item") return make_error("invalid", "kind must be path, type or item");
     if (trim(value).empty()) return make_error("invalid", "empty exclusion");
+    if (auto s = store_->purge_recovery_copy(); !s) return s;
     if (Status s = store_->add_user_exclusion(kind, trim(value)); !s) return s;
     // Exclusion added later: everything derived from the excluded items is deleted now.
-    apply_exclusions();
+    if (auto s = apply_exclusions(); !s) return s;
+    sync_sharing(false);
     if (kind == "type" || kind == "path")
         for (const auto& [id, _] : store_->skipped("files", 1'000'000))
             if (excluded_path(id, config())) store_->clear_skipped("files", id);
@@ -1137,25 +1658,68 @@ Status KnowledgeService::remove_exclusion(const std::string& kind, const std::st
     return {};
 }
 
+std::vector<EntityRow> KnowledgeService::visible_entities(const std::string& query, int limit) {
+    std::vector<EntityRow> out;
+    if (limit <= 0) return out;
+    const int batch_size = std::clamp(limit, 32, 200);
+    const auto normalized_query = normalize_name(query);
+    std::optional<EntityCursor> after;
+    for (;;) {
+        const auto batch = store_->find_entities_page(query, batch_size, after);
+        if (batch.empty()) break;
+        for (const auto& row : batch) {
+            if (!entity_visible(row.entity.id)) continue;
+            if (!normalized_query.empty() && normalize_name(row.entity.name).find(normalized_query) == std::string::npos &&
+                row.entity.email != to_lower(trim(query))) {
+                const auto entity = store_->entity(row.entity.id);
+                if (!entity) continue;
+                const auto aliases = visible_entity_aliases(*entity);
+                if (std::none_of(aliases.begin(), aliases.end(), [&](const auto& alias) {
+                        return normalize_name(alias).find(normalized_query) != std::string::npos;
+                    })) continue;
+            }
+            out.push_back(row.entity);
+            if (static_cast<int>(out.size()) >= limit) return out;
+        }
+        if (static_cast<int>(batch.size()) < batch_size) break;
+        const auto& last = batch.back();
+        after = EntityCursor{last.score, last.entity.name, last.entity.id};
+    }
+    return out;
+}
+
 json KnowledgeService::entities(const std::string& query, int limit) {
     json out = json::array();
-    for (const auto& e : store_->find_entities(query, limit))
+    for (const auto& e : visible_entities(query, limit))
         out.push_back({{"id", e.id}, {"type", e.type}, {"name", e.name}, {"email", e.email}, {"department", e.department}, {"title", e.title}});
     return out;
 }
 
 json KnowledgeService::items(const std::string& query, int limit) {
     json out = json::array();
-    for (const auto& it : store_->find_items(query, limit))
-        out.push_back({{"id", it.id}, {"source", it.source}, {"title", it.title}, {"ref", it.ref}});
+    if (limit <= 0) return out;
+    const int batch_size = std::clamp(limit, 32, 200);
+    std::optional<std::pair<long long, long long>> before;
+    for (;;) {
+        const auto batch = store_->find_items(query, batch_size, before);
+        if (batch.empty()) break;
+        for (const auto& it : batch) {
+            if (!item_visible(it)) continue;
+            out.push_back({{"id", it.id}, {"source", it.source}, {"title", it.title}, {"ref", it.ref}});
+            if (static_cast<int>(out.size()) >= limit) return out;
+        }
+        if (static_cast<int>(batch.size()) < batch_size) break;
+        before = std::pair{batch.back().updated_at, batch.back().id};
+    }
     return out;
 }
 
 json KnowledgeService::entity_profile(long long id) {
     const auto e = store_->entity(id);
-    if (!e) return nullptr;
+    if (!e || !entity_visible(id)) return nullptr;
     json facts = json::array();
     for (const auto& f : store_->facts_of(id)) {
+        if (!fact_visible(f)) continue;
         json fact = {{"id", f.id},
                      {"text", f.text},
                      {"stated", iso(f.created_at)},
@@ -1168,6 +1732,7 @@ json KnowledgeService::entity_profile(long long id) {
     }
     json relations = json::array();
     for (const auto& r : store_->relations_of(id, 30)) {
+        if (!relation_visible(r)) continue;
         json rel = {{"id", r.id}, {"subject", r.subject_name}, {"predicate", r.predicate}, {"object", r.object_name}, {"confidence", r.confidence}};
         if (!r.valid_from.empty()) rel["valid_from"] = r.valid_from;
         if (!r.valid_to.empty()) rel["valid_to"] = r.valid_to;
@@ -1180,8 +1745,10 @@ json KnowledgeService::entity_profile(long long id) {
         if (!r.chunk_id) rel["source"] = {{"source", "directory"}};
         relations.push_back(std::move(rel));
     }
-    json profile = {{"id", e->id}, {"type", e->type}, {"name", e->name}, {"aliases", e->aliases}, {"facts", facts}, {"relations", relations},
-                    {"mentions", store_->chunks_mentioning({id}, 1000).size()}};
+    const auto mentioned = store_->chunks_mentioning({id}, 1000);
+    const auto visible_mentions = std::count_if(mentioned.begin(), mentioned.end(), [&](long long chunk) { return chunk_visible(chunk); });
+    json profile = {{"id", e->id}, {"type", e->type}, {"name", e->name}, {"aliases", visible_entity_aliases(*e)}, {"facts", facts}, {"relations", relations},
+                    {"mentions", visible_mentions}};
     if (!e->email.empty()) profile["email"] = e->email;
     if (!e->department.empty()) profile["department"] = e->department;
     if (!e->title.empty()) profile["title"] = e->title;
@@ -1189,19 +1756,69 @@ json KnowledgeService::entity_profile(long long id) {
     return profile;
 }
 
+Result<std::vector<std::string>> KnowledgeService::freeze_for_delete_all() {
+    const std::lock_guard lock(share_mx_);
+    deleting_all_ = true;
+    if (auto s = store_->mark_shares_unsharing(); !s) {
+        deleting_all_ = false;
+        return s.error();
+    }
+    std::vector<std::string> ids;
+    for (const auto& row : store_->shares()) {
+        if (row.state == "removed" || row.state == "withdrawn") continue;
+        std::string id = row.remote_id;
+        if (id.empty() && shareable_source(row.source) && !row.ext_id.empty())
+            id = "k-" + content_hash(row.source + ":" + row.ext_id);
+        if (id.empty()) {
+            deleting_all_ = false;
+            return make_error("remote_pending", "A shared item has no withdrawal identity; your local data has not been deleted.");
+        }
+        if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(std::move(id));
+    }
+    return ids;
+}
+
+void KnowledgeService::cancel_delete_all() { deleting_all_ = false; }
+
+Status KnowledgeService::prepare_delete_all() {
+    auto ids = freeze_for_delete_all();
+    if (!ids) return ids.error();
+    const std::lock_guard lock(share_mx_);
+    for (const auto& row : store_->shares()) {
+        if (row.state == "removed" || row.state == "withdrawn") continue;
+        std::string id = row.remote_id;
+        if (id.empty() && shareable_source(row.source) && !row.ext_id.empty())
+            id = "k-" + content_hash(row.source + ":" + row.ext_id);
+        const auto response = env_.team && !id.empty() ? env_.team("DELETE", "api/v1/knowledge/items/" + id, nullptr) :
+            Result<json>(make_error("offline", "The control plane is not available."));
+        // A 404 does not prove absence for the original account: legacy shares are keyed by mutable usernames.
+        if (!response) {
+            deleting_all_ = false;
+            return make_error("remote_pending", "Shared knowledge could not be removed. Reconnect and try Delete all again; your local data has not been deleted.");
+        }
+        if (auto result = store_->mark_share_removed(row.source, row.ext_id); !result) {
+            deleting_all_ = false;
+            return result;
+        }
+    }
+    return {};
+}
+
 Status KnowledgeService::forget_all() {
+    if (auto s = prepare_delete_all(); !s) return s;
+    if (auto s = store_->purge_recovery_copy(); !s) {
+        deleting_all_ = false;
+        return s;
+    }
     {
         const std::lock_guard lock(mx_);
         tasks_.clear();
     }
-    // Shared items are unshared first (best effort: an unreachable control plane keeps them until an administrator
-    // removes them).
-    {
-        const std::lock_guard lock(share_mx_);
-        for (const auto& row : store_->shares())
-            if (row.state != "removed" && row.state != "withdrawn") (void)unpublish(row);
+    if (auto s = store_->clear(true); !s) {
+        deleting_all_ = false;
+        return s;
     }
-    store_->clear(true);
+    deleting_all_ = false;
     notify();
     return {};
 }
@@ -1230,10 +1847,12 @@ Status KnowledgeService::add_document(const std::string& path_in) {
 }
 
 Status KnowledgeService::remove_document(const std::string& path) {
+    if (auto s = store_->purge_recovery_copy(); !s) return s;
     if (Status s = store_->remove_document(path); !s) return s;
     bool in_folder = false;
     for (const auto& f : store_->folders()) in_folder = in_folder || under(path, f);
-    if (!in_folder) store_->remove_item("files", path);
+    if (!in_folder && store_->item("files", path) && !store_->remove_item("files", path))
+        return make_error("storage", "The indexed file could not be removed.");
     policy_changed();  // the next sweep unshares it when it was shared
     notify();
     return {};
@@ -1257,29 +1876,25 @@ Result<long long> KnowledgeService::save_note(long long id, const std::string& t
 }
 
 Status KnowledgeService::delete_note(long long id) {
-    if (!store_->delete_note(id)) return make_error("not_found", "no such note");
     const std::string sid = std::to_string(id);
-    store_->remove_item("notes", sid);
+    {
+        const std::lock_guard lock(share_mx_);
+        if (auto s = store_->delete_note(id); !s) return s;
+    }
     {
         const std::lock_guard lock(mx_);
         tasks_.erase(std::remove_if(tasks_.begin(), tasks_.end(), [&](const Task& t) { return t.source == "notes" && t.id == sid; }), tasks_.end());
     }
-    if (const auto row = store_->share("notes", sid)) {
-        const std::lock_guard lock(share_mx_);
-        if (unpublish(*row)) store_->remove_share("notes", sid);
-        else {
-            auto r = *row;
-            r.state = "unsharing";
-            store_->put_share(r);
-        }
-    }
+    sync_sharing(false);
     notify();
     return {};
 }
 
 json KnowledgeService::notes() {
     json out = json::array();
+    if (!config().source_policy.at("notes")) return out;
     for (const auto& n : store_->notes()) {
+        if (excluded_item("notes", std::to_string(n.id))) continue;
         const auto it = store_->item("notes", std::to_string(n.id));
         out.push_back({{"id", n.id}, {"title", note_title(n)}, {"updated", iso(n.updated_at)}, {"size", n.text.size()}, {"item_id", it ? it->id : 0}});
     }
@@ -1300,6 +1915,7 @@ json KnowledgeService::origin_json(const NoteRow& n) {
 }
 
 json KnowledgeService::note(long long id) {
+    if (!config().source_policy.at("notes") || excluded_item("notes", std::to_string(id))) return nullptr;
     const auto n = store_->note(id);
     if (!n) return nullptr;
     const auto it = store_->item("notes", std::to_string(id));
@@ -1350,7 +1966,7 @@ std::string fit_note_text(std::string text, size_t title_bytes, size_t limit) {
 Result<json> KnowledgeService::draft_from_mail(long long item_id) {
     if (!config().save_as_note) return make_error("not_permitted", "Policy does not allow saving mail as a note.");
     const auto it = store_->item(item_id);
-    if (!it || it->source != "mail") return make_error("not_found", "This mail item is no longer in your knowledge.");
+    if (!it || it->source != "mail" || !item_visible(*it)) return make_error("not_found", "This mail item is no longer in your knowledge.");
     const auto m = env_.mail_message ? env_.mail_message(it->ext_id) : std::nullopt;
     if (!m || jbool(*m, "withheld")) return make_error("not_found", "This mail item is no longer in your knowledge.");
     const std::string subject = jstr(*m, "subject").empty() ? std::string("(no subject)") : jstr(*m, "subject");
@@ -1416,9 +2032,14 @@ long long item_size(KgStore& store, const ItemRow& it, long long indexed) {
     return indexed;
 }
 
+bool inferred_legacy_removal(const ShareRow& r) {
+    return (r.state == "removed" && r.error == "Removed from team knowledge by an administrator.") ||
+           (r.state == "withdrawn" && r.error != "acknowledged-delete-v1");
+}
+
 json share_json(const ShareRow& r) {
-    json j = {{"state", r.state}, {"groups", r.groups}, {"updated", iso(r.updated_at)}};
-    if (!r.error.empty()) j["error"] = r.error;
+    json j = {{"state", inferred_legacy_removal(r) ? "unverified" : r.state}, {"groups", r.groups}, {"updated", iso(r.updated_at)}};
+    if (!r.error.empty() && r.error != "acknowledged-delete-v1") j["error"] = r.error;
     if (!r.rule.empty()) j["rule"] = r.rule;
     return j;
 }
@@ -1429,24 +2050,88 @@ bool is_shared(const std::optional<ShareRow>& r) { return r && (r->state == "sha
 
 json KnowledgeService::browse(const std::string& source, const std::string& query, int limit) {
     json out = json::array();
+    if (limit <= 0) return out;
+    const auto cfg = config();
+    const auto policy = cfg.source_policy.find(source);
+    if (policy == cfg.source_policy.end() || !policy->second) return out;
     if (source == "notes") {
         const std::string q = to_lower(trim(query));
-        for (const auto& n : store_->notes()) {
-            if (static_cast<int>(out.size()) >= limit) break;
-            const std::string title = note_title(n);
-            if (!q.empty() && to_lower(title).find(q) == std::string::npos && to_lower(n.text).find(q) == std::string::npos) continue;
-            const std::string sid = std::to_string(n.id);
-            const auto it = store_->item("notes", sid);
-            const auto share = store_->share("notes", sid);
-            json row = {{"id", it ? it->id : 0}, {"note_id", n.id}, {"source", "notes"}, {"title", title}, {"ref", "workbench://note/" + sid},
-                        {"date", iso(n.updated_at)}, {"size", n.text.size()},
-                        {"pending", !it || it->hash != note_hash(n) || store_->item_pending(it->id, config().extraction) > 0}, {"shared", is_shared(share)}};
-            if (share) row["sharing"] = share_json(*share);
-            out.push_back(std::move(row));
+        std::unordered_set<std::string> excluded_notes;
+        for (const auto& [kind, value] : store_->user_exclusions())
+            if (kind == "item" && value.starts_with("notes:")) excluded_notes.insert(value.substr(6));
+        std::optional<std::pair<long long, long long>> before;
+        constexpr int batch_size = 16;  // Notes can each contain up to two megabytes.
+        for (;;) {
+            const auto batch = store_->notes_page(batch_size, before);
+            if (batch.empty()) break;
+            for (const auto& n : batch) {
+                const std::string title = note_title(n);
+                if (!q.empty() && to_lower(title).find(q) == std::string::npos && to_lower(n.text).find(q) == std::string::npos) continue;
+                const std::string sid = std::to_string(n.id);
+                if (excluded_notes.count(sid) || excluded_item("notes", sid)) continue;
+                const auto it = store_->item("notes", sid);
+                const auto share = store_->share("notes", sid);
+                json row = {{"id", it ? it->id : 0}, {"note_id", n.id}, {"source", "notes"}, {"title", title}, {"ref", "workbench://note/" + sid},
+                            {"date", iso(n.updated_at)}, {"size", n.text.size()},
+                            {"pending", !it || it->hash != note_hash(n) || store_->item_pending(it->id, config().extraction) > 0}, {"shared", is_shared(share)}};
+                if (share) row["sharing"] = share_json(*share);
+                out.push_back(std::move(row));
+                if (static_cast<int>(out.size()) >= limit) return out;
+            }
+            if (static_cast<int>(batch.size()) < batch_size) break;
+            before = std::pair{batch.back().updated_at, batch.back().id};
         }
         return out;
     }
-    for (const auto& b : store_->browse(source, trim(query), limit, config().extraction)) {
+    // Share one exclusion snapshot across the page, then refresh it before returning. This avoids loading the complete
+    // table once per row, while still rechecking current policy and file permissions after collecting candidates.
+    std::unordered_set<std::string> excluded_items;
+    Exclusions path_exclusions;
+    auto current_cfg = cfg;
+    const auto refresh_filters = [&] {
+        current_cfg = config();
+        excluded_items.clear();
+        path_exclusions.clear();
+        for (const auto& [kind, value] : store_->user_exclusions())
+            if (kind == "item") excluded_items.insert(value);
+            else path_exclusions.emplace_back(kind, value);
+    };
+    const auto visible = [&](const ItemRow& item) {
+        const auto policy_now = current_cfg.source_policy.find(item.source);
+        if (policy_now == current_cfg.source_policy.end() || !policy_now->second ||
+            excluded_items.count(item.source + ":" + item.ext_id)) return false;
+        return item.source != "files" ||
+               (!path_excluded(item.ext_id, current_cfg, path_exclusions) &&
+                (!env_.read_permitted || env_.read_permitted(item.ext_id)));
+    };
+    refresh_filters();
+    std::vector<BrowseRow> rows;
+    const auto revalidate = [&] {
+        refresh_filters();
+        rows.erase(std::remove_if(rows.begin(), rows.end(), [&](const BrowseRow& b) { return !visible(b.item); }), rows.end());
+    };
+    std::optional<std::pair<long long, long long>> before;
+    const int batch_size = std::clamp(limit, 32, 200);
+    bool full = false;
+    for (;;) {
+        const auto batch = store_->browse(source, trim(query), batch_size, current_cfg.extraction, before);
+        if (batch.empty()) {
+            revalidate();
+            break;
+        }
+        for (const auto& b : batch) {
+            before = std::pair{b.item.updated_at, b.item.id};
+            if (!visible(b.item)) continue;
+            rows.push_back(b);
+            if (static_cast<int>(rows.size()) >= limit) {
+                revalidate();
+                if (static_cast<int>(rows.size()) >= limit) { full = true; break; }
+            }
+        }
+        if (full) break;
+        if (static_cast<int>(batch.size()) < batch_size) { revalidate(); break; }
+    }
+    for (const auto& b : rows) {
         const auto share = shareable_source(source) ? store_->share(source, b.item.ext_id) : std::nullopt;
         json row = {{"id", b.item.id}, {"source", b.item.source}, {"title", b.item.title}, {"ref", b.item.ref},
                     {"date", iso(b.item.updated_at)}, {"size", item_size(*store_, b.item, b.size)}, {"pending", b.pending > 0},
@@ -1459,18 +2144,57 @@ json KnowledgeService::browse(const std::string& source, const std::string& quer
 
 json KnowledgeService::source_counts() {
     json out = json::object();
-    for (const auto& k : source_kinds()) out[k] = store_->counts(k).items;
-    out["notes"] = store_->notes().size();
+    const auto cfg = config();
+    const auto exclusions = store_->user_exclusions();
+    std::unordered_set<std::string> excluded_items;
+    Exclusions path_exclusions;
+    for (const auto& [kind, value] : exclusions)
+        if (kind == "item") excluded_items.insert(value);
+        else path_exclusions.emplace_back(kind, value);
+    for (const auto& k : source_kinds()) {
+        const auto policy = cfg.source_policy.find(k);
+        if (policy == cfg.source_policy.end() || !policy->second) out[k] = 0;
+        else if (k == "notes") {
+            long long count = 0;
+            for (const auto id : store_->note_ids())
+                if (!excluded_items.count("notes:" + std::to_string(id))) ++count;
+            out[k] = count;
+        } else {
+            long long count = 0;
+            for (const auto& id : store_->item_ids(k)) {
+                if (excluded_items.count(k + ":" + id)) continue;
+                if (k == "files" && path_excluded(id, cfg, path_exclusions)) continue;
+                if (k == "files" && env_.read_permitted && !env_.read_permitted(id)) continue;
+                ++count;
+            }
+            out[k] = count;
+        }
+    }
     return out;
 }
 
 json KnowledgeService::item_detail(long long id) {
-    const auto it = store_->item(id);
-    if (!it) return nullptr;
     // The indexed text: a note's own text; otherwise the passages in order, cut at about 20,000 characters.
     std::string text;
     long long indexed = 0;
-    const auto chunks = store_->chunks_of_item(id);
+    std::optional<ItemRow> it;
+    std::vector<ChunkRow> chunks;
+    std::vector<RelationRow> relations;
+    const auto cfg = config();
+    long long pending = 0;
+    long long extraction_pending = 0;
+    {
+        // Reindexing can replace chunks and reuse their integer ids. Read both sides of the link while the
+        // knowledge-store lock is held so a new relation cannot be paired with an old passage (or vice versa).
+        const std::lock_guard lock(store_->db().mutex());
+        it = store_->item(id);
+        if (!it) return nullptr;
+        chunks = store_->chunks_of_item(id);
+        relations = store_->relations_of_item(id);
+        pending = store_->item_pending(id, cfg.extraction);
+        extraction_pending = store_->item_extraction_pending(id);
+    }
+    if (!item_visible(*it)) return nullptr;
     for (const auto& c : chunks) indexed += static_cast<long long>(c.text.size());
     std::optional<NoteRow> n;
     if (it->source == "notes") n = store_->note(std::atoll(it->ext_id.c_str()));
@@ -1485,12 +2209,31 @@ json KnowledgeService::item_detail(long long id) {
         }
     json entities = json::array();
     for (const auto& e : store_->entities_of_item(id)) entities.push_back({{"id", e.id}, {"name", e.name}, {"type", e.type}});
+    std::map<long long, const ChunkRow*> chunks_by_id;
+    for (const auto& c : chunks) chunks_by_id.emplace(c.id, &c);
     json facts = json::array();
-    for (const auto& r : store_->relations_of_item(id))
-        facts.push_back({{"kind", "relation"}, {"id", r.id}, {"text", fact_text(r)}, {"entity_id", r.subject}, {"valid_from", r.valid_from}});
+    for (const auto& r : relations) {
+        json fact = {{"kind", "relation"}, {"id", r.id}, {"text", fact_text(r)}, {"entity_id", r.subject}, {"valid_from", r.valid_from}};
+        if (const auto found = chunks_by_id.find(r.chunk_id); found != chunks_by_id.end()) {
+            // This is the passage sent for extraction, not an exact quoted evidence span or an earlier revision.
+            std::string passage = found->second->text;
+            if (passage.size() > 1000) passage = utf8_truncate(passage, 1000) + "…";
+            if (!passage.empty()) fact["source_passage"] = std::move(passage);
+        }
+        facts.push_back(std::move(fact));
+    }
     for (const auto& f : store_->facts_of_item(it->source, it->ext_id)) {
         const auto e = store_->entity(f.entity_id);
         facts.push_back({{"kind", "user"}, {"id", f.id}, {"text", f.text}, {"entity_id", f.entity_id}, {"entity", e ? e->name : ""}, {"stated", iso(f.created_at)}});
+    }
+    bool item_delayed = extraction_delayed_.load();
+    {
+        const std::lock_guard lock(extraction_deferred_mx_);
+        for (const auto& [chunk_id, state] : extraction_deferred_) {
+            if (state.item_id == it->id && std::any_of(chunks.begin(), chunks.end(), [&](const auto& c) {
+                    return c.id == chunk_id && c.text == state.text;
+                })) item_delayed = true;
+        }
     }
     json out = {{"id", it->id},
                 {"source", it->source},
@@ -1499,11 +2242,18 @@ json KnowledgeService::item_detail(long long id) {
                 {"ref", it->ref},
                 {"date", iso(it->updated_at)},
                 {"size", item_size(*store_, *it, indexed)},
-                {"pending", store_->item_pending(id, config().extraction) > 0},
+                {"pending", pending > 0},
+                {"extraction_state", !cfg.extraction ? "off" : extraction_pending > 0 ?
+                    (item_delayed ? "delayed" : "pending") : "not_pending"},
                 {"text", text},
                 {"entities", entities},
                 {"facts", facts},
                 {"shareable", shareable_source(it->source)}};
+    if (it->source == "files") {
+        const auto state = store_->source("files");
+        out["freshness"] = !state.user_enabled || state.paused ? "paused" :
+            (!state.last_error.empty() || !store_->meta("files.recheck_required").empty()) ? "uncertain" : "current";
+    }
     if (n) out["note_id"] = n->id;
     if (n && !n->origin_kind.empty()) out["origin"] = origin_json(*n);
     if (const auto share = store_->share(it->source, it->ext_id)) out["sharing"] = share_json(*share);
@@ -1636,11 +2386,25 @@ Result<std::string> KnowledgeService::share_text(const std::string& source, cons
 
 // Publishes the item's text with the row's Groups (PUT, which also replaces an earlier version); stores the row.
 Status KnowledgeService::publish(ShareRow row, const ItemRow& item) {
+    if (deleting_all_) return make_error("unavailable", "Deleting local data is in progress.");
     if (!env_.team) return make_error("offline", "Team knowledge is not available.");
+    row.remote_id = "k-" + content_hash(item.source + ":" + item.ext_id);
+    const auto withdrawal_pending = [&]() -> Status {
+        if (!env_.pending_item_withdrawal) return {};
+        const auto pending = env_.pending_item_withdrawal(row.remote_id);
+        if (!pending) return pending.error();
+        if (*pending) return make_error("withdrawal_pending", "The previous shared item is still being removed. Try sharing again after removal finishes.");
+        return {};
+    };
+    if (auto result = withdrawal_pending(); !result) return result;
+    if (!item_visible(item)) return make_error("policy", "This item is unavailable under the current Source settings.");
     auto text = share_text(item.source, item.ext_id);
     if (!text) return text.error();
+    const auto current = store_->item(item.id);
+    if (!current || current->hash != item.hash || !item_visible(*current))
+        return make_error("policy", "This item changed or became unavailable before sharing.");
+    if (auto result = withdrawal_pending(); !result) return result;
     const std::string hash = content_hash(*text);
-    row.remote_id = "k-" + content_hash(item.source + ":" + item.ext_id);
     const json body = {{"title", item.title}, {"kind", item.source == "notes" ? "notes" : "files"}, {"text", *text},
                        {"content_hash", hash}, {"groups", row.groups}};
     auto r = env_.team("PUT", "api/v1/knowledge/items/" + row.remote_id, body);
@@ -1659,9 +2423,10 @@ Status KnowledgeService::publish(ShareRow row, const ItemRow& item) {
 }
 
 bool KnowledgeService::unpublish(const ShareRow& row) {
-    if (!env_.team || row.remote_id.empty()) return true;
+    if (!env_.team || row.remote_id.empty()) return false;
     auto r = env_.team("DELETE", "api/v1/knowledge/items/" + row.remote_id, nullptr);
-    return r || r.error().code == "NOT_FOUND" || r.error().code == "http_404";
+    // Legacy item ownership is keyed by username. A 404 under this username does not prove the original owner's item is gone.
+    return static_cast<bool>(r);
 }
 
 Status KnowledgeService::share_item(long long item_id, const std::vector<std::string>& groups_in) {
@@ -1678,13 +2443,19 @@ Status KnowledgeService::share_item(long long item_id, const std::vector<std::st
         for (const auto& g : groups)
             if (std::find(permitted.begin(), permitted.end(), g) == permitted.end())
                 return make_error("GROUP_NOT_PERMITTED", "Policy does not permit sharing with " + g + ".");
-    ShareRow row;
-    if (const auto old = store_->share(it->source, it->ext_id)) row = *old;
-    row.groups = groups;
-    row.rule.clear();  // shared on its own now
     Status s;
     {
         const std::lock_guard lock(share_mx_);
+        ShareRow row;
+        if (const auto old = store_->share(it->source, it->ext_id)) {
+            if (old->state == "unsharing")
+                return make_error("withdrawal_pending", "The previous shared item is still being removed. Try sharing again after removal finishes.");
+            if (old->state == "unverified" || inferred_legacy_removal(*old))
+                return make_error("sharing_unverified", "The previous sharing state cannot be verified. Contact your administrator before sharing again.");
+            row = *old;
+        }
+        row.groups = groups;
+        row.rule.clear();  // shared on its own now
         s = publish(row, *it);
     }
     notify();
@@ -1692,28 +2463,27 @@ Status KnowledgeService::share_item(long long item_id, const std::vector<std::st
 }
 
 Status KnowledgeService::unshare_item(long long item_id) {
-    const auto it = store_->item(item_id);
-    if (!it) return make_error("not_found", "no such item");
-    const auto row = store_->share(it->source, it->ext_id);
-    if (!row) return {};
     Status s;
     {
         const std::lock_guard lock(share_mx_);
-        if (unpublish(*row)) {
+        const auto it = store_->item(item_id);
+        if (!it) return make_error("not_found", "no such item");
+        const auto existing = store_->share(it->source, it->ext_id);
+        if (!existing) return {};
+        auto row = *existing;
+        row.state = "unsharing";
+        if (auto saved = store_->put_share(row); !saved) return saved;
+        if (unpublish(row)) {
             // A file of a shared folder stays out of the share rule until it is shared again.
-            if (!row->rule.empty()) {
-                auto r = *row;
-                r.state = "withdrawn";
-                r.error.clear();
-                store_->put_share(r);
+            if (!row.rule.empty()) {
+                row.state = "withdrawn";
+                row.error = "acknowledged-delete-v1";
+                s = store_->put_share(row);
             } else {
-                store_->remove_share(row->source, row->ext_id);
+                s = store_->remove_share(row.source, row.ext_id);
             }
         } else {
-            auto r = *row;
-            r.state = "unsharing";
-            store_->put_share(r);
-            s = make_error("offline", "The control plane is not reachable; the item is unshared as soon as it is.");
+            s = make_error("remote_pending", "Removal could not be confirmed. The item may remain shared while removal is retried.");
         }
     }
     notify();
@@ -1721,7 +2491,12 @@ Status KnowledgeService::unshare_item(long long item_id) {
 }
 
 Status KnowledgeService::share_folder(const std::string& folder, const std::vector<std::string>& groups_in) {
+    if (deleting_all_) return make_error("unavailable", "Deleting local data is in progress.");
     if (sharing_policy().empty()) return make_error("policy", "Sharing is not enabled by policy.");
+    const auto cfg = config();
+    const auto files = cfg.source_policy.find("files");
+    if (files == cfg.source_policy.end() || !files->second)
+        return make_error("policy", "The files Source is disabled by policy.");
     std::string match;
     for (const auto& f : store_->folders())
         if (path_key(f) == path_key(folder)) match = f;
@@ -1749,34 +2524,58 @@ Status KnowledgeService::share_folder(const std::string& folder, const std::vect
 }
 
 Status KnowledgeService::unshare_folder(const std::string& folder) {
-    std::string match;
-    for (const auto& [f, _] : store_->share_rules())
-        if (path_key(f) == path_key(folder)) match = f;
-    if (match.empty()) return {};
-    store_->remove_share_rule(match);
     bool pending = false;
     {
         const std::lock_guard lock(share_mx_);
-        for (auto row : store_->shares()) {
-            if (row.rule != match) continue;
-            if (row.state == "withdrawn" || row.state == "removed" || unpublish(row)) store_->remove_share(row.source, row.ext_id);
-            else {
+        std::vector<ShareRow> withdrawals;
+        const auto recorded = store_->db().transaction([&]() -> Status {
+            if (auto repaired = store_->repair_ambiguous_shares(); !repaired) return repaired;
+            std::string match;
+            for (const auto& [f, _] : store_->share_rules())
+                if (path_key(f) == path_key(folder)) match = f;
+            if (match.empty()) return {};
+            if (auto removed = store_->remove_share_rule(match); !removed) return removed;
+            for (auto row : store_->shares()) {
+                if (row.rule != match) continue;
+                if (row.state == "withdrawn" || row.state == "removed") {
+                    if (auto removed = store_->remove_share(row.source, row.ext_id); !removed) return removed;
+                    continue;
+                }
                 row.state = "unsharing";
-                store_->put_share(row);
-                pending = true;
+                row.rule.clear();
+                if (auto saved = store_->put_share(row); !saved) return saved;
+                withdrawals.push_back(std::move(row));
             }
+            return {};
+        });
+        if (!recorded) return recorded;
+        for (const auto& row : withdrawals) {
+            if (!unpublish(row)) pending = true;
+            else if (auto removed = store_->remove_share(row.source, row.ext_id); !removed) return removed;
         }
     }
     notify();
-    if (pending) return make_error("offline", "The control plane is not reachable; the files are unshared as soon as it is.");
+    if (pending) return make_error("remote_pending", "Removal could not be confirmed. The files may remain shared while removal is retried.");
     return {};
 }
 
 void KnowledgeService::sync_sharing(bool list) {
-    if (!env_.team) return;
     std::unique_lock lock(share_mx_, std::try_to_lock);
     if (!lock.owns_lock()) return;
+    if (deleting_all_) return;
+    if (!store_->repair_ambiguous_shares()) return;
     const bool enabled = !sharing_policy().empty();
+    // Record withdrawals before contacting the server, so an offline list request
+    // cannot leave a newly restricted item eligible for another upload.
+    for (auto row : store_->shares()) {
+        if (row.state == "unsharing" || row.state == "removed" || row.state == "withdrawn") continue;
+        const auto item = store_->item(row.source, row.ext_id);
+        if (!item || !item_visible(*item)) {
+            row.state = "unsharing";
+            if (!store_->put_share(row)) return;
+        }
+    }
+    if (!env_.team) return;
     // Nothing shared and sharing off: no request at all.
     if (!enabled && store_->shares().empty()) return;
     bool changed = false;
@@ -1794,13 +2593,13 @@ void KnowledgeService::sync_sharing(bool list) {
         for (auto row : store_->shares()) {
             if (remote.count(row.remote_id)) continue;
             if (row.state == "unsharing") {
-                store_->remove_share(row.source, row.ext_id);
-                changed = true;
-            } else if (row.state == "shared") {
-                // Removed by an administrator (or gone): no longer shared, and not published again by a share rule.
-                row.state = "removed";
-                row.error = "Removed from team knowledge by an administrator.";
-                store_->put_share(row);
+                // The legacy list is scoped by mutable username and cannot confirm removal for the original owner.
+                continue;
+            } else if (row.state == "shared" || row.state == "error") {
+                // A legacy username-scoped list cannot distinguish admin removal from an owner change.
+                row.state = "unverified";
+                row.error = "The previous sharing state cannot be verified.";
+                if (!store_->put_share(row)) return;
                 changed = true;
             }
         }
@@ -1811,8 +2610,22 @@ void KnowledgeService::sync_sharing(bool list) {
     }
     for (auto row : store_->shares()) {
         if (row.state == "unsharing") {
+            if (row.error == "Waiting for verified removal.") {
+                std::string id = row.remote_id;
+                if (id.empty() && shareable_source(row.source) && !row.ext_id.empty())
+                    id = "k-" + content_hash(row.source + ":" + row.ext_id);
+                if (!id.empty() && env_.team("DELETE", "api/v1/knowledge/items/" + id, nullptr)) {
+                    if (auto result = store_->mark_share_removed(row.source, row.ext_id); result) changed = true;
+                }
+                continue;
+            }
             if (unpublish(row)) {
-                store_->remove_share(row.source, row.ext_id);
+                if (row.rule.empty()) store_->remove_share(row.source, row.ext_id);
+                else {
+                    row.state = "withdrawn";  // Keep the exception to this folder's automatic sharing rule.
+                    row.error = "acknowledged-delete-v1";
+                    store_->put_share(row);
+                }
                 changed = true;
             }
             continue;
@@ -1828,7 +2641,7 @@ void KnowledgeService::sync_sharing(bool list) {
             changed = true;
             continue;
         }
-        if (!enabled || row.state == "removed" || row.state == "withdrawn") continue;
+        if (!enabled || row.state == "removed" || row.state == "withdrawn" || row.state == "unverified") continue;
         // Changed after re-indexing: re-published when its text changed (design D3).
         if (it->hash == row.item_hash && !(list && row.state == "error")) continue;
         auto text = share_text(row.source, row.ext_id);

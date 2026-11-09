@@ -3,11 +3,13 @@
 #include "base/json.h"
 #include "base/strings.h"
 #include "platform/win.h"
+#include "storage/withdrawal_outbox.h"
 
 #include <shlobj.h>
 
 #include <fstream>
 #include <sstream>
+#include <vector>
 
 namespace wb {
 namespace {
@@ -78,6 +80,8 @@ Result<DataRoot> DataRoot::open(const std::optional<std::filesystem::path>& over
         json b = {{"windows_sid", sid}, {"schema", 1}};
         if (!write_json_file(binding_path, b)) return make_error("data_root", "cannot write binding file");
     }
+    WithdrawalOutbox outbox(r.file("withdrawals.dpapi"));
+    if (auto s = outbox.finish_interrupted_wipe([&] { return r.wipe(); }); !s) return s.error();
     std::error_code ec;
     std::filesystem::create_directories(r.logs(), ec);
     std::filesystem::create_directories(r.cache(), ec);
@@ -100,15 +104,33 @@ Status DataRoot::set_policy_root(const std::optional<std::filesystem::path>& roo
 }
 
 Status DataRoot::wipe() const {
+    WithdrawalOutbox outbox(file("withdrawals.dpapi"));
+    if (auto state = outbox.load(); !state) return state.error();
     std::error_code ec;
-    for (const auto& e : std::filesystem::directory_iterator(root_, ec)) {
-        const auto name = e.path().filename().string();
-        if (name == kBindingFile || name == kBootstrapFile) continue;
-        std::filesystem::remove_all(e.path(), ec);
-        if (ec) return make_error("wipe", "cannot delete " + name + ": " + ec.message());
+    std::filesystem::directory_iterator it(root_, ec);
+    if (ec) return make_error("wipe", "cannot enumerate the data root: " + ec.message());
+    std::vector<std::filesystem::path> to_remove;
+    for (; it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        if (ec) return make_error("wipe", "cannot enumerate the data root: " + ec.message());
+        const auto name = it->path().filename().string();
+        if (name == kBindingFile || name == kBootstrapFile || name == "withdrawals.dpapi") continue;
+        to_remove.push_back(it->path());
     }
+    if (ec) return make_error("wipe", "cannot enumerate the data root: " + ec.message());
+    for (const auto& path : to_remove) {
+        std::filesystem::remove_all(path, ec);
+        if (ec) return make_error("wipe", "cannot delete " + path.filename().string() + ": " + ec.message());
+    }
+    for (std::filesystem::directory_iterator check(root_, ec); !ec && check != std::filesystem::directory_iterator(); check.increment(ec)) {
+        const auto name = check->path().filename().string();
+        if (name != kBindingFile && name != kBootstrapFile && name != "withdrawals.dpapi")
+            return make_error("wipe", "data changed while it was being deleted; another attempt is needed");
+    }
+    if (ec) return make_error("wipe", "cannot verify the data root: " + ec.message());
     std::filesystem::create_directories(logs(), ec);
+    if (ec) return make_error("wipe", "cannot recreate the log directory: " + ec.message());
     std::filesystem::create_directories(cache(), ec);
+    if (ec) return make_error("wipe", "cannot recreate the cache directory: " + ec.message());
     return {};
 }
 

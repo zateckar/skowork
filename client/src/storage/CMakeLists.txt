@@ -2,6 +2,7 @@ add_library(wb_storage STATIC
   keystore.cpp
   database.cpp
   data_root.cpp
+  withdrawal_outbox.cpp
   forget.cpp
   quota.cpp
   app_store.cpp

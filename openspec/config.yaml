@@ -2,8 +2,8 @@ schema: spec-driven
 
 context: |
   PRODUCT
-  Workbench is the organization-internal AI agent for employees' Windows laptops.
-  Each laptop runs one Workbench client per user session. A central on-premise control plane
+  SkoWork is the organization-internal AI agent for employees' Windows laptops.
+  Each laptop runs one SkoWork client per user session. A central on-premise control plane
   manages identity, policy, LLM access, skills, MCP servers, remote tasks and telemetry.
   The on-premise LLM is the organization LLM API: an OpenAI-compatible LiteLLM proxy over vLLM. It offers
   chat models with tool calling and vision, plus embedding and reranking models (verified 2026-10-21;
@@ -15,7 +15,8 @@ context: |
     Embeddings and reranking use the on-prem models through the LLM gateway.
   - The client runs as the signed-in user: no admin rights, no Windows service, no kernel drivers.
     Installation, updates and distribution are handled by the existing organization software
-    distribution system and are out of scope, except for exposing the version and a minimum-version gate.
+    distribution system and are out of scope, except for exposing the version, a minimum-version gate,
+    and the optional, verified speech package acquisition described by client/speech-models.
   - Very lightweight: footprint budgets are normative and live in client/desktop-host.
   - User data lives only in the user's profile and is readable only by that user. The only accepted
     exception is the operating-system SYSTEM account, which profile backup needs. Profile backup and
@@ -120,7 +121,7 @@ context: |
   - Policy bundle: a signed, versioned and expiring document issued by the control plane. It holds
     the effective policy for one user. Its top-level keys are:
     llm, tools, filesystem, network, mcp, skills, knowledge, meeting_capture, scheduler,
-    unattended, telemetry, storage, mail, ui, messaging, apps.
+    unattended, telemetry, storage, mail, ui, messaging, apps, dictation, notifications, speech.
   - Policy key layout: decisions are written policy.tools.rules[<tool-id pattern>] = allow|approve|deny,
     with policy.tools.risk.<risk class> defaults. Unattended runs add policy.unattended.allowed_risk and
     policy.unattended.rules. Tool settings are written policy.tools.<group>.<setting> and are never decisions.
@@ -137,6 +138,8 @@ context: |
   - Occurrence: one firing of a Trigger, or one accepted Remote task, as executed by client/scheduler.
   - Remote task: work requested through the control plane by a person or a system. It is not a Trigger.
   - Source: an origin of knowledge. Its kinds are threads | files | notes | mail | calendar | meetings.
+  - Category: a user-editable way to organize knowledge locally; membership does not itself grant access.
+  - Publication: an explicitly shared, versioned snapshot of selected eligible knowledge for a Group.
   - Model role: the logical model a feature asks for. The roles are main | vision | small | embed | rerank | image.
     The gateway maps each role per Group to an upstream model (policy.llm.models, owned by
     control-plane/llm-gateway).
@@ -185,6 +188,9 @@ context: |
   31 keep-sign-in-response-on-root    [Hardening]
   32 use-idp-tokens-for-mcp           [Hardening]
   33 improve-admin-console-ux         [Hardening]
+  34 redesign-admin-console-records   [Hardening]
+  35 fix-desktop-machine-config       [Hardening]
+  36 improve-skowork-and-knowledge-control [Hardening, Knowledge]
 
 rules:
   proposal:

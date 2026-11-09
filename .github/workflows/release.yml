@@ -1,7 +1,7 @@
 # Release (add-client-foundation task 2.4): a version tag publishes two artifacts:
 #   - the control plane as a container image on GitHub Container Registry,
 #   - the desktop client as a zip package with its SHA-256 checksum, attached to the GitHub release,
-#     with the optional app runtime package for Local apps (add-local-apps) next to it.
+#     with optional Local apps and speech runtime packages next to it.
 name: release
 
 on:
@@ -30,10 +30,27 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           [[ "$v" == *-* ]] && echo "prerelease=true" >> "$GITHUB_OUTPUT" || echo "prerelease=false" >> "$GITHUB_OUTPUT"
 
+  policy-coverage:
+    name: Policy catalog and schema coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: control-plane
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: control-plane/package-lock.json
+      - run: npm ci
+      - run: npm run policy:schema -- --check
+      - run: node --test test/policy-tool-catalog.test.ts test/policy-tool-decision.test.ts
+
   control-plane-image:
     name: Control plane container image
     runs-on: ubuntu-latest
-    needs: version
+    needs: [version, policy-coverage]
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -50,7 +67,7 @@ jobs:
             type=raw,value=${{ needs.version.outputs.version }}
             type=raw,value=latest,enable=${{ needs.version.outputs.prerelease == 'false' }}
           labels: |
-            org.opencontainers.image.title=Workbench control plane
+            org.opencontainers.image.title=SkoWork control plane
             org.opencontainers.image.version=${{ needs.version.outputs.version }}
       - uses: docker/build-push-action@v6
         with:
@@ -66,7 +83,7 @@ jobs:
   desktop-zip:
     name: Desktop client zip
     runs-on: windows-latest
-    needs: version
+    needs: [version, policy-coverage]
     env:
       HAS_SIGNING_CERT: ${{ secrets.WORKBENCH_SIGNING_CERT_PFX_BASE64 != '' }}
     steps:
@@ -102,6 +119,7 @@ jobs:
         run: |
           cmake --preset release '-DWORKBENCH_VERSION=${{ needs.version.outputs.version }}' '-DWORKBENCH_COMMIT=${{ github.sha }}'
           cmake --build --preset release
+          ./tools/check-manifests.ps1 -BuildDir build/release
           ctest --preset release -LE e2e
           ./tools/check-footprint.ps1 -BuildDir build/release
       - name: Sign executables (when a code-signing certificate is configured)
@@ -116,6 +134,13 @@ jobs:
         shell: pwsh
         working-directory: client
         run: ./tools/package.ps1 -BuildDir build/release -OutDir build/package -Version '${{ needs.version.outputs.version }}'
+      - name: Fetch pinned speech assets
+        shell: pwsh
+        run: ./dev/scripts/fetch-stt-models.ps1
+      - name: Build and verify optional speech package
+        shell: pwsh
+        working-directory: client
+        run: ./tools/package-speech.ps1 -OutDir build/package
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-zip
@@ -134,12 +159,13 @@ jobs:
           path: dist
       - uses: softprops/action-gh-release@v2
         with:
-          name: Workbench ${{ needs.version.outputs.version }}
+          name: SkoWork ${{ needs.version.outputs.version }}
           prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
           files: |
             dist/*.zip
             dist/*.zip.sha256
           body: |
-            Desktop client: `Workbench-${{ needs.version.outputs.version }}-win-x64.zip` (checksum in the `.sha256` file).
-            Optional app runtime for Local apps: `Workbench-${{ needs.version.outputs.version }}-app-runtime-win-x64.zip`, extracted next to Workbench.exe.
+            Desktop client: `SkoWork-${{ needs.version.outputs.version }}-win-x64.zip` (checksum in the `.sha256` file).
+            Optional app runtime for Local apps: `SkoWork-${{ needs.version.outputs.version }}-app-runtime-win-x64.zip`, extracted next to SkoWork.exe.
+            Optional speech runtime and models: `SkoWork-speech-v1-win-x64.zip` (checksum in the `.sha256` file), extracted next to SkoWork.exe.
             Control plane image: `ghcr.io/${{ github.repository_owner }}/workbench-control-plane:${{ needs.version.outputs.version }}`.

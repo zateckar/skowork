@@ -1,0 +1,25 @@
+Speech models distributed with SkoWork
+
+NVIDIA Parakeet-TDT-0.6B-v3, converted to the sherpa-onnx int8 format:
+https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+Licensed by NVIDIA under Creative Commons Attribution 4.0 International:
+https://creativecommons.org/licenses/by/4.0/
+The distributed ONNX files are quantized and converted versions of the model.
+
+OpenAI Whisper small, converted to the sherpa-onnx int8 format:
+https://github.com/openai/whisper (MIT; see whisper-MIT.txt).
+
+Silero VAD:
+https://github.com/snakers4/silero-vad (MIT; see silero-vad-MIT.txt).
+
+pyannote segmentation 3.0, converted to int8:
+https://huggingface.co/pyannote/segmentation-3.0
+MIT; see models/stt/pyannote-segmentation-3-0/LICENSE.
+
+WeSpeaker ResNet34-LM:
+https://github.com/wenet-e2e/wespeaker/blob/master/docs/pretrained.md
+The VoxCeleb-trained model is licensed under CC BY 4.0; see CC-BY-4.0.txt.
+WeSpeaker source code is licensed under Apache License 2.0; see
+sherpa-onnx-Apache-2.0.txt for that license text.
+
+The pinned conversion archives and checksums are listed in THIRD-PARTY.md.

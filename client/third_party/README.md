@@ -60,7 +60,7 @@ builds fall back to `client/models/stt`). Licences are those of the upstream mod
 | asr-models/sherpa-onnx-whisper-small.tar.bz2 | MIT (OpenAI Whisper) | 486A46AFBB7BA798507190FFE02FEA2DD726049AF212E774537EFAC6AFB210A6 |
 | asr-models/silero_vad.onnx | MIT (Silero VAD) | 9E2449E1087496D8D4CABA907F23E0BD3F78D91FA552479BB9C23AC09CBB1FD6 |
 | speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2 | MIT (pyannote segmentation-3.0) | 24615EE884C897D9D2BA09BB4D30DA6BB1B15E685065962DB5B02E76E4996488 |
-| speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx | Apache-2.0 (WeSpeaker) | E9848563DA86F263117134DFD7AD63C92355B37DE492B55E325400C9D9C39012 |
+| speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx | CC-BY-4.0 (WeSpeaker VoxCeleb model; WeSpeaker code is Apache-2.0) | E9848563DA86F263117134DFD7AD63C92355B37DE492B55E325400C9D9C39012 |
 
 | File in client/models/stt | Size | SHA-256 |
 |---|---|---|

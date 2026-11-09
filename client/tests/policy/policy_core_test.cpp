@@ -109,6 +109,21 @@ TEST(PolicyDecide, RuleSourceNamesTheGroup) {
     EXPECT_EQ(decide(&p, call("files.delete", "destructive")).source, "default");
 }
 
+TEST(PolicyDecide, SharedToolSimulationFixtures) {
+    std::ifstream input(WORKBENCH_TOOL_DECISIONS_FIXTURE);
+    ASSERT_TRUE(input);
+    json cases;
+    input >> cases;
+    ASSERT_TRUE(cases.is_array());
+    for (const auto& c : cases) {
+        const EffectivePolicy p = make(c.at("policy"), c.value("src", json::object()));
+        const Verdict v = decide(&p, call(c.at("tool").get<std::string>(), c.at("risk").get<std::string>(), c.at("unattended").get<bool>()));
+        EXPECT_EQ(to_string(v.decision), c.at("decision").get<std::string>()) << c.at("name");
+        EXPECT_EQ(v.rule, c.at("rule").get<std::string>()) << c.at("name");
+        EXPECT_EQ(v.source, c.at("source").get<std::string>()) << c.at("name");
+    }
+}
+
 TEST(PolicyDecide, FailClosedWithoutPolicy) {
     CallFacts own = call("ask_user", "read");
     own.own_data = true;

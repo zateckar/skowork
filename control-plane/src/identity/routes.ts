@@ -14,6 +14,8 @@ export interface DenyHooks {
   onMappingChanged?(): void;
   /** Called after a direct Group assignment of one user changes. */
   onAssignmentChanged?(userName: string): void;
+  /** WORKBENCH_BOOTSTRAP_ADMINS, listed in the directory. */
+  bootstrapAdmins?: readonly string[];
 }
 
 export function identityRoutes(): Router {
@@ -21,6 +23,7 @@ export function identityRoutes(): Router {
   r.get('/api/v1/identity/whoami', (req, res) => {
     const u = req.user!;
     res.json({
+      issuer: u.issuer,
       subject: u.subject,
       user_name: u.userName,
       email: u.email,
@@ -141,6 +144,33 @@ export function identityAdminRoutes(db: Db, audit: Audit, hooks: DenyHooks): Rou
     const r2 = db.prepare('DELETE FROM admin_roles WHERE user_name = ? COLLATE NOCASE AND role = ?').run(user ?? '', role ?? '');
     record(req, 'identity.admin-role.revoke', { user, role });
     res.json({ removed: r2.changes > 0 });
+  });
+  // Admin Directory: names the control plane has seen, for the console's pickers. Any administrator role (admin gate).
+  r.get('/directory', (_req, res) => {
+    const users = new Map<string, { name: string; sources: Set<string>; bootstrap: boolean }>();
+    const add = (name: string | null | undefined, source: string) => {
+      const n = name?.trim();
+      if (!n) return;
+      const u = users.get(n.toLowerCase()) ?? { name: n, sources: new Set<string>(), bootstrap: false };
+      u.sources.add(source);
+      users.set(n.toLowerCase(), u);
+    };
+    const names = (sql: string) => (db.prepare(sql).all() as { n: string }[]).map((x) => x.n);
+    for (const n of names('SELECT DISTINCT user_name AS n FROM installations')) add(n, 'installation');
+    for (const n of names('SELECT DISTINCT user_name AS n FROM group_members')) add(n, 'member');
+    for (const n of names('SELECT DISTINCT user_name AS n FROM admin_roles')) add(n, 'administrator');
+    for (const n of names("SELECT value AS n FROM deny_list WHERE kind = 'user'")) add(n, 'denied');
+    for (const o of names('SELECT owners AS n FROM policy_groups')) for (const n of JSON.parse(o) as string[]) add(n, 'owner');
+    for (const n of hooks.bootstrapAdmins ?? []) {
+      add(n, 'administrator');
+      users.get(n.toLowerCase())!.bootstrap = true;
+    }
+    const roles = new Set(names('SELECT DISTINCT idp_role AS n FROM role_mappings'));
+    for (const j of names("SELECT DISTINCT idp_roles AS n FROM installations WHERE idp_roles != '[]'")) for (const x of JSON.parse(j) as string[]) roles.add(x);
+    res.json({
+      users: [...users.values()].map((u) => ({ name: u.name, sources: [...u.sources].sort(), bootstrap: u.bootstrap })).sort((a, b) => a.name.localeCompare(b.name)),
+      idp_roles: [...roles].sort(),
+    });
   });
   // The audit log viewer is in the admin console module (src/admin/routes.ts).
   return r;

@@ -128,7 +128,16 @@ public:
         }
         return step(req, sink);
     }
-    [[nodiscard]] std::optional<model::RoleInfo> role_info(model::Role) override { return std::nullopt; }
+    [[nodiscard]] std::optional<model::RoleInfo> role_info(model::Role role) override {
+        const std::lock_guard lock(mx_);
+        const auto it = roles_.find(role);
+        return it == roles_.end() ? std::nullopt : std::optional<model::RoleInfo>(it->second);
+    }
+
+    void set_role_info(model::RoleInfo info) {
+        const std::lock_guard lock(mx_);
+        roles_[info.role] = std::move(info);
+    }
 
     void push(Step s) {
         const std::lock_guard lock(mx_);
@@ -176,6 +185,7 @@ private:
     std::vector<model::ChatRequest> requests_;
     Responder responder_;
     std::vector<model::ChatRequest> side_requests_;
+    std::map<model::Role, model::RoleInfo> roles_;
 };
 
 class TestPolicy final : public PolicyHook {

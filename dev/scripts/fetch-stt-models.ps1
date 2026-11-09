@@ -1,15 +1,27 @@
 # Fetches the speech-to-text models package (add-meeting-capture design D1) into client/models/stt: Parakeet-TDT-0.6B-v3
 # int8, Whisper small int8, Silero VAD, pyannote segmentation 3.0 int8 and the WeSpeaker ResNet34-LM embedding, all
 # from the k2-fsa/sherpa-onnx GitHub releases, about 1.2 GB to download and 1.0 GB on disk. Each archive and each kept
-# file is checked against the SHA-256 in client/third_party/README.md. The runtime DLLs are vendored in
+# file is checked against client/tools/speech-manifest.json. The runtime DLLs are vendored in
 # client/third_party/sherpa-onnx and copied next to the worker by the build. The test recordings shipped with the
 # models go to client/models/stt/fixtures for the MeetingSherpa tests.
-#   pwsh dev/scripts/fetch-stt-models.ps1
+#   pwsh dev/scripts/fetch-stt-models.ps1 [-VerifyOnly]
+param([switch] $VerifyOnly)
 $ErrorActionPreference = 'Stop'
 $client = Resolve-Path (Join-Path $PSScriptRoot '../../client')
 $models = Join-Path $client 'models/stt'
-$work = Join-Path ([IO.Path]::GetTempPath()) ("workbench-stt-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
-New-Item -ItemType Directory -Force $work, $models | Out-Null
+$manifest = Get-Content -LiteralPath (Join-Path $client 'tools/speech-manifest.json') -Raw | ConvertFrom-Json
+if ($manifest.schema -ne 1 -or $manifest.package -ne 'skowork-speech' -or $manifest.architecture -ne 'windows-x64' -or
+    $manifest.files.Count -ne 13) {
+    throw 'Unsupported speech manifest'
+}
+$expected = @{}
+foreach ($file in $manifest.files) {
+    $path = [string]$file.path
+    if ($path -notmatch '^models/stt/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$' -or ($path -split '/') -contains '..' -or
+        $expected.ContainsKey($path) -or $file.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or [long]$file.bytes -le 0 -or
+        $file.source -notin @('models', 'runtime')) { throw "Invalid speech manifest entry: $path" }
+    $expected[$path] = $file
+}
 
 $base = 'https://github.com/k2-fsa/sherpa-onnx/releases/download'
 $downloads = @(
@@ -19,19 +31,19 @@ $downloads = @(
     @{ url = "$base/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"; sha = '24615EE884C897D9D2BA09BB4D30DA6BB1B15E685065962DB5B02E76E4996488' },
     @{ url = "$base/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx"; sha = 'E9848563DA86F263117134DFD7AD63C92355B37DE492B55E325400C9D9C39012' }
 )
-# Kept file (relative to client/models/stt) <- path in the extracted archives, with its SHA-256.
+# Kept file (relative to client/models/stt) <- path in the extracted archives.
 $files = @(
-    @('parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx', 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx', 'ACFC2B4456377E15D04F0243AF540B7FE7C992F8D898D751CF134C3A55FD2247'),
-    @('parakeet-tdt-0.6b-v3-int8/decoder.int8.onnx', 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/decoder.int8.onnx', '179E50C43D1A9DE79C8A24149A2F9BAC6EB5981823F2A2ED88D655B24248DB4E'),
-    @('parakeet-tdt-0.6b-v3-int8/joiner.int8.onnx', 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/joiner.int8.onnx', '3164C13FC2821009440D20FCB5FDC78BFF28B4DB2F8D0F0B329101719C0948B3'),
-    @('parakeet-tdt-0.6b-v3-int8/tokens.txt', 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/tokens.txt', 'D58544679EA4BC6AC563D1F545EB7D474BD6CFA467F0A6E2C1DC1C7D37E3C35D'),
-    @('whisper-small-int8/small-encoder.int8.onnx', 'sherpa-onnx-whisper-small/small-encoder.int8.onnx', '4CBE7B22FA9026B843B60A68640C747DE05BAFB1A11B57EDC0E66C232D9F33A9'),
-    @('whisper-small-int8/small-decoder.int8.onnx', 'sherpa-onnx-whisper-small/small-decoder.int8.onnx', 'ACAD50B5C782696E91B55914CC5AB4F756F1532F76E22AA6FC615F39FB69A8EE'),
-    @('whisper-small-int8/small-tokens.txt', 'sherpa-onnx-whisper-small/small-tokens.txt', 'B34B360DBB493E781E479794586D661700670D65564001F23024971D1F2FA126'),
-    @('pyannote-segmentation-3-0/model.int8.onnx', 'sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx', 'D582F4B4C6B48205DE7E0643C57DF0DF5615A3C176189BE3FC461E9D18827B5D'),
-    @('pyannote-segmentation-3-0/LICENSE', 'sherpa-onnx-pyannote-segmentation-3-0/LICENSE', '14D7016AD68E7394D6E6B78D96CC2AE431C905287B89674CFDF021E79E62B8BA'),
-    @('silero_vad.onnx', 'silero_vad.onnx', '9E2449E1087496D8D4CABA907F23E0BD3F78D91FA552479BB9C23AC09CBB1FD6'),
-    @('wespeaker_en_voxceleb_resnet34_LM.onnx', 'wespeaker_en_voxceleb_resnet34_LM.onnx', 'E9848563DA86F263117134DFD7AD63C92355B37DE492B55E325400C9D9C39012')
+    @('parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx', 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx'),
+    @('parakeet-tdt-0.6b-v3-int8/decoder.int8.onnx', 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/decoder.int8.onnx'),
+    @('parakeet-tdt-0.6b-v3-int8/joiner.int8.onnx', 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/joiner.int8.onnx'),
+    @('parakeet-tdt-0.6b-v3-int8/tokens.txt', 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/tokens.txt'),
+    @('whisper-small-int8/small-encoder.int8.onnx', 'sherpa-onnx-whisper-small/small-encoder.int8.onnx'),
+    @('whisper-small-int8/small-decoder.int8.onnx', 'sherpa-onnx-whisper-small/small-decoder.int8.onnx'),
+    @('whisper-small-int8/small-tokens.txt', 'sherpa-onnx-whisper-small/small-tokens.txt'),
+    @('pyannote-segmentation-3-0/model.int8.onnx', 'sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx'),
+    @('pyannote-segmentation-3-0/LICENSE', 'sherpa-onnx-pyannote-segmentation-3-0/LICENSE'),
+    @('silero_vad.onnx', 'silero_vad.onnx'),
+    @('wespeaker_en_voxceleb_resnet34_LM.onnx', 'wespeaker_en_voxceleb_resnet34_LM.onnx')
 )
 $fixtures = @(
     @('fixtures/parakeet-en.wav', 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/test_wavs/en.wav'),
@@ -41,6 +53,37 @@ $fixtures = @(
     @('fixtures/whisper-0.wav', 'sherpa-onnx-whisper-small/test_wavs/0.wav'),
     @('fixtures/whisper-1.wav', 'sherpa-onnx-whisper-small/test_wavs/1.wav')
 )
+
+$modelEntries = @($manifest.files | Where-Object source -eq 'models')
+$runtimeEntries = @($manifest.files | Where-Object source -eq 'runtime')
+if ($files.Count -ne $modelEntries.Count -or $runtimeEntries.Count -ne 2 -or
+    !$expected.ContainsKey('models/stt/sherpa-onnx-c-api.dll') -or !$expected.ContainsKey('models/stt/onnxruntime.dll') -or
+    $expected['models/stt/sherpa-onnx-c-api.dll'].source -ne 'runtime' -or $expected['models/stt/onnxruntime.dll'].source -ne 'runtime') {
+    throw 'Speech manifest and fetched file list differ'
+}
+$listed = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($f in $files) {
+    $path = 'models/stt/' + $f[0]
+    if (!$listed.Add($path) -or !$expected.ContainsKey($path) -or $expected[$path].source -ne 'models') {
+        throw "Speech manifest does not match fetched file: $path"
+    }
+}
+if ($VerifyOnly) {
+    foreach ($file in $manifest.files) {
+        $relative = ([string]$file.path).Substring('models/stt/'.Length).Replace('/', [IO.Path]::DirectorySeparatorChar)
+        if ($file.source -eq 'models') { $src = Join-Path $models $relative }
+        elseif ($relative -notmatch '[\\/]') { $src = Join-Path (Join-Path $client 'third_party/sherpa-onnx/x64') $relative }
+        else { throw "Invalid runtime path: $relative" }
+        $info = Get-Item -LiteralPath $src
+        if ($info.Length -ne [long]$file.bytes -or (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash -ne $file.sha256) {
+            throw "Speech asset failed size or SHA-256 verification: $($file.path)"
+        }
+    }
+    Write-Host "Verified $($manifest.files.Count) speech assets against the manifest"
+    return
+}
+$work = Join-Path ([IO.Path]::GetTempPath()) ("workbench-stt-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Force $work, $models | Out-Null
 
 try {
     foreach ($d in $downloads) {
@@ -56,7 +99,10 @@ try {
     foreach ($f in $files) {
         $src = Join-Path $work $f[1]
         $h = (Get-FileHash $src -Algorithm SHA256).Hash
-        if ($h -ne $f[2]) { throw "$($f[1]) has SHA-256 $h, expected $($f[2])" }
+        $entry = $expected['models/stt/' + $f[0]]
+        if ((Get-Item -LiteralPath $src).Length -ne [long]$entry.bytes -or $h -ne $entry.sha256) {
+            throw "$($f[1]) does not match the speech manifest"
+        }
         $dst = Join-Path $models $f[0]
         New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
         Copy-Item $src $dst -Force

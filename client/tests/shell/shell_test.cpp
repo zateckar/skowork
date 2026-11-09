@@ -42,8 +42,8 @@ constexpr UINT kRunSync = WM_APP, kRunPosted = WM_APP + 1;
 // The window on its own thread with a message loop, wired to an RpcRegistry like the app wires it.
 class ShellThread {
 public:
-    ShellThread(RpcRegistry& rpc, int width, std::function<long long()> now, bool show = false) {
-        thread_ = std::thread([this, &rpc, width, now, show] {
+    ShellThread(RpcRegistry& rpc, int width, std::function<long long()> now, bool show = false, bool async_rpc = false) {
+        thread_ = std::thread([this, &rpc, width, now, show, async_rpc] {
             ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
             // The app is per-monitor DPI aware (its manifest); this test process is not.
             ::SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -73,7 +73,11 @@ public:
                     const RpcRegistry::Handler* h = rpc.find(m, false);
                     return h ? *h : shell::AsyncLink::Handler{};
                 },
-                [](std::function<void()> f) { f(); }, [this](std::function<void()> f) { post(std::move(f)); });
+                [this, async_rpc](std::function<void()> f) {
+                    if (!async_rpc) return f();
+                    std::lock_guard<std::mutex> l(workers_mx_);
+                    workers_.emplace_back(std::move(f));
+                }, [this](std::function<void()> f) { post(std::move(f)); });
             shell::MainWindow::Options o;
             o.lang = "en";
             o.width = width;
@@ -117,12 +121,14 @@ public:
         cv_.wait(l, [this] { return ready_; });
     }
     ~ShellThread() {
-        {
-            std::lock_guard<std::mutex> l(workers_mx_);
-            for (auto& t : workers_) t.join();
-        }
+        join_workers();
         run([] { ::PostQuitMessage(0); });
         thread_.join();
+    }
+    void join_workers() {
+        std::lock_guard<std::mutex> l(workers_mx_);
+        for (auto& t : workers_)
+            if (t.joinable()) t.join();
     }
     void run(std::function<void()> f) { ::SendMessageW(runner_, kRunSync, 0, reinterpret_cast<LPARAM>(&f)); }
     void post(std::function<void()> f) {
@@ -2530,9 +2536,16 @@ TEST(ShellStatusBar, ContextUsageWarnsAtThreeQuartersAndOffersCompactNow) {
     Fixture f;
     std::atomic<int> compacts{0};
     std::atomic<long long> tokens{30000};
+    std::atomic<long long> budget{-1};
+    std::atomic<bool> includes_tools{false};
     f.rpc.add("threads.context", RpcExposure::ui, [&](const json&) -> Result<json> {
-        return json{{"tokens", tokens.load()}, {"window", 100000}, {"compaction_threshold", 0.9},
-                    {"last_compaction", compacts ? json{{"kind", "manual"}} : json{{"kind", "automatic"}}}};
+        json result = {{"tokens", tokens.load()}, {"window", 100000}, {"compaction_threshold", 0.9},
+                       {"last_compaction", compacts ? json{{"kind", "manual"}} : json{{"kind", "automatic"}}}};
+        if (budget >= 0) {
+            result["input_budget"] = budget.load();
+            result["includes_tools"] = includes_tools.load();
+        }
+        return result;
     });
     f.rpc.add("threads.compact", RpcExposure::ui, [&](const json&) -> Result<json> {
         ++compacts;
@@ -2551,7 +2564,7 @@ TEST(ShellStatusBar, ContextUsageWarnsAtThreeQuartersAndOffersCompactNow) {
     EXPECT_EQ(m[L"status-context"].name, L"Context 30%");
     EXPECT_TRUE(has(m, L"status-auto-compacted"));
     EXPECT_FALSE(has(m, L"status-compact"));
-    EXPECT_EQ(m[L"status-version"].name, L"Workbench 0.1.0");
+    EXPECT_EQ(m[L"status-version"].name, L"SkoWork 0.1.0");
 
     tokens = 80000;
     w.run([&] { w.shell().load_context(); });
@@ -2563,6 +2576,24 @@ TEST(ShellStatusBar, ContextUsageWarnsAtThreeQuartersAndOffersCompactNow) {
     EXPECT_EQ(compacts.load(), 1);
     EXPECT_EQ(uia.by_id(w.hwnd())[L"status-context"].name, L"Context 12%");
     EXPECT_TRUE(said.heard(u"Compacted 6 messages."));
+    budget = 50000;
+    tokens = 45000;
+    w.run([&] { w.shell().load_context(); });
+    ASSERT_TRUE(w.until([&] { return w.exists("status-compact"); }));
+    EXPECT_TRUE(uia.by_id(w.hwnd())[L"status-context"].name.starts_with(L"Context ~90%"));
+    includes_tools = true;
+    w.run([&] { w.shell().load_context(); });
+    ASSERT_TRUE(w.until([&] { return w.with("status-context", [](ui::Node& node) {
+        return node.help.find(u"last request's tools") != std::u16string::npos;
+    }); }));
+    BSTR help = nullptr;
+    ASSERT_TRUE(SUCCEEDED(uia.by_id(w.hwnd())[L"status-context"].el->get_CurrentHelpText(&help)));
+    EXPECT_NE(take(help).find(L"last request's tools"), std::wstring::npos);
+    budget = 0;
+    w.run([&] { w.shell().load_context(); });
+    ASSERT_TRUE(w.until([&] { return w.with("status-context", [](ui::Node& node) {
+        return node.name.starts_with(u"Context ~100%");
+    }); }));
 }
 
 // ---- Status, Settings and About (3.7) --------------------------------------------------------------------------------
@@ -2824,6 +2855,257 @@ TEST(ShellGolden, StatusPage) {
     });
     ASSERT_EQ(px.size(), static_cast<size_t>(pw) * ph);
     expect_golden("shell_status", px, pw, ph);
+}
+
+TEST(ShellKnowledge, FileSourceWarningFollowsStatusAndRecovery) {
+    Fixture f;
+    std::atomic<bool> unavailable{true};
+    std::atomic<int> status_calls{0};
+    f.rpc.add("knowledge.browse", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"items", json::array()}, {"counts", {{"files", 0}, {"notes", 0}}}};
+    });
+    f.rpc.add("knowledge.search", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"passages", json::array()}};
+    });
+    f.rpc.add("knowledge.status", RpcExposure::ui, [&unavailable, &status_calls](const json&) -> Result<json> {
+        ++status_calls;
+        return json{{"folders", json::array()}, {"documents", json::array()},
+                    {"sources", {{{"kind", "files"}, {"error", unavailable ? "Folder unavailable" : ""}},
+                                 {{"kind", "notes"}, {"error", "Unrelated problem"}}}}};
+    });
+    f.rpc.add("knowledge.sharing", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"enabled", true}, {"permitted_groups", json::array()}, {"rules", json::array()}};
+    });
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    w.run([&] { w.main().open("#/knowledge"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-source-warning-files"); }));
+    w.with("knowledge-source-warning-files", [](ui::Node& n) {
+        EXPECT_NE(n.name.find(u"out of date"), std::u16string::npos);
+        EXPECT_NE(n.name.find(u"Folder unavailable"), std::u16string::npos);
+        return true;
+    });
+    ASSERT_TRUE(w.invoke("knowledge-tab-notes"));
+    ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-source-warning-files"); }));
+    w.type("knowledge-search", u"project");
+    ASSERT_TRUE(w.invoke("knowledge-search-go"));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-no-results") && w.exists("knowledge-source-warning-files"); }));
+    unavailable = false;
+    w.post([&w] { w.main().emit("knowledge.changed", json::object()); });
+    ASSERT_TRUE(w.until([&] { return status_calls >= 3 && !w.exists("knowledge-source-warning-files"); }));
+    unavailable = true;
+    w.post([&w] { w.main().emit("knowledge.changed", json::object()); });
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-source-warning-files"); }));
+    ASSERT_TRUE(w.invoke("knowledge-search-clear"));
+    ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-source-warning-files"); }));
+    unavailable = false;
+    ASSERT_TRUE(w.invoke("knowledge-tab-files"));
+    w.post([&w] { w.main().emit("knowledge.changed", json::object()); });
+    ASSERT_TRUE(w.until([&] { return status_calls >= 5 && !w.exists("knowledge-source-warning-files"); }));
+}
+
+TEST(ShellKnowledge, PendingExtractionDoesNotPresentEmptyFactsAsFinal) {
+    Fixture f;
+    std::atomic<int> state{0};
+    f.rpc.add("knowledge.browse", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"items", {{{"id", 11}, {"source", "files"}, {"title", "Pending.txt"}}}}, {"counts", {{"files", 1}}}};
+    });
+    f.rpc.add("knowledge.status", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"folders", json::array()}, {"documents", json::array()}};
+    });
+    f.rpc.add("knowledge.sharing", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"enabled", true}, {"permitted_groups", json::array()}, {"rules", json::array()}};
+    });
+    f.rpc.add("knowledge.item", RpcExposure::ui, [&state](const json&) -> Result<json> {
+        return json{{"id", 11}, {"source", "files"}, {"title", "Pending.txt"}, {"text", "A source."},
+                    {"extraction_state", state == 0 ? "pending" : state == 1 ? "off" : state == 3 ? "delayed" : "not_pending"},
+                    {"freshness", state == 4 ? "paused" : state == 5 ? "uncertain" : "current"},
+                    {"facts", json::array()}, {"entities", json::array()}};
+    });
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    w.run([&] { w.main().open("#/knowledge"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-row-11"); }));
+    ASSERT_TRUE(w.invoke("knowledge-row-11"));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-extraction-pending"); }));
+    EXPECT_FALSE(w.exists("knowledge-no-facts"));
+    EXPECT_FALSE(w.exists("knowledge-no-entities"));
+    w.with("knowledge-item-details", [](ui::Node& n) {
+        EXPECT_NE(n.name.find(u"extraction pending"), std::u16string::npos);
+        return true;
+    });
+    state = 1;
+    w.post([&w] { w.main().emit("knowledge.changed", json::object()); });
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-extraction-off") && !w.exists("knowledge-extraction-pending"); }));
+    EXPECT_TRUE(w.exists("knowledge-no-facts"));
+    state = 2;
+    w.post([&w] { w.main().emit("knowledge.changed", json::object()); });
+    ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-extraction-off") && w.exists("knowledge-no-facts"); }));
+    state = 3;
+    w.post([&w] { w.main().emit("knowledge.changed", json::object()); });
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-extraction-delayed") && !w.exists("knowledge-no-facts"); }));
+    EXPECT_NE(label_text(w, "knowledge-extraction-delayed").find(u"remains searchable"), std::u16string::npos);
+    state = 4;
+    w.post([&w] { w.main().emit("knowledge.changed", json::object()); });
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-file-indexing-paused"); }));
+    state = 5;
+    w.post([&w] { w.main().emit("knowledge.changed", json::object()); });
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-file-freshness-uncertain") && !w.exists("knowledge-file-indexing-paused"); }));
+}
+
+TEST(ShellKnowledge, LateItemResponseCannotReplaceTheNewerSelection) {
+    Fixture f;
+    std::promise<void> release_first;
+    const auto released = release_first.get_future().share();
+    std::atomic<bool> first_started{false};
+    f.rpc.add("knowledge.browse", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"items", {{{"id", 11}, {"source", "files"}, {"title", "First"}},
+                                {{"id", 12}, {"source", "files"}, {"title", "Second"}}}}, {"counts", {{"files", 2}}}};
+    });
+    f.rpc.add("knowledge.status", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"folders", json::array()}, {"documents", json::array()}};
+    });
+    f.rpc.add("knowledge.sharing", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"enabled", true}, {"permitted_groups", json::array()}, {"rules", json::array()}};
+    });
+    f.rpc.add("knowledge.item", RpcExposure::ui, [&released, &first_started](const json& p) -> Result<json> {
+        const long long id = jint(p, "id");
+        if (id == 11) {
+            first_started = true;
+            released.wait_for(5s);
+            return json{{"id", id}, {"source", "files"}, {"title", "First"}, {"text", "Old source"},
+                        {"facts", json::array()}, {"entities", json::array()}};
+        }
+        return json{{"id", id}, {"source", "files"}, {"title", "Second"}, {"text", "Current source"},
+                    {"facts", json::array()}, {"entities", json::array()}};
+    });
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); }, false, true);
+    w.run([&] { w.main().open("#/knowledge"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-row-11") && w.exists("knowledge-row-12"); }));
+    ASSERT_TRUE(w.invoke("knowledge-row-11"));
+    ASSERT_TRUE(w.until([&] { return first_started.load(); }));
+    ASSERT_TRUE(w.invoke("knowledge-row-12"));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-title"); }));
+    release_first.set_value();
+    w.join_workers();
+    w.settle();
+    ASSERT_TRUE(w.with("knowledge-item-title", [](ui::Node& n) { return n.name == u"Second"; }));
+    EXPECT_FALSE(w.exists("knowledge-error"));
+}
+
+TEST(ShellKnowledge, LateSourceListCannotReplaceTheNewerRefresh) {
+    Fixture f;
+    std::promise<void> release_first;
+    const auto released = release_first.get_future().share();
+    std::atomic<int> browses{0};
+    f.rpc.add("knowledge.browse", RpcExposure::ui, [&released, &browses](const json&) -> Result<json> {
+        if (browses++ == 0) {
+            released.wait_for(5s);
+            return json{{"items", json::array()}, {"counts", {{"files", 0}}}};
+        }
+        return json{{"items", {{{"id", 12}, {"source", "files"}, {"title", "New source"}}}},
+                    {"counts", {{"files", 1}}}};
+    });
+    f.rpc.add("knowledge.status", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"folders", json::array()}, {"documents", json::array()}};
+    });
+    f.rpc.add("knowledge.sharing", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"enabled", true}, {"permitted_groups", json::array()}, {"rules", json::array()}};
+    });
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); }, false, true);
+    w.run([&] { w.main().open("#/knowledge"); });
+    ASSERT_TRUE(w.until([&] { return browses.load() >= 1; }));
+    w.post([&w] { w.main().emit("knowledge.changed", json::object()); });
+    ASSERT_TRUE(w.until([&] { return browses.load() >= 2 && w.exists("knowledge-row-12"); }));
+    release_first.set_value();
+    w.join_workers();
+    w.settle();
+    EXPECT_TRUE(w.exists("knowledge-row-12"));
+    w.with("knowledge-tab-files", [](ui::Node& n) {
+        EXPECT_NE(n.name.find(u"1"), std::u16string::npos);
+        return true;
+    });
+}
+
+TEST(ShellKnowledge, PendingWithdrawalRemainsVisibleUntilConfirmed) {
+    Fixture f;
+    std::promise<void> release_first;
+    const auto released = release_first.get_future().share();
+    std::atomic<int> calls{0};
+    std::atomic<int> state{1};
+    f.rpc.add("knowledge.browse", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"items", json::array()}, {"counts", {{"files", 0}}}};
+    });
+    f.rpc.add("knowledge.status", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"folders", json::array()}, {"documents", json::array()}};
+    });
+    f.rpc.add("knowledge.sharing", RpcExposure::ui, [&released, &calls, &state](const json&) -> Result<json> {
+        if (calls++ == 0) {
+            released.wait_for(5s);
+            return json{{"enabled", true}, {"items", json::array()}};
+        }
+        if (state == 2) return make_error("unavailable", "sharing status unavailable");
+        return json{{"enabled", true}, {"items", state == 1 ? json::array({{{"state", "unsharing"}}}) : json::array()}};
+    });
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); }, false, true);
+    w.run([&] { w.main().open("#/knowledge"); });
+    ASSERT_TRUE(w.until([&] { return calls.load() >= 1; }));
+    w.post([&w] { w.main().emit("knowledge.changed", json::object()); });
+    ASSERT_TRUE(w.until([&] { return calls.load() >= 2 && w.exists("knowledge-pending-withdrawal"); }));
+    release_first.set_value();
+    w.join_workers();
+    w.settle();
+    EXPECT_TRUE(w.exists("knowledge-pending-withdrawal"));
+    state = 2;
+    w.post([&w] { w.main().emit("knowledge.changed", json::object()); });
+    ASSERT_TRUE(w.until([&] { return calls.load() >= 3; }));
+    w.join_workers();
+    w.settle();
+    EXPECT_TRUE(w.exists("knowledge-pending-withdrawal"));
+    state = 0;
+    w.post([&w] { w.main().emit("knowledge.changed", json::object()); });
+    ASSERT_TRUE(w.until([&] { return calls.load() >= 4 && !w.exists("knowledge-pending-withdrawal"); }));
+}
+
+TEST(ShellKnowledge, LeavingPendingSearchIgnoresItsResultsAndErrors) {
+    for (const auto& [fail, clear] : {std::pair{false, false}, std::pair{true, false}, std::pair{false, true}, std::pair{true, true}}) {
+        Fixture f;
+        std::promise<void> release_search;
+        const auto released = release_search.get_future().share();
+        std::atomic<bool> search_started{false};
+        f.rpc.add("knowledge.browse", RpcExposure::ui, [](const json&) -> Result<json> {
+            return json{{"items", json::array()}, {"counts", {{"files", 0}, {"notes", 0}}}};
+        });
+        f.rpc.add("knowledge.status", RpcExposure::ui, [](const json&) -> Result<json> {
+            return json{{"folders", json::array()}, {"documents", json::array()}};
+        });
+        f.rpc.add("knowledge.sharing", RpcExposure::ui, [](const json&) -> Result<json> {
+            return json{{"enabled", true}, {"permitted_groups", json::array()}, {"rules", json::array()}};
+        });
+        f.rpc.add("knowledge.search", RpcExposure::ui, [&released, &search_started, fail](const json&) -> Result<json> {
+            search_started = true;
+            released.wait_for(5s);
+            if (fail) return make_error("unavailable", "The abandoned search failed");
+            return json{{"passages", json::array()}};
+        });
+        ShellThread w(f.rpc, 1300, [&f] { return f.now(); }, false, true);
+        w.run([&] { w.main().open("#/knowledge"); });
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-search-go") && w.exists("knowledge-tab-notes"); }));
+        w.type("knowledge-search", u"project");
+        ASSERT_TRUE(w.invoke("knowledge-search-go"));
+        ASSERT_TRUE(w.until([&] { return search_started.load(); }));
+        if (clear) {
+            w.type("knowledge-search", u"");
+            ASSERT_TRUE(w.invoke("knowledge-search-go"));
+        } else {
+            ASSERT_TRUE(w.invoke("knowledge-tab-notes"));
+        }
+        release_search.set_value();
+        w.join_workers();
+        w.settle();
+        EXPECT_FALSE(w.exists("knowledge-results-head"));
+        EXPECT_FALSE(w.exists("knowledge-error"));
+        ASSERT_TRUE(w.with(clear ? "knowledge-tab-files" : "knowledge-tab-notes",
+                           [](ui::Node& n) { return n.name.find(u"selected") != std::u16string::npos; }));
+    }
 }
 
 // improve-knowledge-view 2.1: the list pane with two-line rows and badges, and the reader with an open document.
@@ -3788,6 +4070,16 @@ TEST(ShellKnowledge, KnowledgeViewImportNotesSearchCurateAndShare) {
         const std::string note_row = "knowledge-row-n" + std::to_string(store.notes()[0].id);
         ASSERT_TRUE(w.until([&] { return w.exists(note_row); }));
         EXPECT_TRUE(name_of(note_row).starts_with(u"Falcon dates · "));
+        ASSERT_TRUE(w.invoke(note_row));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-more"); }));
+        ASSERT_TRUE(w.invoke("knowledge-item-more"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-forget"); }));
+        ASSERT_TRUE(w.invoke("knowledge-item-forget"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-forget-body"); }));
+        const auto note_forget_body = label_text(w, "knowledge-forget-body");
+        EXPECT_NE(note_forget_body.find(u"Delete the note"), std::u16string::npos);
+        EXPECT_EQ(note_forget_body.find(u"The original source remains"), std::u16string::npos);
+        ASSERT_TRUE(w.invoke("knowledge-forget-cancel"));
 
         // Search: local passages and a colleague's, each with its Source or owner.
         w.type("knowledge-search", u"Falcon");
@@ -3818,19 +4110,33 @@ TEST(ShellKnowledge, KnowledgeViewImportNotesSearchCurateAndShare) {
         ASSERT_TRUE(w.invoke("knowledge-row-" + sdoc));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item") && w.exists("knowledge-entity-" + std::to_string(project)); }));
         EXPECT_NE(label_text(w, "knowledge-item-text").find(u"kickoff is in March"), std::u16string::npos);
-        // The open row is selected; Details start collapsed.
+        // The open row is selected; extracted knowledge is visible by default.
         int selected = -1, expanded = -1;
         w.with("knowledge-row-" + sdoc, [&](ui::Node& n) { selected = n.selected_state(); return true; });
         w.with("knowledge-item-details-header", [&](ui::Node& n) { expanded = n.expand_state(); return true; });
         EXPECT_EQ(selected, 1);
-        EXPECT_EQ(expanded, 0);
-        ASSERT_TRUE(w.expand("knowledge-item-details-header"));
+        EXPECT_EQ(expanded, 1);
         // Exclude and Forget are in the More menu.
         EXPECT_FALSE(w.exists("knowledge-item-forget"));
         ASSERT_TRUE(w.invoke("knowledge-item-more"));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-forget") && w.exists("knowledge-item-exclude"); }));
-        w.run([&] { w.main().window()->overlay().close_all(); });
+        ASSERT_TRUE(w.invoke("knowledge-item-forget"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-forget-body"); }));
+        const auto forget_body = label_text(w, "knowledge-forget-body");
+        EXPECT_NE(forget_body.find(u"Facts or corrections shown when this item was opened: 1"), std::u16string::npos);
+        EXPECT_NE(forget_body.find(u"have not been fully analyzed"), std::u16string::npos);
+        EXPECT_NE(forget_body.find(u"The original source remains"), std::u16string::npos);
+        EXPECT_EQ(forget_body.find(u"Everything derived"), std::u16string::npos);
+        ASSERT_TRUE(w.invoke("knowledge-forget-cancel"));
+        ASSERT_TRUE(w.invoke("knowledge-item-more"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-exclude"); }));
+        ASSERT_TRUE(w.invoke("knowledge-item-exclude"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-exclude-body"); }));
+        EXPECT_NE(label_text(w, "knowledge-exclude-body").find(u"have not been fully analyzed"), std::u16string::npos);
+        ASSERT_TRUE(w.invoke("knowledge-exclude-cancel"));
         EXPECT_EQ(name_of("knowledge-fact-relation-" + std::to_string(rel)), u"Jana Novakova leads Falcon");
+        ASSERT_TRUE(w.expand("knowledge-fact-source-relation-" + std::to_string(rel) + "-header"));
+        EXPECT_NE(label_text(w, "knowledge-fact-passage-relation-" + std::to_string(rel)).find(u"kickoff is in March"), std::u16string::npos);
         ASSERT_TRUE(w.invoke("knowledge-entity-rename-" + std::to_string(project)));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-rename-field"); }));
         w.type("knowledge-rename-field", u"Project Falcon");
@@ -3863,6 +4169,14 @@ TEST(ShellKnowledge, KnowledgeViewImportNotesSearchCurateAndShare) {
             ASSERT_EQ(shared.size(), 1u);
             EXPECT_EQ(shared.begin()->second["title"], "falcon.txt");
         }
+        // This legacy list omits the item; the view must not claim that an administrator removed it.
+        svc.sync_sharing(true);
+        ASSERT_TRUE(w.until([&] {
+            return label_text(w, "knowledge-item-sharing") ==
+                   u"Sharing could not be verified. The item may still be available to others; contact your administrator.";
+        }));
+        EXPECT_FALSE(w.exists("knowledge-share"));
+        EXPECT_TRUE(w.exists("knowledge-unshare"));
         ASSERT_TRUE(w.invoke("knowledge-unshare"));
         ASSERT_TRUE(w.until([&] { return label_text(w, "knowledge-item-sharing") == u"Private: only you can find this item."; }));
         {
@@ -4962,6 +5276,10 @@ TEST(ShellDictation, DictateInsertsAtTheCaretEscapeDiscardsAndAvailability) {
     ASSERT_TRUE(w.until([&] { return w.exists("settings-dictation-language"); }));
     ASSERT_TRUE(w.invoke("settings-dictation-language"));
     ASSERT_TRUE(w.until([&] { return w.exists("settings-dictation-language-cs") && w.exists("settings-dictation-language-auto"); }));
+    EXPECT_TRUE(w.exists("settings-dictation-language-de"));
+    EXPECT_TRUE(w.exists("settings-dictation-language-en"));
+    EXPECT_FALSE(w.exists("settings-dictation-language-pl"));
+    EXPECT_FALSE(w.exists("settings-dictation-language-sk"));
     w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
     EXPECT_TRUE(problems.empty()) << problems.front();
     ASSERT_TRUE(w.invoke("settings-dictation-language-cs"));

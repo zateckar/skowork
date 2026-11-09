@@ -187,7 +187,11 @@ TEST(MeetingCore, SegmentsSpeakersAndMarkdown) {
     EXPECT_FALSE(parse_segments({{"segments", {{{"track", "video"}, {"start_ms", 0}, {"end_ms", 1}, {"text", "x"}}}}}));
     EXPECT_FALSE(parse_segments({{"segments", {{{"track", "local"}, {"start_ms", 5}, {"end_ms", 1}, {"text", "x"}}}}}));
     EXPECT_FALSE(parse_segments(json::object()));
-    EXPECT_TRUE(supported_language("SK"));
+    EXPECT_TRUE(supported_language("CS"));
+    EXPECT_TRUE(supported_language("de"));
+    EXPECT_TRUE(supported_language("en"));
+    EXPECT_FALSE(supported_language("sk"));
+    EXPECT_FALSE(supported_language("pl"));
     EXPECT_FALSE(supported_language("fr"));
 }
 
@@ -308,7 +312,7 @@ TEST(MeetingCore, SpeakerLabelsFollowDiarizationOverlapAndLanguageVotes) {
     EXPECT_EQ(vote_language({"cs", "de"}), "cs");
     EXPECT_EQ(vote_language({}), "");
     EXPECT_TRUE(parakeet_language("CS"));
-    EXPECT_TRUE(parakeet_language("sk"));
+    EXPECT_TRUE(parakeet_language("de"));
     EXPECT_FALSE(parakeet_language("ja"));
 }
 
@@ -1580,8 +1584,7 @@ TEST(Dictation, LimitAndLeftovers) {
 }
 
 // Dictation with the sherpa-onnx engine through the stt worker, on the models package's speech: the language is detected
-// and the text comes back with punctuation and capitals (Czech is checked on the demo client, task 3.1: the package has
-// no Czech recording).
+// and the text comes back with punctuation and capitals.
 TEST(DictationSherpa, EnglishAndGermanSpeechBecomeText) {
     WB_REQUIRES_DEV_ENDPOINTS();
     if (!models_fetched()) GTEST_SKIP() << "client/models/stt is not fetched (dev/scripts/fetch-stt-models.ps1)";
@@ -1601,6 +1604,78 @@ TEST(DictationSherpa, EnglishAndGermanSpeechBecomeText) {
         EXPECT_NE(text.find_first_of(".,?!"), std::string::npos) << text;
         EXPECT_EQ(f.audio_files(), 0u);
     }
+}
+
+// Optional public-domain spoken-Wikipedia Czech fixture; see the qualification record for source and hash.
+TEST(DictationSherpa, CzechSpeechBecomesText) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    if (!models_fetched() || !std::filesystem::exists(stt_fixtures() / "parakeet-cs.wav")) GTEST_SKIP() << "Czech fixture not fetched";
+    SttRun stt;
+    Dictations f;
+    f.transcribe = [&stt](const json& p) { return stt.transcribe(p); };
+    f.speech = concat({silence(0.5), wav16k("parakeet-cs.wav"), silence(0.5)});
+    ASSERT_TRUE(f.svc->start());
+    auto r = f.svc->stop();
+    ASSERT_TRUE(r) << r.error().code << ": " << r.error().message;
+    const std::string text = jstr(*r, "text");
+    std::printf("[ dictation ] cs (%s): %s\n", jstr(*r, "language").c_str(), text.c_str());
+    EXPECT_EQ(jstr(*r, "language"), "cs");
+    EXPECT_GT(text.size(), 10u);
+    EXPECT_EQ(f.audio_files(), 0u);
+}
+
+TEST(DictationSherpa, ModelsInUnicodePathWorkInWorker) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    if (!models_fetched() || !std::filesystem::exists(stt_fixtures() / "parakeet-cs.wav")) GTEST_SKIP() << "speech fixtures not fetched";
+    if (::GetEnvironmentVariableW(L"WORKBENCH_STT_MODELS", nullptr, 0) != 0) GTEST_SKIP() << "model override would bypass the test package";
+    TempRoot tmp;
+    // Place the isolated fixture next to the test executable so the model hardlinks stay on the same volume.
+    // Only assign it to TempRoot after creating a new child of the resolved executable directory.
+    std::error_code ec;
+    const auto parent = std::filesystem::canonical(exe_dir(), ec);
+    ASSERT_FALSE(ec) << ec.message();
+    const auto scratch = parent / (L"speech-unicode-" + widen(random_urlsafe(12)));
+    ASSERT_EQ(scratch.parent_path(), parent);
+    ASSERT_TRUE(std::filesystem::create_directory(scratch, ec)) << ec.message();
+    tmp.path = scratch;
+    const auto root = tmp.path / L"模型-日本語";
+    const auto models = root / L"models" / L"stt";
+    std::filesystem::create_directories(models, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    std::filesystem::copy_file(exe_dir() / L"workbench-worker.exe", root / L"workbench-worker.exe", ec);
+    ASSERT_FALSE(ec) << ec.message();
+    for (const auto* dll : {L"sherpa-onnx-c-api.dll", L"onnxruntime.dll"}) {
+        std::filesystem::create_hard_link(exe_dir() / L"models" / L"stt" / dll, models / dll, ec);
+        if (ec) GTEST_SKIP() << "cannot create runtime hardlink: " << ec.message();
+    }
+    const auto source = std::filesystem::path(WORKBENCH_SOURCE_DIR) / "models" / "stt";
+    for (const auto* name : {L"silero_vad.onnx", L"parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx",
+                             L"parakeet-tdt-0.6b-v3-int8/decoder.int8.onnx", L"parakeet-tdt-0.6b-v3-int8/joiner.int8.onnx",
+                             L"parakeet-tdt-0.6b-v3-int8/tokens.txt", L"whisper-small-int8/small-encoder.int8.onnx",
+                             L"whisper-small-int8/small-decoder.int8.onnx", L"whisper-small-int8/small-tokens.txt",
+                             L"pyannote-segmentation-3-0/model.int8.onnx", L"wespeaker_en_voxceleb_resnet34_LM.onnx"}) {
+        const auto dest = models / name;
+        std::filesystem::create_directories(dest.parent_path(), ec);
+        ASSERT_FALSE(ec) << ec.message();
+        std::filesystem::create_hard_link(source / name, dest, ec);
+        if (ec) GTEST_SKIP() << "cannot create model hardlink: " << ec.message();
+    }
+    WorkerHost::Options options;
+    options.worker_exe = root / L"workbench-worker.exe";
+    WorkerHost worker(options);
+    const auto path = tmp.path / L"input.skau";
+    auto track = TrackWriter::create(path, TrackKind::local, 16000, 0);
+    ASSERT_TRUE(track);
+    const auto speech = concat({silence(0.5), wav16k("parakeet-cs.wav"), silence(0.5)});
+    ASSERT_TRUE((*track)->append(speech.data(), speech.size()));
+    ASSERT_TRUE((*track)->close());
+    auto result = worker.call(WorkerRole::stt, "stt.transcribe", {{"tracks", {path_to_utf8(path)}}, {"engine", "sherpa-onnx"}, {"language", "cs"}});
+    ASSERT_TRUE(result) << result.error().code << ": " << result.error().message;
+    EXPECT_EQ(jstr(*result, "language"), "cs");
+    EXPECT_EQ(jstr(*result, "engine").rfind("sherpa-onnx ", 0), 0u);
+    auto segments = parse_segments(*result);
+    ASSERT_TRUE(segments);
+    EXPECT_GT(all_text(*segments, "").size(), 10u);
 }
 
 // Dictation Language (D5): a chosen language goes to the engine without detection; Automatic sends the window's
@@ -1639,17 +1714,21 @@ TEST(Dictation, LanguageChosenOrDetectedWithTheWindowLanguageAsFallback) {
     ASSERT_TRUE(svc.stop());
     EXPECT_FALSE(sent.back().contains("language"));
     EXPECT_EQ(jstr(sent.back(), "fallback_language"), "de");
+    chosen = "pl";  // Existing profiles with a removed choice use Automatic.
+    ASSERT_TRUE(svc.start());
+    ASSERT_TRUE(svc.stop());
+    EXPECT_FALSE(sent.back().contains("language"));
+    EXPECT_EQ(jstr(sent.back(), "fallback_language"), "de");
 
-    // The stt request: an unsupported detection ("ru" from the test engine) falls back; without a fallback it fails.
+    // An explicitly requested unsupported language fails even if a fallback was supplied.
     auto w = TrackWriter::create(f.tmp.path / L"t.skau", TrackKind::local, 16000, 0);
     ASSERT_TRUE(w);
     ASSERT_TRUE((*w)->append(f.speech.data(), f.speech.size()));
     ASSERT_TRUE((*w)->close());
     const json track = json::array({path_to_utf8(f.tmp.path / L"t.skau")});
-    auto fb = stt_request("stt.transcribe", {{"tracks", track}, {"language", "ru"}, {"fallback_language", "cs"}});
-    ASSERT_TRUE(fb) << fb.error().message;
-    EXPECT_EQ(jstr(*fb, "language"), "cs");
-    auto no = stt_request("stt.transcribe", {{"tracks", track}, {"language", "ru"}});
-    ASSERT_FALSE(no);
-    EXPECT_EQ(no.error().code, "unsupported_language");
+    for (const char* lang : {"pl", "sk", "ru"}) {
+        auto no = stt_request("stt.transcribe", {{"tracks", track}, {"language", lang}, {"fallback_language", "cs"}});
+        ASSERT_FALSE(no);
+        EXPECT_EQ(no.error().code, "unsupported_language");
+    }
 }

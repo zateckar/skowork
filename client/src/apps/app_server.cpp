@@ -313,7 +313,7 @@ void AppServer::serve(std::uintptr_t raw) {
             }
         }
         if (session.empty()) {
-            reply(c, 403, "Forbidden", page("Link expired", "This link has been used or has expired. Open the app again from Workbench."), {},
+            reply(c, 403, "Forbidden", page("Link expired", "This link has been used or has expired. Open the app again from SkoWork."), {},
                   "text/html; charset=utf-8");
             return finish();
         }
@@ -328,7 +328,7 @@ void AppServer::serve(std::uintptr_t raw) {
         allowed = it != sessions_.end() && constant_time_equals(it->second, app_id);
     }
     if (!allowed) {
-        reply(c, 403, "Forbidden", page("Not allowed", "Open this app from Workbench."), {}, "text/html; charset=utf-8");
+        reply(c, 403, "Forbidden", page("Not allowed", "Open this app from SkoWork."), {}, "text/html; charset=utf-8");
         return finish();
     }
     if (req->has("Transfer-Encoding") || req->has("Upgrade")) {
@@ -382,7 +382,7 @@ void AppServer::serve(std::uintptr_t raw) {
     if (!stream) {
         log::info(kLog, app_id + ": " + stream.error().message);
         reply(c, 503, "Service Unavailable",
-              page("The app is not running", "Workbench could not start this app. See the app's log in Workbench's Apps view."), {},
+              page("The app is not running", "SkoWork could not start this app. See the app's log in SkoWork's Apps view."), {},
               "text/html; charset=utf-8");
         return finish();
     }

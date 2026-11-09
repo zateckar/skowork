@@ -16,8 +16,8 @@ namespace wb::meeting {
 std::filesystem::path stt_models_dir();
 std::filesystem::path stt_runtime_dir();
 
-// Fails with model_missing when the runtime or a model file is absent, and with "model_path" when a path has
-// characters outside the ANSI code page (sherpa-onnx opens model files by narrow path). force_whisper sends every
+// Fails with model_missing when the runtime or a model file is absent, and with "model_path" when a path cannot be
+// represented as UTF-8. force_whisper sends every
 // language to Whisper small (development builds use it to test the fallback, which no supported language reaches).
 // The runtime and every model file are present (nothing is loaded). Development builds that use the test engine count
 // as installed.

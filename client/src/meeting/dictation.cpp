@@ -1,6 +1,7 @@
 #include "meeting/dictation.h"
 
 #include "base/strings.h"
+#include "meeting/core.h"
 #include "platform/crypto.h"
 #include "platform/log.h"
 
@@ -104,7 +105,7 @@ Result<json> DictationService::stop() {
     // window's language as the fallback (D5).
     json params = {{"tracks", json::array({path_to_utf8(file)})}};
     const std::string chosen = env_.language ? env_.language() : std::string();
-    if (!chosen.empty() && chosen != "auto") params["language"] = chosen;
+    if (supported_language(chosen)) params["language"] = chosen;
     else params["fallback_language"] = env_.fallback_language ? env_.fallback_language() : std::string("en");
     Result<json> r = env_.transcribe ? env_.transcribe(params)
                                      : Result<json>(make_error("models_missing", "Speech recognition is not installed."));

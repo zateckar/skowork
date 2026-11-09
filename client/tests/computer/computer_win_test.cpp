@@ -17,6 +17,13 @@
 
 using namespace wb::computer;
 
+TEST(ComputerBranding, BothExecutableNamesAreProtected) {
+    const ComputerEnv env;
+    EXPECT_TRUE(app_refusal("SkoWork.exe", {}, {}, env.own_executables));
+    EXPECT_TRUE(app_refusal("Workbench.exe", {}, {}, env.own_executables));
+    EXPECT_TRUE(app_refusal("skowork.exe", {"skowork.exe"}, {}, env.own_executables));
+}
+
 namespace {
 
 // ---- the test window -------------------------------------------------------------------------------------------------

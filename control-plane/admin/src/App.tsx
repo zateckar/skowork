@@ -1,4 +1,4 @@
-// Workbench admin console shell (control-plane/admin-console): sign-in, and the views the admin's roles allow
+// SkoWork admin console shell (control-plane/admin-console): sign-in, and the views the admin's roles allow
 // (the server returns them with /me; design D6). Views are addressed as #/<view>.
 import { useEffect, useState, type ReactNode } from 'react';
 import { api, ApiError, init, signIn, signOut } from './auth.ts';
@@ -13,7 +13,7 @@ import { Models } from './views/models.tsx';
 import { Policy } from './views/policy.tsx';
 import { Remote } from './views/remote.tsx';
 import { Skills } from './views/skills.tsx';
-import { Notices } from './ui.tsx';
+import { Asker, Notices } from './ui.tsx';
 
 export interface Me {
   user_name: string;
@@ -40,7 +40,7 @@ const TITLES: Record<string, string> = {
 };
 
 const PURPOSES: Record<string, string> = {
-  dashboards: 'Adoption and usage of Workbench per Group.',
+  dashboards: 'Adoption and usage of SkoWork per Group.',
   identity: 'Who gets tokens, who belongs to which Group, and who holds an administrator role.',
   fleet: 'Installed clients, their versions and policies. Revoke a machine or a user, or set the minimum version.',
   policy: 'Write, publish, roll out and roll back the policy of the organization and of each Group.',
@@ -118,8 +118,8 @@ export function App() {
   if (state === 'signed-out')
     return (
       <Centered>
-        <h1>Workbench admin</h1>
-        <button data-testid="sign-in" onClick={() => void signIn()}>Sign in with organization account</button>
+        <h1>SkoWork admin</h1>
+        <button className="primary" data-testid="sign-in" onClick={() => void signIn()}>Sign in with organization account</button>
       </Centered>
     );
   if (state === 'forbidden')
@@ -139,7 +139,7 @@ export function App() {
   return (
     <div className="shell">
       <header>
-        <strong className="brand">Workbench admin</strong>
+        <strong className="brand">SkoWork admin</strong>
         <span className="me" data-testid="me">
           <span>{me!.display_name} <small>({me!.admin_roles.join(', ')})</small></span>
           <button onClick={() => void signOut()}>Sign out</button>
@@ -159,12 +159,15 @@ export function App() {
         ))}
       </nav>
       <Notices />
+      <Asker />
       <main data-testid={`view-${current}`}>
         {current ? (
           <>
             <div className="view-head">
-              <h1>{TITLES[current] ?? current}</h1>
-              {PURPOSES[current] && <p className="muted">{PURPOSES[current]}</p>}
+              <div>
+                <h1>{TITLES[current] ?? current}</h1>
+                {PURPOSES[current] && <p className="muted">{PURPOSES[current]}</p>}
+              </div>
             </div>
             {render(current, me!, setPending)}
           </>

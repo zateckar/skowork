@@ -75,7 +75,7 @@ std::vector<ToolDef> MessagingService::tools() {
     {
         ToolDef t;
         t.id = "messages.find_user";
-        t.description = "Find colleagues in the organization's Workbench user directory by the start of their user name or display "
+        t.description = "Find colleagues in the organization's SkoWork user directory by the start of their user name or display "
                         "name. Returns user names, display names and Presence (online, away, busy, offline).";
         t.parameters = schema({{"query", {{"type", "string"}, {"description", "The start of a user name or display name"}}}}, {"query"});
         t.risk = Risk::read;
@@ -111,7 +111,7 @@ std::vector<ToolDef> MessagingService::tools() {
                 list.push_back(std::move(x));
             }
             json body = {{"chats", list}};
-            if (!connected()) body["note"] = "Workbench is offline; this is the list as last synchronised.";
+            if (!connected()) body["note"] = "SkoWork is offline; this is the list as last synchronised.";
             if (senders.empty()) return ToolOutput::success(body.dump(2));
             return untrusted(body, senders);
         };
@@ -149,7 +149,7 @@ std::vector<ToolDef> MessagingService::tools() {
         ToolDef t;
         t.id = "messages.send";
         t.description = "Send a message to a colleague: to an existing Chat by chat id, or to a user by user name (a direct Chat, "
-                        "started if needed). The text is Markdown, at most 8 KB. Written offline, it is sent when Workbench is "
+                        "started if needed). The text is Markdown, at most 8 KB. Written offline, it is sent when SkoWork is "
                         "connected again.";
         t.parameters = schema({{"chat", {{"type", "string"}, {"description", "The chat id"}}},
                                {"user", {{"type", "string"}, {"description", "The recipient's user name, for a direct Chat (instead of chat)"}}},
@@ -169,7 +169,7 @@ std::vector<ToolDef> MessagingService::tools() {
             if (!r) return ToolOutput::failure(r.error().message);
             json body = *r;
             body["to"] = chat_title(c, me());
-            if (jbool(*r, "pending")) body["note"] = "Queued: it is sent when Workbench is connected to the control plane again.";
+            if (jbool(*r, "pending")) body["note"] = "Queued: it is sent when SkoWork is connected to the control plane again.";
             if (r->contains("error")) return ToolOutput::failure("The control plane refused the message: " + jstr(*r, "error"));
             return ToolOutput::success(body.dump(2));
         };

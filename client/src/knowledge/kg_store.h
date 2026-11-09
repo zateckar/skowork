@@ -7,7 +7,9 @@
 
 #include "base/json.h"
 #include "base/result.h"
+#include "knowledge/analysis.h"
 #include "knowledge/core.h"
+#include "knowledge/reconcile.h"
 #include "storage/database.h"
 
 #include <memory>
@@ -20,6 +22,14 @@ namespace wb::knowledge {
 
 const std::vector<Migration>& kg_migrations();
 
+// Register the connection-local capability before a knowledge migration runs. The guard SQL is installed only
+// alongside the versioned evidence schema; until then it can be exercised on an isolated copied database.
+Status register_kg_writer(Database& db);
+std::string kg_writer_barrier_sql();
+// Versioned evidence migration, currently qualified against copied fixtures before activation.
+std::string kg_evidence_migration_sql();
+Result<std::unique_ptr<Database>> open_kg_database(const std::filesystem::path& file, const db_key& key, MigrationOutcome& outcome);
+
 // The Source kinds (client/knowledge-graph Source Enablement).
 const std::vector<std::string>& source_kinds();
 
@@ -31,25 +41,62 @@ struct SourceState {
     std::string last_error;
 };
 
+struct CategoryRow {
+    long long id = 0;
+    std::string name;
+};
+
+struct CategoryAssignment {
+    long long fact_id = 0, category_id = 0, evidence_id = 0;
+    std::string decision, reason;
+};
+
+struct ConflictRow {
+    long long id = 0, left_fact = 0, right_fact = 0, left_evidence = 0, right_evidence = 0;
+    std::string explanation, state, decision, decision_reason;
+};
+
+struct ConflictDecision {
+    long long left_evidence = 0, right_evidence = 0, decided_at = 0;
+    std::string decision, reason;
+};
+
+struct KnowledgeImpactPreview {
+    long long generation = 0;
+    bool complete = false;  // Extraction, conflict checks and publication differences are not included yet.
+    std::vector<FactImpact> facts;
+};
+
+struct PreparedItemRemoval {
+    std::string token;
+    KnowledgeImpactPreview impact;
+};
+
 struct ItemInput {
     std::string source, ext_id, title, ref, hash;
     long long created_at = 0, updated_at = 0;  // unix ms
     int priority = 1;                          // 2 new or changed, 1 incremental, 0 backfill (embedding and extraction order)
     std::vector<Chunk> chunks;
     bool extract = true;  // queue the chunks for entity extraction
+    std::string legacy_tombstone_hash = {};  // conservatively carry deleted-fact protections across fingerprint upgrade
 };
 
 struct ItemRow {
     long long id = 0;
     std::string source, ext_id, title, ref;
     long long created_at = 0, updated_at = 0, indexed_at = 0;
-    std::string hash;  // the item version (content hash, or size and modification time of a file)
+    std::string hash;  // the item version; older file items can still contain size and modification time
 };
 
 // An item of a Source as the Knowledge view lists it: indexed text size and whether embedding or extraction is pending.
 struct BrowseRow {
     ItemRow item;
     long long size = 0, pending = 0;
+};
+
+struct ItemQueueCounts {
+    std::string ext_id;
+    long long chunks = 0, embed_pending = 0, extract_pending = 0;
 };
 
 // A note of the notes Source (add-knowledge-sharing Knowledge Notes).
@@ -69,7 +116,7 @@ struct ShareRow {
     std::vector<std::string> groups;
     std::string item_hash, content_hash;
     long long size = 0;
-    std::string state;  // shared | error | unsharing | removed (by an administrator)
+    std::string state;  // shared | error | unsharing | unverified | withdrawn | removed
     std::string error, rule;
     long long updated_at = 0;
 };
@@ -85,6 +132,16 @@ struct EntityRow {
     std::string type, name, email, department, title, manager;
     long long enriched_at = 0;
     std::vector<std::string> aliases;
+};
+
+struct EntityCursor {
+    long long score = 0;
+    std::string name;
+    long long id = 0;
+};
+struct EntitySearchRow {
+    EntityRow entity;
+    long long score = 0;
 };
 
 struct RelationRow {
@@ -105,14 +162,49 @@ struct SourceCounts {
     long long items = 0, chunks = 0, embed_pending = 0, extract_pending = 0, skipped = 0;
 };
 
+struct BoundAnalysisEvidence {
+    long long evidence_id = 0, generation = 0;
+};
+
 class KgStore {
 public:
     explicit KgStore(std::unique_ptr<Database> db) : db_(std::move(db)) {}
     [[nodiscard]] Database& db() { return *db_; }
 
+    // Category records organize local facts; they do not change existing publications. Available after evidence migration.
+    Result<long long> create_category(const std::string& name);
+    Status rename_category(long long category_id, const std::string& name);
+    Status delete_category(long long category_id);
+    Status merge_categories(long long source_id, long long destination_id);
+    Status set_category_assignment(long long fact_id, long long category_id, const std::string& decision,
+                                   const std::string& reason, long long evidence_id = 0,
+                                   std::optional<long long> expected_generation = std::nullopt);
+    Status reset_category_assignment(long long fact_id, long long category_id);
+    std::vector<CategoryRow> categories();
+    std::vector<CategoryAssignment> category_assignments(long long fact_id);
+    std::vector<long long> uncategorized_facts(int limit);
+    std::optional<long long> knowledge_generation();
+    // Bind a validated analysis span to an existing support in the same graph snapshot.
+    Result<BoundAnalysisEvidence> bind_analysis_evidence(long long fact_id, const AnalysisSpan& span,
+                                                         long long expected_generation);
+    Result<long long> record_conflict(long long left_fact, long long right_fact, long long left_evidence,
+                                      long long right_evidence, const std::string& explanation, long long expected_generation);
+    Status decide_conflict(long long conflict_id, const std::string& decision, const std::string& reason,
+                           long long now, long long expected_generation);
+    Status reopen_conflict(long long conflict_id, long long expected_generation);
+    std::vector<ConflictRow> conflicts(int limit);
+    std::vector<ConflictDecision> conflict_history(long long conflict_id);
+    Result<KnowledgeImpactPreview> preview_evidence_removal(const std::unordered_set<long long>& evidence_ids);
+    Result<KnowledgeImpactPreview> preview_item_removal(long long item_id);
+    Result<PreparedItemRemoval> prepare_item_removal(long long item_id, long long now);
+    Status cancel_item_removal(const std::string& token);
+    Status confirm_item_removal(const std::string& token, bool accept_incomplete, long long now);
+
     // ---- Sources, folders, exclusions ----
     SourceState source(const std::string& kind);
     void set_source(const SourceState& s);
+    Status set_file_source_with_recheck(const SourceState& s, bool changed);
+    Status clear_file_recheck(const std::string& token);
     void touch_source(const std::string& kind, long long at, const std::string& error);
     std::vector<std::string> folders();
     Status add_folder(const std::string& path);
@@ -124,6 +216,7 @@ public:
     void set_skipped(const std::string& source, const std::string& ext_id, const std::string& reason);
     void clear_skipped(const std::string& source, const std::string& ext_id);
     std::vector<std::pair<std::string, std::string>> skipped(const std::string& source, int limit);
+    long long skipped_count(const std::string& source);
     // Single documents of the files Source (File Ingestion Scope), by path.
     std::vector<std::string> documents();
     Status add_document(const std::string& path);
@@ -133,30 +226,39 @@ public:
     // Inserts (id 0) or updates a note; returns its id, 0 when there is no such note.
     // A new note (id 0) takes the origin of `origin`; saving an existing note keeps the one it has.
     long long save_note(long long id, const std::string& title, const std::string& text, long long now, const NoteRow& origin = {});
-    bool delete_note(long long id);
+    Status delete_note(long long id);
     std::optional<NoteRow> note(long long id);
     std::vector<NoteRow> notes();
+    std::vector<long long> note_ids();
+    std::vector<NoteRow> notes_page(int limit, std::optional<std::pair<long long, long long>> before = std::nullopt);
 
     // ---- Items and chunks ----
     // The stored content hash of an item, or nullopt when it is not indexed.
     std::optional<std::string> item_hash(const std::string& source, const std::string& ext_id);
     // Inserts or replaces the item and its chunks; new chunks are queued for embedding (and for extraction).
     Result<long long> put_item(const ItemInput& in, long long now);
-    bool remove_item(const std::string& source, const std::string& ext_id);
-    bool remove_item(long long id);
+    // A migration backup can contain forgotten knowledge. Failure must prevent acknowledging the forget operation.
+    Status purge_recovery_copy();
+    Status forget_thread(const std::string& thread_id);
+    bool remove_item(const std::string& source, const std::string& ext_id, bool forget = false);
+    bool remove_item(long long id, bool forget = false);
     std::vector<std::string> item_ids(const std::string& source);  // external ids
-    int remove_source(const std::string& kind);  // every item of the Source
+    int remove_source(const std::string& kind, bool forget = false);  // every item; explicit forget also disables the Source
     std::optional<ItemRow> item(long long id);
     std::optional<ItemRow> item(const std::string& source, const std::string& ext_id);
     // Items whose title or reference contains `query` (case-insensitive for ASCII), newest first.
-    std::vector<ItemRow> find_items(const std::string& query, int limit);
+    std::vector<ItemRow> find_items(const std::string& query, int limit,
+                                    std::optional<std::pair<long long, long long>> before = std::nullopt);
     std::vector<ChunkRow> chunks(const std::vector<long long>& ids);
     std::vector<ChunkRow> chunks_of_item(long long item_id);
     SourceCounts counts(const std::string& source);
+    std::vector<ItemQueueCounts> item_queue_counts(const std::string& source);
     // Items of a Source whose title or reference contains `query` (all when empty), newest first. Pending counts
     // chunks waiting for embedding, and for extraction when `extraction` is on.
-    std::vector<BrowseRow> browse(const std::string& source, const std::string& query, int limit, bool extraction);
+    std::vector<BrowseRow> browse(const std::string& source, const std::string& query, int limit, bool extraction,
+                                  std::optional<std::pair<long long, long long>> before = std::nullopt);  // updated_at, id
     long long item_pending(long long item_id, bool extraction);
+    long long item_extraction_pending(long long item_id);
 
     // ---- Full text ----
     // BM25 order; the query is reduced to its words (any word matches).
@@ -183,7 +285,7 @@ public:
                                                             int limit, int coarse = 200);
 
     // ---- Extraction ----
-    std::vector<ChunkRow> extract_batch(int n);
+    std::vector<ChunkRow> extract_batch(int n, const std::vector<long long>& deferred = {});
     long long extract_pending();
     void mark_extracted(const std::vector<long long>& chunk_ids);
     void clear_extract_queue();
@@ -194,6 +296,11 @@ public:
     long long resolve_entity(const std::string& type, const std::string& name, const std::string& email, long long now);
     std::optional<EntityRow> entity(long long id);
     std::vector<EntityRow> find_entities(const std::string& query, int limit);
+    std::vector<EntitySearchRow> find_entities_page(const std::string& query, int limit,
+                                                    const std::optional<EntityCursor>& after = std::nullopt);
+    bool entity_has_directory_relation(long long entity_id);
+    std::vector<ItemRow> entity_evidence_items(long long entity_id, long long after_item_id, int limit);
+    std::vector<ItemRow> entity_alias_items(long long entity_id, const std::string& normalized_alias, long long after_item_id, int limit);
     std::vector<EntityRow> entities_in_chunks(const std::vector<long long>& chunk_ids);
     // Entities one of whose names (three letters or more) occurs in the text as whole words: the query's entities.
     std::vector<long long> entities_named_in(const std::string& text, int limit);
@@ -237,12 +344,15 @@ public:
     // ---- Sharing (add-knowledge-sharing design D3) ----
     std::vector<ShareRow> shares();
     std::optional<ShareRow> share(const std::string& source, const std::string& ext_id);
-    void put_share(const ShareRow& s);
-    void remove_share(const std::string& source, const std::string& ext_id);
+    Status put_share(const ShareRow& s);
+    Status repair_ambiguous_shares();
+    Status mark_shares_unsharing();
+    Status mark_share_removed(const std::string& source, const std::string& ext_id);
+    Status remove_share(const std::string& source, const std::string& ext_id);
     // Share rules: a folder whose supported files are each shared with the Groups.
     std::vector<std::pair<std::string, std::vector<std::string>>> share_rules();
     Status put_share_rule(const std::string& folder, const std::vector<std::string>& groups);
-    void remove_share_rule(const std::string& folder);
+    Status remove_share_rule(const std::string& folder);
     // Facts whose text matches the query words, for knowledge.search.
     std::vector<FactRow> find_facts(const std::string& query, int limit);
 
@@ -256,9 +366,11 @@ public:
 
     // Removes everything (forget the whole knowledge store); Sources, folders, documents, notes, exclusions and sharing
     // stay unless `all`.
-    void clear(bool all = false);
+    Status clear(bool all = false);
 
 private:
+    Result<KnowledgeImpactPreview> preview_evidence_snapshot(std::unordered_set<long long> removed,
+                                                            std::optional<long long> item_id);
     std::unique_ptr<Database> db_;
 };
 

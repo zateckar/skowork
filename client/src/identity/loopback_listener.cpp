@@ -11,14 +11,14 @@ namespace wb {
 namespace {
 
 constexpr char kRefusedPage[] =
-    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Workbench</title></head>"
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>SkoWork</title></head>"
     "<body style=\"font-family:Segoe UI,sans-serif;margin:3em\"><h1>Sign-in not completed</h1>"
-    "<p>This response does not belong to a pending Workbench sign-in.</p></body></html>";
+    "<p>This response does not belong to a pending SkoWork sign-in.</p></body></html>";
 
 constexpr char kPage[] =
-    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Workbench</title></head>"
-    "<body style=\"font-family:Segoe UI,sans-serif;margin:3em\"><h1>Signed in to Workbench</h1>"
-    "<p>You can close this tab and return to Workbench.</p></body></html>";
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>SkoWork</title></head>"
+    "<body style=\"font-family:Segoe UI,sans-serif;margin:3em\"><h1>Signed in to SkoWork</h1>"
+    "<p>You can close this tab and return to SkoWork.</p></body></html>";
 
 constexpr SOCKET kInvalid = INVALID_SOCKET;
 

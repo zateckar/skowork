@@ -158,7 +158,7 @@ Result<json> stt_request(const std::string& method, const json& params) {
     // Dictation (add-dictation D5): a short dictation detected as an unsupported language is transcribed in the
     // fallback language (the window's) instead.
     if (const std::string lang = jstr(*r, "language"), fallback = jstr(params, "fallback_language");
-        !supported_language(lang) && supported_language(fallback)) {
+        jstr(params, "language").empty() && !supported_language(lang) && supported_language(fallback)) {
         r = engine->transcribe(tracks, fallback);
         if (!r) return r;
     }
