@@ -28,6 +28,10 @@ Status register_kg_writer(Database& db);
 std::string kg_writer_barrier_sql();
 // Versioned evidence migration, currently qualified against copied fixtures before activation.
 std::string kg_evidence_migration_sql();
+// The longest chain of facts a derivation may form through required facts; the evidence schema enforces it.
+inline constexpr int kMaxDerivationDepth = 32;
+// Superseded revisions of an item whose excerpts are kept as history beside the current one.
+inline constexpr int kRetainedSupersededRevisions = 4;
 Result<std::unique_ptr<Database>> open_kg_database(const std::filesystem::path& file, const db_key& key, MigrationOutcome& outcome);
 
 // The Source kinds (client/knowledge-graph Source Enablement).
@@ -237,6 +241,10 @@ public:
     std::optional<std::string> item_hash(const std::string& source, const std::string& ext_id);
     // Inserts or replaces the item and its chunks; new chunks are queued for embedding (and for extraction).
     Result<long long> put_item(const ItemInput& in, long long now);
+    // With the evidence schema, a large change first withdraws the findings it will invalidate in short transactions
+    // and queues their passages again; put_item does this itself, but a caller holding the database lock around
+    // put_item should call it before taking the lock so that other writers can run between the steps.
+    Status prepare_item_change(const ItemInput& in);
     // A migration backup can contain forgotten knowledge. Failure must prevent acknowledging the forget operation.
     Status purge_recovery_copy();
     Status forget_thread(const std::string& thread_id);
@@ -288,6 +296,9 @@ public:
     std::vector<ChunkRow> extract_batch(int n, const std::vector<long long>& deferred = {});
     long long extract_pending();
     void mark_extracted(const std::vector<long long>& chunk_ids);
+    // The passages one extraction request saw, and those whose findings took their date from the item. With the
+    // evidence schema a later revision rechecks only findings whose inputs changed; without a record it rechecks all.
+    Status record_extraction(const std::vector<long long>& chunk_ids, const std::vector<long long>& item_dated);
     void clear_extract_queue();
 
     // ---- Entities ----
@@ -369,6 +380,8 @@ public:
     Status clear(bool all = false);
 
 private:
+    Status withdraw_findings(const std::vector<long long>& chunk_ids);
+    Status prepare_item_removal_steps(const std::string& source, const std::string& ext_id);
     Result<KnowledgeImpactPreview> preview_evidence_snapshot(std::unordered_set<long long> removed,
                                                             std::optional<long long> item_id);
     std::unique_ptr<Database> db_;

@@ -592,6 +592,7 @@ void KnowledgeService::index_file(const std::string& path, int priority) {
     const auto current_cfg = config();
     bool eligible = false;
     std::string write_error;
+    (void)store_->prepare_item_change(in);  // before the lock below, so a large change does not block other writers
     {
         // The same database lock protects exclusions and selected imports, and KgStore's write transaction.
         // Do not hold it while updating file status: file_error takes the status lock before the database lock.
@@ -626,6 +627,7 @@ void KnowledgeService::index_meeting(const Task& t) {
     const long long start = jint(d, "start");
     ItemInput in{"meetings", t.id, jstr(d, "title", "Meeting"), jstr(d, "ref"), hash, start, start, t.priority,
                  chunks_from_json(r->value("chunks", json::array())), true};
+    (void)store_->prepare_item_change(in);
     const std::lock_guard lock(store_->db().mutex());
     const auto source = store_->source("meetings");
     if (!source.user_enabled || source.paused || excluded_item("meetings", t.id)) return;
@@ -981,7 +983,9 @@ bool KnowledgeService::extract_step() {
     {
         const std::lock_guard lock(store_->db().mutex());
         if (!same_chunks(*store_, batch)) return true;  // The remaining queued passages will be retried.
-        store_extraction(batch, *extraction);
+        const auto item_dated = store_extraction(batch, *extraction);
+        // Without this record a later revision falls back to rechecking every passage of the item.
+        (void)store_->record_extraction(ids, item_dated);
         store_->mark_extracted(ids);
     }
     {
@@ -995,8 +999,9 @@ bool KnowledgeService::extract_step() {
     return true;
 }
 
-void KnowledgeService::store_extraction(const std::vector<ChunkRow>& batch, const Extraction& x) {
+std::vector<long long> KnowledgeService::store_extraction(const std::vector<ChunkRow>& batch, const Extraction& x) {
     const long long now = now_ms();
+    std::vector<long long> item_dated;
     std::map<std::string, long long> ids;
     for (const auto& e : x.entities) {
         const long long id = store_->resolve_entity(e.type, e.name, e.email, now);
@@ -1017,14 +1022,17 @@ void KnowledgeService::store_extraction(const std::vector<ChunkRow>& batch, cons
         if (from.empty()) {
             // The fact holds from the passage's date when it states none (a transcript or message date).
             long long when = chunk.at;
-            if (!when)
+            if (!when) {
                 if (const auto it = store_->item(chunk.item_id)) when = it->updated_at;
+                item_dated.push_back(chunk.id);
+            }
             from = iso_day(when);
         }
         store_->add_relation(s->second, r.predicate, o->second, r.confidence, from, r.valid_to, chunk.id);
         store_->add_mention(chunk.id, s->second, r.subject);
         store_->add_mention(chunk.id, o->second, r.object);
     }
+    return item_dated;
 }
 
 // ---- Directory enrichment (design D5) -----------------------------------------------------------------------------------

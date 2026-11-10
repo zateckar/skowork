@@ -1028,6 +1028,544 @@ TEST(Database, SourceRevisionKeepsUnchangedEvidenceAndIndependentSupport) {
               0);
 }
 
+TEST(Database, SourceRevisionRechecksOnlyFindingsWhoseExtractionInputsChanged) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get_or_create("inputs.db");
+    ASSERT_TRUE(key);
+    auto migrations = knowledge::kg_migrations();
+    migrations.push_back({5, knowledge::kg_evidence_migration_sql()});
+    MigrationOutcome outcome;
+    auto db = open_and_migrate_consistently(root->file("inputs.db"), *key, migrations, outcome, knowledge::register_kg_writer);
+    ASSERT_TRUE(db) << db.error().message;
+    ASSERT_FALSE(outcome.degraded) << outcome.failure;
+    knowledge::KgStore store(std::move(*db));
+    const auto put = [&](const std::string& ext, const std::string& hash, long long updated, std::vector<knowledge::Chunk> chunks) {
+        knowledge::ItemInput in;
+        in.source = "files";
+        in.ext_id = ext;
+        in.title = ext;
+        in.hash = hash;
+        in.updated_at = updated;
+        in.chunks = std::move(chunks);
+        auto id = store.put_item(in, 2000);
+        EXPECT_TRUE(id) << (id ? "" : id.error().message);
+        return id ? *id : 0;
+    };
+    const auto number = [&](const std::string& sql) -> long long {
+        auto s = store.db().prepare(sql);
+        return s.step() ? s.col_int(0) : -1;
+    };
+    const auto chunk = [&](long long item, int ord) {
+        return number("SELECT id FROM chunks WHERE item_id=" + std::to_string(item) + " AND ord=" + std::to_string(ord));
+    };
+    const auto findings = [&](long long id) { return number("SELECT count(*) FROM relations WHERE chunk_id=" + std::to_string(id)); };
+    const auto queued = [&](long long id) { return number("SELECT count(*) FROM extract_queue WHERE chunk_id=" + std::to_string(id)); };
+    // Unverified support whose passage evidence belongs to the item's current revision.
+    const auto supported = [&](long long id) {
+        return number("SELECT count(*) FROM knowledge_support_sets s JOIN knowledge_support_evidence se ON se.support_id=s.id "
+                      "JOIN knowledge_evidence e ON e.id=se.evidence_id JOIN knowledge_revisions v ON v.id=e.revision_id "
+                      "WHERE s.state='unverified' AND v.current=1 AND e.chunk_id=" + std::to_string(id));
+    };
+    const std::string intro = "Atlas is a logistics project.", plan = "Atlas starts on 1 May.", budget = "Atlas has an approved budget.";
+    const long long doc = put("doc", "h1", 1000, {{"", intro, 0}, {"", plan, 0}, {"", budget, 0}});
+    const long long other = put("other", "h1", 1000, {{"", "Atlas reports to operations.", 0}});
+    ASSERT_TRUE(doc && other);
+    const long long c_intro = chunk(doc, 0), c_plan = chunk(doc, 1), c_budget = chunk(doc, 2), c_note = chunk(other, 0);
+    const long long atlas = store.resolve_entity("project", "Atlas", "", 1), value = store.resolve_entity("topic", "value", "", 1);
+    ASSERT_TRUE(atlas && value);
+    const auto find = [&](const std::string& predicate, long long id) {
+        return store.add_relation(atlas, predicate, value, 0.9, "2026", "", id) != 0;
+    };
+    // Two extraction requests: intro with plan, budget with the other Source's passage. The budget finding took its
+    // date from the item.
+    ASSERT_TRUE(find("is", c_intro) && find("starts", c_plan) && find("budget", c_budget) && find("reports", c_note));
+    ASSERT_TRUE(store.record_extraction({c_intro, c_plan}, {}));
+    ASSERT_TRUE(store.record_extraction({c_budget, c_note}, {c_budget}));
+    store.clear_extract_queue();
+
+    // Replacing the plan rechecks the passage extracted beside it and nothing else.
+    ASSERT_EQ(put("doc", "h2", 1000, {{"", intro, 0}, {"", "Atlas starts on 1 June.", 0}, {"", budget, 0}}), doc);
+    const long long c_plan2 = chunk(doc, 1);
+    ASSERT_NE(c_plan2, c_plan);
+    EXPECT_EQ(findings(c_intro), 0);
+    EXPECT_EQ(queued(c_intro), 1);
+    EXPECT_EQ(supported(c_intro), 0);
+    EXPECT_EQ(findings(c_budget), 1);
+    EXPECT_EQ(queued(c_budget), 0);
+    EXPECT_EQ(supported(c_budget), 1);
+    EXPECT_EQ(findings(c_note), 1);
+    EXPECT_EQ(queued(c_note), 0);
+    EXPECT_EQ(queued(c_plan2), 1);
+
+    // The model answers for intro and the new plan; the same finding revives its support.
+    ASSERT_TRUE(find("is", c_intro) && find("starts", c_plan2));
+    ASSERT_TRUE(store.record_extraction({c_intro, c_plan2}, {}));
+    store.clear_extract_queue();
+    EXPECT_EQ(supported(c_intro), 1);
+
+    // Only the item's date changes: the finding dated from the item is rechecked, the others are kept.
+    ASSERT_EQ(put("doc", "h2", 5000, {{"", intro, 0}, {"", "Atlas starts on 1 June.", 0}, {"", budget, 0}}), doc);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_revisions WHERE item_id=" + std::to_string(doc)), 2);
+    EXPECT_EQ(findings(c_budget), 0);
+    EXPECT_EQ(queued(c_budget), 1);
+    EXPECT_EQ(findings(c_intro), 1);
+    EXPECT_EQ(findings(c_plan2), 1);
+    EXPECT_EQ(queued(c_intro) + queued(c_plan2), 0);
+    EXPECT_EQ(findings(c_note), 1);
+    ASSERT_TRUE(find("budget", c_budget));
+    ASSERT_TRUE(store.record_extraction({c_budget}, {c_budget}));
+    store.clear_extract_queue();
+
+    // A passage whose own date changes is rechecked together with the passage extracted beside it.
+    ASSERT_EQ(put("doc", "h3", 5000, {{"", intro, 0}, {"", "Atlas starts on 1 June.", 777}, {"", budget, 0}}), doc);
+    EXPECT_EQ(chunk(doc, 1), c_plan2);
+    EXPECT_EQ(findings(c_plan2) + findings(c_intro), 0);
+    EXPECT_EQ(queued(c_plan2) + queued(c_intro), 2);
+    EXPECT_EQ(findings(c_budget), 1);
+    EXPECT_EQ(queued(c_budget), 0);
+
+    // The other Source's finding was produced beside the budget passage, so forgetting the document rechecks it.
+    EXPECT_EQ(findings(c_note), 1);
+    ASSERT_TRUE(store.remove_item("files", "doc", true));
+    EXPECT_EQ(findings(c_note), 0);
+    EXPECT_EQ(queued(c_note), 1);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_extraction_inputs"), 0);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state IN ('current','unverified')"), 0);
+}
+
+TEST(Database, SourceRevisionInvalidatesDerivationsThroughRequiredFacts) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get_or_create("derived.db");
+    ASSERT_TRUE(key);
+    auto migrations = knowledge::kg_migrations();
+    migrations.push_back({5, knowledge::kg_evidence_migration_sql()});
+    MigrationOutcome outcome;
+    auto db = open_and_migrate_consistently(root->file("derived.db"), *key, migrations, outcome, knowledge::register_kg_writer);
+    ASSERT_TRUE(db) << db.error().message;
+    ASSERT_FALSE(outcome.degraded) << outcome.failure;
+    knowledge::KgStore store(std::move(*db));
+    const auto put = [&](const std::string& ext, const std::string& hash, const std::string& passage) {
+        knowledge::ItemInput in;
+        in.source = "files";
+        in.ext_id = ext;
+        in.title = ext;
+        in.hash = hash;
+        in.updated_at = 1000;
+        in.chunks = {{"", passage, 0}};
+        auto id = store.put_item(in, 2000);
+        EXPECT_TRUE(id) << (id ? "" : id.error().message);
+        return id ? *id : 0;
+    };
+    const auto number = [&](const std::string& sql) -> long long {
+        auto s = store.db().prepare(sql);
+        return s.step() ? s.col_int(0) : -1;
+    };
+    const auto text = [&](const std::string& sql) {
+        auto s = store.db().prepare(sql);
+        return s.step() ? s.col_text(0) : std::string("<none>");
+    };
+    const long long a = put("a", "h1", "Atlas starts on 1 May."), b = put("b", "h1", "The Atlas team has eight people.");
+    ASSERT_TRUE(a && b);
+    const long long atlas = store.resolve_entity("project", "Atlas", "", 1), value = store.resolve_entity("topic", "value", "", 1);
+    ASSERT_TRUE(atlas && value);
+    ASSERT_TRUE(store.add_relation(atlas, "starts", value, 0.9, "2026", "", number("SELECT id FROM chunks WHERE item_id=" + std::to_string(a))));
+    ASSERT_TRUE(store.add_relation(atlas, "team", value, 0.9, "2026", "", number("SELECT id FROM chunks WHERE item_id=" + std::to_string(b))));
+    const std::string starts = std::to_string(number("SELECT id FROM knowledge_facts WHERE predicate='starts'"));
+    const std::string team = std::to_string(number("SELECT id FROM knowledge_facts WHERE predicate='team'"));
+    // 701 needs both Sources' facts, 702 needs 701, and 703 is derived independently from either fact.
+    ASSERT_TRUE(store.db().exec(
+        "INSERT INTO knowledge_facts(id,subject,predicate,object) VALUES(701," + std::to_string(atlas) + ",'staffed_at_start'," +
+        std::to_string(value) + "),(702," + std::to_string(atlas) + ",'ready'," + std::to_string(value) + "),(703," +
+        std::to_string(atlas) + ",'active'," + std::to_string(value) + ");"
+        "INSERT INTO knowledge_support_sets(id,fact_id,state) VALUES(701,701,'current'),(702,702,'current'),(703,703,'current'),(704,703,'current');"
+        "INSERT INTO knowledge_support_facts(support_id,required_fact_id) VALUES(701," + starts + "),(701," + team + "),(702,701),(703," +
+        starts + "),(704," + team + ");"));
+    const auto state = [&](int support) { return text("SELECT state FROM knowledge_support_sets WHERE id=" + std::to_string(support)); };
+    store.clear_extract_queue();
+
+    // The revision replaces the only passage stating the start while no analysis has run on the new text.
+    ASSERT_EQ(put("a", "h2", "Atlas starts on 1 June."), a);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state IN ('current','unverified') AND fact_id=" + starts), 0);
+    EXPECT_EQ(number("SELECT count(*) FROM extract_queue"), 1);
+    // The replaced passage's support is history of the old revision, not a finding waiting to be confirmed again.
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state='superseded' AND fact_id=" + starts), 1);
+    EXPECT_EQ(state(701), "unsupported");
+    EXPECT_EQ(state(702), "unsupported");
+    EXPECT_EQ(state(703), "unsupported");
+    EXPECT_EQ(state(704), "current");
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state IN ('current','unverified') AND fact_id=" + team), 1);
+
+    // Extraction later states the start again from the new passage. The derivations were made from the old support
+    // and stay out of current knowledge until they are derived again.
+    ASSERT_TRUE(store.add_relation(atlas, "starts", value, 0.9, "2026", "", number("SELECT id FROM chunks WHERE item_id=" + std::to_string(a))));
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state='unverified' AND fact_id=" + starts), 1);
+    EXPECT_EQ(state(701), "unsupported");
+    EXPECT_EQ(state(702), "unsupported");
+    EXPECT_EQ(state(703), "unsupported");
+    EXPECT_EQ(state(704), "current");
+}
+
+TEST(Database, DerivationDepthAndRevisionHistoryAreBounded) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get_or_create("bounds.db");
+    ASSERT_TRUE(key);
+    auto migrations = knowledge::kg_migrations();
+    migrations.push_back({5, knowledge::kg_evidence_migration_sql()});
+    MigrationOutcome outcome;
+    auto db = open_and_migrate_consistently(root->file("bounds.db"), *key, migrations, outcome, knowledge::register_kg_writer);
+    ASSERT_TRUE(db) << db.error().message;
+    ASSERT_FALSE(outcome.degraded) << outcome.failure;
+    knowledge::KgStore store(std::move(*db));
+    const auto put = [&](const std::string& ext, int version) {
+        knowledge::ItemInput in;
+        in.source = "files";
+        in.ext_id = ext;
+        in.title = ext;
+        in.hash = "h" + std::to_string(version);
+        in.updated_at = 1000;
+        in.chunks = {{"", "Atlas starts in month " + std::to_string(version) + ".", 0}};
+        auto id = store.put_item(in, 2000);
+        EXPECT_TRUE(id) << (id ? "" : id.error().message);
+        return id ? *id : 0;
+    };
+    const auto number = [&](const std::string& sql) -> long long {
+        auto s = store.db().prepare(sql);
+        return s.step() ? s.col_int(0) : -1;
+    };
+    const long long a = put("a", 1);
+    ASSERT_TRUE(a);
+    const long long atlas = store.resolve_entity("project", "Atlas", "", 1), value = store.resolve_entity("topic", "value", "", 1);
+    ASSERT_TRUE(atlas && value);
+    const auto state_fact = [&](const std::string& predicate) {
+        return store.add_relation(atlas, predicate, value, 0.9, "2026", "", number("SELECT id FROM chunks WHERE item_id=" + std::to_string(a))) != 0;
+    };
+    ASSERT_TRUE(state_fact("starts"));
+    const long long base = number("SELECT id FROM knowledge_facts WHERE predicate='starts'");
+    const auto derive = [&](long long id, long long required) {
+        return store.db().exec("INSERT INTO knowledge_facts(id,subject,predicate,object) VALUES(" + std::to_string(id) + "," +
+                               std::to_string(atlas) + ",'derived-" + std::to_string(id) + "'," + std::to_string(value) + ");"
+                               "INSERT INTO knowledge_support_sets(id,fact_id,state) VALUES(" + std::to_string(id) + "," +
+                               std::to_string(id) + ",'current');"
+                               "INSERT INTO knowledge_support_facts(support_id,required_fact_id) VALUES(" + std::to_string(id) + "," +
+                               std::to_string(required) + ")");
+    };
+    // The extracted fact and 31 derivations form the longest permitted chain.
+    for (int level = 1; level < knowledge::kMaxDerivationDepth; ++level)
+        ASSERT_TRUE(derive(1000 + level, level == 1 ? base : 1000 + level - 1)) << level;
+    ASSERT_TRUE(store.db().exec("SAVEPOINT deep"));
+    EXPECT_FALSE(derive(1032, 1031));
+    ASSERT_TRUE(store.db().exec("ROLLBACK TO deep; RELEASE deep"));
+    // Joining two short chains may not exceed the bound either.
+    ASSERT_TRUE(derive(2001, base));
+    ASSERT_TRUE(derive(2002, 2001));
+    EXPECT_FALSE(store.db().exec("INSERT INTO knowledge_support_facts(support_id,required_fact_id) VALUES(2001,1031)"));
+    EXPECT_TRUE(store.db().exec("INSERT INTO knowledge_support_facts(support_id,required_fact_id) VALUES(2001,1029)"));
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state='current'"), 33);
+
+    // A revision replacing the only passage invalidates the whole chain in one write.
+    ASSERT_EQ(put("a", 2), a);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state='unsupported'"), 33);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state='superseded'"), 1);
+
+    // History keeps four superseded revisions; older excerpts, supports and facts they alone supported are removed.
+    for (int version = 2; version <= 7; ++version) {
+        if (version > 2) ASSERT_EQ(put("a", version), a);
+        ASSERT_TRUE(state_fact("starts-" + std::to_string(version)));
+    }
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_revisions WHERE item_id=" + std::to_string(a)), 5);
+    EXPECT_EQ(number("SELECT min(sequence) FROM knowledge_revisions WHERE item_id=" + std::to_string(a)), 3);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_evidence"), 5);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_facts WHERE predicate IN ('starts','starts-2')"), 0);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_facts WHERE predicate LIKE 'starts-%'"), 5);
+    // The derivations required the pruned fact and went with it.
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_facts WHERE predicate LIKE 'derived-%'"), 0);
+
+    // Forgetting cascades through a full-depth chain without reaching the trigger depth limit.
+    const long long current = number("SELECT id FROM knowledge_facts WHERE predicate='starts-7'");
+    for (int level = 1; level < knowledge::kMaxDerivationDepth; ++level)
+        ASSERT_TRUE(derive(3000 + level, level == 1 ? current : 3000 + level - 1)) << level;
+    ASSERT_TRUE(store.remove_item("files", "a", true));
+    EXPECT_EQ(number("SELECT (SELECT count(*) FROM knowledge_facts)+(SELECT count(*) FROM knowledge_support_sets)+"
+                     "(SELECT count(*) FROM knowledge_revisions)+(SELECT count(*) FROM knowledge_evidence)"),
+              0);
+}
+
+TEST(Database, LargeSourceChangeWithdrawsInStepsAndRecoversIfInterrupted) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get_or_create("steps.db");
+    ASSERT_TRUE(key);
+    auto migrations = knowledge::kg_migrations();
+    migrations.push_back({5, knowledge::kg_evidence_migration_sql()});
+    MigrationOutcome outcome;
+    auto db = open_and_migrate_consistently(root->file("steps.db"), *key, migrations, outcome, knowledge::register_kg_writer);
+    ASSERT_TRUE(db) << db.error().message;
+    ASSERT_FALSE(outcome.degraded) << outcome.failure;
+    knowledge::KgStore store(std::move(*db));
+    const auto number = [&](const std::string& sql) -> long long {
+        auto s = store.db().prepare(sql);
+        return s.step() ? s.col_int(0) : -1;
+    };
+    constexpr int kPassages = 2100;  // above the 2,048-passage threshold for stepping
+    knowledge::ItemInput in;
+    in.source = "files";
+    in.ext_id = "large";
+    in.title = "large";
+    in.hash = "h1";
+    in.updated_at = 1000;
+    for (int n = 0; n < kPassages; ++n) in.chunks.push_back({"", "Passage " + std::to_string(n) + ".", 0});
+    const auto item = store.put_item(in, 2000);
+    ASSERT_TRUE(item) << item.error().message;
+    const long long one = store.resolve_entity("project", "Atlas", "", 1), two = store.resolve_entity("topic", "value", "", 1);
+    const auto extract_all = [&] {
+        int n = 0;
+        for (const auto& c : store.chunks_of_item(*item))
+            if (!number("SELECT count(*) FROM relations WHERE chunk_id=" + std::to_string(c.id)))
+                ASSERT_TRUE(store.add_relation(one, "fact-" + std::to_string(c.id), two, 0.9, "2026", "", c.id)) << ++n;
+        store.clear_extract_queue();
+    };
+    extract_all();
+    const std::string active = "SELECT count(*) FROM knowledge_support_sets WHERE state IN ('current','unverified')";
+    ASSERT_EQ(number(active), kPassages);
+    // An exact excerpt on a passage that stays: a recheck of its legacy finding does not touch it.
+    const long long kept = number("SELECT id FROM chunks WHERE item_id=" + std::to_string(*item) + " AND ord=1");
+    const long long kept_fact = number("SELECT fact_id FROM knowledge_support_sets s JOIN relations r ON r.id=s.legacy_relation_id "
+                                       "WHERE r.chunk_id=" + std::to_string(kept));
+    ASSERT_TRUE(store.db().exec(
+        "INSERT INTO knowledge_evidence(id,revision_id,chunk_id,excerpt,precision,byte_start,byte_end) "
+        "SELECT 90000,id," + std::to_string(kept) + ",'Passage','exact',0,7 FROM knowledge_revisions WHERE current=1 AND item_id=" +
+        std::to_string(*item) + ";"
+        "INSERT INTO knowledge_support_sets(id,fact_id,state) VALUES(90000," + std::to_string(kept_fact) + ",'current');"
+        "INSERT INTO knowledge_support_evidence(support_id,evidence_id) VALUES(90000,90000);"));
+    ASSERT_EQ(number(active), kPassages + 1);
+
+    // The revision replaces every even passage. Stopping after the withdrawal step leaves the item as it was, its
+    // findings awaiting recheck and its passages queued, never a partly replaced item.
+    knowledge::ItemInput revised = in;
+    revised.hash = "h2";
+    for (size_t n = 0; n < revised.chunks.size(); n += 2) revised.chunks[n].text += " Revised.";
+    ASSERT_TRUE(store.prepare_item_change(revised));
+    EXPECT_EQ(store.item_hash("files", "large"), "h1");
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_revisions WHERE item_id=" + std::to_string(*item)), 1);
+    EXPECT_EQ(number("SELECT count(*) FROM chunks WHERE item_id=" + std::to_string(*item)), kPassages);
+    EXPECT_EQ(number("SELECT count(*) FROM relations"), 0);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state='unsupported'"), kPassages);
+    EXPECT_EQ(number(active), 1);
+    EXPECT_EQ(store.extract_pending(), kPassages);
+    // Extraction of the unchanged item restores every finding.
+    extract_all();
+    EXPECT_EQ(number(active), kPassages + 1);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets"), kPassages + 1);
+
+    // The complete revision: replaced passages' findings are history, the rest await recheck, the excerpt stays.
+    ASSERT_TRUE(store.put_item(revised, 3000));
+    EXPECT_EQ(store.item_hash("files", "large"), "h2");
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state='superseded'"), kPassages / 2);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state='unsupported'"), kPassages / 2);
+    EXPECT_EQ(number(active), 1);
+    EXPECT_EQ(store.extract_pending(), kPassages);
+    extract_all();
+    EXPECT_EQ(number(active), kPassages + 1);
+
+    // A large forget also proceeds in steps and leaves nothing.
+    ASSERT_TRUE(store.remove_item("files", "large", true));
+    EXPECT_EQ(number("SELECT (SELECT count(*) FROM knowledge_facts)+(SELECT count(*) FROM knowledge_support_sets)+"
+                     "(SELECT count(*) FROM knowledge_evidence)+(SELECT count(*) FROM knowledge_revisions)+"
+                     "(SELECT count(*) FROM chunks)+(SELECT count(*) FROM extract_queue)"),
+              0);
+}
+
+// Run explicitly as a local scale qualification; it builds a large encrypted scratch database.
+TEST(Database, DISABLED_KnowledgeCascadeScale) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get_or_create("cascade-scale.db");
+    ASSERT_TRUE(key);
+    auto migrations = knowledge::kg_migrations();
+    migrations.push_back({5, knowledge::kg_evidence_migration_sql()});
+    MigrationOutcome outcome;
+    auto db = open_and_migrate_consistently(root->file("cascade-scale.db"), *key, migrations, outcome, knowledge::register_kg_writer);
+    ASSERT_TRUE(db) << db.error().message;
+    ASSERT_FALSE(outcome.degraded) << outcome.failure;
+    knowledge::KgStore store(std::move(*db));
+    const auto number = [&](const std::string& sql) -> long long {
+        auto s = store.db().prepare(sql);
+        return s.step() ? s.col_int(0) : -1;
+    };
+    // Background: 10,000 items with 90,000 facts, nine per passage.
+    auto setup = store.db().transaction([&]() -> Status {
+        return store.db().exec(R"sql(
+INSERT INTO entities(id,type,name,key) VALUES(1,'project','A','a'),(2,'date','B','b');
+WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+ INSERT INTO items(id,source,ext_id) SELECT x,'files','source-'||x FROM n;
+INSERT INTO chunks(id,item_id,ord,text) SELECT id,id,0,'source passage' FROM items;
+INSERT INTO knowledge_revisions(id,item_id,sequence,source_hash,indexed_at,current) SELECT id,id,1,'hash',1,1 FROM items;
+INSERT INTO knowledge_evidence(id,revision_id,chunk_id,excerpt,precision) SELECT id,id,id,'source passage','passage' FROM items;
+WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<90000)
+ INSERT INTO knowledge_facts(id,subject,predicate,object) SELECT x,1,'fact-'||x,2 FROM n;
+INSERT INTO knowledge_support_sets(id,fact_id,state) SELECT id,id,'current' FROM knowledge_facts;
+INSERT INTO knowledge_support_evidence(support_id,evidence_id) SELECT id,(id-1)/9+1 FROM knowledge_support_sets;
+)sql");
+    });
+    ASSERT_TRUE(setup) << setup.error().message;
+    // The large Source: 10,000 passages, each with one extracted finding, written by the real store.
+    const auto passages = [](bool revised) {
+        std::vector<knowledge::Chunk> chunks;
+        for (int n = 1; n <= 10000; ++n)
+            chunks.push_back({"", "Passage " + std::to_string(n) + (revised && n % 2 ? " as revised." : " of the large source."), 0});
+        return chunks;
+    };
+    knowledge::ItemInput in;
+    in.source = "files";
+    in.ext_id = "large";
+    in.title = "large";
+    in.hash = "h1";
+    in.updated_at = 1000;
+    in.chunks = passages(false);
+    const auto large = store.put_item(in, 2000);
+    ASSERT_TRUE(large) << large.error().message;
+    setup = store.db().transaction([&]() -> Status {
+        auto chunks = store.chunks_of_item(*large);
+        int n = 0;
+        for (const auto& c : chunks)
+            if (!store.add_relation(1, "large-" + std::to_string(++n), 2, 0.9, "2026", "", c.id)) return make_error("storage", "relation");
+        return {};
+    });
+    ASSERT_TRUE(setup) << setup.error().message;
+    const long long first_fact = number("SELECT min(id) FROM knowledge_facts WHERE predicate LIKE 'large-%'");
+    const long long first_evidence = number("SELECT min(e.id) FROM knowledge_evidence e JOIN chunks c ON c.id=e.chunk_id WHERE c.item_id=" +
+                                            std::to_string(*large));
+    ASSERT_EQ(number("SELECT count(*) FROM knowledge_facts WHERE predicate LIKE 'large-%' AND id BETWEEN " + std::to_string(first_fact) +
+                     " AND " + std::to_string(first_fact + 9999)),
+              10000);
+    // 300 full-depth derivation chains, 1,000 automatic category assignments and 500 possible inconsistencies
+    // all depend on the large Source.
+    const std::string f = std::to_string(first_fact), e = std::to_string(first_evidence);
+    setup = store.db().transaction([&]() -> Status {
+        return store.db().exec(
+            "WITH RECURSIVE k(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM k WHERE x<299), l(y) AS (VALUES(1) UNION ALL SELECT y+1 FROM l WHERE y<31) "
+            "INSERT INTO knowledge_facts(id,subject,predicate,object) SELECT 200000+x*100+y,1,'derived-'||x||'-'||y,2 FROM k,l;"
+            "INSERT INTO knowledge_support_sets(id,fact_id,state) SELECT id,id,'current' FROM knowledge_facts WHERE id>=200000;"
+            "INSERT INTO knowledge_support_facts(support_id,required_fact_id) "
+            "SELECT id,CASE WHEN id%100=1 THEN " + f + "+(id-200000)/100 ELSE id-1 END FROM knowledge_facts WHERE id>=200000 ORDER BY id DESC;"
+            "INSERT INTO knowledge_categories(id,name,normalized_name) VALUES(1,'Projects','projects');"
+            "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<999) "
+            "INSERT INTO knowledge_category_assignments(fact_id,category_id,decision,reason,evidence_id) "
+            "SELECT s.fact_id,1,'automatic','reason',se.evidence_id FROM n JOIN knowledge_support_sets s ON s.fact_id=" + f + "+x "
+            "JOIN knowledge_support_evidence se ON se.support_id=s.id;"
+            "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<499) "
+            "INSERT INTO knowledge_conflicts(left_fact,right_fact,left_evidence,right_evidence,explanation,state) "
+            "SELECT l.fact_id,r.fact_id,le.evidence_id,re.evidence_id,'differs','open' FROM n "
+            "JOIN knowledge_support_sets l ON l.fact_id=" + f + "+2000+2*x JOIN knowledge_support_evidence le ON le.support_id=l.id "
+            "JOIN knowledge_support_sets r ON r.fact_id=" + f + "+2001+2*x JOIN knowledge_support_evidence re ON re.support_id=r.id;");
+    });
+    ASSERT_TRUE(setup) << setup.error().message;
+    ASSERT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state IN ('current','unverified')"), 90000 + 10000 + 9300);
+    ASSERT_EQ(number("SELECT (SELECT count(*) FROM knowledge_category_assignments)+(SELECT count(*) FROM knowledge_conflicts)"), 1500);
+    const auto timed = [](const auto& work) {
+        const auto started = std::chrono::steady_clock::now();
+        work();
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+    };
+
+    // The interactive target is stated for 1,000 facts: a Source with 1,000 passages and findings, revised by half
+    // and then forgotten, in the same store.
+    knowledge::ItemInput medium;
+    medium.source = "files";
+    medium.ext_id = "medium";
+    medium.title = "medium";
+    medium.hash = "h1";
+    medium.updated_at = 1000;
+    for (int n = 1; n <= 1000; ++n) medium.chunks.push_back({"", "Medium passage " + std::to_string(n) + ".", 0});
+    const auto medium_id = store.put_item(medium, 2000);
+    ASSERT_TRUE(medium_id) << medium_id.error().message;
+    const auto extract_medium = [&] {
+        return store.db().transaction([&]() -> Status {
+            for (const auto& c : store.chunks_of_item(*medium_id))
+                if (!store.add_relation(1, "medium-" + c.text, 2, 0.9, "2026", "", c.id)) return make_error("storage", "relation");
+            return {};
+        });
+    };
+    const auto p95 = [](std::vector<long long> samples) {
+        std::sort(samples.begin(), samples.end());
+        return samples[(samples.size() * 95 + 99) / 100 - 1];  // nearest rank
+    };
+    std::vector<long long> medium_revisions;
+    for (int sample = 0; sample < 20; ++sample) {
+        ASSERT_TRUE(extract_medium());
+        // Alternately replace the even and the odd passages.
+        medium.hash = "m" + std::to_string(sample);
+        for (int n = sample % 2; n < 1000; n += 2) medium.chunks[static_cast<size_t>(n)].text += " Revised.";
+        bool ok = false;
+        medium_revisions.push_back(timed([&] { ok = static_cast<bool>(store.put_item(medium, 3000 + sample)); }));
+        ASSERT_TRUE(ok);
+    }
+    ASSERT_TRUE(extract_medium());
+    bool medium_ok = false;
+    const auto medium_forget_ms = timed([&] { medium_ok = store.remove_item("files", "medium", true); });
+    ASSERT_TRUE(medium_ok);
+    ASSERT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state IN ('current','unverified')"), 90000 + 10000 + 9300);
+    std::cout << "[ knowledge cascade ] one Source with 1000 supports, 20 revisions: p95 " << p95(medium_revisions) << " ms, max "
+              << *std::max_element(medium_revisions.begin(), medium_revisions.end()) << " ms; forget " << medium_forget_ms << " ms\n";
+
+    // Another writer keeps making small changes while the large Source changes; its waits are what a user notices.
+    std::atomic<bool> probing{true};
+    std::vector<long long> waits;
+    std::thread probe([&] {
+        int n = 0;
+        while (probing) {
+            const auto started = std::chrono::steady_clock::now();
+            store.set_meta("probe", std::to_string(++n));
+            waits.push_back(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count());
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+
+    // A revision that replaces half of the passages and keeps the other half.
+    in.hash = "h2";
+    in.chunks = passages(true);
+    Result<long long> revised = make_error("storage", "not run");
+    const auto withdrawal_ms = timed([&] { ASSERT_TRUE(store.prepare_item_change(in)); });
+    const auto revision_ms = timed([&] { revised = store.put_item(in, 3000); });
+    std::cout << "[ knowledge cascade ] large revision: stepped withdrawal " << withdrawal_ms << " ms, then put_item " << revision_ms << " ms\n";
+    ASSERT_TRUE(revised) << revised.error().message;
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state='superseded'"), 5000);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state IN ('current','unverified')"), 90000);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE id>=200000 AND state='unsupported'"), 9300);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_conflicts WHERE state='needs_recheck'"), 500);
+
+    bool removed = false;
+    const auto forget_ms = timed([&] { removed = store.remove_item("files", "large", true); });
+    probing = false;
+    probe.join();
+    ASSERT_TRUE(removed);
+    std::cout << "[ knowledge cascade ] concurrent small writes during the large revision and forget: " << waits.size()
+              << " samples, p95 " << p95(waits) << " ms, max " << *std::max_element(waits.begin(), waits.end()) << " ms\n";
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_facts"), 90000);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets"), 90000);
+    EXPECT_EQ(number("SELECT (SELECT count(*) FROM knowledge_category_assignments)+(SELECT count(*) FROM knowledge_conflicts)"), 0);
+    std::cout << "[ knowledge cascade ] encrypted 10000-item / 109300-fact store, one Source with 10000 supports: revision "
+              << revision_ms << " ms, forget " << forget_ms << " ms\n";
+}
+
 TEST(Database, KnowledgeConflictDecisionRechecksEvidenceAndForgetsHistory) {
     TempRoot t;
     auto root = DataRoot::open(t.path);
@@ -1216,12 +1754,14 @@ INSERT INTO knowledge_evidence(id,revision_id,chunk_id,excerpt,precision)
 WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
  INSERT INTO knowledge_facts(id,subject,predicate,object) SELECT x,1,'fact-'||x,2 FROM n;
 INSERT INTO knowledge_support_sets(id,fact_id,state) SELECT id,id,'current' FROM knowledge_facts;
-INSERT INTO knowledge_support_evidence(support_id,evidence_id) VALUES(1,1);
+INSERT INTO knowledge_support_evidence(support_id,evidence_id)
+ SELECT id,(id-1)/25%10000+1 FROM knowledge_support_sets WHERE id%25=1;
 WITH RECURSIVE n(x) AS (VALUES(100000) UNION ALL SELECT x-1 FROM n WHERE x>2)
- INSERT INTO knowledge_support_facts(support_id,required_fact_id) SELECT x,x-1 FROM n ORDER BY x DESC;
+ INSERT INTO knowledge_support_facts(support_id,required_fact_id) SELECT x,x-1 FROM n WHERE x%25<>1 ORDER BY x DESC;
 )sql");
     });
     ASSERT_TRUE(setup) << setup.error().message;
+    // 4,000 derivation chains of 25 facts, the schema's depth bound being 32; the first chain rests on item 1.
     const auto started = std::chrono::steady_clock::now();
     const auto preview = store.preview_item_removal(1);
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
@@ -1229,8 +1769,10 @@ WITH RECURSIVE n(x) AS (VALUES(100000) UNION ALL SELECT x-1 FROM n WHERE x>2)
     ASSERT_EQ(preview->facts.size(), 100'000u);
     EXPECT_EQ(preview->facts.front().before, 1);
     EXPECT_EQ(preview->facts.front().after, 0);
+    EXPECT_EQ(preview->facts[24].before, 1);
+    EXPECT_EQ(preview->facts[24].after, 0);
     EXPECT_EQ(preview->facts.back().before, 1);
-    EXPECT_EQ(preview->facts.back().after, 0);
+    EXPECT_EQ(preview->facts.back().after, 1);
     std::cout << "[ knowledge impact ] encrypted 10000-item / 100000-fact snapshot and diff: " << elapsed.count() << " ms\n";
 }
 

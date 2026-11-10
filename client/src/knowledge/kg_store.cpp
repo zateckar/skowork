@@ -7,11 +7,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <map>
 #include <limits>
 #include <mutex>
 #include <queue>
 #include <set>
+#include <thread>
 #include <unordered_map>
 
 namespace wb::knowledge {
@@ -63,6 +65,9 @@ CREATE TABLE knowledge_evidence(
   byte_end INTEGER,
   CHECK((precision='passage' AND byte_start IS NULL AND byte_end IS NULL) OR
         (precision='exact' AND byte_start IS NOT NULL AND byte_end IS NOT NULL AND byte_start>=0 AND byte_end>byte_start)));
+CREATE INDEX knowledge_evidence_revision ON knowledge_evidence(revision_id,chunk_id);
+-- Deleting a passage clears its evidence references; without this every deletion scans all evidence.
+CREATE INDEX knowledge_evidence_chunk ON knowledge_evidence(chunk_id);
 CREATE UNIQUE INDEX knowledge_passage_identity ON knowledge_evidence(revision_id,chunk_id) WHERE precision='passage';
 CREATE UNIQUE INDEX knowledge_exact_identity ON knowledge_evidence(revision_id,chunk_id,byte_start,byte_end) WHERE precision='exact';
 CREATE TRIGGER knowledge_evidence_validate_insert BEFORE INSERT ON knowledge_evidence
@@ -116,6 +121,24 @@ WHEN EXISTS(
   SELECT 1 FROM required WHERE id=(SELECT fact_id FROM knowledge_support_sets WHERE id=new.support_id)
 )
 BEGIN SELECT RAISE(ABORT,'cyclic knowledge dependency'); END;
+-- Invalidation and forgetting follow required facts through nested triggers. Bounding the longest chain to 32 facts
+-- (kMaxDerivationDepth) keeps every cascade far below SQLite's trigger depth, so a forget cannot fail on a deep graph.
+CREATE TRIGGER knowledge_dependency_depth BEFORE INSERT ON knowledge_support_facts
+WHEN (WITH RECURSIVE below(id,d) AS (
+        SELECT new.required_fact_id,1
+        UNION
+        SELECT x.required_fact_id,b.d+1 FROM below b
+          JOIN knowledge_support_sets s ON s.fact_id=b.id
+          JOIN knowledge_support_facts x ON x.support_id=s.id WHERE b.d<=32)
+      SELECT max(d) FROM below)
+   + (WITH RECURSIVE above(id,d) AS (
+        SELECT fact_id,1 FROM knowledge_support_sets WHERE id=new.support_id
+        UNION
+        SELECT s.fact_id,a.d+1 FROM above a
+          JOIN knowledge_support_facts x ON x.required_fact_id=a.id
+          JOIN knowledge_support_sets s ON s.id=x.support_id WHERE a.d<=32)
+      SELECT max(d) FROM above) > 32
+BEGIN SELECT RAISE(ABORT,'knowledge dependency chain is too deep'); END;
 CREATE TRIGGER knowledge_immutable_dependency BEFORE UPDATE ON knowledge_support_facts
 BEGIN SELECT RAISE(ABORT,'replace knowledge dependencies instead of updating them'); END;
 CREATE TABLE knowledge_annotations(
@@ -149,6 +172,9 @@ CREATE TABLE knowledge_conflicts(
   UNIQUE(left_fact,right_fact));
 CREATE INDEX knowledge_conflict_left_evidence ON knowledge_conflicts(left_evidence);
 CREATE INDEX knowledge_conflict_right_evidence ON knowledge_conflicts(right_evidence);
+CREATE INDEX knowledge_conflict_right_fact ON knowledge_conflicts(right_fact);
+CREATE INDEX knowledge_category_evidence ON knowledge_category_assignments(evidence_id);
+CREATE INDEX knowledge_annotation_revision ON knowledge_annotations(revision_id);
 CREATE TABLE knowledge_conflict_history(
   id INTEGER PRIMARY KEY,
   conflict_id INTEGER NOT NULL REFERENCES knowledge_conflicts(id) ON DELETE CASCADE,
@@ -157,6 +183,9 @@ CREATE TABLE knowledge_conflict_history(
   decision TEXT NOT NULL,
   reason TEXT NOT NULL,
   decided_at INTEGER NOT NULL);
+CREATE INDEX knowledge_history_conflict ON knowledge_conflict_history(conflict_id);
+CREATE INDEX knowledge_history_left_evidence ON knowledge_conflict_history(left_evidence);
+CREATE INDEX knowledge_history_right_evidence ON knowledge_conflict_history(right_evidence);
 CREATE TABLE knowledge_previews(
   token TEXT PRIMARY KEY,
   operation TEXT NOT NULL CHECK(operation='forget_item'),
@@ -165,6 +194,16 @@ CREATE TABLE knowledge_previews(
   expires_at INTEGER NOT NULL);
 CREATE TABLE knowledge_generation(id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL);
 INSERT INTO knowledge_generation(id,value) VALUES(1,0);
+-- Every passage sent in one extraction request is an input of that request. result=1 marks the request whose
+-- findings a passage currently holds; item_date=1 when one of them took its date from the item.
+CREATE TABLE knowledge_extraction_inputs(
+  batch_id INTEGER NOT NULL,
+  chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+  result INTEGER NOT NULL CHECK(result IN (0,1)),
+  item_date INTEGER NOT NULL DEFAULT 0 CHECK(item_date IN (0,1)),
+  PRIMARY KEY(batch_id,chunk_id)) WITHOUT ROWID;
+CREATE UNIQUE INDEX knowledge_extraction_result ON knowledge_extraction_inputs(chunk_id) WHERE result=1;
+CREATE INDEX knowledge_extraction_member ON knowledge_extraction_inputs(chunk_id,batch_id);
 
 INSERT INTO knowledge_revisions(item_id,sequence,source_hash,indexed_at,current)
   SELECT id,1,hash,indexed_at,1 FROM items;
@@ -195,7 +234,7 @@ CREATE TRIGGER knowledge_legacy_relation_removed BEFORE DELETE ON relations BEGI
       AND r.valid_from=old.valid_from AND r.valid_to=old.valid_to),
     state=CASE WHEN EXISTS(SELECT 1 FROM relations r WHERE r.id<>old.id AND r.chunk_id=old.chunk_id
       AND r.subject=old.subject AND r.predicate=old.predicate AND r.object=old.object
-      AND r.valid_from=old.valid_from AND r.valid_to=old.valid_to) THEN state ELSE 'unsupported' END
+      AND r.valid_from=old.valid_from AND r.valid_to=old.valid_to) OR state='superseded' THEN state ELSE 'unsupported' END
     WHERE legacy_relation_id=old.id;
 END;
 CREATE TRIGGER knowledge_forget_evidence BEFORE DELETE ON knowledge_evidence BEGIN
@@ -256,7 +295,27 @@ CREATE TRIGGER knowledge_empty_fact AFTER DELETE ON knowledge_support_sets BEGIN
   DELETE FROM knowledge_facts WHERE id=old.fact_id AND NOT EXISTS
     (SELECT 1 FROM knowledge_support_sets WHERE fact_id=old.fact_id);
 END;
-)sql") + kg_writer_barrier_sql() + [] {
+)sql") + [] {
+        // A removed or re-dated passage was shown to the model beside others: their findings are rechecked too.
+        const auto recheck = [](const std::string& name, const std::string& event, const std::string& self) {
+            const std::string batches = "(SELECT batch_id FROM knowledge_extraction_inputs WHERE chunk_id=old.id)";
+            const std::string affected = "(SELECT d.chunk_id FROM knowledge_extraction_inputs d WHERE d.result=1" + self +
+                                         " AND d.batch_id IN " + batches + ")";
+            return "CREATE TRIGGER " + name + " " + event + " BEGIN\n"
+                   "  DELETE FROM relations WHERE chunk_id IN " + affected + ";\n"
+                   "  DELETE FROM mentions WHERE chunk_id IN " + affected + ";\n"
+                   "  INSERT OR IGNORE INTO extract_queue(chunk_id,priority) SELECT d.chunk_id,1 FROM knowledge_extraction_inputs d"
+                   " WHERE d.result=1" + self + " AND d.batch_id IN " + batches + ";\n"
+                   "  UPDATE knowledge_extraction_inputs SET result=0,item_date=0 WHERE result=1" +
+                   (self.empty() ? std::string() : " AND chunk_id<>old.id") + " AND batch_id IN " + batches + ";\n"
+                   "  DELETE FROM knowledge_extraction_inputs WHERE batch_id IN " + batches +
+                   " AND NOT EXISTS(SELECT 1 FROM knowledge_extraction_inputs r"
+                   " WHERE r.batch_id=knowledge_extraction_inputs.batch_id AND r.result=1 AND r.chunk_id<>old.id);\n"
+                   "END;\n";
+        };
+        return recheck("knowledge_extraction_input_removed", "BEFORE DELETE ON chunks", " AND d.chunk_id<>old.id") +
+               recheck("knowledge_extraction_input_redated", "AFTER UPDATE OF at ON chunks WHEN old.at IS NOT new.at", "");
+    }() + kg_writer_barrier_sql() + [] {
         std::string sql;
         for (const char* table : {"sources", "folders", "documents", "user_exclusions", "skipped", "items", "chunks",
                                   "entities", "entity_aliases", "mentions", "relations", "facts_user", "notes", "shares",
@@ -545,7 +604,17 @@ Status advance_revision(Database& db, long long item, const std::string& hash, l
     // A correction or user-stated fact belongs to the item, not to one version of its text.
     if (Status s = db.exec("UPDATE knowledge_annotations SET revision_id=" + next + " WHERE revision_id=" + old); !s) return s;
     if (Status s = db.exec("UPDATE knowledge_revisions SET current=0 WHERE id=" + old); !s) return s;
-    return db.exec("UPDATE knowledge_revisions SET current=1 WHERE id=" + next);
+    // A finding already withdrawn for recheck whose excerpt did not carry over is history of the old revision, the
+    // same as one the schema just superseded. This is what a change withdrawn in advance leaves behind.
+    if (Status s = db.exec("UPDATE knowledge_support_sets SET state='superseded' WHERE state='unsupported' AND id IN "
+                           "(SELECT se.support_id FROM knowledge_support_evidence se JOIN knowledge_evidence e ON e.id=se.evidence_id "
+                           "WHERE e.revision_id=" + old + ")");
+        !s)
+        return s;
+    if (Status s = db.exec("UPDATE knowledge_revisions SET current=1 WHERE id=" + next); !s) return s;
+    // History is bounded: older revisions go with their excerpts, superseded supports and review history.
+    return db.exec("DELETE FROM knowledge_revisions WHERE item_id=" + std::to_string(item) + " AND current=0 AND sequence<"
+                   "(SELECT sequence FROM knowledge_revisions WHERE id=" + next + ")-" + std::to_string(kRetainedSupersededRevisions));
 }
 
 // Records a newly extracted relation as passage-level, unverified support of its canonical fact, exactly as the
@@ -1409,7 +1478,168 @@ std::optional<std::string> KgStore::item_hash(const std::string& source, const s
     return s.col_text(0);
 }
 
+namespace {
+
+// A revision or removal touching more than kStepThreshold passages first withdraws its findings, kWithdrawStep
+// passages per transaction. Below the threshold one transaction is faster overall and short enough.
+constexpr size_t kStepThreshold = 2048, kWithdrawStep = 256;
+
+// How a new version of an item maps onto its stored passages. Identical passages keep their identity and
+// embeddings, including when they move; a heading change is a changed passage; duplicates match one at a time.
+struct PassagePlan {
+    std::vector<long long> old_ids;
+    std::map<long long, long long> old_dates;
+    std::vector<long long> retained;  // per new passage: the stored passage it keeps, or 0
+    std::set<long long> used;
+    bool unchanged_context = false;
+};
+
+PassagePlan plan_passages(Database& db, long long item_id, const std::optional<ItemRow>& previous, const ItemInput& in) {
+    PassagePlan plan;
+    std::map<std::pair<std::string, std::string>, std::queue<long long>> available;
+    std::vector<Chunk> old_passages;
+    auto old = db.prepare("SELECT id, heading, text, at FROM chunks WHERE item_id=?1 ORDER BY ord, id");
+    old.bind(1, item_id);
+    while (old.step()) {
+        const long long chunk_id = old.col_int(0);
+        plan.old_ids.push_back(chunk_id);
+        plan.old_dates[chunk_id] = old.col_int(3);
+        old_passages.push_back({old.col_text(1), old.col_text(2), old.col_int(3)});
+        available[{old.col_text(1), old.col_text(2)}].push(chunk_id);
+    }
+    plan.unchanged_context = previous && previous->updated_at == in.updated_at && old_passages.size() == in.chunks.size();
+    for (size_t n = 0; plan.unchanged_context && n < in.chunks.size(); ++n)
+        if (old_passages[n].heading != in.chunks[n].heading || old_passages[n].text != in.chunks[n].text ||
+            old_passages[n].at != in.chunks[n].at)
+            plan.unchanged_context = false;
+    for (const auto& c : in.chunks) {
+        auto& matches = available[{c.heading, c.text}];
+        if (matches.empty()) plan.retained.push_back(0);
+        else {
+            plan.retained.push_back(matches.front());
+            plan.used.insert(matches.front());
+            matches.pop();
+        }
+    }
+    return plan;
+}
+
+// Whether a kept passage's findings must be extracted again. Legacy relations lack complete dependency and date
+// provenance, so without a record they are rechecked whenever the item's passages or date context change. The
+// recorded extraction inputs narrow that: a removed or re-dated input clears the record itself, so what is left to
+// check is the passage's own date and a date taken from the item.
+bool recheck_retained(Database& db, const PassagePlan& plan, const std::optional<ItemRow>& previous, const ItemInput& in,
+                      long long chunk_id, long long at, bool evidence_schema) {
+    if (!previous) return false;
+    const bool redated = plan.old_dates.at(chunk_id) != at;
+    if (redated) return true;
+    if (plan.unchanged_context) return false;
+    if (!evidence_schema) return true;
+    auto recorded = db.prepare("SELECT item_date FROM knowledge_extraction_inputs WHERE chunk_id=?1 AND result=1");
+    recorded.bind(1, chunk_id);
+    if (!recorded.step()) return true;
+    return recorded.col_int(0) != 0 && previous->updated_at != in.updated_at;
+}
+
+}  // namespace
+
+Status KgStore::withdraw_findings(const std::vector<long long>& chunk_ids) {
+    for (size_t at = 0; at < chunk_ids.size(); at += kWithdrawStep) {
+        // Each step is its own transaction, and the lock is released between steps so that searches, the indexer
+        // and a concurrent forget are not held behind one large item. The lock is not fair: pause so a waiting
+        // thread actually gets it.
+        if (at) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const std::lock_guard lock(db_->mutex());
+        if (!sqlite3_get_autocommit(db_->raw())) return {};
+        const std::vector<long long> part(chunk_ids.begin() + static_cast<std::ptrdiff_t>(at),
+                                          chunk_ids.begin() + static_cast<std::ptrdiff_t>(std::min(chunk_ids.size(), at + kWithdrawStep)));
+        const std::string ids = id_list(part);
+        const auto step = db_->transaction([&]() -> Status {
+            // A passage that had findings is queued again first, so that if the change never completes the
+            // passage recovers its findings instead of silently keeping fewer.
+            if (Status s = db_->exec("INSERT OR IGNORE INTO extract_queue(chunk_id,priority) "
+                                     "SELECT chunk_id,0 FROM relations WHERE chunk_id IN (" + ids + ") "
+                                     "UNION SELECT chunk_id,0 FROM mentions WHERE chunk_id IN (" + ids + ")");
+                !s)
+                return s;
+            if (Status s = db_->exec("UPDATE knowledge_extraction_inputs SET result=0,item_date=0 WHERE result=1 AND chunk_id IN (" + ids + ")"); !s)
+                return s;
+            if (Status s = db_->exec("DELETE FROM relations WHERE chunk_id IN (" + ids + ")"); !s) return s;
+            return db_->exec("DELETE FROM mentions WHERE chunk_id IN (" + ids + ")");
+        });
+        if (!step) return step;
+    }
+    return {};
+}
+
+Status KgStore::prepare_item_change(const ItemInput& in) {
+    std::vector<long long> withdraw;
+    {
+        const std::lock_guard lock(db_->mutex());
+        if (db_->user_version() < 5 || !sqlite3_get_autocommit(db_->raw())) return {};
+        const auto previous = item(in.source, in.ext_id);
+        if (!previous) return {};
+        const auto plan = plan_passages(*db_, previous->id, previous, in);
+        std::vector<long long> moved;  // removed or re-dated: the passages extracted beside them are rechecked too
+        for (const long long id : plan.old_ids)
+            if (!plan.used.count(id)) moved.push_back(id);
+        withdraw = moved;
+        for (size_t n = 0; n < in.chunks.size(); ++n) {
+            const long long id = plan.retained[n];
+            if (!id) continue;
+            if (plan.old_dates.at(id) != in.chunks[n].at) moved.push_back(id);
+            if (recheck_retained(*db_, plan, previous, in, id, in.chunks[n].at, true)) withdraw.push_back(id);
+        }
+        if (withdraw.size() <= kStepThreshold) return {};
+        if (!moved.empty()) {
+            auto beside = db_->prepare("SELECT DISTINCT d.chunk_id FROM knowledge_extraction_inputs d WHERE d.result=1 AND d.batch_id IN "
+                                       "(SELECT batch_id FROM knowledge_extraction_inputs WHERE chunk_id IN (" + id_list(moved) + "))");
+            while (beside.step()) withdraw.push_back(beside.col_int(0));
+        }
+    }
+    std::sort(withdraw.begin(), withdraw.end());
+    withdraw.erase(std::unique(withdraw.begin(), withdraw.end()), withdraw.end());
+    return withdraw_findings(withdraw);
+}
+
+Status KgStore::prepare_item_removal_steps(const std::string& source, const std::string& ext_id) {
+    long long item_id = 0;
+    std::vector<long long> passages;
+    {
+        const std::lock_guard lock(db_->mutex());
+        if (db_->user_version() < 5 || !sqlite3_get_autocommit(db_->raw())) return {};
+        const auto existing = item(source, ext_id);
+        if (!existing) return {};
+        item_id = existing->id;
+        auto s = db_->prepare("SELECT id FROM chunks WHERE item_id=?1 ORDER BY id");
+        s.bind(1, item_id);
+        while (s.step()) passages.push_back(s.col_int(0));
+        if (passages.size() <= kStepThreshold) return {};
+    }
+    if (Status s = withdraw_findings(passages); !s) return s;
+    // Then the item's excerpts, which takes the supports, category assignments and review entries that rest on them.
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const std::lock_guard lock(db_->mutex());
+        if (!sqlite3_get_autocommit(db_->raw())) return {};
+        int removed = 0;
+        const auto step = db_->transaction([&]() -> Status {
+            if (Status s = db_->exec("DELETE FROM knowledge_evidence WHERE id IN (SELECT e.id FROM knowledge_evidence e "
+                                     "JOIN knowledge_revisions v ON v.id=e.revision_id WHERE v.item_id=" + std::to_string(item_id) +
+                                     " LIMIT " + std::to_string(kWithdrawStep) + ")");
+                !s)
+                return s;
+            removed = db_->changes();
+            return {};
+        });
+        if (!step) return step;
+        if (!removed) return {};
+    }
+}
+
 Result<long long> KgStore::put_item(const ItemInput& in, long long now) {
+    // Optional: withdraws a large change's findings in steps; the transaction below completes the change either way.
+    (void)prepare_item_change(in);
     const std::lock_guard lock(db_->mutex());
     long long id = 0;
     Status st = db_->transaction([&]() -> Status {
@@ -1434,57 +1664,34 @@ Result<long long> KgStore::put_item(const ItemInput& in, long long now) {
         existing.bind(1, in.source).bind(2, in.ext_id);
         if (!existing.step()) return make_error("storage", "the indexed item could not be found");
         id = existing.col_int(0);
-        // Keep identical passages and their embeddings, including when they move. Legacy relations lack complete
-        // dependency and date provenance, so recheck them when indexed passages or their date context change.
-        // A heading change is changed context; match duplicates one occurrence at a time.
-        std::map<std::pair<std::string, std::string>, std::queue<long long>> available;
-        std::map<long long, long long> old_dates;
-        std::vector<long long> old_ids;
-        std::vector<Chunk> old_passages;
-        auto old = db_->prepare("SELECT id, heading, text, at FROM chunks WHERE item_id=?1 ORDER BY ord, id");
-        old.bind(1, id);
-        while (old.step()) {
-            const long long chunk_id = old.col_int(0);
-            old_ids.push_back(chunk_id);
-            old_dates[chunk_id] = old.col_int(3);
-            old_passages.push_back({old.col_text(1), old.col_text(2), old.col_int(3)});
-            available[{old.col_text(1), old.col_text(2)}].push(chunk_id);
-        }
-        bool unchanged_context = previous && previous->updated_at == in.updated_at && old_passages.size() == in.chunks.size();
-        if (unchanged_context) {
-            for (size_t n = 0; n < in.chunks.size(); ++n) {
-                if (old_passages[n].heading != in.chunks[n].heading || old_passages[n].text != in.chunks[n].text ||
-                    old_passages[n].at != in.chunks[n].at) {
-                    unchanged_context = false;
-                    break;
-                }
-            }
-        }
-        std::vector<long long> retained;
-        std::set<long long> used;
-        for (const auto& c : in.chunks) {
-            auto& matches = available[{c.heading, c.text}];
-            if (matches.empty()) retained.push_back(0);
-            else {
-                const long long chunk_id = matches.front();
-                matches.pop();
-                retained.push_back(chunk_id);
-                used.insert(chunk_id);
-            }
-        }
-        if (db_->user_version() >= 5) {
+        const auto plan = plan_passages(*db_, id, previous, in);
+        const auto& [old_ids, old_dates, retained, used, unchanged_context] = plan;
+        const bool evidence_schema = db_->user_version() >= 5;
+        if (evidence_schema) {
             // A passage keeps its evidence only when its heading, text and date are all unchanged.
             std::vector<long long> unchanged;
             bool changed = !previous || previous->hash != in.hash || used.size() != old_ids.size();
             for (size_t n = 0; n < in.chunks.size(); ++n) {
-                if (retained[n] && old_dates[retained[n]] == in.chunks[n].at) unchanged.push_back(retained[n]);
+                if (retained[n] && old_dates.at(retained[n]) == in.chunks[n].at) unchanged.push_back(retained[n]);
                 else changed = true;
             }
             if (Status s = advance_revision(*db_, id, in.hash, now, changed, unchanged); !s) return s;
         }
+        // Prepared once: a large item runs each of these for every passage, and compiling a statement on a table
+        // with triggers costs more than running it.
+        auto drop = db_->prepare("DELETE FROM chunks WHERE id=?1");
+        auto update = db_->prepare("UPDATE chunks SET ord=?1, at=?2 WHERE id=?3");
+        auto relations = db_->prepare("DELETE FROM relations WHERE chunk_id=?1");
+        auto mentions = db_->prepare("DELETE FROM mentions WHERE chunk_id=?1");
+        auto requeue = db_->prepare("INSERT INTO extract_queue(chunk_id, priority) VALUES(?1,?2) "
+                                    "ON CONFLICT(chunk_id) DO UPDATE SET priority=max(priority, excluded.priority)");
+        auto dequeue = db_->prepare("DELETE FROM extract_queue WHERE chunk_id=?1");
+        auto ci = db_->prepare("INSERT INTO chunks(item_id, ord, heading, text, at, tokens) VALUES(?1,?2,?3,?4,?5,?6)");
+        auto q = db_->prepare("INSERT INTO embed_queue(chunk_id, priority) VALUES(?1,?2)");
+        auto x = db_->prepare("INSERT INTO extract_queue(chunk_id, priority) VALUES(?1,?2)");
         for (const long long chunk_id : old_ids) {
             if (used.count(chunk_id)) continue;
-            auto drop = db_->prepare("DELETE FROM chunks WHERE id=?1");
+            drop.reset();
             drop.bind(1, chunk_id);
             if (Status s = drop.run(); !s) return s;
         }
@@ -1492,39 +1699,42 @@ Result<long long> KgStore::put_item(const ItemInput& in, long long now) {
         for (const auto& c : in.chunks) {
             const long long existing_id = retained[static_cast<size_t>(ord)];
             if (existing_id) {
-                auto update = db_->prepare("UPDATE chunks SET ord=?1, at=?2 WHERE id=?3");
+                update.reset();
                 update.bind(1, ord++).bind(2, c.at).bind(3, existing_id);
                 if (Status s = update.run(); !s) return s;
-                const bool recheck = previous && (!unchanged_context || old_dates[existing_id] != c.at);
-                if (recheck) {
-                    auto relations = db_->prepare("DELETE FROM relations WHERE chunk_id=?1");
+                if (recheck_retained(*db_, plan, previous, in, existing_id, c.at, evidence_schema)) {
+                    if (evidence_schema) {
+                        auto stale = db_->prepare("UPDATE knowledge_extraction_inputs SET result=0,item_date=0 WHERE chunk_id=?1 AND result=1");
+                        stale.bind(1, existing_id);
+                        if (Status s = stale.run(); !s) return s;
+                    }
+                    relations.reset();
                     relations.bind(1, existing_id);
                     if (Status s = relations.run(); !s) return s;
-                    auto mentions = db_->prepare("DELETE FROM mentions WHERE chunk_id=?1");
+                    mentions.reset();
                     mentions.bind(1, existing_id);
                     if (Status s = mentions.run(); !s) return s;
                     if (in.extract) {
-                        auto x = db_->prepare("INSERT INTO extract_queue(chunk_id, priority) VALUES(?1,?2) "
-                                              "ON CONFLICT(chunk_id) DO UPDATE SET priority=max(priority, excluded.priority)");
-                        x.bind(1, existing_id).bind(2, in.priority);
-                        if (Status s = x.run(); !s) return s;
+                        requeue.reset();
+                        requeue.bind(1, existing_id).bind(2, in.priority);
+                        if (Status s = requeue.run(); !s) return s;
                     } else {
-                        auto x = db_->prepare("DELETE FROM extract_queue WHERE chunk_id=?1");
-                        x.bind(1, existing_id);
-                        if (Status s = x.run(); !s) return s;
+                        dequeue.reset();
+                        dequeue.bind(1, existing_id);
+                        if (Status s = dequeue.run(); !s) return s;
                     }
                 }
                 continue;
             }
-            auto ci = db_->prepare("INSERT INTO chunks(item_id, ord, heading, text, at, tokens) VALUES(?1,?2,?3,?4,?5,?6)");
+            ci.reset();
             ci.bind(1, id).bind(2, ord++).bind(3, c.heading).bind(4, c.text).bind(5, c.at).bind(6, estimate_tokens(c.text));
             if (Status s = ci.run(); !s) return s;
             const long long cid = db_->last_insert_id();
-            auto q = db_->prepare("INSERT INTO embed_queue(chunk_id, priority) VALUES(?1,?2)");
+            q.reset();
             q.bind(1, cid).bind(2, in.priority);
             if (Status s = q.run(); !s) return s;
             if (in.extract) {
-                auto x = db_->prepare("INSERT INTO extract_queue(chunk_id, priority) VALUES(?1,?2)");
+                x.reset();
                 x.bind(1, cid).bind(2, in.priority);
                 if (Status s = x.run(); !s) return s;
             }
@@ -1584,6 +1794,8 @@ Status KgStore::forget_thread(const std::string& thread_id) {
 }
 
 bool KgStore::remove_item(const std::string& source, const std::string& ext_id, bool forget) {
+    // Optional, as for a revision: the transaction below removes everything that is left.
+    (void)prepare_item_removal_steps(source, ext_id);
     const std::lock_guard lock(db_->mutex());
     bool removed = false;
     const auto result = db_->transaction([&]() -> Status {
@@ -1612,7 +1824,7 @@ bool KgStore::remove_item(const std::string& source, const std::string& ext_id, 
 }
 
 bool KgStore::remove_item(long long id, bool forget) {
-    const std::lock_guard lock(db_->mutex());
+    // Not locked across both calls, so that a large removal can release the lock between its steps.
     const auto existing = item(id);
     return existing && remove_item(existing->source, existing->ext_id, forget);
 }
@@ -1953,6 +2165,35 @@ void KgStore::mark_extracted(const std::vector<long long>& chunk_ids) {
     if (chunk_ids.empty()) return;
     const std::lock_guard lock(db_->mutex());
     (void)db_->exec("DELETE FROM extract_queue WHERE chunk_id IN (" + id_list(chunk_ids) + ")");
+}
+
+Status KgStore::record_extraction(const std::vector<long long>& chunk_ids, const std::vector<long long>& item_dated) {
+    const std::lock_guard lock(db_->mutex());
+    if (chunk_ids.empty() || db_->user_version() < 5) return {};
+    const auto write = [&]() -> Status {
+        const std::string ids = id_list(chunk_ids);
+        long long batch = 0;
+        {
+            auto next = db_->prepare("SELECT coalesce(max(batch_id),0)+1 FROM knowledge_extraction_inputs");
+            if (!next.step()) return make_error("storage", "The extraction inputs could not be recorded.");
+            batch = next.col_int(0);
+        }
+        if (Status s = db_->exec("UPDATE knowledge_extraction_inputs SET result=0,item_date=0 WHERE result=1 AND chunk_id IN (" + ids + ")"); !s)
+            return s;
+        for (const long long id : chunk_ids) {
+            auto add = db_->prepare("INSERT INTO knowledge_extraction_inputs(batch_id,chunk_id,result,item_date) "
+                                    "SELECT ?1,id,1,?3 FROM chunks WHERE id=?2");
+            add.bind(1, batch).bind(2, id);
+            add.bind(3, std::find(item_dated.begin(), item_dated.end(), id) != item_dated.end() ? 1 : 0);
+            if (Status s = add.run(); !s) return s;
+        }
+        // An earlier request none of whose passages still holds its findings no longer explains anything.
+        return db_->exec("DELETE FROM knowledge_extraction_inputs WHERE batch_id<>" + std::to_string(batch) +
+                         " AND batch_id IN (SELECT batch_id FROM knowledge_extraction_inputs WHERE chunk_id IN (" + ids + "))"
+                         " AND NOT EXISTS(SELECT 1 FROM knowledge_extraction_inputs r"
+                         " WHERE r.batch_id=knowledge_extraction_inputs.batch_id AND r.result=1)");
+    };
+    return sqlite3_get_autocommit(db_->raw()) ? db_->transaction(write) : write();
 }
 
 void KgStore::clear_extract_queue() {

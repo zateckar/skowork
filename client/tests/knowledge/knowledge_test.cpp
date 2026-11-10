@@ -157,7 +157,9 @@ std::string u8(const std::filesystem::path& p) {
 }
 
 struct Kg {
-    explicit Kg(json pol = json::object(), bool background = false) : policy(std::move(pol)) {
+    // `evidence` opens the store with the versioned evidence schema that production does not activate yet.
+    explicit Kg(json pol = json::object(), bool background = false, bool evidence = false)
+        : policy(std::move(pol)), evidence_schema(evidence) {
         auto root = DataRoot::open(tmp.path);
         EXPECT_TRUE(root);
         KeyStore keys(root->keys());
@@ -175,7 +177,9 @@ struct Kg {
     void make(bool background) {
         svc.reset();
         MigrationOutcome o;
-        auto db = open_kg_database(file, *key, o);
+        auto migrations = kg_migrations();
+        if (evidence_schema) migrations.push_back({5, kg_evidence_migration_sql()});
+        auto db = open_and_migrate_consistently(file, *key, migrations, o, register_kg_writer);
         EXPECT_TRUE(db);
         KnowledgeEnv e;
         e.clock = &clock;
@@ -312,6 +316,7 @@ struct Kg {
     std::filesystem::path file, folder;
     std::mutex mx;
     json policy;
+    bool evidence_schema = false;
     FakeGateway gw;
     std::map<std::string, json> threads, mail, mail_messages, chats;
     std::set<std::string> denied_read_paths;
@@ -992,6 +997,61 @@ TEST(KnowledgeFiles, ContentChangeWithSameSizeAndTimestampIsIndexed) {
     ASSERT_EQ(chunks.size(), 1u);
     EXPECT_NE(chunks[0].text.find("July"), std::string::npos);
     EXPECT_EQ(chunks[0].text.find("June"), std::string::npos);
+}
+
+TEST(KnowledgeEvidence, FileRevisionAwaitsAnalysisAndReadFailureKeepsSupport) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}}, false, true);
+    ASSERT_EQ(kg.svc->store().db().user_version(), 5);
+    const auto file = kg.folder / "plan.txt";
+    write_file(file, "Jana Nováková leads Phoenix in June.");
+    ASSERT_TRUE(kg.svc->add_document(u8(file)));
+    kg.idle();
+    const auto item = kg.svc->store().item("files", u8(file));
+    ASSERT_TRUE(item);
+    const std::string active = "SELECT count(*) FROM knowledge_support_sets WHERE state IN ('current','unverified')";
+    const std::string revisions = "SELECT count(*) FROM knowledge_revisions WHERE item_id=" + std::to_string(item->id);
+    EXPECT_EQ(kg.count(revisions), 1);
+    EXPECT_EQ(kg.count(active), 1);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_extraction_inputs WHERE result=1"), 1);
+    const auto timestamp = std::filesystem::last_write_time(file);
+
+    // The bytes change under the same size and modification time while the file cannot be read: nothing is replaced.
+    kg.fail_file_reads = true;
+    write_file(file, "Jana Nováková leads Phoenix in July.");
+    std::filesystem::last_write_time(file, timestamp);
+    kg.svc->sweep_now();
+    kg.idle();
+    EXPECT_EQ(kg.svc->store().item("files", u8(file))->hash, item->hash);
+    EXPECT_EQ(kg.count(revisions), 1);
+    EXPECT_EQ(kg.count(active), 1);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM relations"), 1);
+
+    // The next successful check finds the new content while extraction is unavailable: the old finding is not
+    // kept as current knowledge and the new passage waits for analysis.
+    kg.fail_file_reads = false;
+    kg.gw.chat_failure = model::code::model_unavailable;
+    kg.svc->sweep_now();
+    kg.idle();
+    EXPECT_NE(kg.svc->store().item("files", u8(file))->hash, item->hash);
+    EXPECT_EQ(kg.count(revisions), 2);
+    EXPECT_EQ(kg.count(active), 0);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_support_sets WHERE state='superseded'"), 1);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM relations"), 0);
+    EXPECT_EQ(kg.svc->store().extract_pending(), 1);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_evidence e JOIN knowledge_revisions v ON v.id=e.revision_id "
+                       "WHERE v.current=0 AND e.excerpt LIKE '%June%'"),
+              1);
+
+    // Analysis returns: the fact is supported again, by the passage of the current revision only.
+    kg.gw.chat_failure.clear();
+    kg.clock.advance(std::chrono::hours(3));
+    kg.idle();
+    EXPECT_EQ(kg.svc->store().extract_pending(), 0);
+    EXPECT_EQ(kg.count(active), 1);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_support_sets s JOIN knowledge_support_evidence se ON se.support_id=s.id "
+                       "JOIN knowledge_evidence e ON e.id=se.evidence_id JOIN knowledge_revisions v ON v.id=e.revision_id "
+                       "WHERE s.state='unverified' AND v.current=1 AND v.sequence=2 AND e.excerpt LIKE '%July%'"),
+              1);
 }
 
 TEST(KnowledgeFiles, SameMetadataChangeDuringReadCannotCommitStaleContent) {

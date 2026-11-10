@@ -266,7 +266,8 @@ private:
     bool embed_step();
     bool extract_step();
     bool enrich_step();
-    void store_extraction(const std::vector<ChunkRow>& batch, const Extraction& x);
+    // Returns the passages one of whose findings took its date from the item.
+    std::vector<long long> store_extraction(const std::vector<ChunkRow>& batch, const Extraction& x);
     void notify();
     [[nodiscard]] bool deferred() const;
     void loop();
