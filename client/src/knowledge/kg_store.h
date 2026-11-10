@@ -28,6 +28,8 @@ Status register_kg_writer(Database& db);
 std::string kg_writer_barrier_sql();
 // Versioned evidence migration, currently qualified against copied fixtures before activation.
 std::string kg_evidence_migration_sql();
+// The schema version the evidence migration installs, one past the last production migration (design D6).
+inline constexpr int kKgEvidenceSchemaVersion = 6;
 // The longest chain of facts a derivation may form through required facts; the evidence schema enforces it.
 inline constexpr int kMaxDerivationDepth = 32;
 // Superseded revisions of an item whose excerpts are kept as history beside the current one.

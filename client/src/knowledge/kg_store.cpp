@@ -501,6 +501,19 @@ ALTER TABLE notes ADD COLUMN origin_kind TEXT NOT NULL DEFAULT '';
 ALTER TABLE notes ADD COLUMN origin_ref TEXT NOT NULL DEFAULT '';
 ALTER TABLE notes ADD COLUMN origin_title TEXT NOT NULL DEFAULT '';
 )sql"},
+        // A passage can mention one entity by several names, and a merge brings two names of one passage together:
+        // a mention is keyed by its name too, so neither is lost and a split can move each back (design D6).
+        {5, R"sql(
+CREATE TABLE mentions_by_name(
+  chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+  entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  alias TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(chunk_id, entity_id, alias));
+INSERT INTO mentions_by_name(chunk_id, entity_id, alias) SELECT chunk_id, entity_id, alias FROM mentions;
+DROP TABLE mentions;
+ALTER TABLE mentions_by_name RENAME TO mentions;
+CREATE INDEX mentions_entity ON mentions(entity_id, alias);
+)sql"},
     };
     return m;
 }
@@ -556,7 +569,7 @@ std::string id_list(const std::vector<long long>& ids) {
 Status delete_orphan_entities(Database& db) {
     std::string sql = "DELETE FROM entities WHERE id NOT IN (SELECT entity_id FROM mentions) AND id NOT IN (SELECT entity_id FROM facts_user) "
                       "AND id NOT IN (SELECT subject FROM relations) AND id NOT IN (SELECT object FROM relations)";
-    if (db.user_version() >= 5)
+    if (db.user_version() >= kKgEvidenceSchemaVersion)
         sql += " AND id NOT IN (SELECT subject FROM knowledge_facts) AND id NOT IN (SELECT object FROM knowledge_facts)";
     return db.exec(sql);
 }
@@ -721,7 +734,7 @@ long long model_id(Database& db, const std::string& model, int dim, bool create)
 
 Result<long long> KgStore::create_category(const std::string& name) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < 5) return make_error("schema", "Knowledge categories are not available yet.");
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge categories are not available yet.");
     const auto display = trim(name);
     const auto normalized = normalize_name(display);
     if (display.empty() || display.size() > 160 || normalized.empty()) return make_error("invalid", "Enter a valid category name.");
@@ -733,7 +746,7 @@ Result<long long> KgStore::create_category(const std::string& name) {
 
 Status KgStore::rename_category(long long id, const std::string& name) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < 5) return make_error("schema", "Knowledge categories are not available yet.");
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge categories are not available yet.");
     const auto display = trim(name);
     const auto normalized = normalize_name(display);
     if (display.empty() || display.size() > 160 || normalized.empty()) return make_error("invalid", "Enter a valid category name.");
@@ -745,7 +758,7 @@ Status KgStore::rename_category(long long id, const std::string& name) {
 
 Status KgStore::delete_category(long long id) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < 5) return make_error("schema", "Knowledge categories are not available yet.");
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge categories are not available yet.");
     auto s = db_->prepare("DELETE FROM knowledge_categories WHERE id=?1");
     s.bind(1, id);
     if (auto status = s.run(); !status) return status;
@@ -754,7 +767,7 @@ Status KgStore::delete_category(long long id) {
 
 Status KgStore::merge_categories(long long source, long long destination) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < 5) return make_error("schema", "Knowledge categories are not available yet.");
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge categories are not available yet.");
     if (source == destination) return make_error("invalid", "Choose two different categories.");
     return db_->transaction([&]() -> Status {
         auto count = db_->prepare("SELECT count(*) FROM knowledge_categories WHERE id=?1 OR id=?2");
@@ -777,7 +790,7 @@ Status KgStore::set_category_assignment(long long fact, long long category, cons
                                         const std::string& reason, long long evidence_id,
                                         std::optional<long long> expected_generation) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < 5) return make_error("schema", "Knowledge categories are not available yet.");
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge categories are not available yet.");
     if ((decision != "automatic" && decision != "manual" && decision != "rejected") || reason.size() > 512)
         return make_error("invalid", "Invalid category decision or explanation.");
     return db_->transaction([&]() -> Status {
@@ -811,7 +824,7 @@ INSERT INTO knowledge_category_assignments(fact_id,category_id,decision,reason,e
 
 Status KgStore::reset_category_assignment(long long fact, long long category) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < 5) return make_error("schema", "Knowledge categories are not available yet.");
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge categories are not available yet.");
     auto s = db_->prepare("DELETE FROM knowledge_category_assignments WHERE fact_id=?1 AND category_id=?2");
     s.bind(1, fact).bind(2, category);
     return s.run();
@@ -820,7 +833,7 @@ Status KgStore::reset_category_assignment(long long fact, long long category) {
 std::vector<CategoryRow> KgStore::categories() {
     const std::lock_guard lock(db_->mutex());
     std::vector<CategoryRow> result;
-    if (db_->user_version() < 5) return result;
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return result;
     auto s = db_->prepare("SELECT id,name FROM knowledge_categories ORDER BY normalized_name,id");
     while (s.step()) result.push_back({s.col_int(0), s.col_text(1)});
     return result;
@@ -829,7 +842,7 @@ std::vector<CategoryRow> KgStore::categories() {
 std::vector<CategoryAssignment> KgStore::category_assignments(long long fact) {
     const std::lock_guard lock(db_->mutex());
     std::vector<CategoryAssignment> result;
-    if (db_->user_version() < 5) return result;
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return result;
     auto s = db_->prepare("SELECT fact_id,category_id,ifnull(evidence_id,0),decision,reason "
                           "FROM knowledge_category_assignments WHERE fact_id=?1 ORDER BY category_id");
     s.bind(1, fact);
@@ -840,7 +853,7 @@ std::vector<CategoryAssignment> KgStore::category_assignments(long long fact) {
 std::vector<long long> KgStore::uncategorized_facts(int limit) {
     const std::lock_guard lock(db_->mutex());
     std::vector<long long> result;
-    if (db_->user_version() < 5 || limit <= 0) return result;
+    if (db_->user_version() < kKgEvidenceSchemaVersion || limit <= 0) return result;
     auto s = db_->prepare("SELECT f.id FROM knowledge_facts f WHERE EXISTS (SELECT 1 FROM knowledge_support_sets s "
                           "WHERE s.fact_id=f.id AND s.state IN ('current','unverified')) "
                           "AND NOT EXISTS (SELECT 1 FROM knowledge_category_assignments a "
@@ -852,7 +865,7 @@ std::vector<long long> KgStore::uncategorized_facts(int limit) {
 
 std::optional<long long> KgStore::knowledge_generation() {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < 5) return std::nullopt;
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return std::nullopt;
     auto s = db_->prepare("SELECT value FROM knowledge_generation WHERE id=1");
     if (!s.step()) return std::nullopt;
     return s.col_int(0);
@@ -861,7 +874,7 @@ std::optional<long long> KgStore::knowledge_generation() {
 Result<BoundAnalysisEvidence> KgStore::bind_analysis_evidence(long long fact, const AnalysisSpan& span,
                                                                long long expected_generation) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < 5) return make_error("schema", "Knowledge evidence is not available yet.");
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge evidence is not available yet.");
     if (fact <= 0 || span.chunk_id <= 0 || span.end <= span.begin || span.end - span.begin > 2048 ||
         span.end > static_cast<size_t>(std::numeric_limits<long long>::max()))
         return make_error("invalid", "Invalid analysis excerpt.");
@@ -932,7 +945,7 @@ bool active_exact_evidence(Database& db, long long fact, long long evidence_id) 
 Result<long long> KgStore::record_conflict(long long left_fact, long long right_fact, long long left_evidence,
                                            long long right_evidence, const std::string& explanation, long long expected_generation) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < 5) return make_error("schema", "Knowledge review is not available yet.");
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge review is not available yet.");
     if (left_fact <= 0 || right_fact <= 0 || left_fact == right_fact || trim(explanation).empty() || explanation.size() > 512)
         return make_error("invalid", "A possible inconsistency needs two facts and an explanation.");
     if (left_fact > right_fact) {
@@ -973,7 +986,7 @@ INSERT INTO knowledge_conflicts(left_fact,right_fact,left_evidence,right_evidenc
 Status KgStore::decide_conflict(long long id, const std::string& decision, const std::string& reason,
                                 long long now, long long expected_generation) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < 5) return make_error("schema", "Knowledge review is not available yet.");
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge review is not available yet.");
     if ((decision != "keep_both" && decision != "prefer_left" && decision != "prefer_right" && decision != "defer") ||
         reason.size() > 512 || now <= 0 || ((decision == "prefer_left" || decision == "prefer_right") && trim(reason).empty()))
         return make_error("invalid", "Invalid review decision or reason.");
@@ -1000,7 +1013,7 @@ Status KgStore::decide_conflict(long long id, const std::string& decision, const
 
 Status KgStore::reopen_conflict(long long id, long long expected_generation) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < 5) return make_error("schema", "Knowledge review is not available yet.");
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge review is not available yet.");
     return db_->transaction([&]() -> Status {
         const auto generation = knowledge_generation();
         if (!generation || *generation != expected_generation) return make_error("stale", "Knowledge changed while this decision was open.");
@@ -1015,7 +1028,7 @@ Status KgStore::reopen_conflict(long long id, long long expected_generation) {
 std::vector<ConflictRow> KgStore::conflicts(int limit) {
     const std::lock_guard lock(db_->mutex());
     std::vector<ConflictRow> result;
-    if (db_->user_version() < 5 || limit <= 0) return result;
+    if (db_->user_version() < kKgEvidenceSchemaVersion || limit <= 0) return result;
     auto s = db_->prepare("SELECT id,left_fact,right_fact,left_evidence,right_evidence,explanation,state,decision,decision_reason "
                           "FROM knowledge_conflicts ORDER BY id DESC LIMIT ?1");
     s.bind(1, std::min(limit, 1000));
@@ -1028,7 +1041,7 @@ std::vector<ConflictRow> KgStore::conflicts(int limit) {
 std::vector<ConflictDecision> KgStore::conflict_history(long long id) {
     const std::lock_guard lock(db_->mutex());
     std::vector<ConflictDecision> result;
-    if (db_->user_version() < 5) return result;
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return result;
     auto s = db_->prepare("SELECT left_evidence,right_evidence,decided_at,decision,reason "
                           "FROM knowledge_conflict_history WHERE conflict_id=?1 ORDER BY id");
     s.bind(1, id);
@@ -1052,7 +1065,7 @@ Result<KnowledgeImpactPreview> KgStore::preview_evidence_snapshot(std::unordered
     long long generation = 0;
     {
         const std::lock_guard lock(db_->mutex());
-        if (db_->user_version() < 5) return make_error("schema", "Knowledge impact previews are not available yet.");
+        if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge impact previews are not available yet.");
         if (auto status = db_->exec("BEGIN"); !status) return status.error();
         const auto read = [&]() -> Status {
             const auto g = knowledge_generation();
@@ -1165,7 +1178,7 @@ Result<PreparedItemRemoval> KgStore::prepare_item_removal(long long item_id, lon
 
 Status KgStore::cancel_item_removal(const std::string& token) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < 5) return make_error("schema", "Knowledge impact previews are not available yet.");
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge impact previews are not available yet.");
     if (token.size() != 32) return make_error("invalid", "Invalid preview token.");
     auto remove = db_->prepare("DELETE FROM knowledge_previews WHERE token=?1 AND operation='forget_item'");
     remove.bind(1, token);
@@ -1174,7 +1187,7 @@ Status KgStore::cancel_item_removal(const std::string& token) {
 
 Status KgStore::confirm_item_removal(const std::string& token, bool accept_incomplete, long long now) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < 5) return make_error("schema", "Knowledge impact previews are not available yet.");
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge impact previews are not available yet.");
     if (token.size() != 32 || now <= 0) return make_error("invalid", "Invalid preview confirmation.");
     if (!accept_incomplete) return make_error("incomplete", "This preview does not include all analysis or publication effects.");
     return db_->transaction([&]() -> Status {
@@ -1588,7 +1601,7 @@ Status KgStore::prepare_item_change(const ItemInput& in) {
     std::vector<long long> withdraw;
     {
         const std::lock_guard lock(db_->mutex());
-        if (db_->user_version() < 5 || !sqlite3_get_autocommit(db_->raw())) return {};
+        if (db_->user_version() < kKgEvidenceSchemaVersion || !sqlite3_get_autocommit(db_->raw())) return {};
         // A new item has nothing to withdraw; it may still be staged below.
         const auto previous = item(in.source, in.ext_id);
         const auto plan = plan_passages(*db_, previous ? previous->id : 0, previous, in);
@@ -1626,7 +1639,7 @@ Status KgStore::stage_passages(const ItemInput& in) {
     long long stage = 0;
     {
         const std::lock_guard lock(db_->mutex());
-        if (db_->user_version() < 5 || !sqlite3_get_autocommit(db_->raw())) return {};
+        if (db_->user_version() < kKgEvidenceSchemaVersion || !sqlite3_get_autocommit(db_->raw())) return {};
         const auto previous = item(in.source, in.ext_id);
         const auto plan = plan_passages(*db_, previous ? previous->id : 0, previous, in);
         if (plan.inserted() + plan.dropped() <= kStepThreshold) return {};
@@ -1684,7 +1697,7 @@ Status KgStore::finish_item_changes() {
     for (bool first = true;; first = false) {
         if (!first) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         const std::lock_guard lock(db_->mutex());
-        if (db_->user_version() < 5 || !sqlite3_get_autocommit(db_->raw())) return {};
+        if (db_->user_version() < kKgEvidenceSchemaVersion || !sqlite3_get_autocommit(db_->raw())) return {};
         int removed = 0;
         const auto step = db_->transaction([&]() -> Status {
             if (Status s = db_->exec("DELETE FROM chunks WHERE id IN (" + retired + ")"); !s) return s;
@@ -1699,7 +1712,7 @@ Status KgStore::finish_item_changes() {
 Status KgStore::discard_item_change(const std::string& source, const std::string& ext_id) {
     {
         const std::lock_guard lock(db_->mutex());
-        if (db_->user_version() < 5) return {};
+        if (db_->user_version() < kKgEvidenceSchemaVersion) return {};
         auto retire = db_->prepare("UPDATE items SET source=?1, ext_id=ext_id||'#'||id WHERE source=?2 AND ext_id=?3");
         retire.bind(1, kRetiredSource).bind(2, kStagedSource).bind(3, hidden_key(source, ext_id));
         if (Status s = retire.run(); !s) return s;
@@ -1712,7 +1725,7 @@ Status KgStore::prepare_item_removal_steps(const std::string& source, const std:
     std::vector<long long> passages;
     {
         const std::lock_guard lock(db_->mutex());
-        if (db_->user_version() < 5 || !sqlite3_get_autocommit(db_->raw())) return {};
+        if (db_->user_version() < kKgEvidenceSchemaVersion || !sqlite3_get_autocommit(db_->raw())) return {};
         const auto existing = item(source, ext_id);
         if (!existing) return {};
         item_id = existing->id;
@@ -1814,7 +1827,7 @@ Result<long long> KgStore::put_prepared_item(const ItemInput& in, long long now)
         const auto& old_dates = plan.old_dates;
         const auto& retained = plan.retained;
         const auto& used = plan.used;
-        const bool evidence_schema = db_->user_version() >= 5;
+        const bool evidence_schema = db_->user_version() >= kKgEvidenceSchemaVersion;
         if (evidence_schema) {
             // A passage keeps its evidence only when its heading, text and date are all unchanged.
             std::vector<long long> unchanged;
@@ -1991,7 +2004,7 @@ bool KgStore::remove_item(const std::string& source, const std::string& ext_id, 
             tombstones.bind(1, source).bind(2, ext_id);
             if (auto s = tombstones.run(); !s) return s;
         }
-        if (db_->user_version() >= 5)
+        if (db_->user_version() >= kKgEvidenceSchemaVersion)
             if (auto s = retire_removed_passages(*db_, source, ext_id); !s) return s;
         auto s = db_->prepare("DELETE FROM items WHERE source=?1 AND ext_id=?2");
         s.bind(1, source).bind(2, ext_id);
@@ -2029,7 +2042,7 @@ int KgStore::remove_source(const std::string& kind, bool forget) {
     int n = 0;
     const auto result = db_->transaction([&]() -> Status {
         if (auto s = purge_recovery_copy(); !s) return s;
-        if (db_->user_version() >= 5) {
+        if (db_->user_version() >= kKgEvidenceSchemaVersion) {
             // Staged passages of the Source's items go with them.
             auto discard = db_->prepare("UPDATE items SET source=?1, ext_id=ext_id||'#'||id WHERE source=?2 AND substr(ext_id,1,length(?3)+1)=?3||':'");
             discard.bind(1, kRetiredSource).bind(2, kStagedSource).bind(3, kind);
@@ -2368,7 +2381,7 @@ void KgStore::mark_extracted(const std::vector<long long>& chunk_ids) {
 
 Status KgStore::record_extraction(const std::vector<long long>& chunk_ids, const std::vector<long long>& item_dated) {
     const std::lock_guard lock(db_->mutex());
-    if (chunk_ids.empty() || db_->user_version() < 5) return {};
+    if (chunk_ids.empty() || db_->user_version() < kKgEvidenceSchemaVersion) return {};
     const auto write = [&]() -> Status {
         const std::string ids = id_list(chunk_ids);
         long long batch = 0;
@@ -2604,7 +2617,7 @@ long long KgStore::add_relation(long long subject, const std::string& predicate,
         if (Status st = s.run(); !st) return st;
         id = db_->last_insert_id();
         // A relation without a passage (directory enrichment) has no item evidence to record.
-        if (!chunk_id || db_->user_version() < 5) return {};
+        if (!chunk_id || db_->user_version() < kKgEvidenceSchemaVersion) return {};
         return record_relation_support(*db_, id, subject, predicate, object, valid_from, valid_to, chunk_id);
     };
     // The relation and its evidence are one write; join the caller's transaction when there is one.
@@ -2854,7 +2867,7 @@ long long KgStore::add_fact(long long entity_id, const std::string& text, const 
     s.bind(1, entity_id).bind(2, text).bind(3, thread_id).bind(4, now).bind(5, item_source).bind(6, item_ext_id);
     if (!s.run()) return 0;
     const long long id = db_->last_insert_id();
-    if (db_->user_version() >= 5) {
+    if (db_->user_version() >= kKgEvidenceSchemaVersion) {
         // The same link the migration backfills: the stated item, else the Thread the fact was stated in, else none.
         auto note = db_->prepare(
             "INSERT INTO knowledge_annotations(user_fact_id,revision_id) VALUES(?1,(SELECT v.id FROM items i "
@@ -3070,7 +3083,7 @@ Status KgStore::clear(bool all) {
         if (auto s = purge_recovery_copy(); !s) return s;
         if (auto s = db_->exec("DELETE FROM items; DELETE FROM entities; DELETE FROM skipped; DELETE FROM meta; DELETE FROM fact_tombstones;"); !s)
             return s;
-        if (all && db_->user_version() >= 5)
+        if (all && db_->user_version() >= kKgEvidenceSchemaVersion)
             if (auto s = db_->exec("DELETE FROM knowledge_categories;"); !s) return s;
         if (all)
             return db_->exec("DELETE FROM sources; DELETE FROM folders; DELETE FROM user_exclusions; DELETE FROM documents; DELETE FROM notes; "

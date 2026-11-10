@@ -178,7 +178,7 @@ struct Kg {
         svc.reset();
         MigrationOutcome o;
         auto migrations = kg_migrations();
-        if (evidence_schema) migrations.push_back({5, kg_evidence_migration_sql()});
+        if (evidence_schema) migrations.push_back({kKgEvidenceSchemaVersion, kg_evidence_migration_sql()});
         auto db = open_and_migrate_consistently(file, *key, migrations, o, register_kg_writer);
         EXPECT_TRUE(db);
         KnowledgeEnv e;
@@ -1001,7 +1001,7 @@ TEST(KnowledgeFiles, ContentChangeWithSameSizeAndTimestampIsIndexed) {
 
 TEST(KnowledgeEvidence, FileRevisionAwaitsAnalysisAndReadFailureKeepsSupport) {
     Kg kg({{"knowledge.directory_enrichment", "off"}}, false, true);
-    ASSERT_EQ(kg.svc->store().db().user_version(), 5);
+    ASSERT_EQ(kg.svc->store().db().user_version(), kKgEvidenceSchemaVersion);
     const auto file = kg.folder / "plan.txt";
     write_file(file, "Jana Nováková leads Phoenix in June.");
     ASSERT_TRUE(kg.svc->add_document(u8(file)));
@@ -3254,6 +3254,78 @@ TEST(KnowledgeCuration, EditAndDeleteFactsWithTombstonesAndRename) {
     EXPECT_EQ(store.entity(phoenix)->aliases.size(), 2u);
     const long long other = store.resolve_entity("Project", "Osprey", "", kg.clock.unix_millis());
     EXPECT_EQ(kg.svc->rename_entity(other, "Projekt Phoenix").error().code, "conflict");
+}
+
+// 7.8: a merge keeps the merged-in name's mention of a passage that also names the target, so a split can move it back.
+TEST(KnowledgeCuration, MergeThenSplitNamesMentionedInOnePassage) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.directory_enrichment", "off"}});
+    write_file(kg.folder / "codename.txt", "Phoenix, known internally as Firebird, starts on Monday.");
+    ASSERT_TRUE(kg.svc->add_document(kg.file_path("codename.txt")));
+    kg.idle();
+    auto& store = kg.svc->store();
+    const auto chunks = store.chunks_of_item(store.item("files", kg.file_path("codename.txt"))->id);
+    ASSERT_EQ(chunks.size(), 1u);
+    const long long now = kg.clock.unix_millis();
+    const long long phoenix = store.resolve_entity("Project", "Phoenix", "", now);
+    const long long firebird = store.resolve_entity("Project", "Firebird", "", now);
+    ASSERT_NE(phoenix, firebird);
+    store.add_mention(chunks[0].id, phoenix, "Phoenix");
+    store.add_mention(chunks[0].id, firebird, "Firebird");
+
+    ASSERT_TRUE(kg.svc->merge_entities(firebird, phoenix));
+    json merged = kg.svc->entity_profile(phoenix);
+    EXPECT_EQ(merged["aliases"].size(), 2u) << merged.dump();
+    EXPECT_NE(std::find(merged["aliases"].begin(), merged["aliases"].end(), "Firebird"), merged["aliases"].end()) << merged.dump();
+    EXPECT_EQ(merged["mentions"], 1);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM mentions WHERE entity_id=" + std::to_string(phoenix)), 2);
+
+    const auto split = kg.svc->split_entity(phoenix, "Firebird");
+    ASSERT_TRUE(split) << split.error().message;
+    const json restored = kg.svc->entity_profile(*split);
+    EXPECT_EQ(restored["aliases"], json({"Firebird"})) << restored.dump();
+    EXPECT_EQ(restored["mentions"], 1);
+    const json remaining = kg.svc->entity_profile(phoenix);
+    EXPECT_EQ(remaining["aliases"], json({"Phoenix"})) << remaining.dump();
+    EXPECT_EQ(remaining["mentions"], 1);
+}
+
+// 7.8: production migration 5 keeps every mention and lets one passage name an entity in several ways.
+TEST(KnowledgeCore, MentionsMigrationKeepsRowsAndKeysNames) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get_or_create("kg.db");
+    ASSERT_TRUE(key);
+    std::vector<Migration> v4;
+    for (const auto& m : kg_migrations())
+        if (m.version <= 4) v4.push_back(m);
+    {
+        MigrationOutcome o;
+        auto db = open_and_migrate_consistently(root->file("kg.db"), *key, v4, o, register_kg_writer);
+        ASSERT_TRUE(db);
+        ASSERT_TRUE((*db)->exec("INSERT INTO items(id,source,ext_id) VALUES(1,'files','a');"
+                                "INSERT INTO chunks(id,item_id,ord,text) VALUES(1,1,0,'Phoenix, also Firebird');"
+                                "INSERT INTO entities(id,type,name,key) VALUES(1,'Project','Phoenix','project:phoenix');"
+                                "INSERT INTO mentions(chunk_id,entity_id,alias) VALUES(1,1,'phoenix');"));
+        EXPECT_FALSE((*db)->exec("INSERT INTO mentions(chunk_id,entity_id,alias) VALUES(1,1,'firebird')"));
+    }
+    MigrationOutcome o;
+    auto db = open_kg_database(root->file("kg.db"), *key, o);
+    ASSERT_TRUE(db) << db.error().message;
+    ASSERT_FALSE(o.degraded) << o.failure;
+    EXPECT_EQ(o.from_version, 4);
+    EXPECT_EQ((*db)->user_version(), 5);
+    ASSERT_TRUE((*db)->exec("INSERT INTO mentions(chunk_id,entity_id,alias) VALUES(1,1,'firebird')"));
+    auto rows = (*db)->prepare("SELECT group_concat(alias,',') FROM (SELECT alias FROM mentions WHERE chunk_id=1 AND entity_id=1 ORDER BY alias)");
+    ASSERT_TRUE(rows.step());
+    EXPECT_EQ(rows.col_text(0), "firebird,phoenix");
+    // The mention still goes with its passage.
+    ASSERT_TRUE((*db)->exec("DELETE FROM chunks WHERE id=1"));
+    auto left = (*db)->prepare("SELECT count(*) FROM mentions");
+    ASSERT_TRUE(left.step());
+    EXPECT_EQ(left.col_int(0), 0);
 }
 
 // 2.3: Sharing Knowledge Items (design D1, D3) against the team-knowledge contract.

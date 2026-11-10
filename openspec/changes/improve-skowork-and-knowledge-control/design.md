@@ -129,7 +129,9 @@ Applying exclusions serializes with existing item-share synchronization. It repo
 
 Existing item sharing keeps the client-supplied content hash for backwards-compatible responses, but a separately stored server SHA-256 digest determines whether the uploaded bytes changed. Rows created before this digest was added are reprocessed on the next upload rather than trusting their old hash.
 
-Alternatives: attach only one chunk to each relation (cannot survive removal of one of several supports); keep edited facts as unrelated free text (breaks deletion and correction provenance); use LLM-generated ids as stable identities (not reproducible).
+A mention records which name of an entity a passage used, so it is keyed by passage, entity and normalized name, not by passage and entity alone. Under the narrower key a merge of two entities named in the same passage silently dropped the merged-in name's mention; that name then had no accessible evidence, disappeared from the profile and could not be split back. Production migration 5 rebuilds `mentions` with the wider key and copies every row; the gated evidence schema moves to version 6 (`kKgEvidenceSchemaVersion`). The wider key only admits more rows, so writers that predate it keep working against the migrated table and no writer barrier is needed for this step. A split keeps the existing rule that relations from the passages mentioning the split name move with it; a passage that mentions both names cannot say which entity its relation was about.
+
+Alternatives: attach only one chunk to each relation (cannot survive removal of one of several supports); keep edited facts as unrelated free text (breaks deletion and correction provenance); use LLM-generated ids as stable identities (not reproducible); keep the narrow mention key and store a merged entity's names in one row (loses which name each passage used, so a split cannot restore it).
 
 ### D7. Incremental analysis, review and impact previews
 

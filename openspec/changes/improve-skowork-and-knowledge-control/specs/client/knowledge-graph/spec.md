@@ -55,6 +55,11 @@ The Knowledge view SHALL let the user edit or reject a fact, rename, merge or sp
 - **WHEN** a new document version supports Sales after the user's correction to Engineering
 - **THEN** the correction is preserved and the disagreement enters Review with both versions and their evidence
 
+#### Scenario: Merge and split names mentioned in one passage
+- **WHEN** the user merges two entities whose names both appear in one accessible passage and later splits the merged-in name off again
+- **THEN** the merged entity lists both names with that passage as evidence for each
+- **AND** the split entity again has its name and its mention in that passage, while the remaining entity keeps its own
+
 ### Requirement: Sharing Knowledge Items
 Every knowledge item SHALL be private by default. The user can share an imported document, selected folder or note with their Groups permitted by policy.knowledge.sharing.groups (Group names or `*`; default empty), after confirming title, size, Groups and update behavior. These explicit item shares remain current and can be unshared. Raw mail, calendar, meeting and Thread items and whole entities MUST NOT be shared. Facts can leave the device only under Category Publication.
 
