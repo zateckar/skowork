@@ -252,6 +252,7 @@ private:
     void index_file(const std::string& path, int priority);
     void file_error(const std::string& path, const std::string& error, long long updated = 0);
     void index_meeting(const Task& t);
+    std::optional<long long> put_eligible(const ItemInput& in, const std::function<void(long long)>& written_hook = {});
     void index_note(const std::string& id, int priority);
     json origin_json(const NoteRow& n);
     void scan_files();

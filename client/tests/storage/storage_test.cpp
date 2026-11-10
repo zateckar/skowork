@@ -1390,6 +1390,114 @@ TEST(Database, LargeSourceChangeWithdrawsInStepsAndRecoversIfInterrupted) {
               0);
 }
 
+TEST(Database, LargeSourceChangeIsStagedHiddenAndSwitched) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get_or_create("staged.db");
+    ASSERT_TRUE(key);
+    auto migrations = knowledge::kg_migrations();
+    migrations.push_back({5, knowledge::kg_evidence_migration_sql()});
+    MigrationOutcome outcome;
+    auto db = open_and_migrate_consistently(root->file("staged.db"), *key, migrations, outcome, knowledge::register_kg_writer);
+    ASSERT_TRUE(db) << db.error().message;
+    ASSERT_FALSE(outcome.degraded) << outcome.failure;
+    knowledge::KgStore store(std::move(*db));
+    const auto number = [&](const std::string& sql) -> long long {
+        auto s = store.db().prepare(sql);
+        return s.step() ? s.col_int(0) : -1;
+    };
+    const std::string hidden = "SELECT count(*) FROM chunks c JOIN items i ON i.id=c.item_id WHERE i.source IN ('~staged','~retired')";
+    constexpr int kPassages = 2100;  // a revision replacing half of them changes 2,100 passages, above the threshold
+    knowledge::ItemInput in;
+    in.source = "files";
+    in.ext_id = "large";
+    in.title = "large";
+    in.hash = "h1";
+    in.updated_at = 1000;
+    for (int n = 0; n < kPassages; ++n) in.chunks.push_back({"", (n % 2 ? "Kept passage " : "Draft passage ") + std::to_string(n) + ".", 0});
+    // A new large item is staged too; once written nothing hidden is left.
+    const auto item = store.put_item(in, 2000);
+    ASSERT_TRUE(item) << item.error().message;
+    ASSERT_TRUE(store.finish_item_changes());
+    EXPECT_EQ(number("SELECT count(*) FROM chunks WHERE item_id=" + std::to_string(*item)), kPassages);
+    EXPECT_EQ(number(hidden), 0);
+    EXPECT_EQ(number("SELECT count(*) FROM embed_queue"), kPassages);
+
+    // Staged, not yet switched: the item, its search results and its counts are those of the first version.
+    knowledge::ItemInput revised = in;
+    revised.hash = "h2";
+    for (int n = 0; n < kPassages; n += 2) revised.chunks[static_cast<size_t>(n)].text = "Final passage " + std::to_string(n) + ".";
+    ASSERT_TRUE(store.prepare_item_change(revised));
+    EXPECT_EQ(store.item_hash("files", "large"), "h1");
+    EXPECT_EQ(number(hidden), kPassages / 2);
+    EXPECT_TRUE(store.fts("Final", 10).empty());
+    EXPECT_EQ(store.fts("Draft", 10).size(), 10u);
+    EXPECT_EQ(store.counts("files").items, 1);
+    EXPECT_EQ(store.counts("files").chunks, kPassages);
+    EXPECT_EQ(store.find_items("", 10).size(), 1u);  // every item, and the stage is not one
+    EXPECT_EQ(number("SELECT count(*) FROM embed_queue q JOIN chunks c ON c.id=q.chunk_id JOIN items i ON i.id=c.item_id "
+                     "WHERE i.source='~staged'"),
+              0);
+    // Staging again resumes rather than duplicating.
+    ASSERT_TRUE(store.prepare_item_change(revised));
+    EXPECT_EQ(number(hidden), kPassages / 2);
+    const long long staged_min = number("SELECT min(c.id) FROM chunks c JOIN items i ON i.id=c.item_id WHERE i.source='~staged'");
+
+    // The switch adopts the staged passages and retires the replaced ones out of every reader's sight.
+    ASSERT_TRUE(store.put_prepared_item(revised, 3000));
+    EXPECT_EQ(store.item_hash("files", "large"), "h2");
+    std::vector<std::string> texts;
+    for (const auto& c : store.chunks_of_item(*item)) texts.push_back(c.text);
+    ASSERT_EQ(texts.size(), static_cast<size_t>(kPassages));
+    for (int n = 0; n < kPassages; ++n) EXPECT_EQ(texts[static_cast<size_t>(n)], revised.chunks[static_cast<size_t>(n)].text) << n;
+    EXPECT_EQ(number("SELECT min(id) FROM chunks WHERE item_id=" + std::to_string(*item) + " AND text LIKE 'Final%'"), staged_min);
+    EXPECT_EQ(number("SELECT count(*) FROM items WHERE source='~staged'"), 0);
+    EXPECT_EQ(number(hidden), kPassages / 2);
+    EXPECT_TRUE(store.fts("Draft", 10).empty());
+    EXPECT_EQ(store.fts("Final", 10).size(), 10u);
+    EXPECT_EQ(store.counts("files").chunks, kPassages);
+    EXPECT_EQ(number("SELECT count(*) FROM chunks c JOIN items i ON i.id=c.item_id WHERE i.source='~retired' AND "
+                     "(c.id IN (SELECT chunk_id FROM embed_queue) OR c.id IN (SELECT chunk_id FROM extract_queue))"),
+              0);
+    EXPECT_EQ(number("SELECT count(*) FROM chunks c JOIN embed_queue q ON q.chunk_id=c.id WHERE c.item_id=" + std::to_string(*item) +
+                     " AND c.text LIKE 'Final%'"),
+              kPassages / 2);
+    ASSERT_TRUE(store.finish_item_changes());
+    EXPECT_EQ(number(hidden), 0);
+    EXPECT_EQ(number("SELECT count(*) FROM items"), 1);
+
+    // A stage whose change is not written is discarded; a stage of another version is not used for a different one.
+    knowledge::ItemInput third = revised, fourth = revised;
+    third.hash = "h3";
+    fourth.hash = "h4";
+    for (int n = 1; n < kPassages; n += 2) {
+        third.chunks[static_cast<size_t>(n)].text = "Third passage " + std::to_string(n) + ".";
+        fourth.chunks[static_cast<size_t>(n)].text = "Fourth passage " + std::to_string(n) + ".";
+    }
+    ASSERT_TRUE(store.prepare_item_change(third));
+    EXPECT_EQ(number(hidden), kPassages / 2);
+    ASSERT_TRUE(store.discard_item_change("files", "large"));
+    EXPECT_EQ(number(hidden), 0);
+    ASSERT_TRUE(store.prepare_item_change(third));
+    ASSERT_TRUE(store.put_prepared_item(fourth, 4000));
+    ASSERT_TRUE(store.finish_item_changes());
+    texts.clear();
+    for (const auto& c : store.chunks_of_item(*item)) texts.push_back(c.text);
+    ASSERT_EQ(texts.size(), static_cast<size_t>(kPassages));
+    EXPECT_EQ(texts[1], "Fourth passage 1.");
+    EXPECT_EQ(number(hidden), 0);
+    EXPECT_TRUE(store.fts("Third", 10).empty());
+
+    // Forgetting an item while a change of it is staged leaves no copy of its text.
+    ASSERT_TRUE(store.prepare_item_change(third));
+    EXPECT_GT(number(hidden), 0);
+    ASSERT_TRUE(store.remove_item("files", "large", true));
+    EXPECT_EQ(number("SELECT (SELECT count(*) FROM chunks)+(SELECT count(*) FROM items)+(SELECT count(*) FROM embed_queue)"), 0);
+}
+
 // Run explicitly as a local scale qualification; it builds a large encrypted scratch database.
 TEST(Database, DISABLED_KnowledgeCascadeScale) {
     TempRoot t;
@@ -1528,13 +1636,19 @@ INSERT INTO knowledge_support_evidence(support_id,evidence_id) SELECT id,(id-1)/
 
     // Another writer keeps making small changes while the large Source changes; its waits are what a user notices.
     std::atomic<bool> probing{true};
+    std::atomic<int> phase{0};  // which operation a wait overlapped, to attribute the longest ones
+    const char* const phases[] = {"withdrawal and staging", "switch", "cleanup", "forget"};
     std::vector<long long> waits;
+    std::map<int, long long> longest;  // by phase
     std::thread probe([&] {
         int n = 0;
         while (probing) {
+            const int during = phase;
             const auto started = std::chrono::steady_clock::now();
             store.set_meta("probe", std::to_string(++n));
-            waits.push_back(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count());
+            const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+            waits.push_back(ms);
+            longest[std::max(during, static_cast<int>(phase))] = std::max(longest[std::max(during, static_cast<int>(phase))], ms);
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     });
@@ -1544,8 +1658,13 @@ INSERT INTO knowledge_support_evidence(support_id,evidence_id) SELECT id,(id-1)/
     in.chunks = passages(true);
     Result<long long> revised = make_error("storage", "not run");
     const auto withdrawal_ms = timed([&] { ASSERT_TRUE(store.prepare_item_change(in)); });
-    const auto revision_ms = timed([&] { revised = store.put_item(in, 3000); });
-    std::cout << "[ knowledge cascade ] large revision: stepped withdrawal " << withdrawal_ms << " ms, then put_item " << revision_ms << " ms\n";
+    phase = 1;
+    const auto revision_ms = timed([&] { revised = store.put_prepared_item(in, 3000); });
+    phase = 2;
+    const auto cleanup_ms = timed([&] { ASSERT_TRUE(store.finish_item_changes()); });
+    phase = 3;
+    std::cout << "[ knowledge cascade ] large revision: stepped withdrawal and staging " << withdrawal_ms << " ms, switch " << revision_ms
+              << " ms, stepped cleanup " << cleanup_ms << " ms\n";
     ASSERT_TRUE(revised) << revised.error().message;
     EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state='superseded'"), 5000);
     EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state IN ('current','unverified')"), 90000);
@@ -1558,7 +1677,9 @@ INSERT INTO knowledge_support_evidence(support_id,evidence_id) SELECT id,(id-1)/
     probe.join();
     ASSERT_TRUE(removed);
     std::cout << "[ knowledge cascade ] concurrent small writes during the large revision and forget: " << waits.size()
-              << " samples, p95 " << p95(waits) << " ms, max " << *std::max_element(waits.begin(), waits.end()) << " ms\n";
+              << " samples, p95 " << p95(waits) << " ms, max " << *std::max_element(waits.begin(), waits.end()) << " ms; longest wait during";
+    for (const auto& [during, ms] : longest) std::cout << " " << phases[during] << " " << ms << " ms;";
+    std::cout << "\n";
     EXPECT_EQ(number("SELECT count(*) FROM knowledge_facts"), 90000);
     EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets"), 90000);
     EXPECT_EQ(number("SELECT (SELECT count(*) FROM knowledge_category_assignments)+(SELECT count(*) FROM knowledge_conflicts)"), 0);

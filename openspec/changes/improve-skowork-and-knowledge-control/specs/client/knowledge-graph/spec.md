@@ -235,6 +235,10 @@ A Source update SHALL invalidate evidence from changed or removed passages and r
 - **WHEN** a fact's sole supporting passage is replaced and extraction is temporarily unavailable
 - **THEN** the old fact is marked unsupported or awaiting recheck and is excluded from current-fact answers until valid support is established
 
+#### Scenario: Large Source revision
+- **WHEN** a revision replaces thousands of passages of one Source
+- **THEN** search and knowledge answers see either the previous or the new content of that Source in full, never a mixture or the not-yet-current passages, and other knowledge reads and writes are not held behind the revision beyond the interactive target
+
 ### Requirement: Forget Dependency Cascade
 Forgetting a Source or item SHALL remove its text, excerpts, chunks, embeddings, extraction results and derived dependencies under client/local-storage. Facts with independent surviving evidence remain; unsupported facts and dependent summaries stop being used. Related publication withdrawals are durably queued. Forgetting an item MUST NOT delete the original file, mail or calendar entry.
 

@@ -1488,22 +1488,28 @@ constexpr size_t kStepThreshold = 2048, kWithdrawStep = 256;
 // embeddings, including when they move; a heading change is a changed passage; duplicates match one at a time.
 struct PassagePlan {
     std::vector<long long> old_ids;
-    std::map<long long, long long> old_dates;
+    std::map<long long, long long> old_dates, old_ords;
     std::vector<long long> retained;  // per new passage: the stored passage it keeps, or 0
     std::set<long long> used;
     bool unchanged_context = false;
+    size_t inserted() const { return static_cast<size_t>(std::count(retained.begin(), retained.end(), 0LL)); }
+    size_t dropped() const { return old_ids.size() - used.size(); }
 };
+
+// The hidden item key of a real item: one stage per item, retired items suffixed with their own id.
+std::string hidden_key(const std::string& source, const std::string& ext_id) { return source + ":" + ext_id; }
 
 PassagePlan plan_passages(Database& db, long long item_id, const std::optional<ItemRow>& previous, const ItemInput& in) {
     PassagePlan plan;
     std::map<std::pair<std::string, std::string>, std::queue<long long>> available;
     std::vector<Chunk> old_passages;
-    auto old = db.prepare("SELECT id, heading, text, at FROM chunks WHERE item_id=?1 ORDER BY ord, id");
+    auto old = db.prepare("SELECT id, heading, text, at, ord FROM chunks WHERE item_id=?1 ORDER BY ord, id");
     old.bind(1, item_id);
     while (old.step()) {
         const long long chunk_id = old.col_int(0);
         plan.old_ids.push_back(chunk_id);
         plan.old_dates[chunk_id] = old.col_int(3);
+        plan.old_ords[chunk_id] = old.col_int(4);
         old_passages.push_back({old.col_text(1), old.col_text(2), old.col_int(3)});
         available[{old.col_text(1), old.col_text(2)}].push(chunk_id);
     }
@@ -1528,17 +1534,21 @@ PassagePlan plan_passages(Database& db, long long item_id, const std::optional<I
 // provenance, so without a record they are rechecked whenever the item's passages or date context change. The
 // recorded extraction inputs narrow that: a removed or re-dated input clears the record itself, so what is left to
 // check is the passage's own date and a date taken from the item.
-bool recheck_retained(Database& db, const PassagePlan& plan, const std::optional<ItemRow>& previous, const ItemInput& in,
-                      long long chunk_id, long long at, bool evidence_schema) {
+// `recorded` is kRecordedInputs prepared once by the caller, because a large item asks for every kept passage; null
+// without the evidence schema.
+constexpr const char* kRecordedInputs = "SELECT item_date FROM knowledge_extraction_inputs WHERE chunk_id=?1 AND result=1";
+
+bool recheck_retained(Statement* recorded, const PassagePlan& plan, const std::optional<ItemRow>& previous, const ItemInput& in,
+                      long long chunk_id, long long at) {
     if (!previous) return false;
     const bool redated = plan.old_dates.at(chunk_id) != at;
     if (redated) return true;
     if (plan.unchanged_context) return false;
-    if (!evidence_schema) return true;
-    auto recorded = db.prepare("SELECT item_date FROM knowledge_extraction_inputs WHERE chunk_id=?1 AND result=1");
-    recorded.bind(1, chunk_id);
-    if (!recorded.step()) return true;
-    return recorded.col_int(0) != 0 && previous->updated_at != in.updated_at;
+    if (!recorded) return true;
+    recorded->reset();
+    recorded->bind(1, chunk_id);
+    if (!recorded->step()) return true;
+    return recorded->col_int(0) != 0 && previous->updated_at != in.updated_at;
 }
 
 }  // namespace
@@ -1573,25 +1583,28 @@ Status KgStore::withdraw_findings(const std::vector<long long>& chunk_ids) {
 }
 
 Status KgStore::prepare_item_change(const ItemInput& in) {
+    // Leftovers of an earlier switch first, so that retired passages stay bounded.
+    if (Status s = finish_item_changes(); !s) return s;
     std::vector<long long> withdraw;
     {
         const std::lock_guard lock(db_->mutex());
         if (db_->user_version() < 5 || !sqlite3_get_autocommit(db_->raw())) return {};
+        // A new item has nothing to withdraw; it may still be staged below.
         const auto previous = item(in.source, in.ext_id);
-        if (!previous) return {};
-        const auto plan = plan_passages(*db_, previous->id, previous, in);
+        const auto plan = plan_passages(*db_, previous ? previous->id : 0, previous, in);
         std::vector<long long> moved;  // removed or re-dated: the passages extracted beside them are rechecked too
         for (const long long id : plan.old_ids)
             if (!plan.used.count(id)) moved.push_back(id);
         withdraw = moved;
-        for (size_t n = 0; n < in.chunks.size(); ++n) {
+        auto recorded = db_->prepare(kRecordedInputs);
+        for (size_t n = 0; previous && n < in.chunks.size(); ++n) {
             const long long id = plan.retained[n];
             if (!id) continue;
             if (plan.old_dates.at(id) != in.chunks[n].at) moved.push_back(id);
-            if (recheck_retained(*db_, plan, previous, in, id, in.chunks[n].at, true)) withdraw.push_back(id);
+            if (recheck_retained(&recorded, plan, previous, in, id, in.chunks[n].at)) withdraw.push_back(id);
         }
-        if (withdraw.size() <= kStepThreshold) return {};
-        if (!moved.empty()) {
+        if (withdraw.size() <= kStepThreshold) withdraw.clear();
+        else if (!moved.empty()) {
             auto beside = db_->prepare("SELECT DISTINCT d.chunk_id FROM knowledge_extraction_inputs d WHERE d.result=1 AND d.batch_id IN "
                                        "(SELECT batch_id FROM knowledge_extraction_inputs WHERE chunk_id IN (" + id_list(moved) + "))");
             while (beside.step()) withdraw.push_back(beside.col_int(0));
@@ -1599,7 +1612,99 @@ Status KgStore::prepare_item_change(const ItemInput& in) {
     }
     std::sort(withdraw.begin(), withdraw.end());
     withdraw.erase(std::unique(withdraw.begin(), withdraw.end()), withdraw.end());
-    return withdraw_findings(withdraw);
+    if (Status s = withdraw_findings(withdraw); !s) return s;
+    return stage_passages(in);
+}
+
+// The new passages of a large change are written beforehand, in steps, to a hidden item that no reader treats as a
+// Source; the switch in put_item then moves them to the item instead of inserting and indexing them. A stage is keyed
+// by the item and the content hash, and by each passage's position in the new content, so an interrupted stage
+// resumes. The switch checks every staged passage against the content it writes.
+Status KgStore::stage_passages(const ItemInput& in) {
+    const std::string key = hidden_key(in.source, in.ext_id);
+    std::vector<size_t> pending;
+    long long stage = 0;
+    {
+        const std::lock_guard lock(db_->mutex());
+        if (db_->user_version() < 5 || !sqlite3_get_autocommit(db_->raw())) return {};
+        const auto previous = item(in.source, in.ext_id);
+        const auto plan = plan_passages(*db_, previous ? previous->id : 0, previous, in);
+        if (plan.inserted() + plan.dropped() <= kStepThreshold) return {};
+        const auto created = db_->transaction([&]() -> Status {
+            // The stage of another version of the item is discarded with the retired passages.
+            auto retire = db_->prepare("UPDATE items SET source=?1, ext_id=ext_id||'#'||id WHERE source=?2 AND ext_id=?3 AND hash<>?4");
+            retire.bind(1, kRetiredSource).bind(2, kStagedSource).bind(3, key).bind(4, in.hash);
+            if (Status s = retire.run(); !s) return s;
+            auto create = db_->prepare("INSERT OR IGNORE INTO items(source, ext_id, hash) VALUES(?1,?2,?3)");
+            create.bind(1, kStagedSource).bind(2, key).bind(3, in.hash);
+            if (Status s = create.run(); !s) return s;
+            auto find = db_->prepare("SELECT id FROM items WHERE source=?1 AND ext_id=?2");
+            find.bind(1, kStagedSource).bind(2, key);
+            if (!find.step()) return make_error("storage", "the staged passages could not be recorded");
+            stage = find.col_int(0);
+            return {};
+        });
+        if (!created) return created;
+        std::set<long long> staged;
+        auto existing = db_->prepare("SELECT ord FROM chunks WHERE item_id=?1");
+        existing.bind(1, stage);
+        while (existing.step()) staged.insert(existing.col_int(0));
+        for (size_t n = 0; n < in.chunks.size(); ++n)
+            if (!plan.retained[n] && !staged.count(static_cast<long long>(n))) pending.push_back(n);
+    }
+    for (size_t at = 0; at < pending.size(); at += kWithdrawStep) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const std::lock_guard lock(db_->mutex());
+        if (!sqlite3_get_autocommit(db_->raw())) return {};
+        bool current = false;
+        const auto step = db_->transaction([&]() -> Status {
+            // A forget, a discard or a newer version may have retired the stage meanwhile.
+            auto check = db_->prepare("SELECT 1 FROM items WHERE id=?1 AND source=?2 AND hash=?3");
+            check.bind(1, stage).bind(2, kStagedSource).bind(3, in.hash);
+            if (!(current = check.step())) return {};
+            auto insert = db_->prepare("INSERT INTO chunks(item_id, ord, heading, text, at, tokens) VALUES(?1,?2,?3,?4,?5,?6)");
+            for (size_t k = at; k < std::min(pending.size(), at + kWithdrawStep); ++k) {
+                const auto& c = in.chunks[pending[k]];
+                insert.reset();
+                insert.bind(1, stage).bind(2, static_cast<long long>(pending[k])).bind(3, c.heading).bind(4, c.text).bind(5, c.at);
+                insert.bind(6, estimate_tokens(c.text));
+                if (Status s = insert.run(); !s) return s;
+            }
+            return {};
+        });
+        if (!step) return step;
+        if (!current) return {};
+    }
+    return {};
+}
+
+Status KgStore::finish_item_changes() {
+    const std::string retired = std::string("SELECT c.id FROM items i JOIN chunks c ON c.item_id=i.id WHERE i.source='") + kRetiredSource +
+                                "' LIMIT " + std::to_string(kWithdrawStep);
+    for (bool first = true;; first = false) {
+        if (!first) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const std::lock_guard lock(db_->mutex());
+        if (db_->user_version() < 5 || !sqlite3_get_autocommit(db_->raw())) return {};
+        int removed = 0;
+        const auto step = db_->transaction([&]() -> Status {
+            if (Status s = db_->exec("DELETE FROM chunks WHERE id IN (" + retired + ")"); !s) return s;
+            if ((removed = db_->changes())) return {};
+            return db_->exec(std::string("DELETE FROM items WHERE source='") + kRetiredSource + "'");
+        });
+        if (!step) return step;
+        if (!removed) return {};
+    }
+}
+
+Status KgStore::discard_item_change(const std::string& source, const std::string& ext_id) {
+    {
+        const std::lock_guard lock(db_->mutex());
+        if (db_->user_version() < 5) return {};
+        auto retire = db_->prepare("UPDATE items SET source=?1, ext_id=ext_id||'#'||id WHERE source=?2 AND ext_id=?3");
+        retire.bind(1, kRetiredSource).bind(2, kStagedSource).bind(3, hidden_key(source, ext_id));
+        if (Status s = retire.run(); !s) return s;
+    }
+    return finish_item_changes();
 }
 
 Status KgStore::prepare_item_removal_steps(const std::string& source, const std::string& ext_id) {
@@ -1637,9 +1742,49 @@ Status KgStore::prepare_item_removal_steps(const std::string& source, const std:
     }
 }
 
+namespace {
+
+// In the transaction that removes an item: its stage is retired, and so are the passages of a large item whose
+// findings and excerpts were already withdrawn in steps, so that the transaction does not delete and unindex every
+// passage while holding the writer. Retired passages are no longer part of any Source; finish_item_changes() deletes
+// them. A passage still holding findings is left to be deleted with the item, so its triggers run here.
+Status retire_removed_passages(Database& db, const std::string& source, const std::string& ext_id) {
+    const std::string key = hidden_key(source, ext_id);
+    auto discard = db.prepare("UPDATE items SET source=?1, ext_id=ext_id||'#'||id WHERE source=?2 AND ext_id=?3");
+    discard.bind(1, kRetiredSource).bind(2, kStagedSource).bind(3, key);
+    if (Status s = discard.run(); !s) return s;
+    long long item = 0, passages = 0;
+    {
+        auto s = db.prepare("SELECT i.id, (SELECT count(*) FROM chunks WHERE item_id=i.id) FROM items i WHERE i.source=?1 AND i.ext_id=?2");
+        s.bind(1, source).bind(2, ext_id);
+        if (!s.step()) return {};
+        item = s.col_int(0);
+        passages = s.col_int(1);
+    }
+    if (passages <= static_cast<long long>(kStepThreshold)) return {};
+    // Named like any retired stage, key#id: the next rowid, so unique.
+    auto create = db.prepare("INSERT INTO items(source, ext_id) SELECT ?1, ?2||'#'||(max(id)+1) FROM items");
+    create.bind(1, kRetiredSource).bind(2, key);
+    if (Status s = create.run(); !s) return s;
+    const std::string retired = std::to_string(db.last_insert_id()), from = std::to_string(item);
+    return db.exec(
+        "UPDATE chunks SET item_id=" + retired + " WHERE item_id=" + from +
+        " AND NOT EXISTS(SELECT 1 FROM relations r WHERE r.chunk_id=chunks.id) AND NOT EXISTS(SELECT 1 FROM mentions m WHERE m.chunk_id=chunks.id)"
+        " AND NOT EXISTS(SELECT 1 FROM knowledge_extraction_inputs d WHERE d.result=1 AND d.batch_id IN"
+        " (SELECT batch_id FROM knowledge_extraction_inputs WHERE chunk_id=chunks.id));"
+        "DELETE FROM extract_queue WHERE chunk_id IN (SELECT id FROM chunks WHERE item_id=" + retired + ");"
+        "DELETE FROM embed_queue WHERE chunk_id IN (SELECT id FROM chunks WHERE item_id=" + retired + ");");
+}
+
+}  // namespace
+
 Result<long long> KgStore::put_item(const ItemInput& in, long long now) {
-    // Optional: withdraws a large change's findings in steps; the transaction below completes the change either way.
+    // Optional: withdraws and stages a large change in steps; the write completes the change either way.
     (void)prepare_item_change(in);
+    return put_prepared_item(in, now);
+}
+
+Result<long long> KgStore::put_prepared_item(const ItemInput& in, long long now) {
     const std::lock_guard lock(db_->mutex());
     long long id = 0;
     Status st = db_->transaction([&]() -> Status {
@@ -1665,7 +1810,10 @@ Result<long long> KgStore::put_item(const ItemInput& in, long long now) {
         if (!existing.step()) return make_error("storage", "the indexed item could not be found");
         id = existing.col_int(0);
         const auto plan = plan_passages(*db_, id, previous, in);
-        const auto& [old_ids, old_dates, retained, used, unchanged_context] = plan;
+        const auto& old_ids = plan.old_ids;
+        const auto& old_dates = plan.old_dates;
+        const auto& retained = plan.retained;
+        const auto& used = plan.used;
         const bool evidence_schema = db_->user_version() >= 5;
         if (evidence_schema) {
             // A passage keeps its evidence only when its heading, text and date are all unchanged.
@@ -1677,67 +1825,100 @@ Result<long long> KgStore::put_item(const ItemInput& in, long long now) {
             }
             if (Status s = advance_revision(*db_, id, in.hash, now, changed, unchanged); !s) return s;
         }
-        // Prepared once: a large item runs each of these for every passage, and compiling a statement on a table
-        // with triggers costs more than running it.
-        auto drop = db_->prepare("DELETE FROM chunks WHERE id=?1");
+        // A large item would run thousands of single-row statements here, and this transaction is what other writers
+        // wait for: passages are handled as lists, one statement per step, and the rest is prepared once.
         auto update = db_->prepare("UPDATE chunks SET ord=?1, at=?2 WHERE id=?3");
-        auto relations = db_->prepare("DELETE FROM relations WHERE chunk_id=?1");
-        auto mentions = db_->prepare("DELETE FROM mentions WHERE chunk_id=?1");
-        auto requeue = db_->prepare("INSERT INTO extract_queue(chunk_id, priority) VALUES(?1,?2) "
-                                    "ON CONFLICT(chunk_id) DO UPDATE SET priority=max(priority, excluded.priority)");
-        auto dequeue = db_->prepare("DELETE FROM extract_queue WHERE chunk_id=?1");
         auto ci = db_->prepare("INSERT INTO chunks(item_id, ord, heading, text, at, tokens) VALUES(?1,?2,?3,?4,?5,?6)");
-        auto q = db_->prepare("INSERT INTO embed_queue(chunk_id, priority) VALUES(?1,?2)");
-        auto x = db_->prepare("INSERT INTO extract_queue(chunk_id, priority) VALUES(?1,?2)");
-        for (const long long chunk_id : old_ids) {
-            if (used.count(chunk_id)) continue;
-            drop.reset();
-            drop.bind(1, chunk_id);
-            if (Status s = drop.run(); !s) return s;
+        const std::string item_id = std::to_string(id), priority = std::to_string(in.priority);
+        const auto each = [&](const std::string& head, const std::vector<long long>& ids, const std::string& tail = {}) -> Status {
+            return ids.empty() ? Status{} : db_->exec(head + "(" + id_list(ids) + ")" + tail);
+        };
+        // A staged change: its new passages are already written and indexed under the hidden stage, and the passages
+        // it replaces are retired there, to be deleted in steps after the switch.
+        const std::string key = hidden_key(in.source, in.ext_id);
+        long long stage = 0;
+        std::map<long long, ChunkRow> staged;  // by position in the new content
+        if (evidence_schema) {
+            auto s = db_->prepare("SELECT id FROM items WHERE source=?1 AND ext_id=?2 AND hash=?3");
+            s.bind(1, kStagedSource).bind(2, key).bind(3, in.hash);
+            if (s.step()) stage = s.col_int(0);
         }
+        if (stage) {
+            auto s = db_->prepare("SELECT id, ord, heading, text, at FROM chunks WHERE item_id=?1");
+            s.bind(1, stage);
+            while (s.step()) staged[s.col_int(1)] = {s.col_int(0), stage, s.col_text(2), s.col_text(3), s.col_int(4)};
+        }
+        std::optional<Statement> recorded;
+        if (evidence_schema) recorded.emplace(db_->prepare(kRecordedInputs));
+        std::vector<long long> dropped;
+        for (const long long chunk_id : old_ids)
+            if (!used.count(chunk_id)) dropped.push_back(chunk_id);
+        // Only a passage that holds no findings and shares no extraction request with current findings is retired;
+        // any other is deleted now, so that its triggers withdraw those findings in this transaction.
+        if (stage)
+            if (Status s = each("UPDATE chunks SET item_id=" + std::to_string(stage) + " WHERE id IN ", dropped,
+                                " AND NOT EXISTS(SELECT 1 FROM relations r WHERE r.chunk_id=chunks.id)"
+                                " AND NOT EXISTS(SELECT 1 FROM mentions m WHERE m.chunk_id=chunks.id)"
+                                " AND NOT EXISTS(SELECT 1 FROM knowledge_extraction_inputs d WHERE d.result=1 AND d.batch_id IN"
+                                " (SELECT batch_id FROM knowledge_extraction_inputs WHERE chunk_id=chunks.id))");
+                !s)
+                return s;
+        if (Status s = each("DELETE FROM chunks WHERE item_id=" + item_id + " AND id IN ", dropped); !s) return s;
+        std::vector<long long> rechecked, adopted, added;
         int ord = 0;
         for (const auto& c : in.chunks) {
             const long long existing_id = retained[static_cast<size_t>(ord)];
             if (existing_id) {
-                update.reset();
-                update.bind(1, ord++).bind(2, c.at).bind(3, existing_id);
-                if (Status s = update.run(); !s) return s;
-                if (recheck_retained(*db_, plan, previous, in, existing_id, c.at, evidence_schema)) {
-                    if (evidence_schema) {
-                        auto stale = db_->prepare("UPDATE knowledge_extraction_inputs SET result=0,item_date=0 WHERE chunk_id=?1 AND result=1");
-                        stale.bind(1, existing_id);
-                        if (Status s = stale.run(); !s) return s;
-                    }
-                    relations.reset();
-                    relations.bind(1, existing_id);
-                    if (Status s = relations.run(); !s) return s;
-                    mentions.reset();
-                    mentions.bind(1, existing_id);
-                    if (Status s = mentions.run(); !s) return s;
-                    if (in.extract) {
-                        requeue.reset();
-                        requeue.bind(1, existing_id).bind(2, in.priority);
-                        if (Status s = requeue.run(); !s) return s;
-                    } else {
-                        dequeue.reset();
-                        dequeue.bind(1, existing_id);
-                        if (Status s = dequeue.run(); !s) return s;
-                    }
+                // A passage that stays in place with its date is not rewritten.
+                if (plan.old_ords.at(existing_id) != ord || old_dates.at(existing_id) != c.at) {
+                    update.reset();
+                    update.bind(1, ord).bind(2, c.at).bind(3, existing_id);
+                    if (Status s = update.run(); !s) return s;
                 }
+                ++ord;
+                if (recheck_retained(recorded ? &*recorded : nullptr, plan, previous, in, existing_id, c.at)) rechecked.push_back(existing_id);
+                continue;
+            }
+            if (const auto ready = staged.find(ord); ready != staged.end() && ready->second.heading == c.heading &&
+                                                     ready->second.text == c.text && ready->second.at == c.at) {
+                adopted.push_back(ready->second.id);
+                ++ord;
                 continue;
             }
             ci.reset();
             ci.bind(1, id).bind(2, ord++).bind(3, c.heading).bind(4, c.text).bind(5, c.at).bind(6, estimate_tokens(c.text));
             if (Status s = ci.run(); !s) return s;
-            const long long cid = db_->last_insert_id();
-            q.reset();
-            q.bind(1, cid).bind(2, in.priority);
-            if (Status s = q.run(); !s) return s;
-            if (in.extract) {
-                x.reset();
-                x.bind(1, cid).bind(2, in.priority);
-                if (Status s = x.run(); !s) return s;
-            }
+            added.push_back(db_->last_insert_id());
+        }
+        if (Status s = each("UPDATE chunks SET item_id=" + item_id + " WHERE id IN ", adopted); !s) return s;
+        added.insert(added.end(), adopted.begin(), adopted.end());
+        if (Status s = each("INSERT INTO embed_queue(chunk_id, priority) SELECT id," + priority + " FROM chunks WHERE id IN ", added); !s) return s;
+        if (in.extract)
+            if (Status s = each("INSERT INTO extract_queue(chunk_id, priority) SELECT id," + priority + " FROM chunks WHERE id IN ", added); !s)
+                return s;
+        // Kept passages whose findings are extracted again.
+        if (evidence_schema)
+            if (Status s = each("UPDATE knowledge_extraction_inputs SET result=0,item_date=0 WHERE result=1 AND chunk_id IN ", rechecked); !s)
+                return s;
+        if (Status s = each("DELETE FROM relations WHERE chunk_id IN ", rechecked); !s) return s;
+        if (Status s = each("DELETE FROM mentions WHERE chunk_id IN ", rechecked); !s) return s;
+        if (Status s = in.extract ? each("INSERT INTO extract_queue(chunk_id, priority) SELECT id," + priority + " FROM chunks WHERE id IN ",
+                                         rechecked, " ON CONFLICT(chunk_id) DO UPDATE SET priority=max(priority, excluded.priority)")
+                                  : each("DELETE FROM extract_queue WHERE chunk_id IN ", rechecked);
+            !s)
+            return s;
+        if (stage) {
+            // What is left under the stage is retired: nothing may pick it up for embedding or extraction.
+            const std::string left = "(SELECT id FROM chunks WHERE item_id=" + std::to_string(stage) + ")";
+            if (Status s = db_->exec("DELETE FROM extract_queue WHERE chunk_id IN " + left + "; DELETE FROM embed_queue WHERE chunk_id IN " + left);
+                !s)
+                return s;
+        }
+        if (evidence_schema) {
+            // Any stage of the item, including one of another version, is retired by a completed change.
+            auto discard = db_->prepare("UPDATE items SET source=?1, ext_id=ext_id||'#'||id WHERE source=?2 AND ext_id=?3");
+            discard.bind(1, kRetiredSource).bind(2, kStagedSource).bind(3, key);
+            if (Status s = discard.run(); !s) return s;
         }
         auto sk = db_->prepare("DELETE FROM skipped WHERE source=?1 AND ext_id=?2");
         sk.bind(1, in.source).bind(2, in.ext_id);
@@ -1796,7 +1977,7 @@ Status KgStore::forget_thread(const std::string& thread_id) {
 bool KgStore::remove_item(const std::string& source, const std::string& ext_id, bool forget) {
     // Optional, as for a revision: the transaction below removes everything that is left.
     (void)prepare_item_removal_steps(source, ext_id);
-    const std::lock_guard lock(db_->mutex());
+    std::unique_lock lock(db_->mutex());
     bool removed = false;
     const auto result = db_->transaction([&]() -> Status {
         if (auto s = purge_recovery_copy(); !s) return s;
@@ -1810,6 +1991,8 @@ bool KgStore::remove_item(const std::string& source, const std::string& ext_id, 
             tombstones.bind(1, source).bind(2, ext_id);
             if (auto s = tombstones.run(); !s) return s;
         }
+        if (db_->user_version() >= 5)
+            if (auto s = retire_removed_passages(*db_, source, ext_id); !s) return s;
         auto s = db_->prepare("DELETE FROM items WHERE source=?1 AND ext_id=?2");
         s.bind(1, source).bind(2, ext_id);
         if (auto status = s.run(); !status) return status;
@@ -1820,6 +2003,9 @@ bool KgStore::remove_item(const std::string& source, const std::string& ext_id, 
         return removed ? delete_orphan_entities(*db_) : Status{};
     });
     if (!result) return false;
+    lock.unlock();
+    // The retired passages hold the forgotten text: delete them now rather than with a later change.
+    (void)finish_item_changes();
     return removed;
 }
 
@@ -1839,10 +2025,16 @@ std::vector<std::string> KgStore::item_ids(const std::string& source) {
 }
 
 int KgStore::remove_source(const std::string& kind, bool forget) {
-    const std::lock_guard lock(db_->mutex());
+    std::unique_lock lock(db_->mutex());
     int n = 0;
     const auto result = db_->transaction([&]() -> Status {
         if (auto s = purge_recovery_copy(); !s) return s;
+        if (db_->user_version() >= 5) {
+            // Staged passages of the Source's items go with them.
+            auto discard = db_->prepare("UPDATE items SET source=?1, ext_id=ext_id||'#'||id WHERE source=?2 AND substr(ext_id,1,length(?3)+1)=?3||':'");
+            discard.bind(1, kRetiredSource).bind(2, kStagedSource).bind(3, kind);
+            if (auto s = discard.run(); !s) return s;
+        }
         if (forget) {
             if (auto s = queue_item_withdrawals(*db_, kind, std::nullopt); !s) return s;
             if (kind == "files")
@@ -1873,6 +2065,8 @@ int KgStore::remove_source(const std::string& kind, bool forget) {
         return delete_orphan_entities(*db_);
     });
     if (!result) return -1;
+    lock.unlock();
+    (void)finish_item_changes();
     return n;
 }
 
@@ -1905,10 +2099,12 @@ std::vector<ItemRow> KgStore::find_items(const std::string& query, int limit,
     const std::lock_guard lock(db_->mutex());
     auto s = db_->prepare(std::string("SELECT ") + kItemColumns +
                           " FROM items WHERE (instr(lower(title), lower(?1)) > 0 OR instr(lower(ref), lower(?1)) > 0)"
+                          " AND source NOT IN (?5,?6)"
                           " AND NOT EXISTS (SELECT 1 FROM user_exclusions u WHERE u.kind='item' AND u.value=items.source||':'||items.ext_id)"
                           " AND (?3=0 OR updated_at<?4 OR (updated_at=?4 AND id<?3))"
                           " ORDER BY updated_at DESC, id DESC LIMIT ?2");
     s.bind(1, query).bind(2, static_cast<long long>(limit)).bind(3, before ? before->second : 0).bind(4, before ? before->first : 0);
+    s.bind(5, kStagedSource).bind(6, kRetiredSource);
     while (s.step()) out.push_back(read_item(s));
     return out;
 }
@@ -2007,8 +2203,10 @@ std::vector<long long> KgStore::fts(const std::string& query, int limit) {
     const std::string q = fts_query(query);
     if (q.empty()) return out;
     const std::lock_guard lock(db_->mutex());
-    auto s = db_->prepare("SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ?1 ORDER BY rank LIMIT ?2");
-    s.bind(1, q).bind(2, limit);
+    // Staged and retired passages are indexed but belong to no Source.
+    auto s = db_->prepare("SELECT f.rowid FROM chunks_fts f JOIN chunks c ON c.id=f.rowid JOIN items i ON i.id=c.item_id "
+                          "WHERE chunks_fts MATCH ?1 AND i.source NOT IN (?3,?4) ORDER BY f.rank LIMIT ?2");
+    s.bind(1, q).bind(2, limit).bind(3, kStagedSource).bind(4, kRetiredSource);
     while (s.step()) out.push_back(s.col_int(0));
     return out;
 }
@@ -2072,9 +2270,10 @@ void KgStore::set_active_embedding(const std::string& model, int dim) {
 long long KgStore::queue_reembed(const std::string& model, int dim) {
     const std::lock_guard lock(db_->mutex());
     auto s = db_->prepare(
-        "INSERT OR IGNORE INTO embed_queue(chunk_id, priority) SELECT c.id, 0 FROM chunks c WHERE NOT EXISTS "
+        "INSERT OR IGNORE INTO embed_queue(chunk_id, priority) SELECT c.id, 0 FROM chunks c JOIN items i ON i.id=c.item_id "
+        "WHERE i.source NOT IN (?3,?4) AND NOT EXISTS "
         "(SELECT 1 FROM vec_bin v JOIN vec_models m ON m.id=v.model_id WHERE v.chunk_id=c.id AND m.model=?1 AND m.dim=?2)");
-    s.bind(1, model).bind(2, dim);
+    s.bind(1, model).bind(2, dim).bind(3, kStagedSource).bind(4, kRetiredSource);
     (void)s.run();
     return db_->changes();
 }

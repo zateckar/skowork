@@ -32,6 +32,10 @@ std::string kg_evidence_migration_sql();
 inline constexpr int kMaxDerivationDepth = 32;
 // Superseded revisions of an item whose excerpts are kept as history beside the current one.
 inline constexpr int kRetainedSupersededRevisions = 4;
+// Hidden items: the new passages of a large change before it is switched to current, and passages a switch or
+// forget replaced, until they are deleted in steps. Neither is a Source; readers exclude them.
+inline constexpr const char* kStagedSource = "~staged";
+inline constexpr const char* kRetiredSource = "~retired";
 Result<std::unique_ptr<Database>> open_kg_database(const std::filesystem::path& file, const db_key& key, MigrationOutcome& outcome);
 
 // The Source kinds (client/knowledge-graph Source Enablement).
@@ -241,10 +245,17 @@ public:
     std::optional<std::string> item_hash(const std::string& source, const std::string& ext_id);
     // Inserts or replaces the item and its chunks; new chunks are queued for embedding (and for extraction).
     Result<long long> put_item(const ItemInput& in, long long now);
-    // With the evidence schema, a large change first withdraws the findings it will invalidate in short transactions
-    // and queues their passages again; put_item does this itself, but a caller holding the database lock around
-    // put_item should call it before taking the lock so that other writers can run between the steps.
+    // put_item without its prepare_item_change, for a caller that called that itself before taking the lock.
+    Result<long long> put_prepared_item(const ItemInput& in, long long now);
+    // With the evidence schema, a large change first withdraws the findings it will invalidate and stages the new
+    // passages in a hidden item, both in short transactions; put_item then only switches the staged passages over.
+    // put_item does this itself, but a caller holding the database lock around put_item should call it before taking
+    // the lock so that other writers can run between the steps, and call finish_item_changes() after releasing it.
     Status prepare_item_change(const ItemInput& in);
+    // Deletes, in short transactions, passages that a switch, discard or forget retired.
+    Status finish_item_changes();
+    // Discards the staged passages of an item whose change will not be written (not eligible, cancelled).
+    Status discard_item_change(const std::string& source, const std::string& ext_id);
     // A migration backup can contain forgotten knowledge. Failure must prevent acknowledging the forget operation.
     Status purge_recovery_copy();
     Status forget_thread(const std::string& thread_id);
@@ -381,6 +392,7 @@ public:
 
 private:
     Status withdraw_findings(const std::vector<long long>& chunk_ids);
+    Status stage_passages(const ItemInput& in);
     Status prepare_item_removal_steps(const std::string& source, const std::string& ext_id);
     Result<KnowledgeImpactPreview> preview_evidence_snapshot(std::unordered_set<long long> removed,
                                                             std::optional<long long> item_id);

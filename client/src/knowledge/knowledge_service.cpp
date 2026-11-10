@@ -363,6 +363,7 @@ void KnowledgeService::index_note(const std::string& id, int priority) {
         if (auto put = store_->put_item(in, now_ms()); !put) store_->touch_source("notes", 0, put.error().message);
         else store_->touch_source("notes", now_ms(), {});
     }
+    (void)store_->finish_item_changes();
 }
 
 void KnowledgeService::index_thread(const std::string& id, int priority) {
@@ -395,11 +396,7 @@ void KnowledgeService::index_thread(const std::string& id, int priority) {
     }
     ItemInput in{"threads", id, jstr(*data, "title", "Thread"), "workbench://thread/" + id, hash, first, last, priority,
                  chunks_from_json(r->value("chunks", json::array())), true};
-    const std::lock_guard lock(store_->db().mutex());
-    const auto source = store_->source("threads");
-    if (!source.user_enabled || source.paused || excluded_item("threads", id)) return;
-    if (auto put = store_->put_item(in, now_ms()); !put) store_->touch_source("threads", 0, put.error().message);
-    else store_->touch_source("threads", now_ms(), {});
+    put_eligible(in);
 }
 
 void KnowledgeService::index_mail(const std::string& kind, const std::string& id, int priority) {
@@ -432,24 +429,17 @@ void KnowledgeService::index_mail(const std::string& kind, const std::string& id
     for (auto& c : chunks) c.at = at;
     if (chunks.empty()) chunks.push_back({{}, jstr(*item, "title"), at});
     ItemInput in{kind, id, jstr(*item, "title"), jstr(*item, "ref"), hash, at, at, priority, std::move(chunks), true};
-    const std::lock_guard lock(store_->db().mutex());
-    const auto source = store_->source(kind);
-    if (!source.user_enabled || source.paused || excluded_item(kind, id)) return;
-    auto put = store_->put_item(in, now_ms());
-    if (!put) {
-        store_->touch_source(kind, 0, put.error().message);
-        return;
-    }
-    // The people of the item are Person entities keyed by address (design D5), mentioned in each of its chunks.
-    const auto rows = store_->chunks_of_item(*put);
-    for (const auto& p : item->value("people", json::array())) {
-        const std::string address = to_lower(jstr(p, "address"));
-        if (address.find('@') == std::string::npos) continue;
-        const long long e = store_->resolve_entity("Person", jstr(p, "name"), address, now_ms());
-        if (!e) continue;
-        for (const auto& c : rows) store_->add_mention(c.id, e, jstr(p, "name").empty() ? address : jstr(p, "name"));
-    }
-    store_->touch_source(kind, now_ms(), {});
+    put_eligible(in, [&](long long written) {
+        // The people of the item are Person entities keyed by address (design D5), mentioned in each of its chunks.
+        const auto rows = store_->chunks_of_item(written);
+        for (const auto& p : item->value("people", json::array())) {
+            const std::string address = to_lower(jstr(p, "address"));
+            if (address.find('@') == std::string::npos) continue;
+            const long long e = store_->resolve_entity("Person", jstr(p, "name"), address, now_ms());
+            if (!e) continue;
+            for (const auto& c : rows) store_->add_mention(c.id, e, jstr(p, "name").empty() ? address : jstr(p, "name"));
+        }
+    });
 }
 
 void KnowledgeService::file_error(const std::string& path, const std::string& error, long long updated) {
@@ -592,23 +582,35 @@ void KnowledgeService::index_file(const std::string& path, int priority) {
     const auto current_cfg = config();
     bool eligible = false;
     std::string write_error;
-    (void)store_->prepare_item_change(in);  // before the lock below, so a large change does not block other writers
-    {
-        // The same database lock protects exclusions and selected imports, and KgStore's write transaction.
-        // Do not hold it while updating file status: file_error takes the status lock before the database lock.
-        const std::lock_guard lock(store_->db().mutex());
+    // Called with the database lock held: the same lock protects exclusions and selected imports.
+    const auto eligible_now = [&] {
         const auto docs = store_->documents();
         const auto folders = store_->folders();
         const auto source = store_->source("files");
         const auto allowed = current_cfg.source_policy.find("files");
         const bool selected = std::find(docs.begin(), docs.end(), path) != docs.end() ||
                               std::any_of(folders.begin(), folders.end(), [&](const std::string& folder) { return under(path, folder); });
-        eligible = selected && source.user_enabled && !source.paused && allowed != current_cfg.source_policy.end() && allowed->second &&
-                   !excluded_path(path, current_cfg);
+        return selected && source.user_enabled && !source.paused && allowed != current_cfg.source_policy.end() && allowed->second &&
+               !excluded_path(path, current_cfg);
+    };
+    // A large change is withdrawn and staged before the lock below, so it does not block other writers; nothing is
+    // staged for a file that is not eligible, and a stage is discarded if the file stopped being eligible meanwhile.
+    bool stage = false;
+    {
+        const std::lock_guard lock(store_->db().mutex());
+        stage = eligible_now();
+    }
+    if (stage) (void)store_->prepare_item_change(in);
+    {
+        // Do not hold the lock while updating file status: file_error takes the status lock before the database lock.
+        const std::lock_guard lock(store_->db().mutex());
+        eligible = eligible_now();
         if (eligible) {
-            if (auto put = store_->put_item(in, now_ms()); !put) write_error = "Cannot index " + path + ": " + put.error().message;
+            auto put = stage ? store_->put_prepared_item(in, now_ms()) : store_->put_item(in, now_ms());
+            if (!put) write_error = "Cannot index " + path + ": " + put.error().message;
         }
     }
+    if (stage) (void)(eligible && write_error.empty() ? store_->finish_item_changes() : store_->discard_item_change("files", path));
     if (!eligible) file_error(path, {});
     else if (!write_error.empty()) file_error(path, write_error);
     else file_error(path, {}, now_ms());
@@ -627,12 +629,39 @@ void KnowledgeService::index_meeting(const Task& t) {
     const long long start = jint(d, "start");
     ItemInput in{"meetings", t.id, jstr(d, "title", "Meeting"), jstr(d, "ref"), hash, start, start, t.priority,
                  chunks_from_json(r->value("chunks", json::array())), true};
-    (void)store_->prepare_item_change(in);
-    const std::lock_guard lock(store_->db().mutex());
-    const auto source = store_->source("meetings");
-    if (!source.user_enabled || source.paused || excluded_item("meetings", t.id)) return;
-    if (auto put = store_->put_item(in, now_ms()); !put) store_->touch_source("meetings", 0, put.error().message);
-    else store_->touch_source("meetings", now_ms(), {});
+    put_eligible(in);
+}
+
+// Writes an indexed item of a Source other than files and notes: a large change is withdrawn and staged before the
+// lock is held, but only while the Source is on and the item is not excluded, and the stage is discarded if that
+// stopped being true before the write. `written_hook` runs under the same lock after the write. Returns the item id
+// when it was written.
+std::optional<long long> KnowledgeService::put_eligible(const ItemInput& in, const std::function<void(long long)>& written_hook) {
+    const auto eligible_now = [&] {
+        const auto source = store_->source(in.source);
+        return source.user_enabled && !source.paused && !excluded_item(in.source, in.ext_id);
+    };
+    bool stage = false;
+    {
+        const std::lock_guard lock(store_->db().mutex());
+        stage = eligible_now();
+    }
+    if (stage) (void)store_->prepare_item_change(in);
+    std::optional<long long> written;
+    {
+        const std::lock_guard lock(store_->db().mutex());
+        if (eligible_now()) {
+            if (auto put = stage ? store_->put_prepared_item(in, now_ms()) : store_->put_item(in, now_ms()); !put)
+                store_->touch_source(in.source, 0, put.error().message);
+            else {
+                if (written_hook) written_hook(*put);
+                store_->touch_source(in.source, now_ms(), {});
+                written = *put;
+            }
+        }
+    }
+    if (stage) (void)(written ? store_->finish_item_changes() : store_->discard_item_change(in.source, in.ext_id));
+    return written;
 }
 
 void KnowledgeService::scan_files() {
