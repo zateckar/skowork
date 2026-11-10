@@ -3894,11 +3894,25 @@ TEST(ShellKnowledge, SourcesFoldersExclusionsForgetMergeAndSplit) {
         EXPECT_TRUE(w.until([&] { return w.exists("knowledge-exclusion-item-files:" + folder + "\\phoenix.txt"); }));
 
         // Merge "Phoenix" into "Projekt Phoenix", then split the alias off again. (Entities without mentions are swept
-        // as orphans when items are removed, so they are made here.)
+        // as orphans when items are removed, so they are made here. An entity and a noncanonical alias are shown only
+        // when a permitted item mentions them, so each is mentioned by its own passage of a file in the folder.)
         const long long now = system_clock().unix_millis();
+        const auto kickoff_path = docs / L"kickoff.txt";
+        std::ofstream(kickoff_path) << "# Kickoff\n\nPhoenix starts on Monday.\n\n# Owner\n\nProjekt Phoenix is run by Line 4.";
+        const auto kickoff_u8 = kickoff_path.u8string();
+        const std::string kickoff(kickoff_u8.begin(), kickoff_u8.end());
+        knowledge::ItemInput kickoff_item{"files", kickoff, "kickoff.txt", kickoff, "v1", now, now, 1,
+                                          {{"Kickoff", "Phoenix starts on Monday.", 0}, {"Owner", "Projekt Phoenix is run by Line 4.", 0}}, false};
+        ASSERT_TRUE(store.put_item(kickoff_item, now));
+        const auto kickoff_row = store.item("files", kickoff);
+        ASSERT_TRUE(kickoff_row);
+        const auto kickoff_chunks = store.chunks_of_item(kickoff_row->id);
+        ASSERT_EQ(kickoff_chunks.size(), 2u);
         const long long phoenix = store.resolve_entity("Project", "Phoenix", "", now);
         const long long projekt = store.resolve_entity("Project", "Projekt Phoenix", "", now);
         ASSERT_NE(phoenix, projekt);
+        store.add_mention(kickoff_chunks[0].id, phoenix, "Phoenix");
+        store.add_mention(kickoff_chunks[1].id, projekt, "Projekt Phoenix");
         w.type("settings-knowledge-entity-query", u"phoenix");
         ASSERT_TRUE(w.invoke("settings-knowledge-find-entities"));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-entity-merge-" + std::to_string(phoenix)); }));
