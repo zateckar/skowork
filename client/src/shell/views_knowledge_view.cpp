@@ -1264,7 +1264,18 @@ void KnowledgeView::load_section(bool more) {
         else if (scope.rfind("c", 0) == 0) fetch("knowledge.facts", {{"limit", 50}, {"category", std::atoll(scope.c_str() + 1)}}, &facts_, "facts", "before");
     } else if (section == "review") {
         if (kind == "changes") fetch("knowledge.changes", {{"limit", 50}}, &review_changes_, "items", "before");
-        else if (kind == "categories") fetch("knowledge.category.suggestions", {{"limit", 50}}, &suggestions_, "items", "after");
+        else if (kind == "categories") {
+            fetch("knowledge.category.suggestions", {{"limit", 50}}, &suggestions_, "items", "after");
+            // New names are few (bounded by the store), so they come in one page above the assignments.
+            if (!more) {
+                category_names_ = nullptr;
+                shell_.call("knowledge.category.names", {{"limit", 20}}, [this, alive, request](Result<json> r) {
+                    if (!alive.lock() || request != section_request_) return;
+                    category_names_ = r ? *r : json{{"items", json::array()}};
+                    rebuild();
+                });
+            }
+        }
         else fetch("knowledge.reviews", {{"limit", 50}}, &reviews_, "items", "after");
     } else if (section == "sharing") {
         load_sharing();
@@ -1924,7 +1935,10 @@ void KnowledgeView::build_review_list() {
     if (review_kind_ == "categories") {
         const json* list = jobj(suggestions_, "items");
         if (!list || !list->is_array()) return loading();
-        if (list->empty()) text(*list_, shell_.t("knowledge.no_suggestions"), Paint::text_secondary, "knowledge-no-suggestions");
+        build_category_names();
+        const json* names = jobj(category_names_, "items");
+        if (list->empty() && (!names || names->empty()))
+            text(*list_, shell_.t("knowledge.no_suggestions"), Paint::text_secondary, "knowledge-no-suggestions");
         for (const auto& s : *list) {
             const long long fid = jint(s, "fact_id"), cid = jint(s, "category_id");
             const std::string key = "f" + std::to_string(fid);
@@ -1966,6 +1980,63 @@ void KnowledgeView::build_review_list() {
         row->emplace<ui::Label>(u, state, TextStyle::caption, Paint::text_secondary, false)->role = ui::Role::none;
     }
     more_button(reviews_);
+}
+
+// Suggested new category names (Inspectable Category Assignment): each lists the facts it would hold with the words
+// it rests on, and places none of them until it is accepted; it can be renamed or dismissed instead.
+void KnowledgeView::build_category_names() {
+    const json* names = jobj(category_names_, "items");
+    if (!names || names->empty()) return;
+    ui::Ui& u = shell_.ui();
+    const auto top = [this] {
+        history_.clear();
+        cited_ = nullptr;
+    };
+    const auto changed = [this](const json&) { load_section(); };
+    list_->emplace<ui::Label>(u, shell_.t("knowledge.new_categories"), TextStyle::body_strong)->role = ui::Role::heading;
+    for (const auto& n : *names) {
+        const long long nid = jint(n, "id");
+        const std::string sid = std::to_string(nid);
+        const std::u16string cname = u16(jstr(n, "name"));
+        const json facts = n.value("facts", json::array());
+        auto* group = list_->emplace<Node>("knowledge-category-name-" + sid);
+        group->role = ui::Role::group;
+        group->name = shell_.t("knowledge.new_category_named", {{"name", cname}});
+        group->gap = 2;
+        group->emplace<ui::Label>(u, cname, TextStyle::body, Paint::text, true)->role = ui::Role::none;
+        group->emplace<ui::Label>(u, shell_.t("knowledge.new_category_meta", {{"reason", u16(jstr(n, "reason"))},
+                                                                             {"n", u16(std::to_string(facts.size()))}}),
+                                  TextStyle::caption, Paint::text_secondary, true)->role = ui::Role::none;
+        for (const auto& f : facts) {
+            const long long fid = jint(f, "fact_id");
+            const std::string key = "f" + std::to_string(fid);
+            const std::u16string title = relation_text(f.value("fact", json::object()));
+            const std::u16string quote = u16(jstr(f, "excerpt"));
+            auto* row = group->add(std::make_unique<Row>(u, "knowledge-category-name-fact-" + sid + "-" + std::to_string(fid),
+                                                         title + u" · " + quote, reader_mode_ == Reader::fact && selected_ == key,
+                                                         [this, fid, key, top] {
+                                                             top();
+                                                             selected_ = key;
+                                                             open_fact(fid);
+                                                         }));
+            row->emplace<ui::Label>(u, title, TextStyle::body, Paint::text, true)->role = ui::Role::none;
+            row->emplace<ui::Label>(u, quote, TextStyle::caption, Paint::text_secondary, true)->role = ui::Role::none;
+        }
+        auto* actions = row_box(*group, "knowledge-category-name-actions-" + sid);
+        actions->gap = 4;
+        button(*actions, "knowledge-category-name-accept-" + sid, shell_.t("knowledge.new_category_accept"), [this, nid, changed] {
+            act("knowledge.category.name.accept", {{"id", nid}}, changed);
+        }, ui::Button::Kind::subtle)->name = shell_.t("knowledge.new_category_accept_named", {{"name", cname}});
+        button(*actions, "knowledge-category-name-rename-" + sid, shell_.t("knowledge.new_category_rename"), [this, nid, cname, changed] {
+            shell_.ask_text_value("knowledge-category-name-dialog", shell_.t("knowledge.new_category_rename"), shell_.t("knowledge.category_name"),
+                                  cname, [this, nid, changed](const std::string& renamed) {
+                                      act("knowledge.category.name.rename", {{"id", nid}, {"name", renamed}}, changed);
+                                  });
+        }, ui::Button::Kind::subtle)->name = shell_.t("knowledge.new_category_rename_named", {{"name", cname}});
+        button(*actions, "knowledge-category-name-dismiss-" + sid, shell_.t("knowledge.new_category_dismiss"), [this, nid, changed] {
+            act("knowledge.category.name.dismiss", {{"id", nid}}, changed);
+        }, ui::Button::Kind::subtle)->name = shell_.t("knowledge.new_category_dismiss_named", {{"name", cname}});
+    }
 }
 
 void KnowledgeView::load_fact_categories(long long fact_id) {

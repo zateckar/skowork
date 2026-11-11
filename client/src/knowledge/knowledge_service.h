@@ -220,6 +220,15 @@ public:
     // Automatic category assignments to review (Review section): [{fact_id, fact, state, category_id, name, reason,
     // excerpt}], newest fact first, for facts the user may read; `next` {fact_id, category_id}.
     json category_suggestions(long long before_fact, long long after_category, int limit);
+    // Suggested new category names (Review section): {categorization, items: [{id, name, reason, facts: [{fact_id,
+    // fact, state, excerpt}]}], next?}, newest first, each with the facts the user may read now (none while
+    // categorization is off); `next` is the id to continue before.
+    json suggested_category_names(long long before, int limit);
+    // Accept a suggested name, optionally renamed: {category_id, assigned, skipped}. Refused while categorization is off.
+    Result<json> accept_category_name(long long id, const std::string& name);
+    Status rename_category_name(long long id, const std::string& name);
+    // Dismiss a suggested name: it is not suggested again for these facts.
+    Status dismiss_category_name(long long id);
     // Current knowledge in pages (Knowledge section): all facts, a category's, or Uncategorized ones (category 0),
     // newest first, each with its state and categories; `next` is the id to continue before.
     json facts_page(std::optional<long long> category, long long before, int limit);

@@ -170,6 +170,20 @@ The client SHALL automatically assign existing categories when policy.knowledge.
 - **WHEN** the user resets a manual assignment or rejection
 - **THEN** later automatic suggestions can propose the category again, and facts without accepted categories appear in Uncategorized
 
+#### Scenario: Suggest a new category name
+- **WHEN** categorization finds facts that none of the existing categories fits
+- **THEN** it can store a new category name for review, listing each fact with the exact excerpt it rests on, and no fact is placed in that category before the user accepts it
+- **AND** the user can accept the name, rename it, or dismiss it; accepting creates the category and assigns it automatically to each listed fact that is still current, permitted knowledge with that excerpt, without replacing a manual or rejected choice
+
+#### Scenario: Suggested names stay new and few
+- **WHEN** analysis proposes a name that repeats or nearly repeats an existing category, Uncategorized or an open suggestion, or proposes a name for a fact for which the user dismissed the same or a nearly identical name
+- **THEN** no duplicate is stored: a name like an existing category is dropped, a name like an open suggestion adds its facts to that suggestion, and the facts with a dismissed name are left out
+- **AND** the number of open suggestions and of facts in each is bounded
+
+#### Scenario: Category names under policy
+- **WHEN** categorization or extraction is off, the shared daily budget is spent, or knowledge changed between analysis and saving
+- **THEN** no name is suggested, and while categorization is off open suggestions are neither shown nor accepted
+
 ### Requirement: Category Membership Is Not Access
 Category membership SHALL organize local knowledge without granting access to it. A fact can belong to multiple categories, and automatic or manual changes to category membership MUST NOT add content or recipients to an existing publication without its owner's confirmation.
 

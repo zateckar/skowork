@@ -1,6 +1,8 @@
 #include "knowledge/analysis.h"
 
 #include "base/json.h"
+#include "base/strings.h"
+#include "knowledge/core.h"
 
 #include <algorithm>
 #include <limits>
@@ -86,7 +88,73 @@ std::optional<AnalysisProposals> parse_analysis_proposals(std::string_view text,
         if (!a || !b) return std::nullopt;
         out.conflicts.push_back({*left, *right, *why, kind, *a, *b});
     }
+    // Optional new category names, each resting on exact excerpts of the facts it would hold.
+    if (const auto names = parsed->find("new_categories"); names != parsed->end()) {
+        if (!names->is_array() || names->size() > kMaxNamesPerAnswer) return std::nullopt;
+        std::set<std::string> seen_names;
+        for (const auto& n : *names) {
+            if (!n.is_object()) return std::nullopt;
+            const auto nm = n.find("name");
+            const auto why = reason(n);
+            const auto fs = n.find("facts");
+            if (nm == n.end() || !nm->is_string() || !why || fs == n.end() || !fs->is_array() || fs->empty() ||
+                fs->size() > facts.size()) return std::nullopt;
+            std::string display = nm->get<std::string>();
+            const auto b = display.find_first_not_of(" \t");
+            display = b == std::string::npos ? std::string() : display.substr(b, display.find_last_not_of(" \t") - b + 1);
+            if (display.empty() || display.size() > kMaxCategoryNameBytes ||
+                std::any_of(display.begin(), display.end(), [](char ch) { return static_cast<unsigned char>(ch) < 0x20; }))
+                return std::nullopt;
+            const std::string key = category_name_key(display);
+            if (key.empty() || !seen_names.insert(key).second) return std::nullopt;
+            CategoryNameProposal proposal{display, *why, {}};
+            std::set<long long> seen_facts;
+            for (const auto& f : *fs) {
+                const auto fact = positive_id(f, "fact_id");
+                const auto span = f.is_object() ? f.find("evidence") : f.end();
+                if (!fact || !facts.count(*fact) || span == f.end() || !seen_facts.insert(*fact).second) return std::nullopt;
+                const auto e = evidence(*span, *fact, facts);
+                if (!e) return std::nullopt;
+                proposal.facts.push_back({*fact, *e});
+            }
+            out.names.push_back(std::move(proposal));
+        }
+    }
     return out;
+}
+
+std::string category_name_key(std::string_view name) {
+    std::string out;
+    for (std::string word : split(normalize_name(name), ' ')) {
+        if (word.empty()) continue;
+        if (word.size() > 4 && word.compare(word.size() - 3, 3, "ies") == 0) word.replace(word.size() - 3, 3, "y");
+        else if (word.size() > 3 && word.back() == 's' && word[word.size() - 2] != 's') word.pop_back();
+        if (!out.empty()) out.push_back(' ');
+        out += word;
+    }
+    return out;
+}
+
+bool category_keys_near(std::string_view a, std::string_view b) {
+    if (a == b) return true;
+    const size_t shorter = std::min(a.size(), b.size()), longer = std::max(a.size(), b.size());
+    if (shorter < 5) return false;
+    const size_t allowed = longer >= 10 ? 2 : 1;
+    if (longer - shorter > allowed) return false;
+    // Edit distance, stopped as soon as every path exceeds the allowance.
+    std::vector<size_t> row(b.size() + 1), next(b.size() + 1);
+    for (size_t j = 0; j <= b.size(); ++j) row[j] = j;
+    for (size_t i = 1; i <= a.size(); ++i) {
+        next[0] = i;
+        size_t best = next[0];
+        for (size_t j = 1; j <= b.size(); ++j) {
+            next[j] = std::min({row[j] + 1, next[j - 1] + 1, row[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1)});
+            best = std::min(best, next[j]);
+        }
+        if (best > allowed) return false;
+        row.swap(next);
+    }
+    return row[b.size()] <= allowed;
 }
 
 }  // namespace wb::knowledge

@@ -39,8 +39,13 @@ inline constexpr int kKgCategoryChecksSchemaVersion = 7;
 inline constexpr int kKgConsistencySchemaVersion = 8;
 // Revision-bound operation previews with paged entries (task 8.3).
 inline constexpr int kKgPreviewSchemaVersion = 9;
-// The latest schema: durable Source change reports (task 8.4).
-inline constexpr int kKgSchemaVersion = 10;
+// Durable Source change reports (task 8.4).
+inline constexpr int kKgChangeReportSchemaVersion = 10;
+// The latest schema: suggested category names and their dismissals (task 8.6).
+inline constexpr int kKgSchemaVersion = 11;
+// Open suggested category names, and facts in one, at most.
+inline constexpr int kMaxCategoryNameSuggestions = 20;
+inline constexpr int kMaxCategoryNameFacts = 50;
 // The longest chain of facts a derivation may form through required facts; the evidence schema enforces it.
 inline constexpr int kMaxDerivationDepth = 32;
 // Superseded revisions of an item whose excerpts are kept as history beside the current one.
@@ -73,6 +78,26 @@ struct CategoryAssignment {
     std::string category_name;  // the category's display name
     long long chunk_id = 0;     // the passage of an automatic assignment's excerpt (0 when it is gone)
     std::string excerpt;        // why an automatic assignment was made: the exact words the model cited
+};
+
+// A suggested new category name (task 8.6) and the facts it would hold, each with the excerpt it rests on.
+struct CategoryNameFactRow {
+    long long fact_id = 0, evidence_id = 0;
+    long long chunk_id = 0;  // the excerpt's passage
+    std::string excerpt;
+};
+
+struct CategoryNameSuggestion {
+    long long id = 0;
+    std::string name, reason;
+    std::vector<CategoryNameFactRow> facts;
+};
+
+// What accepting a suggested name did: the category, and the facts assigned or left out (no longer current,
+// permitted knowledge with that excerpt, or with a manual or rejected choice for the category).
+struct AcceptedCategoryName {
+    long long category_id = 0;
+    int assigned = 0, skipped = 0;
 };
 
 struct ConflictRow {
@@ -331,6 +356,19 @@ public:
     std::vector<long long> fact_page(std::optional<long long> category, long long before, int limit);
     // Automatic category assignments to review, newest fact first, after the cursor (fact_id, category_id).
     std::vector<CategoryAssignment> category_suggestions(long long before_fact, long long after_category, int limit);
+    // Suggested category names (task 8.6), newest first, with ids below `before` when it is set. They are not
+    // knowledge: none changes the generation or places a fact.
+    std::vector<CategoryNameSuggestion> category_name_suggestions(long long before, int limit);
+    std::optional<CategoryNameSuggestion> category_name_suggestion(long long id);
+    // Rename before accepting: refused when the name repeats a category or another suggestion.
+    Status rename_category_name(long long id, const std::string& name);
+    // Removes the suggestion and remembers its names (as proposed and as renamed) as dismissed for its facts.
+    Status dismiss_category_name(long long id);
+    // Creates the category (or uses the category with exactly that name) and assigns it automatically, with the
+    // suggestion's reason and each fact's excerpt, to every fact `permitted(fact, chunk)` still allows whose excerpt is
+    // still current; then removes the suggestion. All in one transaction.
+    Result<AcceptedCategoryName> accept_category_name(long long id, const std::string& name,
+                                                      const std::function<bool(long long, long long)>& permitted);
     std::optional<long long> knowledge_generation();
     // Bind a validated analysis span to an existing support in the same graph snapshot.
     Result<BoundAnalysisEvidence> bind_analysis_evidence(long long fact_id, const AnalysisSpan& span,
@@ -340,7 +378,9 @@ public:
     // Saves one analysis's validated proposals in a single transaction, or none of them: the graph generation must
     // still be the one the analysis read, `still_permitted` (the caller's current policy for the analyzed Sources and
     // the analysis kind) is asked under the store lock, and every excerpt is bound to a current support in the current
-    // revision. Automatic categories never replace manual or rejected decisions.
+    // revision. Automatic categories never replace manual or rejected decisions. Suggested names are stored after the
+    // same checks, leaving out names like an existing category or Uncategorized and facts with a dismissed name like
+    // it; a name like an open suggestion adds its facts there, within the bounds above.
     // `categorized` facts are recorded as checked by automatic categorization in the same transaction, so they are
     // analyzed again only after their evidence or the category list changes.
     // `consistency_checked` facts are recorded as checked by consistency analysis, and `cleared` reviews still needing

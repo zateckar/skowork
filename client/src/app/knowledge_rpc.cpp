@@ -90,6 +90,13 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
         return s.category_suggestions(after.is_object() ? jint(after, "fact_id") : 0, after.is_object() ? jint(after, "category_id") : 0,
                                       static_cast<int>(jint(p, "limit", 50)));
     });
+    // Suggested new category names: listed, accepted (optionally under another name), renamed or dismissed (UI only).
+    add("knowledge.category.names", [](Svc& s, const json& p) -> Result<json> {
+        return s.suggested_category_names(jint(p, "before", 0), static_cast<int>(jint(p, "limit", 20)));
+    });
+    add("knowledge.category.name.accept", [](Svc& s, const json& p) { return s.accept_category_name(jint(p, "id"), jstr(p, "name")); });
+    add("knowledge.category.name.rename", [done](Svc& s, const json& p) { return done(s.rename_category_name(jint(p, "id"), jstr(p, "name"))); });
+    add("knowledge.category.name.dismiss", [done](Svc& s, const json& p) { return done(s.dismiss_category_name(jint(p, "id"))); });
     // Current knowledge in pages: {category: id, or 0 for Uncategorized; absent for all}, before the last id seen.
     add("knowledge.facts", [](Svc& s, const json& p) -> Result<json> {
         std::optional<long long> category;

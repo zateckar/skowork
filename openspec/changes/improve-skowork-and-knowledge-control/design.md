@@ -436,7 +436,7 @@ Add speech to the Policy bundle top-level glossary and also reconcile the alread
   - **Tests:** `KnowledgeCategories.AutomaticAssignmentsExplainThemselvesAndYieldToLockedChoices` covers two automatic categories with reason and excerpt, durable progress across a restart, rejected and manual choices surviving re-analysis, reset, rename, merge with manual precedence, and deletion without loss of facts, evidence or search. `KnowledgeCategories.UnavailableOrUnsafeAnalysisLeavesManualCategoriesWorking` covers categorization off, extraction off, model unavailable with backoff, a Source turned off between request and save, an invented category id and the spent shared budget. 216 knowledge, storage, RPC and shell tests and the 41 storage tests pass on the debug build.
   - **Limits:**
     - The native category workspace is part of the Knowledge and Review sections (10.1).
-    - Suggestions of new category names are not implemented (8.6).
+    - Suggestions of new category names came later (see "Suggested category names").
     - Only passages a support cites whole can be quoted, so a fact supported only by exact excerpts is checked without a request.
     - Category quality on a real model is not measured (1.4).
 - **Possible inconsistencies, 2026-11-11:**
@@ -558,6 +558,38 @@ Add speech to the Policy bundle top-level glossary and also reconcile the alread
     - **Tests:** `ShellKnowledge.WorkspaceTraversesEvidenceRevisionsAndReviews` now also covers each new RPC's paging; the category list and a category's facts across Load more (50, then 57); entities across Load more; the review kinds; Keep, undo, Add and Reject on suggestions; the dialogs above by keyboard; and the restored scroll on both window widths. 764 win, 70 UI and 7 analysis tests pass on the debug build.
     
     Publications in Sharing are 10.2 and 10.3.
+- **Suggested category names, 8.6, 2026-11-11:**
+  - **Asking:** the categorization request may also return `new_categories`: at most 3 names, each at most 60 bytes on one line, with a reason and, for each fact it would hold, an exact quote from a passage listed for that fact. The validator refuses the whole answer for an invented fact or quote, a fact named twice, an empty list, a long or multi-line name, more than 3 names, or two names alike. Names are asked only where categorization already runs: with categorization and extraction on, inside the shared `extraction_daily_calls`, and only once the user has at least one category. A user who never categorizes spends no budget on names, and suggestions grow from the user's own taxonomy. Consistency analysis drops any names in its answer.
+  - **Alike:** two names are compared by a key: the normalized name with simple plural endings removed from each word (`-ies` to `-y`, a final `s`). Two keys are alike when equal or, when both have at least 5 bytes, within one edit (two from 10 bytes). Shorter names must match exactly, so Sales and Rules stay apart.
+  - **Storing:** kg.db migration 11 adds `knowledge_category_names` (name, current and proposed keys, reason), their facts with the bound excerpt, and per-fact dismissals by key. Names are written inside `apply_analysis`, so they get the same generation and policy fence as assignments. Under that lock:
+    - a name like an existing category or Uncategorized is dropped;
+    - facts for which the user dismissed a name like it are left out;
+    - a name like an open suggestion adds its facts to it;
+    - at most 20 open names and 50 facts in each are kept, and the rest is dropped.
+    
+    Suggestions are not knowledge: they do not change the generation. A suggestion goes when its last fact is deleted.
+  - **The user's side:** the UI-only RPCs are `knowledge.category.names` (newest first, each with the facts the user may read now and their excerpts), `knowledge.category.name.accept {id, name?}`, `.rename` and `.dismiss`.
+    - **Accept:** creates the category, or uses the one with exactly that name. In one transaction it assigns the category automatically, with the suggestion's reason and each fact's excerpt, to every fact that is still current, permitted knowledge whose excerpt is still current support. It leaves out facts with a manual or rejected choice for that category and reports how many were assigned and how many skipped. The new assignments are ordinary automatic suggestions, which the user keeps or rejects in Review.
+    - **Rename:** refused when the new name is an existing category's.
+    - **Dismiss:** remembers both the proposed and the current name for each of the facts.
+    - **Policy:** while categorization is off the list is empty and accepting and renaming are refused. Dismissing still works.
+  - **Review:** Suggested categories shows the new names above the assignments. Each name lists its facts with their excerpts, each opening its fact, and has Accept, Rename (a dialog: Enter saves, Escape cancels) and Dismiss.
+  - **Tests:**
+    - `KnowledgeAnalysis.NewCategoryNamesAreBoundedAndEvidenceBound` covers the validator and the name keys.
+    - `KnowledgeCategories.NewNamesAreSuggestedForReviewAndPlaceNothingBeforeAcceptance` covers, with the fake model:
+      - a name with two facts that places nothing, and a near repeat of the existing Engineering dropped;
+      - a near repeat of the open name that adds its fact, and Uncategorized refused;
+      - rename refused for an existing category, then renamed;
+      - dismissal, after which neither name comes back for those facts while another name still does;
+      - listing and accepting refused while categorization is off;
+      - acceptance under an existing category's name, skipping the fact where the user rejected it, and acceptance creating a new category;
+      - a Source turned off between request and save, which stores nothing;
+      - the spent shared budget, with nothing asked or stored until the next day;
+      - the bound of 20 open names.
+    - `ShellKnowledge.WorkspaceTraversesEvidenceRevisionsAndReviews` renames by keyboard, dismisses and accepts in Review.
+    
+    765 win, 70 UI and 8 analysis tests pass on the debug build.
+  - **Limits:** the bound of 50 facts per name is enforced but not exercised by a test. Name quality on a real model is not measured (1.4).
 - **Progress audit and triage, 2026-11-09:** code was compared with every task. Tasks were split or added where code and specification disagree (2.4, 4.5, 5.6, 6.6), where a prerequisite was implicit (7.5, 7.6, 7.7, 8.5, 9.5), and narrowed where two tasks claimed the same evidence (1.4, 5.5, 6.5). Publication code in the control plane is unmounted library code with unit tests; no publication route, schema installation or policy key exists. The earlier note that multi-pass summarization is not enabled is superseded by the multi-pass note above. tasks.md carries the per-task status and the delivery order.
 - Final immutable speech artifact URL/mirror and manifest digest, verified package sizes, proxy behavior and actual language-fixture timing.
 - Actual configured model ids and context metadata, token-count strategy supported by those models, and measured compaction coverage/latency.

@@ -2206,6 +2206,200 @@ json review_of(const json& reviews, long long a, long long b) {
     return nullptr;
 }
 
+// A new category name the fake model suggests: each listed fact present in the request, quoted from its first passage.
+struct WantedName {
+    std::string name;
+    std::vector<std::pair<long long, std::string>> facts;  // fact, quote
+};
+
+std::string names_answer(const model::ChatRequest& req, const std::vector<WantedName>& wanted) {
+    const std::string& u = req.messages.back().content;
+    json names = json::array();
+    for (const auto& w : wanted) {
+        json facts = json::array();
+        for (const auto& [fact, quote] : w.facts)
+            if (const long long p = listed_passage(u, fact)) facts.push_back({{"fact_id", fact}, {"evidence", {{"chunk_id", p}, {"quote", quote}}}});
+        if (!facts.empty()) names.push_back({{"name", w.name}, {"reason", "These facts share a topic."}, {"facts", facts}});
+    }
+    return json{{"categories", json::array()}, {"new_categories", names}, {"conflicts", json::array()}}.dump();
+}
+
+// improve-skowork-and-knowledge-control 8.6: categorization suggests new category names with the excerpts they rest
+// on and places no fact until the user accepts one. Names like a category, Uncategorized or an open suggestion are
+// not stored again, a dismissed name is not suggested again for the same facts, open suggestions are bounded, and
+// suggestions follow knowledge.categorization, the shared budget and the analysis fence.
+TEST(KnowledgeCategories, NewNamesAreSuggestedForReviewAndPlaceNothingBeforeAcceptance) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    const std::map<std::string, std::string> files = {{"approved.txt", "The approved Phoenix deadline is June."},
+                                                      {"budget.txt", "The Phoenix budget is 5 million EUR."},
+                                                      {"owner.txt", "Petr Novotný owns the Phoenix budget."}};
+    for (const auto& [file, text] : files) {
+        write_file(kg.folder / file, text);
+        ASSERT_TRUE(kg.svc->add_document(kg.file_path(file)));
+        kg.idle();
+    }
+    auto& store = kg.svc->store();
+    const auto chunk_of = [&](const std::string& file) {
+        const auto it = store.item("files", kg.file_path(file));
+        return it ? store.chunks_of_item(it->id).at(0).id : 0;
+    };
+    const auto entity = [&](const char* type, const char* name) { return store.resolve_entity(type, name, "", 1); };
+    const auto fact = [&](long long subject, const char* predicate, long long object, const std::string& file) -> long long {
+        const long long relation = store.add_relation(subject, predicate, object, 0.9, "", "", chunk_of(file));
+        const auto f = relation ? store.fact_of_relation(*store.relation(relation)) : std::nullopt;
+        return f.value_or(0);
+    };
+    const long long phoenix = entity("Project", "Phoenix");
+    const long long june = fact(phoenix, "deadline", entity("Date", "June"), "approved.txt");
+    const long long budget = fact(phoenix, "budget", entity("Amount", "5 million EUR"), "budget.txt");
+    const long long owner = fact(phoenix, "budget_owner", entity("Person", "Petr Novotný"), "owner.txt");
+    ASSERT_TRUE(june && budget && owner);
+    const auto open_names = [&] { return kg.count("SELECT count(*) FROM knowledge_category_names"); };
+    const auto listed = [&] { return kg.svc->suggested_category_names(0, 20); };
+
+    std::vector<WantedName> wanted = {{"Finances", {{budget, "5 million EUR"}, {owner, "owns the Phoenix budget"}}},
+                                      {"Engineerings", {{june, "June"}}}};
+    std::string prompt;
+    kg.gw.categorize = [&](const model::ChatRequest& r) {
+        prompt = r.messages.front().content;
+        return names_answer(r, wanted);
+    };
+    const auto engineering = kg.svc->create_category("Engineering");
+    ASSERT_TRUE(engineering);
+    kg.idle();
+    ASSERT_GE(kg.gw.categorize_calls, 1);
+    EXPECT_NE(prompt.find("new_categories"), std::string::npos);
+    // One suggestion: "Engineerings" is the existing category again. Nothing is placed in either.
+    ASSERT_EQ(open_names(), 1);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_category_assignments"), 0);
+    EXPECT_TRUE(store.category_assignments(budget).empty());
+    json shown = listed();
+    ASSERT_EQ(shown["items"].size(), 1u);
+    const json& finances = shown["items"][0];
+    EXPECT_EQ(finances["name"], "Finances");
+    EXPECT_EQ(finances["reason"], "These facts share a topic.");
+    ASSERT_EQ(finances["facts"].size(), 2u);
+    EXPECT_EQ(finances["facts"][0]["fact_id"], owner);  // newest fact first
+    EXPECT_EQ(finances["facts"][0]["excerpt"], "owns the Phoenix budget");
+    EXPECT_EQ(finances["facts"][1]["excerpt"], "5 million EUR");
+    const long long finances_id = finances["id"].get<long long>();
+
+    // A near repeat of the open suggestion adds its fact there; Uncategorized is never a suggestion.
+    wanted = {{"finance", {{june, "June"}}}, {"Uncategorized", {{june, "Phoenix deadline"}}}};
+    ASSERT_TRUE(kg.svc->create_category("Legal"));  // categories changed: every fact is checked again
+    kg.idle();
+    ASSERT_EQ(open_names(), 1);
+    shown = listed();
+    ASSERT_EQ(shown["items"].size(), 1u);
+    EXPECT_EQ(shown["items"][0]["name"], "Finances");
+    EXPECT_EQ(shown["items"][0]["facts"].size(), 3u);
+
+    // Renaming: not to an existing category; a renamed suggestion keeps its facts.
+    EXPECT_FALSE(kg.svc->rename_category_name(finances_id, "engineering"));
+    EXPECT_FALSE(kg.svc->rename_category_name(finances_id, " "));
+    ASSERT_TRUE(kg.svc->rename_category_name(finances_id, "Money"));
+    EXPECT_EQ(listed()["items"][0]["name"], "Money");
+
+    // Dismissed: neither the proposed nor the renamed name comes back for these facts; another name still can.
+    ASSERT_TRUE(kg.svc->dismiss_category_name(finances_id));
+    EXPECT_EQ(open_names(), 0);
+    EXPECT_FALSE(kg.svc->dismiss_category_name(finances_id));
+    wanted = {{"Finance", {{budget, "5 million EUR"}}}, {"Moneys", {{owner, "owns the Phoenix budget"}}},
+              {"Budget planning", {{budget, "5 million EUR"}, {owner, "owns the Phoenix budget"}}}};
+    ASSERT_TRUE(kg.svc->create_category("Operations"));
+    kg.idle();
+    shown = listed();
+    ASSERT_EQ(shown["items"].size(), 1u);
+    EXPECT_EQ(shown["items"][0]["name"], "Budget planning");
+    const long long planning = shown["items"][0]["id"].get<long long>();
+
+    // Policy: while categorization is off suggestions are neither shown nor accepted.
+    kg.set("knowledge.categorization", "off");
+    EXPECT_EQ(listed()["items"].size(), 0u);
+    EXPECT_EQ(listed()["categorization"], false);
+    const auto refused = kg.svc->accept_category_name(planning, "");
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "disabled");
+    kg.set("knowledge.categorization", "on");
+
+    // Accepting under an existing category's name assigns it there automatically, with the reason and excerpt, except
+    // where the user rejected that category for the fact.
+    const auto legal = store.find_category("Legal");
+    ASSERT_TRUE(legal);
+    ASSERT_TRUE(kg.svc->decide_category(owner, *legal, "rejected"));
+    const auto accepted = kg.svc->accept_category_name(planning, "legal");
+    ASSERT_TRUE(accepted) << accepted.error().message;
+    EXPECT_EQ((*accepted)["category_id"], *legal);
+    EXPECT_EQ((*accepted)["assigned"], 1);
+    EXPECT_EQ((*accepted)["skipped"], 1);
+    EXPECT_EQ(category_decision(*kg.svc, budget, *legal), "automatic");
+    EXPECT_EQ(category_decision(*kg.svc, owner, *legal), "rejected");
+    auto categories = kg.svc->fact_categories(budget);
+    ASSERT_TRUE(categories);
+    EXPECT_EQ((*categories)["assignments"][0]["reason"], "These facts share a topic.");
+    EXPECT_EQ((*categories)["assignments"][0]["excerpt"], "5 million EUR");
+    EXPECT_EQ(open_names(), 0);
+
+    // A new name accepted as is creates its category.
+    wanted = {{"Deadlines", {{june, "June"}}}};
+    ASSERT_TRUE(kg.svc->create_category("People"));
+    kg.idle();
+    shown = listed();
+    ASSERT_EQ(shown["items"].size(), 1u);
+    const auto created = kg.svc->accept_category_name(shown["items"][0]["id"].get<long long>(), "");
+    ASSERT_TRUE(created);
+    const auto deadlines = store.find_category("Deadlines");
+    ASSERT_TRUE(deadlines);
+    EXPECT_EQ((*created)["category_id"], *deadlines);
+    EXPECT_EQ(category_decision(*kg.svc, june, *deadlines), "automatic");
+
+    // Fence: the Source turned off between request and save stores no suggestion.
+    wanted = {{"Timeline", {{june, "June"}}}};
+    bool turn_off = true;
+    kg.after_chat = [&] {
+        if (!turn_off) return;
+        turn_off = false;
+        kg.set("knowledge.sources.files", "off");
+    };
+    ASSERT_TRUE(kg.svc->create_category("Sales"));
+    const int before_fence = kg.gw.categorize_calls;
+    kg.svc->step();
+    EXPECT_EQ(kg.gw.categorize_calls, before_fence + 1);
+    EXPECT_EQ(open_names(), 0);
+    kg.set("knowledge.sources.files", "on");
+    kg.after_chat = nullptr;
+
+    // Budget: once the shared daily budget is spent, nothing is asked and nothing suggested.
+    const long long used = store.used(kg.svc->today(), "extract_calls");
+    kg.set("knowledge.extraction_daily_calls", used);
+    const int before_budget = kg.gw.categorize_calls;
+    kg.idle();
+    EXPECT_EQ(kg.gw.categorize_calls, before_budget);
+    EXPECT_EQ(open_names(), 0);
+    kg.next_day();
+    kg.idle();
+    EXPECT_EQ(open_names(), 1);
+
+    // Bounds: at most kMaxCategoryNameSuggestions open names, however many analyses propose.
+    const auto generation = store.knowledge_generation();
+    ASSERT_TRUE(generation);
+    const std::string text = files.at("approved.txt");
+    AnalysisProposals many;
+    for (const char* n : {"Alfa", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliett", "Kilo",
+                          "Lima", "Mike", "November", "Oscar", "Papa", "Quebec", "Romeo", "Sierra", "Tango", "Uniform",
+                          "Victor", "Whiskey", "Xray", "Yankee"})
+        many.names.push_back({n, "A topic.", {{june, {chunk_of("approved.txt"), text.find("June"), text.find("June") + 4}}}});
+    many.names.resize(3);
+    ASSERT_TRUE(store.apply_analysis(many, *generation));
+    for (const char* n : {"Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliett", "Kilo", "Lima", "Mike", "November",
+                          "Oscar", "Papa", "Quebec", "Romeo", "Sierra", "Tango", "Uniform", "Victor", "Whiskey", "Xray",
+                          "Yankee"}) {
+        AnalysisProposals one;
+        one.names.push_back({n, "A topic.", {{june, {chunk_of("approved.txt"), text.find("June"), text.find("June") + 4}}}});
+        ASSERT_TRUE(store.apply_analysis(one, *store.knowledge_generation()));
+    }
+    EXPECT_EQ(open_names(), kMaxCategoryNameSuggestions);
+}
 // improve-skowork-and-knowledge-control 8.2: new facts are compared with bounded related facts on the small role; a
 // possible inconsistency cites both excerpts and dates, different periods and the same amount in other units are not
 // disagreements, an uncertain match of people is labeled as such, and a decision is tied to the excerpts reviewed: it

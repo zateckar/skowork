@@ -654,6 +654,7 @@ private:
     void build_review_list();
     void more_button(const json& page);    // Load more when the page has a next one
     void load_fact_categories(long long fact_id);
+    void build_category_names();
     void build_fact_categories(ui::Node& parent, long long fact_id);
     void list_chip(ui::Node& parent, const std::string& id, const std::u16string& label, bool on, std::function<void()> f);
     void rebuild_sections();
@@ -724,6 +725,7 @@ private:
     std::string review_kind_ = "inconsistencies";  // Review list: inconsistencies, changes, categories
     json review_changes_ = nullptr;  // knowledge.changes (Review, changed evidence)
     json suggestions_ = nullptr;     // knowledge.category.suggestions (Review)
+    json category_names_ = nullptr;  // knowledge.category.names (Review, new names to accept)
     json fact_categories_ = nullptr; // knowledge.fact.categories of the open fact
     float pending_scroll_ = -1;      // the reader's scroll to restore once a reader opened by Back is shown
     float list_scroll_ = 0;          // the list's position when the reader covered it (narrow window)

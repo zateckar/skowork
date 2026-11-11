@@ -6032,6 +6032,46 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
         ASSERT_TRUE(w.until([&] { return decision(august_fact, *planning) == "rejected"; }));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-no-suggestions"); }));
 
+        // New category names (8.6): listed with the facts and words they rest on, placing nothing until accepted;
+        // renamed by keyboard, dismissed, accepted.
+        knowledge::AnalysisProposals names;
+        names.names.push_back({"Deadlines", "Facts about deadlines", {{june_fact, span(approved_chunk, "June")}, {august_fact, span(late_chunk, "August")}}});
+        names.names.push_back({"Timing", "When things happen", {{august_fact, span(late_chunk, "August")}}});
+        ASSERT_TRUE(store.apply_analysis(names, generation()));
+        const auto suggested = store.category_name_suggestions(0, 10);
+        ASSERT_EQ(suggested.size(), 2u);
+        const std::string timing_id = std::to_string(suggested[0].id), deadlines_id = std::to_string(suggested[1].id);
+        const size_t categories_before = store.categories().size();
+        ASSERT_TRUE(w.invoke("knowledge-review-kind-changes"));
+        ASSERT_TRUE(w.invoke("knowledge-review-kind-categories"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-category-name-accept-" + deadlines_id); }));
+        EXPECT_FALSE(w.exists("knowledge-no-suggestions"));
+        EXPECT_TRUE(w.exists("knowledge-category-name-fact-" + deadlines_id + "-" + std::to_string(june_fact)));
+        EXPECT_NE(label(w, "knowledge-category-name-fact-" + timing_id + "-" + std::to_string(august_fact)).find(u"August"),
+                  std::u16string::npos);
+        EXPECT_EQ(store.categories().size(), categories_before);
+        ASSERT_TRUE(w.invoke("knowledge-category-name-rename-" + timing_id));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-category-name-dialog-field"); }));
+        w.type("knowledge-category-name-dialog-field", u"Calendar");
+        EXPECT_TRUE(w.field_key("knowledge-category-name-dialog-field", ui::kKeyEnter));
+        ASSERT_TRUE(w.until([&] {
+            const auto s = store.category_name_suggestion(suggested[0].id);
+            return s && s->name == "Calendar";
+        }));
+        ASSERT_TRUE(w.until([&] { return label(w, "knowledge-category-name-" + timing_id).find(u"Calendar") != std::u16string::npos; }));
+        ASSERT_TRUE(w.invoke("knowledge-category-name-dismiss-" + timing_id));
+        ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-category-name-" + timing_id); }));
+        EXPECT_FALSE(store.category_name_suggestion(suggested[0].id));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-category-name-accept-" + deadlines_id); }));  // listed again
+        ASSERT_TRUE(w.invoke("knowledge-category-name-accept-" + deadlines_id));
+        ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-category-name-" + deadlines_id); }));
+        const auto deadlines = store.find_category("Deadlines");
+        ASSERT_TRUE(deadlines);
+        EXPECT_EQ(decision(june_fact, *deadlines), "automatic");
+        EXPECT_EQ(decision(august_fact, *deadlines), "automatic");
+        // The accepted category's assignments are now ordinary suggestions to keep or reject.
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-suggestion-" + std::to_string(june_fact) + "-" + std::to_string(*deadlines)); }));
+
         // Knowledge: categories, a category's facts, all facts in pages, and the entities.
         ASSERT_TRUE(w.invoke("knowledge-section-knowledge"));
         for (const std::string& row : std::vector<std::string>{"all", risks_id, planning_id, "0", "entities"})

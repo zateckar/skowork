@@ -592,7 +592,7 @@ CREATE TABLE knowledge_preview_entries(
 )sql"},
         // Task 8.4: a durable change report per revision of an indexed item, written with the revision. Ids and counts
         // only, no content; it goes with its item. Reports are not knowledge, so they do not change the generation.
-        {kKgSchemaVersion, R"sql(
+        {kKgChangeReportSchemaVersion, R"sql(
 CREATE TABLE knowledge_change_reports(
   id INTEGER PRIMARY KEY,
   item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
@@ -614,6 +614,33 @@ CREATE TABLE knowledge_change_report_facts(
   after INTEGER NOT NULL,
   PRIMARY KEY(report_id,fact_id)) WITHOUT ROWID;
 )sql"},
+        // Task 8.6: new category names suggested for review, the facts each would hold with the excerpt it rests on,
+        // and the names the user dismissed for each fact (by comparison key). Suggestions are not knowledge: they do
+        // not change the generation, and a suggestion whose facts are all gone goes too.
+        {kKgSchemaVersion, R"sql(
+CREATE TABLE knowledge_category_names(
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_key TEXT NOT NULL UNIQUE,
+  proposed_key TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  created_at INTEGER NOT NULL);
+CREATE TABLE knowledge_category_name_facts(
+  name_id INTEGER NOT NULL REFERENCES knowledge_category_names(id) ON DELETE CASCADE,
+  fact_id INTEGER NOT NULL REFERENCES knowledge_facts(id) ON DELETE CASCADE,
+  evidence_id INTEGER NOT NULL REFERENCES knowledge_evidence(id) ON DELETE CASCADE,
+  PRIMARY KEY(name_id,fact_id)) WITHOUT ROWID;
+CREATE INDEX knowledge_category_name_facts_fact ON knowledge_category_name_facts(fact_id);
+CREATE TABLE knowledge_category_name_dismissals(
+  fact_id INTEGER NOT NULL REFERENCES knowledge_facts(id) ON DELETE CASCADE,
+  name_key TEXT NOT NULL,
+  dismissed_at INTEGER NOT NULL,
+  PRIMARY KEY(fact_id,name_key)) WITHOUT ROWID;
+CREATE TRIGGER knowledge_category_name_emptied AFTER DELETE ON knowledge_category_name_facts
+WHEN NOT EXISTS(SELECT 1 FROM knowledge_category_name_facts WHERE name_id=old.name_id)
+BEGIN
+  DELETE FROM knowledge_category_names WHERE id=old.name_id;
+END;)sql"},
     };
     return m;
 }
@@ -1012,7 +1039,199 @@ INSERT INTO knowledge_conflicts(left_fact,right_fact,left_evidence,right_evidenc
     return find.col_int(0);
 }
 
+bool fact_rejected(Database& db, long long fact);  // below, with the state filter
+
+// The display name and comparison key of a category name the user or analysis gave, or nothing when it is not a
+// valid name (empty, too long, or Uncategorized, the filter for facts without a category).
+std::optional<std::pair<std::string, std::string>> category_name_parts(const std::string& name, size_t limit) {
+    const auto display = trim(name);
+    const auto key = category_name_key(display);
+    if (display.empty() || display.size() > limit || key.empty() || key == category_name_key(kUncategorized)) return std::nullopt;
+    return std::pair{display, key};
+}
+
+// Suggested names, stored after their analysis's generation and policy checks: a name like an existing category is
+// dropped, facts with a dismissed name like it are left out, and a name like an open suggestion adds its facts there.
+// At most kMaxCategoryNameSuggestions open names and kMaxCategoryNameFacts facts in each; the rest is dropped.
+Status write_category_names(Database& db, const std::vector<CategoryNameProposal>& names) {
+    std::vector<std::string> category_keys;
+    {
+        auto s = db.prepare("SELECT name FROM knowledge_categories");
+        while (s.step()) category_keys.push_back(category_name_key(s.col_text(0)));
+    }
+    std::vector<std::pair<long long, std::string>> open;  // id, key (the current and the proposed one)
+    {
+        auto s = db.prepare("SELECT id,name_key,proposed_key FROM knowledge_category_names");
+        while (s.step()) {
+            open.emplace_back(s.col_int(0), s.col_text(1));
+            open.emplace_back(s.col_int(0), s.col_text(2));
+        }
+    }
+    auto dismissed = db.prepare("SELECT name_key FROM knowledge_category_name_dismissals WHERE fact_id=?1");
+    auto count_facts = db.prepare("SELECT count(*) FROM knowledge_category_name_facts WHERE name_id=?1");
+    auto add_fact = db.prepare("INSERT OR IGNORE INTO knowledge_category_name_facts(name_id,fact_id,evidence_id) VALUES(?1,?2,?3)");
+    for (const auto& n : names) {
+        const auto parts = category_name_parts(n.name, kMaxCategoryNameBytes);
+        if (!parts || trim(n.reason).empty() || n.reason.size() > 512) continue;
+        const std::string& key = parts->second;
+        if (std::any_of(category_keys.begin(), category_keys.end(), [&](const std::string& k) { return category_keys_near(k, key); }))
+            continue;
+        // The facts not dismissed with a name like this one, each with its excerpt bound to a current support.
+        std::vector<std::pair<long long, long long>> facts;
+        for (const auto& f : n.facts) {
+            dismissed.reset();
+            dismissed.bind(1, f.fact_id);
+            bool refused = false;
+            while (!refused && dismissed.step()) refused = category_keys_near(dismissed.col_text(0), key);
+            if (refused) continue;
+            const auto evidence = bind_span(db, f.fact_id, f.evidence);
+            if (!evidence) return evidence.error();
+            facts.emplace_back(f.fact_id, *evidence);
+        }
+        if (facts.empty()) continue;
+        long long id = 0;
+        for (const auto& [oid, okey] : open)
+            if (category_keys_near(okey, key)) {
+                id = oid;
+                break;
+            }
+        if (!id) {
+            std::set<long long> ids;
+            for (const auto& o : open) ids.insert(o.first);
+            if (static_cast<int>(ids.size()) >= kMaxCategoryNameSuggestions) continue;
+            auto insert = db.prepare("INSERT INTO knowledge_category_names(name,name_key,proposed_key,reason,created_at) "
+                                     "VALUES(?1,?2,?2,?3,CAST(strftime('%s','now') AS INTEGER)*1000)");
+            insert.bind(1, parts->first).bind(2, key).bind(3, n.reason);
+            if (auto s = insert.run(); !s) return s;
+            id = db.last_insert_id();
+            open.emplace_back(id, key);
+        }
+        count_facts.reset();
+        count_facts.bind(1, id);
+        long long held = count_facts.step() ? count_facts.col_int(0) : 0;
+        for (const auto& [fact, evidence] : facts) {
+            if (held >= kMaxCategoryNameFacts) break;
+            add_fact.reset();
+            add_fact.bind(1, id).bind(2, fact).bind(3, evidence);
+            if (auto s = add_fact.run(); !s) return s;
+            held += db.changes();
+        }
+    }
+    return {};
+}
+
 }  // namespace
+
+std::vector<CategoryNameSuggestion> KgStore::category_name_suggestions(long long before, int limit) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<CategoryNameSuggestion> out;
+    if (db_->user_version() < kKgSchemaVersion || limit <= 0) return out;
+    auto s = db_->prepare("SELECT id,name,reason FROM knowledge_category_names WHERE ?1<=0 OR id<?1 ORDER BY id DESC LIMIT ?2");
+    s.bind(1, before).bind(2, std::min(limit, 200));
+    while (s.step()) out.push_back({s.col_int(0), s.col_text(1), s.col_text(2), {}});
+    // Only facts whose excerpt is still current support; the rest cannot be accepted and are not shown.
+    auto facts = db_->prepare("SELECT n.fact_id,n.evidence_id,e.chunk_id,e.excerpt FROM knowledge_category_name_facts n "
+                              "JOIN knowledge_evidence e ON e.id=n.evidence_id WHERE n.name_id=?1 ORDER BY n.fact_id DESC");
+    for (auto& suggestion : out) {
+        facts.reset();
+        facts.bind(1, suggestion.id);
+        while (facts.step())
+            if (active_exact_evidence(*db_, facts.col_int(0), facts.col_int(1)))
+                suggestion.facts.push_back({facts.col_int(0), facts.col_int(1), facts.col_int(2), facts.col_text(3)});
+    }
+    return out;
+}
+
+std::optional<CategoryNameSuggestion> KgStore::category_name_suggestion(long long id) {
+    auto page = category_name_suggestions(id + 1, 1);
+    if (page.empty() || page.front().id != id) return std::nullopt;
+    return std::move(page.front());
+}
+
+Status KgStore::rename_category_name(long long id, const std::string& name) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Category name suggestions are not available yet.");
+    const auto parts = category_name_parts(name, 160);
+    if (!parts) return make_error("invalid", "Enter a valid category name.");
+    return db_->transaction([&]() -> Status {
+        auto exists = db_->prepare("SELECT 1 FROM knowledge_categories WHERE normalized_name=?1");
+        exists.bind(1, normalize_name(parts->first));
+        if (exists.step()) return make_error("exists", "A category with this name already exists.");
+        auto s = db_->prepare("UPDATE knowledge_category_names SET name=?2,name_key=?3 WHERE id=?1");
+        s.bind(1, id).bind(2, parts->first).bind(3, parts->second);
+        if (auto status = s.run(); !status)
+            return make_error("exists", "Another suggestion already has this name.");
+        return db_->changes() ? Status{} : Status(make_error("not_found", "This suggestion is no longer available."));
+    });
+}
+
+Status KgStore::dismiss_category_name(long long id) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Category name suggestions are not available yet.");
+    return db_->transaction([&]() -> Status {
+        auto remember = db_->prepare(R"sql(
+INSERT OR IGNORE INTO knowledge_category_name_dismissals(fact_id,name_key,dismissed_at)
+ SELECT f.fact_id,k.nk,CAST(strftime('%s','now') AS INTEGER)*1000 FROM knowledge_category_name_facts f
+ JOIN knowledge_category_names n ON n.id=f.name_id
+ JOIN (SELECT id,name_key AS nk FROM knowledge_category_names UNION SELECT id,proposed_key FROM knowledge_category_names) k ON k.id=n.id
+ WHERE n.id=?1)sql");
+        remember.bind(1, id);
+        if (auto s = remember.run(); !s) return s;
+        auto remove = db_->prepare("DELETE FROM knowledge_category_names WHERE id=?1");
+        remove.bind(1, id);
+        if (auto s = remove.run(); !s) return s;
+        return db_->changes() ? Status{} : Status(make_error("not_found", "This suggestion is no longer available."));
+    });
+}
+
+Result<AcceptedCategoryName> KgStore::accept_category_name(long long id, const std::string& name,
+                                                           const std::function<bool(long long, long long)>& permitted) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Category name suggestions are not available yet.");
+    AcceptedCategoryName out;
+    const Status done = db_->transaction([&]() -> Status {
+        auto read = db_->prepare("SELECT name,reason FROM knowledge_category_names WHERE id=?1");
+        read.bind(1, id);
+        if (!read.step()) return make_error("not_found", "This suggestion is no longer available.");
+        const auto parts = category_name_parts(trim(name).empty() ? read.col_text(0) : name, 160);
+        if (!parts) return make_error("invalid", "Enter a valid category name.");
+        const std::string reason = read.col_text(1);
+        const std::string normalized = normalize_name(parts->first);
+        auto existing = db_->prepare("SELECT id FROM knowledge_categories WHERE normalized_name=?1");
+        existing.bind(1, normalized);
+        if (existing.step()) {
+            out.category_id = existing.col_int(0);
+        } else {
+            auto create = db_->prepare("INSERT INTO knowledge_categories(name,normalized_name) VALUES(?1,?2)");
+            create.bind(1, parts->first).bind(2, normalized);
+            if (auto s = create.run(); !s) return s;
+            out.category_id = db_->last_insert_id();
+        }
+        auto facts = db_->prepare("SELECT n.fact_id,n.evidence_id,e.chunk_id FROM knowledge_category_name_facts n "
+                                  "JOIN knowledge_evidence e ON e.id=n.evidence_id WHERE n.name_id=?1 ORDER BY n.fact_id");
+        facts.bind(1, id);
+        std::vector<std::tuple<long long, long long, long long>> listed;
+        while (facts.step()) listed.emplace_back(facts.col_int(0), facts.col_int(1), facts.col_int(2));
+        auto decided = db_->prepare("SELECT 1 FROM knowledge_category_assignments WHERE fact_id=?1 AND category_id=?2 "
+                                    "AND decision IN ('manual','rejected')");
+        for (const auto& [fact, evidence, chunk] : listed) {
+            decided.reset();
+            decided.bind(1, fact).bind(2, out.category_id);
+            if (decided.step() || fact_rejected(*db_, fact) || !active_exact_evidence(*db_, fact, evidence) ||
+                (permitted && !permitted(fact, chunk))) {
+                ++out.skipped;
+                continue;
+            }
+            if (Status s = write_assignment(*db_, fact, out.category_id, "automatic", reason, evidence); !s) return s;
+            ++out.assigned;
+        }
+        auto remove = db_->prepare("DELETE FROM knowledge_category_names WHERE id=?1");
+        remove.bind(1, id);
+        return remove.run();
+    });
+    if (!done) return done.error();
+    return out;
+}
 
 Status KgStore::set_category_assignment(long long fact, long long category, const std::string& decision,
                                         const std::string& reason, long long evidence_id,
@@ -1060,6 +1279,10 @@ Status KgStore::apply_analysis(const AnalysisProposals& proposals, long long exp
             if (!right) return right.error();
             if (const auto recorded = write_conflict(*db_, c.left_id, c.right_id, *left, *right, c.reason, c.kind); !recorded)
                 return recorded.error();
+        }
+        if (!proposals.names.empty()) {
+            if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Category name suggestions are not available yet.");
+            if (Status s = write_category_names(*db_, proposals.names); !s) return s;
         }
         if ((!consistency_checked.empty() || !cleared.empty()) && db_->user_version() < kKgConsistencySchemaVersion)
             return make_error("schema", "Consistency progress is not available yet.");
@@ -2463,7 +2686,7 @@ SELECT f.id,(SELECT count(*) FROM knowledge_support_sets s WHERE s.fact_id=f.id 
 std::vector<ChangeReport> KgStore::change_reports(long long before_id, int limit, long long item_id) {
     const std::lock_guard lock(db_->mutex());
     std::vector<ChangeReport> out;
-    if (db_->user_version() < kKgSchemaVersion || limit <= 0) return out;
+    if (db_->user_version() < kKgChangeReportSchemaVersion || limit <= 0) return out;
     auto s = db_->prepare("SELECT r.id,r.item_id,r.revision,r.created_at,r.added,r.kept,r.redated,r.rechecked,r.removed,r.facts,r.unsupported,"
                           "i.source,i.ext_id,i.title FROM knowledge_change_reports r JOIN items i ON i.id=r.item_id "
                           "WHERE (?1=0 OR r.id<?1) AND (?2=0 OR r.item_id=?2) ORDER BY r.id DESC LIMIT ?3");
@@ -2484,7 +2707,7 @@ std::optional<ChangeReport> KgStore::change_report(long long id) {
 std::vector<ChangeReportFact> KgStore::change_report_facts(long long report_id, int offset, int limit) {
     const std::lock_guard lock(db_->mutex());
     std::vector<ChangeReportFact> out;
-    if (db_->user_version() < kKgSchemaVersion || limit <= 0 || offset < 0) return out;
+    if (db_->user_version() < kKgChangeReportSchemaVersion || limit <= 0 || offset < 0) return out;
     auto s = db_->prepare("SELECT fact_id,before,after FROM knowledge_change_report_facts WHERE report_id=?1 "
                           "ORDER BY after>0,fact_id LIMIT ?2 OFFSET ?3");
     s.bind(1, report_id).bind(2, static_cast<long long>(std::min(limit, 500))).bind(3, static_cast<long long>(offset));
@@ -2551,7 +2774,7 @@ Status KgStore::prepare_item_change(const ItemInput& in) {
             while (beside.step()) withdraw.push_back(beside.col_int(0));
         }
         // Withdrawn in steps before the switch: the change report starts from the supports as they are now.
-        if (!withdraw.empty() && previous && db_->user_version() >= kKgSchemaVersion) {
+        if (!withdraw.empty() && previous && db_->user_version() >= kKgChangeReportSchemaVersion) {
             auto& [hash, counts] = report_before_[hidden_key(in.source, in.ext_id)];
             if (hash != in.hash) counts.clear();
             hash = in.hash;
@@ -2747,7 +2970,7 @@ Result<long long> KgStore::put_prepared_item(const ItemInput& in, long long now)
     Status st = db_->transaction([&]() -> Status {
         const auto previous = item(in.source, in.ext_id);
         // A revision of an existing item gets a change report: the supports its facts have before the write.
-        const bool report = previous && db_->user_version() >= kKgSchemaVersion;
+        const bool report = previous && db_->user_version() >= kKgChangeReportSchemaVersion;
         if (report) {
             // A large change counted its supports before withdrawing them in steps; the switch adds only what was
             // recorded on the item since, so it does not scan every passage again while holding the writer.

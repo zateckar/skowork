@@ -32,14 +32,36 @@ struct ConflictProposal {
     AnalysisSpan left, right;
 };
 
+// A new category name for the user to review (task 8.6); it places no fact until it is accepted.
+struct CategoryNameFact {
+    long long fact_id = 0;
+    AnalysisSpan evidence;
+};
+
+struct CategoryNameProposal {
+    std::string name, reason;
+    std::vector<CategoryNameFact> facts;
+};
+
 struct AnalysisProposals {
     std::vector<CategoryProposal> categories;
     std::vector<ConflictProposal> conflicts;
+    std::vector<CategoryNameProposal> names;  // optional "new_categories" of a categorization answer
 };
+
+// At most this many new names in one answer, each 1..kMaxCategoryNameBytes bytes long.
+inline constexpr size_t kMaxNamesPerAnswer = 3;
+inline constexpr size_t kMaxCategoryNameBytes = 60;
 
 // Refuses the entire response if any proposal references foreign IDs, has ambiguous or missing evidence, is a
 // duplicate, or exceeds limits. A validated proposal is still an untrusted suggestion requiring review.
 std::optional<AnalysisProposals> parse_analysis_proposals(std::string_view text, const AnalysisEvidence& facts,
                                                          const std::set<long long>& category_ids);
+
+// The key two category names are compared by: the normalized name with simple plural endings removed from each word.
+std::string category_name_key(std::string_view name);
+// Whether two keys name the same category: equal, or, when both have at least 5 bytes, within one edit (two when the
+// longer has at least 10 bytes).
+bool category_keys_near(std::string_view a, std::string_view b);
 
 }  // namespace wb::knowledge
