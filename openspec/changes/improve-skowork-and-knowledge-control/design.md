@@ -478,7 +478,7 @@ Add speech to the Policy bundle top-level glossary and also reconcile the alread
   - **Limits:**
     - The counts of facts an import adds, corroborates or disputes need extraction and consistency analysis before confirmation; that is 8.8.
     - Effects on published team knowledge are labeled pending, not computed.
-    - The native preview dialog is part of 10.1.
+    - The native preview dialog was planned for 10.1 and is not built; it is task 10.5.
     - The older store-only item-removal preview (`preview_item_removal`) remains for its tests and is not exposed.
 - **Change reports and analysis scheduling, 2026-11-11:**
   - **Change reports:** kg.db migration 10 adds `knowledge_change_reports` and `knowledge_change_report_facts`. They hold ids and counts only, are deleted with their item (and so by forget and exclusion), and are not knowledge, so they do not change the generation. Every revision of an existing item writes one, whether the update came from the watcher, a sweep or a confirmed preview. A first import or an unchanged check writes none. A report records:
@@ -609,6 +609,29 @@ Add speech to the Policy bundle top-level glossary and also reconcile the alread
     - The 0.75 threshold is not measured on the production embedding model; models differ in how similar unrelated passages score (1.4).
     - Similarity is per passage, so a passage with many facts offers them in id order, newest first.
     - The binary scan reads all stored vectors once per request. That is the cost of one semantic search, while holding the lock as search does.
+- **Analyzed import preview, 8.8, 2026-11-11:**
+  - **What runs:** the service analyzes an import or update preview in the background, before the extraction backlog, so the user sees its effect while the preview is open. Only the passages the import adds are analyzed; re-dated and rechecked passages are extracted after the import, as before. The analysis is the one background analysis would do:
+    - extraction requests of 8 passages, as `extract_step` builds them;
+    - consistency requests of 3 facts with the same instructions, related facts (5 each) and passages (2 each). The facts compared are those the import would add that name a known entity, and those it corroborates, because new evidence clears a fact's earlier check;
+    - at most 24 new passages (3 extraction requests) and 6 compared facts (2 consistency requests). Everything counts against the shared `extraction_daily_calls`, and the whole upper bound must fit before the first request.
+    
+    Entities are matched without creating or changing anything (`resolve_entity` with `create_new` false). A finding corroborates an existing fact that is current or disputed, and adds one otherwise. A finding the user deleted for that file content is skipped. Facts and passages that do not exist yet go to the model under ids above any stored id. A dispute needs one side to be a fact of this import, and facts of separate periods are never disputes.
+  - **Storage:** kg.db migration 12 adds the `analysis` column to `knowledge_operation_previews`, in the encrypted database. It holds the state, the raw extraction answers per batch, the findings, the disputes and the counts. It is deleted with the preview, so cancel, expiry, confirmation and forgetting the item discard it.
+  - **States:** `analyzing` (not run yet), `waiting` (budget), `failed` (the model error code or `invalid_response`), `off` (extraction off or no model), `too_large` and `done`. Every state except `done` is pending, and `knowledge.preview.analysis` then says the effect on knowledge is not known yet. Confirming stays possible in every state, and pending passages are analyzed after the import as usual.
+  - **Confirmation:** after the item is written, `apply_preview_analysis` records the stored extraction answers for the stored passages, after checking that each passage's text is the previewed one. It writes the facts and supports, the request records and the extracted marks, then the disputes and the consistency checks of the compared facts through the generation fence (`apply_analysis`). A batch that no longer matches stays queued and is extracted normally. If the fence refuses the disputes, nothing of them is recorded and the facts are compared again later.
+  - **RPC:** `knowledge.preview.analysis {token, offset, limit}` returns the state, reason, counts and paged entries: findings (add, corroborate) with the passage text, and disputes with both quotes. An existing fact is described only while one of its passages may be read.
+  - **Tests:** `KnowledgeImpactPreview.AnalyzedImportIsRecordedAsPreviewedAndPendingAnalysisDoesNotBlockIt` checks that:
+    - a preview with one corroborating and one disputing fact shows 1 added, 1 corroborated and 1 dispute, with quotes, before anything is written;
+    - after confirmation the same facts, supports and review are recorded, with no further extraction or consistency request;
+    - a model failure and a spent budget leave the analysis pending with the reason, the import still works and is analyzed afterwards, and a waiting analysis runs once the budget allows;
+    - a cancelled or expired preview writes no item, fact or support.
+    
+    With the confirmation hook disabled the test fails on the request counts. The other preview tests pass unchanged; 783 win, 70 UI and 8 analysis tests pass on the debug build.
+  - **Limits:**
+    - The counts match only while knowledge is unchanged between preview and confirmation. Otherwise the stale-preview rules of 8.3 apply, or the fence refuses the disputes, which are then found again by background analysis.
+    - Semantically similar candidates (8.7) are not looked up, because the new passages have no stored vectors yet, so the preview may compare a fact with fewer facts than background analysis would. A compared fact is still recorded as checked.
+    - Category assignment and category name suggestions run after the import, not in the preview.
+    - There is no native preview dialog. The 8.3 note placed it in 10.1, which was checked without it; it is now task 10.5.
 - **Progress audit and triage, 2026-11-09:** code was compared with every task. Tasks were split or added where code and specification disagree (2.4, 4.5, 5.6, 6.6), where a prerequisite was implicit (7.5, 7.6, 7.7, 8.5, 9.5), and narrowed where two tasks claimed the same evidence (1.4, 5.5, 6.5). Publication code in the control plane is unmounted library code with unit tests; no publication route, schema installation or policy key exists. The earlier note that multi-pass summarization is not enabled is superseded by the multi-pass note above. tasks.md carries the per-task status and the delivery order.
 - Final immutable speech artifact URL/mirror and manifest digest, verified package sizes, proxy behavior and actual language-fixture timing.
 - Actual configured model ids and context metadata, token-count strategy supported by those models, and measured compaction coverage/latency.

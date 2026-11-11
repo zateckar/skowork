@@ -617,7 +617,7 @@ CREATE TABLE knowledge_change_report_facts(
         // Task 8.6: new category names suggested for review, the facts each would hold with the excerpt it rests on,
         // and the names the user dismissed for each fact (by comparison key). Suggestions are not knowledge: they do
         // not change the generation, and a suggestion whose facts are all gone goes too.
-        {kKgSchemaVersion, R"sql(
+        {kKgCategoryNamesSchemaVersion, R"sql(
 CREATE TABLE knowledge_category_names(
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
@@ -641,7 +641,11 @@ WHEN NOT EXISTS(SELECT 1 FROM knowledge_category_name_facts WHERE name_id=old.na
 BEGIN
   DELETE FROM knowledge_category_names WHERE id=old.name_id;
 END;)sql"},
-    };
+        // Task 8.8: the analysis of an import preview (findings of its new passages and their possible
+        // inconsistencies), kept with the preview and deleted with it.
+        {kKgSchemaVersion, R"sql(
+ALTER TABLE knowledge_operation_previews ADD COLUMN analysis TEXT NOT NULL DEFAULT '';
+)sql"},    };
     return m;
 }
 
@@ -1125,7 +1129,7 @@ Status write_category_names(Database& db, const std::vector<CategoryNameProposal
 std::vector<CategoryNameSuggestion> KgStore::category_name_suggestions(long long before, int limit) {
     const std::lock_guard lock(db_->mutex());
     std::vector<CategoryNameSuggestion> out;
-    if (db_->user_version() < kKgSchemaVersion || limit <= 0) return out;
+    if (db_->user_version() < kKgCategoryNamesSchemaVersion || limit <= 0) return out;
     auto s = db_->prepare("SELECT id,name,reason FROM knowledge_category_names WHERE ?1<=0 OR id<?1 ORDER BY id DESC LIMIT ?2");
     s.bind(1, before).bind(2, std::min(limit, 200));
     while (s.step()) out.push_back({s.col_int(0), s.col_text(1), s.col_text(2), {}});
@@ -1150,7 +1154,7 @@ std::optional<CategoryNameSuggestion> KgStore::category_name_suggestion(long lon
 
 Status KgStore::rename_category_name(long long id, const std::string& name) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Category name suggestions are not available yet.");
+    if (db_->user_version() < kKgCategoryNamesSchemaVersion) return make_error("schema", "Category name suggestions are not available yet.");
     const auto parts = category_name_parts(name, 160);
     if (!parts) return make_error("invalid", "Enter a valid category name.");
     return db_->transaction([&]() -> Status {
@@ -1167,7 +1171,7 @@ Status KgStore::rename_category_name(long long id, const std::string& name) {
 
 Status KgStore::dismiss_category_name(long long id) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Category name suggestions are not available yet.");
+    if (db_->user_version() < kKgCategoryNamesSchemaVersion) return make_error("schema", "Category name suggestions are not available yet.");
     return db_->transaction([&]() -> Status {
         auto remember = db_->prepare(R"sql(
 INSERT OR IGNORE INTO knowledge_category_name_dismissals(fact_id,name_key,dismissed_at)
@@ -1187,7 +1191,7 @@ INSERT OR IGNORE INTO knowledge_category_name_dismissals(fact_id,name_key,dismis
 Result<AcceptedCategoryName> KgStore::accept_category_name(long long id, const std::string& name,
                                                            const std::function<bool(long long, long long)>& permitted) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Category name suggestions are not available yet.");
+    if (db_->user_version() < kKgCategoryNamesSchemaVersion) return make_error("schema", "Category name suggestions are not available yet.");
     AcceptedCategoryName out;
     const Status done = db_->transaction([&]() -> Status {
         auto read = db_->prepare("SELECT name,reason FROM knowledge_category_names WHERE id=?1");
@@ -1281,7 +1285,7 @@ Status KgStore::apply_analysis(const AnalysisProposals& proposals, long long exp
                 return recorded.error();
         }
         if (!proposals.names.empty()) {
-            if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Category name suggestions are not available yet.");
+            if (db_->user_version() < kKgCategoryNamesSchemaVersion) return make_error("schema", "Category name suggestions are not available yet.");
             if (Status s = write_category_names(*db_, proposals.names); !s) return s;
         }
         if ((!consistency_checked.empty() || !cleared.empty()) && db_->user_version() < kKgConsistencySchemaVersion)
@@ -2723,12 +2727,13 @@ Result<std::string> KgStore::save_operation_preview(OperationPreview p, const st
 std::optional<OperationPreview> KgStore::operation_preview(const std::string& token) {
     const std::lock_guard lock(db_->mutex());
     if (db_->user_version() < kKgPreviewSchemaVersion || token.size() != 32) return std::nullopt;
-    auto s = db_->prepare("SELECT token,operation,target,content,content_hash,policy,summary,generation,created_at,expires_at "
-                          "FROM knowledge_operation_previews WHERE token=?1");
+    const bool analyzed = db_->user_version() >= kKgSchemaVersion;
+    auto s = db_->prepare(std::string("SELECT token,operation,target,content,content_hash,policy,summary,generation,created_at,expires_at,") +
+                          (analyzed ? "analysis" : "'") + " FROM knowledge_operation_previews WHERE token=?1");
     s.bind(1, token);
     if (!s.step()) return std::nullopt;
     return OperationPreview{s.col_text(0), s.col_text(1), s.col_text(2), s.col_text(3), s.col_text(4), s.col_text(5), s.col_text(6),
-                            s.col_int(7), s.col_int(8), s.col_int(9)};
+                            s.col_text(10), s.col_int(7), s.col_int(8), s.col_int(9)};
 }
 
 std::vector<PreviewEntry> KgStore::preview_entries(const std::string& token, const std::string& kind, int offset, int limit) {
@@ -2768,6 +2773,79 @@ Status KgStore::delete_item_previews(const std::string& source, const std::strin
     return s.run();
 }
 
+std::vector<std::string> KgStore::previews_awaiting_analysis(long long now) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<std::string> out;
+    if (db_->user_version() < kKgSchemaVersion) return out;
+    auto s = db_->prepare("SELECT token FROM knowledge_operation_previews WHERE operation IN ('import','update') AND expires_at>?1 "
+                          "AND (analysis='' OR json_extract(analysis,'$.state')='waiting') ORDER BY created_at LIMIT 32");
+    s.bind(1, now);
+    while (s.step()) out.push_back(s.col_text(0));
+    return out;
+}
+
+Status KgStore::set_preview_analysis(const std::string& token, const std::string& analysis) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Preview analysis is not available yet.");
+    // A preview confirmed, cancelled or expired meanwhile is gone: its analysis is discarded.
+    auto s = db_->prepare("UPDATE knowledge_operation_previews SET analysis=?2 WHERE token=?1");
+    s.bind(1, token).bind(2, analysis);
+    return s.run();
+}
+
+std::optional<long long> KgStore::find_fact(long long subject, const std::string& predicate, long long object,
+                                            const std::string& valid_from, const std::string& valid_to) {
+    const std::lock_guard lock(db_->mutex());
+    if (subject <= 0 || object <= 0 || db_->user_version() < kKgEvidenceSchemaVersion) return std::nullopt;
+    auto s = db_->prepare("SELECT id FROM knowledge_facts WHERE subject=?1 AND predicate=?2 AND object=?3 AND unit='' AND scope='' "
+                          "AND valid_from=?4 AND valid_to=?5");
+    s.bind(1, subject).bind(2, predicate).bind(3, object).bind(4, valid_from).bind(5, valid_to);
+    if (!s.step()) return std::nullopt;
+    return s.col_int(0);
+}
+
+std::map<long long, CategoryCandidate> KgStore::facts_related_to(long long subject, const std::string& predicate, long long object,
+                                                                  int related, int passage_limit) {
+    const std::lock_guard lock(db_->mutex());
+    std::map<long long, CategoryCandidate> out;
+    if (db_->user_version() < kKgConsistencySchemaVersion || related <= 0 || passage_limit <= 0) return out;
+    // As consistency analysis picks them: the same subject and predicate, the same predicate and object, a shared entity.
+    std::vector<long long> ids;
+    const auto collect = [&](const std::string& sql, long long a, long long b, bool by_predicate) {
+        if (static_cast<int>(ids.size()) >= related * 3) return;
+        auto q = db_->prepare(sql);
+        q.bind(1, a);
+        if (by_predicate) q.bind(2, predicate);
+        else q.bind(2, b);
+        q.bind(3, static_cast<long long>(related) * 3);
+        while (q.step())
+            if (std::find(ids.begin(), ids.end(), q.col_int(0)) == ids.end()) ids.push_back(q.col_int(0));
+    };
+    if (subject > 0) collect("SELECT id FROM knowledge_facts WHERE subject=?1 AND predicate=?2 ORDER BY id DESC LIMIT ?3", subject, 0, true);
+    if (object > 0) collect("SELECT id FROM knowledge_facts WHERE object=?1 AND predicate=?2 ORDER BY id DESC LIMIT ?3", object, 0, true);
+    if (subject > 0 || object > 0)
+        collect("SELECT id FROM (SELECT id FROM knowledge_facts WHERE subject IN (?1,?2) UNION SELECT id FROM knowledge_facts "
+                "WHERE object IN (?1,?2)) ORDER BY id DESC LIMIT ?3", subject, object, false);
+    auto passages = db_->prepare(
+        "SELECT DISTINCT c.id,c.item_id,c.heading,c.text,ifnull(c.at,0) FROM knowledge_support_sets s "
+        "JOIN knowledge_support_evidence se ON se.support_id=s.id JOIN knowledge_evidence e ON e.id=se.evidence_id "
+        "JOIN knowledge_revisions v ON v.id=e.revision_id JOIN chunks c ON c.id=e.chunk_id AND c.item_id=v.item_id "
+        "WHERE s.fact_id=?1 AND s.state IN ('current','unverified') AND v.current=1 AND e.precision='passage' "
+        "AND CAST(e.excerpt AS BLOB)=CAST(c.text AS BLOB) ORDER BY c.id LIMIT ?2");
+    for (long long id : ids) {
+        if (static_cast<int>(out.size()) >= related) break;
+        if (!fact_supported(*db_, id) || fact_rejected(*db_, id)) continue;
+        auto fact = read_fact(*db_, id);
+        if (!fact) continue;
+        CategoryCandidate f{std::move(*fact), {}};
+        passages.reset();
+        passages.bind(1, id).bind(2, static_cast<long long>(passage_limit));
+        while (passages.step())
+            f.passages.push_back({passages.col_int(0), passages.col_int(1), passages.col_text(2), passages.col_text(3), passages.col_int(4)});
+        if (!f.passages.empty()) out.emplace(id, std::move(f));
+    }
+    return out;
+}
 Status KgStore::purge_expired_previews(long long now) {
     const std::lock_guard lock(db_->mutex());
     if (db_->user_version() < kKgPreviewSchemaVersion) return {};
@@ -3788,7 +3866,7 @@ std::vector<std::string> words(const std::string& norm) { return split(norm, ' '
 
 }  // namespace
 
-long long KgStore::resolve_entity(const std::string& type, const std::string& name_in, const std::string& email_in, long long now) {
+long long KgStore::resolve_entity(const std::string& type, const std::string& name_in, const std::string& email_in, long long now, bool create_new) {
     const std::lock_guard lock(db_->mutex());
     const std::string email = to_lower(trim(email_in));
     std::string name = trim(name_in);
@@ -3796,6 +3874,7 @@ long long KgStore::resolve_entity(const std::string& type, const std::string& na
     const std::string norm = normalize_name(name);
     if (norm.empty()) return 0;
     const auto add_alias = [&](long long id) {
+        if (!create_new) return;  // a lookup changes nothing
         auto a = db_->prepare("INSERT OR IGNORE INTO entity_aliases(entity_id, alias, norm) VALUES(?1,?2,?3)");
         a.bind(1, id).bind(2, name).bind(3, norm);
         (void)a.run();
@@ -3806,6 +3885,7 @@ long long KgStore::resolve_entity(const std::string& type, const std::string& na
         return s.step() ? s.col_int(0) : 0;
     };
     const auto create = [&](const std::string& key) -> long long {
+        if (!create_new) return 0;
         auto s = db_->prepare("INSERT INTO entities(type, name, key, email, created_at) VALUES(?1,?2,?3,?4,?5)");
         s.bind(1, type).bind(2, name).bind(3, key).bind(4, email).bind(5, now);
         if (!s.run()) return 0;
@@ -3825,6 +3905,7 @@ long long KgStore::resolve_entity(const std::string& type, const std::string& na
             s.bind(1, norm);
             std::vector<long long> hits;
             while (s.step()) hits.push_back(s.col_int(0));
+            if (hits.size() == 1 && !create_new) return hits[0];
             if (hits.size() == 1) {
                 auto u = db_->prepare("UPDATE entities SET email=?1, key=?2 WHERE id=?3");
                 u.bind(1, email).bind(2, "person:" + email).bind(3, hits[0]);

@@ -155,7 +155,10 @@ struct FakeGateway {
                 entities.push_back({{"name", "Phoenix"}, {"type", "Project"}, {"chunks", {i}}});
                 relations.push_back({{"subject", "Jana Nováková"}, {"predicate", "leads"}, {"object", "Phoenix"}, {"chunk", i}, {"confidence", 0.9}});
             }
-            if (passage.find("Jana N.") != std::string::npos) entities.push_back({{"name", "Jana N."}, {"type", "Person"}, {"chunks", {i}}});
+            if (passage.find("Petr Dvořák leads Phoenix") != std::string::npos) {
+                entities.push_back({{"name", "Petr Dvořák"}, {"type", "Person"}, {"chunks", {i}}});
+                relations.push_back({{"subject", "Petr Dvořák"}, {"predicate", "leads"}, {"object", "Phoenix"}, {"chunk", i}, {"confidence", 0.9}});
+            }            if (passage.find("Jana N.") != std::string::npos) entities.push_back({{"name", "Jana N."}, {"type", "Person"}, {"chunks", {i}}});
         }
         model::ChatResponse r;
         r.text = "```json\n" + json{{"entities", entities}, {"relations", relations}}.dump() + "\n```";
@@ -2666,6 +2669,130 @@ TEST(KnowledgeImpactPreview, PreviewedEffectsMatchTheConfirmedChangeAndAreLabele
     EXPECT_EQ(supports(), 0u);
 }
 
+// improve-skowork-and-knowledge-control 8.8: an import preview analyzes the passages it would add within the shared
+// budget, and confirming records that analysis as shown instead of repeating it. Analysis that fails or waits for the
+// budget is labeled pending and never blocks the import; a cancelled or expired preview writes nothing.
+TEST(KnowledgeImpactPreview, AnalyzedImportIsRecordedAsPreviewedAndPendingAnalysisDoesNotBlockIt) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    RpcRegistry rpc;
+    register_knowledge_rpc(rpc, [&kg] { return kg.svc.get(); }, nullptr);
+    const auto call = [&](const char* method, const json& params) { return (*rpc.find(method, false))(params); };
+    const auto confirm = [&](const json& token) { return call("knowledge.preview.confirm", {{"token", token}, {"accept_incomplete", true}}); };
+    const auto extractions = [&] { return kg.gw.chat_calls - kg.gw.categorize_calls - kg.gw.consistency_calls; };
+    const auto preview = [&](const char* name, const std::string& text) {
+        write_file(kg.folder / name, text);
+        auto p = call("knowledge.preview.import", {{"path", kg.file_path(name)}});
+        EXPECT_TRUE(p) << name;
+        return p ? (*p)["token"] : json();
+    };
+    const auto analysis = [&](const json& token) {
+        auto a = call("knowledge.preview.analysis", {{"token", token}});
+        EXPECT_TRUE(a);
+        return a ? *a : json();
+    };
+    write_file(kg.folder / "lead.txt", "Jana Nováková leads Phoenix.");
+    ASSERT_TRUE(kg.svc->add_document(kg.file_path("lead.txt")));
+    kg.idle();
+    const long long jana = kg.count("SELECT id FROM knowledge_facts WHERE predicate='leads'");
+    ASSERT_GT(jana, 0);
+    const auto supports = [&](long long fact) {  // items citing it; a recorded dispute quotes an excerpt of one
+        std::set<long long> items;
+        if (const auto state = kg.svc->store().fact_state(fact, false))
+            for (const auto& c : state->citations) items.insert(c.item_id);
+        return items.size();
+    };
+
+    // The preview's second finding is compared before it exists, under an id no stored fact has.
+    constexpr long long kSecondFinding = 1'000'000'000'000'001LL;
+    const std::vector<WantedConflict> wanted = {{kSecondFinding, jana, "conflict", "Petr Dvořák", "Jana Nováková"}};
+    kg.gw.consistency = [&](const model::ChatRequest& r) { return consistency_answer(r, wanted); };
+    const json token = preview("new.txt", "Jana Nováková leads Phoenix. Petr Dvořák leads Phoenix.");
+    json a = analysis(token);
+    EXPECT_EQ(a["state"], "analyzing");
+    EXPECT_TRUE(a["pending"].get<bool>());
+    const int extracted = extractions(), compared = kg.gw.consistency_calls;
+    kg.idle();
+    EXPECT_EQ(extractions(), extracted + 1);
+    EXPECT_EQ(kg.gw.consistency_calls, compared + 1);
+    a = analysis(token);
+    ASSERT_EQ(a["state"], "done") << a.dump(2);
+    EXPECT_FALSE(a["pending"].get<bool>());
+    EXPECT_EQ(a["counts"]["add"], 1);
+    EXPECT_EQ(a["counts"]["corroborate"], 1);
+    EXPECT_EQ(a["counts"]["dispute"], 1);
+    std::map<std::string, json> by_effect;
+    for (const auto& e : a["entries"]) by_effect[e["effect"].get<std::string>()] = e;
+    EXPECT_EQ(by_effect["corroborate"]["existing"]["fact"]["fact_id"], jana);
+    EXPECT_EQ(by_effect["add"]["text"], "Petr Dvořák leads Phoenix");
+    EXPECT_EQ(by_effect["dispute"]["existing"]["fact"]["fact_id"], jana);
+    EXPECT_EQ(by_effect["dispute"]["evidence"], "Petr Dvořák");
+    EXPECT_EQ(by_effect["dispute"]["existing_evidence"], "Jana Nováková");
+    // Nothing is written before confirmation.
+    EXPECT_FALSE(kg.svc->store().item("files", kg.file_path("new.txt")));
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_facts"), 1);
+    EXPECT_EQ(supports(jana), 1u);
+
+    // Confirmed: the previewed findings and dispute are recorded, nothing is extracted or compared again.
+    ASSERT_TRUE(confirm(token));
+    kg.idle();
+    EXPECT_EQ(extractions(), extracted + 1);
+    EXPECT_EQ(kg.gw.consistency_calls, compared + 1);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_facts"), 2);
+    EXPECT_EQ(supports(jana), 2u);
+    EXPECT_EQ(kg.svc->status()["consistency"]["pending"], 0);
+    auto reviews = call("knowledge.reviews", json::object());
+    ASSERT_TRUE(reviews);
+    ASSERT_EQ((*reviews)["items"].size(), 1u) << reviews->dump(2);
+    const json& review = (*reviews)["items"][0];
+    const json& other = review["left"]["fact_id"] == jana ? review["right"] : review["left"];
+    EXPECT_EQ(other["subject"], "Petr Dvořák");
+    EXPECT_EQ(other["citation"]["excerpt"], "Petr Dvořák");
+    EXPECT_EQ(kg.svc->store().fact_state(jana, false)->state, "disputed");
+
+    // A model failure is reported as pending; the import still works and is analyzed afterwards.
+    kg.gw.chat_failure = model::code::model_unavailable;
+    const json failed = preview("failed.txt", "Jana Nováková leads Phoenix, says the plan.");
+    kg.idle();
+    a = analysis(failed);
+    EXPECT_EQ(a["state"], "failed");
+    EXPECT_EQ(a["reason"], model::code::model_unavailable);
+    EXPECT_TRUE(a["pending"].get<bool>());
+    EXPECT_FALSE(a.contains("counts"));
+    ASSERT_TRUE(confirm(failed));
+    kg.gw.chat_failure.clear();
+    kg.idle();
+    EXPECT_EQ(supports(jana), 3u);
+
+    // A spent budget makes the analysis wait without asking the model; it runs once the budget allows.
+    const long long used = kg.svc->store().used(kg.svc->today(), "extract_calls");
+    kg.set("knowledge.extraction_daily_calls", used);
+    const json waiting = preview("waiting.txt", "Jana Nováková leads Phoenix, says the minutes.");
+    const int asked = kg.gw.chat_calls;
+    kg.idle();
+    EXPECT_EQ(kg.gw.chat_calls, asked);
+    a = analysis(waiting);
+    EXPECT_EQ(a["state"], "waiting");
+    EXPECT_EQ(a["reason"], "budget");
+    EXPECT_TRUE(a["pending"].get<bool>());
+    kg.set("knowledge.extraction_daily_calls", used + 20);
+    kg.idle();
+    EXPECT_EQ(analysis(waiting)["state"], "done");
+
+    // Cancelled or expired: the analysis is discarded with the preview, and no fact or support is written.
+    ASSERT_TRUE(call("knowledge.preview.cancel", {{"token", waiting}}));
+    EXPECT_FALSE(call("knowledge.preview.analysis", {{"token", waiting}}));
+    const json expired = preview("expired.txt", "Jana Nováková leads Phoenix, says the memo.");
+    kg.idle();
+    EXPECT_EQ(analysis(expired)["state"], "done");
+    kg.clock.advance(std::chrono::minutes(31));
+    EXPECT_FALSE(call("knowledge.preview.analysis", {{"token", expired}}));
+    EXPECT_FALSE(confirm(expired));
+    kg.idle();
+    EXPECT_FALSE(kg.svc->store().item("files", kg.file_path("waiting.txt")));
+    EXPECT_FALSE(kg.svc->store().item("files", kg.file_path("expired.txt")));
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_facts"), 2);
+    EXPECT_EQ(supports(jana), 3u);
+}
 // 8.3: a confirmation applies only to what was analyzed: changed bytes, policy or effects require a new preview, an
 // expired or cancelled preview is gone, and a large preview is read in pages.
 TEST(KnowledgeImpactPreview, ChangedFilePolicyOrGraphRequiresAFreshConfirmation) {

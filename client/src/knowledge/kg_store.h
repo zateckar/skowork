@@ -41,8 +41,10 @@ inline constexpr int kKgConsistencySchemaVersion = 8;
 inline constexpr int kKgPreviewSchemaVersion = 9;
 // Durable Source change reports (task 8.4).
 inline constexpr int kKgChangeReportSchemaVersion = 10;
-// The latest schema: suggested category names and their dismissals (task 8.6).
-inline constexpr int kKgSchemaVersion = 11;
+// Suggested category names and their dismissals (task 8.6).
+inline constexpr int kKgCategoryNamesSchemaVersion = 11;
+// The latest schema: the analysis of an import preview (task 8.8).
+inline constexpr int kKgSchemaVersion = 12;
 // Open suggested category names, and facts in one, at most.
 inline constexpr int kMaxCategoryNameSuggestions = 20;
 inline constexpr int kMaxCategoryNameFacts = 50;
@@ -140,6 +142,7 @@ struct ItemChangePlan {
 // A stored operation preview (task 8.3). `target`, `summary` and an import's `content` are JSON text.
 struct OperationPreview {
     std::string token, operation, target, content, content_hash, policy, summary;
+    std::string analysis;  // an import's analysis (task 8.8), JSON text; empty until it starts
     long long generation = 0, created_at = 0, expires_at = 0;
 };
 
@@ -462,6 +465,18 @@ public:
     // Previews whose target is the item (an import or update preview holds its passages), when it is forgotten.
     Status delete_item_previews(const std::string& source, const std::string& ext_id);
     Status purge_expired_previews(long long now);
+    // Import and update previews whose analysis has not started or waits (for budget), oldest first, not expired.
+    std::vector<std::string> previews_awaiting_analysis(long long now);
+    // Stores a preview's analysis; nothing when the preview is gone (confirmed, cancelled or expired).
+    Status set_preview_analysis(const std::string& token, const std::string& analysis);
+    // The fact an extracted relation would support (no unit or scope, as extraction writes them), if it exists.
+    std::optional<long long> find_fact(long long subject, const std::string& predicate, long long object, const std::string& valid_from,
+                                       const std::string& valid_to);
+    // Up to `related` current, not rejected facts that a fact of these entities and predicate would be compared with
+    // (same subject and predicate, same predicate and object, any shared entity; 0 is an entity that does not exist
+    // yet), each with at most `passages` whole cited passages; facts without one are left out.
+    std::map<long long, CategoryCandidate> facts_related_to(long long subject, const std::string& predicate, long long object,
+                                                             int related, int passages);
 
     // ---- Source change reports (Incremental Source Reconciliation; task 8.4) ----
     // Written by put_item in the transaction of an item's new revision; deleted with the item. Newest first; efore_id
@@ -578,7 +593,9 @@ public:
     // ---- Entities ----
     // Finds or creates the entity: a Person by lower-cased email when there is one, anything else by type and normalised
     // name. A Person without an address is linked to an existing Person only when the name matches one unambiguously.
-    long long resolve_entity(const std::string& type, const std::string& name, const std::string& email, long long now);
+    // With create_new false it only looks up: 0 when the entity does not exist yet, and nothing is written.
+    long long resolve_entity(const std::string& type, const std::string& name, const std::string& email, long long now,
+                             bool create_new = true);
     std::optional<EntityRow> entity(long long id);
     std::vector<EntityRow> find_entities(const std::string& query, int limit);
     std::vector<EntitySearchRow> find_entities_page(const std::string& query, int limit,

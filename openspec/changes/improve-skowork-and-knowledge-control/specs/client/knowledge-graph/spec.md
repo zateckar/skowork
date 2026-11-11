@@ -233,6 +233,18 @@ Before an explicit import, replacement, exclusion or forget operation is committ
 - **WHEN** extraction cannot run for an import
 - **THEN** the user can cancel or explicitly import for search with analysis pending, and the preview does not claim that existing knowledge is unaffected
 
+#### Scenario: Analyzed import is recorded as previewed
+- **WHEN** an import preview has analyzed the new passages within the shared daily budget and the user confirms it while knowledge is unchanged
+- **THEN** the facts recorded as added, corroborated and disputed at confirmation are the ones the preview showed, with the same counts, and those passages are not sent to the model again
+
+#### Scenario: Preview analysis waits or fails
+- **WHEN** extraction is off, the model fails, the import is too large to analyze before confirmation, or the shared daily budget is spent
+- **THEN** the preview labels its analysis pending with the reason, and importing for search remains possible, the passages being analyzed after import as usual
+
+#### Scenario: Preview analysis is discarded
+- **WHEN** an analyzed import preview is cancelled or expires
+- **THEN** its analysis results are deleted with it, and nothing of them is recorded in knowledge
+
 #### Scenario: Partial item removal information
 - **WHEN** an item removal confirmation can show only its currently listed facts and corrections
 - **THEN** it labels the broader effects on other knowledge and shares as not fully analyzed and does not claim every derived fact will be removed

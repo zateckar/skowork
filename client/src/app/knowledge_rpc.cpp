@@ -115,6 +115,9 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
     add("knowledge.preview.page", [](Svc& s, const json& p) {
         return s.preview_page(jstr(p, "token"), jstr(p, "kind"), static_cast<int>(jint(p, "offset", 0)), static_cast<int>(jint(p, "limit", 50)));
     });
+    add("knowledge.preview.analysis", [](Svc& s, const json& p) {
+        return s.preview_analysis(jstr(p, "token"), static_cast<int>(jint(p, "offset", 0)), static_cast<int>(jint(p, "limit", 50)));
+    });
     add("knowledge.preview.confirm", [](Svc& s, const json& p) {
         return s.confirm_preview(jstr(p, "token"), p.value("accept_incomplete", false));
     });

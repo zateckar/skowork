@@ -249,6 +249,10 @@ public:
     Result<json> preview_forget(long long item_id);
     // A page of a preview's affected facts or passages: {kind, offset, total, entries: [...]}.
     Result<json> preview_page(const std::string& token, const std::string& kind, int offset, int limit);
+    // An import preview's analysis (task 8.8): {state, reason?, pending, counts {add, corroborate, dispute}, offset, total,
+    // entries}; the entries are the facts the new passages would add or corroborate, then the facts they would dispute,
+    // each with its evidence. State: analyzing, waiting (reason budget), failed (reason), off, too_large or done.
+    Result<json> preview_analysis(const std::string& token, int offset, int limit);
     // Commits the reviewed operation, only as reviewed: the file must still have the reviewed content, the policy
     // must be unchanged, and when knowledge changed the effects must be unchanged; otherwise stale (preview again).
     // A preview is never complete (extraction, consistency and publication effects follow), so `accept_incomplete`
@@ -398,6 +402,11 @@ private:
     bool categorize_step();
     // Possible inconsistency review (design D7): unchecked facts against bounded related facts.
     bool consistency_step();
+    // Analyzes the new passages of one import preview (task 8.8); its findings are recorded only when it is confirmed.
+    bool preview_analysis_step();
+    // At confirmation, inside the write that imported the item: the previewed findings and disputes are recorded for
+    // the passages that are still the analyzed ones, instead of asking the model again.
+    void apply_preview_analysis(const json& analysis, long long item_id, const ItemInput& in);
     bool enrich_step();
     // Returns the passages one of whose findings took its date from the item.
     std::vector<long long> store_extraction(const std::vector<ChunkRow>& batch, const Extraction& x);
