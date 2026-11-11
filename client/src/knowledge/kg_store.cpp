@@ -515,6 +515,9 @@ DROP TABLE mentions;
 ALTER TABLE mentions_by_name RENAME TO mentions;
 CREATE INDEX mentions_entity ON mentions(entity_id, alias);
 )sql"},
+        // improve-skowork-and-knowledge-control: revisions, exact evidence, canonical facts with independent and
+        // required supports, categories, review and generation fences (design D6, task 7.6).
+        {kKgEvidenceSchemaVersion, kg_evidence_migration_sql()},
     };
     return m;
 }

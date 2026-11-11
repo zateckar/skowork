@@ -3909,7 +3909,7 @@ TEST(ShellKnowledge, SourcesFoldersExclusionsForgetMergeAndSplit) {
     auto k = keys.get_or_create("kg.db");
     ASSERT_TRUE(k);
     MigrationOutcome o;
-    auto db = open_and_migrate(root->file("kg.db"), *k, knowledge::kg_migrations(), o);
+    auto db = knowledge::open_kg_database(root->file("kg.db"), *k, o);
     ASSERT_TRUE(db);
     const json policy = {{"knowledge.sources.mail", "off"}, {"knowledge.extraction", "off"}, {"knowledge.exclusions", {"**\\HR\\**"}}};
     std::atomic<ShellThread*> window{nullptr};
@@ -4075,7 +4075,7 @@ TEST(ShellKnowledge, KnowledgeViewImportNotesSearchCurateAndShare) {
     auto k = keys.get_or_create("kg.db");
     ASSERT_TRUE(k);
     MigrationOutcome o;
-    auto db = open_and_migrate(root->file("kg.db"), *k, knowledge::kg_migrations(), o);
+    auto db = knowledge::open_kg_database(root->file("kg.db"), *k, o);
     ASSERT_TRUE(db);
     json policy = {{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}};
     std::mutex team_mx;
@@ -4578,7 +4578,7 @@ TEST(ShellKnowledge, SaveMailAndChatAsNote) {
     auto k = keys.get_or_create("kg.db");
     ASSERT_TRUE(k);
     MigrationOutcome o;
-    auto db = open_and_migrate(root->file("kg.db"), *k, knowledge::kg_migrations(), o);
+    auto db = knowledge::open_kg_database(root->file("kg.db"), *k, o);
     ASSERT_TRUE(db);
     std::mutex pmx;
     json policy = {{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}};

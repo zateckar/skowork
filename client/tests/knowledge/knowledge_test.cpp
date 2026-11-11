@@ -157,8 +157,8 @@ std::string u8(const std::filesystem::path& p) {
 }
 
 struct Kg {
-    // `evidence` opens the store with the versioned evidence schema that production does not activate yet.
-    explicit Kg(json pol = json::object(), bool background = false, bool evidence = false)
+    // `evidence` false opens the store as a client from before the versioned evidence schema migrated it.
+    explicit Kg(json pol = json::object(), bool background = false, bool evidence = true)
         : policy(std::move(pol)), evidence_schema(evidence) {
         auto root = DataRoot::open(tmp.path);
         EXPECT_TRUE(root);
@@ -178,7 +178,7 @@ struct Kg {
         svc.reset();
         MigrationOutcome o;
         auto migrations = kg_migrations();
-        if (evidence_schema) migrations.push_back({kKgEvidenceSchemaVersion, kg_evidence_migration_sql()});
+        if (!evidence_schema) migrations.pop_back();
         auto db = open_and_migrate_consistently(file, *key, migrations, o, register_kg_writer);
         EXPECT_TRUE(db);
         KnowledgeEnv e;
@@ -316,7 +316,7 @@ struct Kg {
     std::filesystem::path file, folder;
     std::mutex mx;
     json policy;
-    bool evidence_schema = false;
+    bool evidence_schema = true;
     FakeGateway gw;
     std::map<std::string, json> threads, mail, mail_messages, chats;
     std::set<std::string> denied_read_paths;
@@ -3316,7 +3316,7 @@ TEST(KnowledgeCore, MentionsMigrationKeepsRowsAndKeysNames) {
     ASSERT_TRUE(db) << db.error().message;
     ASSERT_FALSE(o.degraded) << o.failure;
     EXPECT_EQ(o.from_version, 4);
-    EXPECT_EQ((*db)->user_version(), 5);
+    EXPECT_EQ((*db)->user_version(), kKgEvidenceSchemaVersion);
     ASSERT_TRUE((*db)->exec("INSERT INTO mentions(chunk_id,entity_id,alias) VALUES(1,1,'firebird')"));
     auto rows = (*db)->prepare("SELECT group_concat(alias,',') FROM (SELECT alias FROM mentions WHERE chunk_id=1 AND entity_id=1 ORDER BY alias)");
     ASSERT_TRUE(rows.step());

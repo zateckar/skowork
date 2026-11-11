@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
     auto key = keys.get_or_create("kg.db");
     if (!key) return 1;
     MigrationOutcome mo;
-    auto db = open_and_migrate(root->file("kg.db"), *key, kg_migrations(), mo);
+    auto db = open_kg_database(root->file("kg.db"), *key, mo);
     if (!db) return std::fprintf(stderr, "kg.db: %s\n", db.error().message.c_str()), 1;
     (void)(*db)->exec("PRAGMA synchronous=OFF;");  // the build only; queries are what is measured
     auto store = std::make_unique<KgStore>(std::move(*db));

@@ -32,6 +32,12 @@ std::filesystem::path temp_root() {
     return std::filesystem::path(local_appdata()) / L"workbench-test" / widen(random_urlsafe(6));
 }
 
+// kg.db as a client from before the evidence schema creates and migrates it.
+std::vector<Migration> pre_evidence_kg_migrations() {
+    const auto& all = knowledge::kg_migrations();
+    return {all.begin(), all.end() - 1};
+}
+
 std::string slurp(const std::filesystem::path& p) {
     std::ifstream f(p, std::ios::binary);
     std::stringstream ss;
@@ -543,13 +549,13 @@ TEST(Database, ConsistentKnowledgeMigrationCommitsLegacyWriterBarrierWithSchema)
     auto key = keys.get_or_create("knowledge.db");
     ASSERT_TRUE(key);
     MigrationOutcome initial;
-    auto original = knowledge::open_kg_database(root->file("knowledge.db"), *key, initial);
+    auto original = open_and_migrate_consistently(root->file("knowledge.db"), *key, pre_evidence_kg_migrations(), initial);
     ASSERT_TRUE(original);
     ASSERT_TRUE((*original)->exec("INSERT INTO items(source,ext_id,title) VALUES('files','one','original')"));
     auto legacy = Database::open(root->file("knowledge.db"), *key);
     ASSERT_TRUE(legacy);
     original->reset();
-    auto migrations = knowledge::kg_migrations();
+    auto migrations = pre_evidence_kg_migrations();
     migrations.push_back({knowledge::kKgEvidenceSchemaVersion, "CREATE TABLE evidence_probe(id INTEGER PRIMARY KEY);" + knowledge::kg_writer_barrier_sql()});
     MigrationOutcome updated;
     auto modern = open_and_migrate_consistently(root->file("knowledge.db"), *key, migrations, updated, knowledge::register_kg_writer);
@@ -578,7 +584,7 @@ TEST(Database, EvidenceMigrationPreservesIndependentAndRequiredSupports) {
     auto key = keys.get_or_create("evidence.db");
     ASSERT_TRUE(key);
     MigrationOutcome initial;
-    auto original = knowledge::open_kg_database(root->file("evidence.db"), *key, initial);
+    auto original = open_and_migrate_consistently(root->file("evidence.db"), *key, pre_evidence_kg_migrations(), initial);
     ASSERT_TRUE(original);
     auto setup = (*original)->exec(R"sql(
 INSERT INTO items(id,source,ext_id,hash) VALUES(1,'files','a','h1'),(2,'files','b','h2'),(3,'notes','3','h3');
@@ -599,7 +605,6 @@ INSERT INTO fact_tombstones(source,ext_id,item_hash,fact_key) VALUES('files','a'
     auto legacy = Database::open(copy, *key);
     ASSERT_TRUE(legacy);
     auto migrations = knowledge::kg_migrations();
-    migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql()});
     MigrationOutcome outcome;
     auto db = open_and_migrate_consistently(copy, *key, migrations, outcome, knowledge::register_kg_writer);
     ASSERT_TRUE(db) << db.error().message;
@@ -620,6 +625,26 @@ INSERT INTO fact_tombstones(source,ext_id,item_hash,fact_key) VALUES('files','a'
     EXPECT_EQ(counts.col_int(4), 1);
     EXPECT_EQ(counts.col_int(5), 1);
     EXPECT_EQ(counts.col_int(6), 1);
+    // Links stay stable: items, passages, entities, relations and notes keep their ids, and each legacy support
+    // points at the relation and passage it came from.
+    {
+        auto ids = (*db)->prepare("SELECT (SELECT group_concat(id) FROM (SELECT id FROM items ORDER BY id)),"
+                                  "(SELECT group_concat(id||':'||item_id) FROM (SELECT id,item_id FROM chunks ORDER BY id)),"
+                                  "(SELECT group_concat(id) FROM (SELECT id FROM entities ORDER BY id)),"
+                                  "(SELECT group_concat(id||':'||chunk_id) FROM (SELECT id,chunk_id FROM relations ORDER BY id)),"
+                                  "(SELECT group_concat(id) FROM notes)");
+        ASSERT_TRUE(ids.step());
+        EXPECT_EQ(ids.col_text(0), "1,2,3");
+        EXPECT_EQ(ids.col_text(1), "1:1,2:2,3:3");
+        EXPECT_EQ(ids.col_text(2), "1,2,3");
+        EXPECT_EQ(ids.col_text(3), "1:1,2:1,3:2,4:3");
+        EXPECT_EQ(ids.col_text(4), "3");
+        auto links = (*db)->prepare("SELECT group_concat(r.id||':'||e.chunk_id) FROM (SELECT * FROM knowledge_support_sets ORDER BY legacy_relation_id) s "
+                                    "JOIN relations r ON r.id=s.legacy_relation_id JOIN knowledge_support_evidence se ON se.support_id=s.id "
+                                    "JOIN knowledge_evidence e ON e.id=se.evidence_id");
+        ASSERT_TRUE(links.step());
+        EXPECT_EQ(links.col_text(0), "1:1,3:2,4:3");
+    }
     ASSERT_TRUE((*db)->exec("DELETE FROM relations WHERE id=1"));
     {
         auto duplicate = (*db)->prepare("SELECT count(*) FROM knowledge_support_sets WHERE legacy_relation_id=2 AND state='unverified'");
@@ -700,6 +725,89 @@ UPDATE knowledge_support_sets SET state='unsupported' WHERE id=200;
     EXPECT_EQ(cascade.col_int(2), 0);
 }
 
+// Task 7.6: a profile written by a client from before the evidence schema upgrades through the production open path,
+// and that older client then refuses the upgraded database instead of writing to it.
+TEST(Database, KnowledgeProfileUpgradesToEvidenceSchemaAndOlderClientRefusesIt) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get_or_create("kg.db");
+    ASSERT_TRUE(key);
+    knowledge::ItemInput in;
+    in.source = "files";
+    in.ext_id = "C:\\docs\\plan.txt";
+    in.title = "plan";
+    in.hash = "v1";
+    in.updated_at = 1000;
+    in.chunks = {{"", "Apollo starts in May.", 0}, {"", "Budget is approved.", 0}};
+    {
+        MigrationOutcome o;
+        auto db = open_and_migrate_consistently(root->file("kg.db"), *key, pre_evidence_kg_migrations(), o, knowledge::register_kg_writer);
+        ASSERT_TRUE(db) << db.error().message;
+        knowledge::KgStore old(std::move(*db));
+        ASSERT_EQ(old.db().user_version(), knowledge::kKgEvidenceSchemaVersion - 1);
+        const auto item = old.put_item(in, 2000);
+        ASSERT_TRUE(item);
+        ASSERT_TRUE(old.db().exec("INSERT INTO entities(id,type,name,key) VALUES(1,'project','Apollo','apollo'),(2,'date','May','may')"));
+        ASSERT_TRUE(old.add_relation(1, "starts", 2, 0.9, "2026", "", old.chunks_of_item(*item)[0].id));
+        ASSERT_TRUE(old.db().exec("PRAGMA wal_checkpoint(TRUNCATE)"));
+    }
+    const auto copy = root->file("kg-profile-copy.db");
+    std::filesystem::copy_file(root->file("kg.db"), copy);
+
+    MigrationOutcome upgraded;
+    auto db = knowledge::open_kg_database(copy, *key, upgraded);
+    ASSERT_TRUE(db) << db.error().message;
+    ASSERT_FALSE(upgraded.degraded) << upgraded.failure;
+    EXPECT_TRUE(upgraded.migrated);
+    EXPECT_EQ(upgraded.from_version, knowledge::kKgEvidenceSchemaVersion - 1);
+    EXPECT_EQ(upgraded.to_version, knowledge::kKgEvidenceSchemaVersion);
+    {
+        auto backup = Database::open(root->file("kg-profile-copy.db.bak"), *key, true);
+        ASSERT_TRUE(backup);
+        EXPECT_EQ((*backup)->user_version(), knowledge::kKgEvidenceSchemaVersion - 1);
+    }
+    std::optional<knowledge::KgStore> holder;
+    holder.emplace(std::move(*db));
+    auto& store = *holder;
+    const auto number = [&](const std::string& sql) {
+        auto s = store.db().prepare(sql);
+        return s.step() ? s.col_int(0) : -1LL;
+    };
+    // The existing finding became unverified passage-level support of a canonical fact in the first revision.
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_revisions WHERE current=1"), 1);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets s JOIN knowledge_support_evidence se ON se.support_id=s.id "
+                     "JOIN knowledge_evidence e ON e.id=se.evidence_id WHERE s.state='unverified' AND e.precision='passage' "
+                     "AND e.excerpt='Apollo starts in May.'"),
+              1);
+    // The upgraded store keeps working: a changed second passage makes a new revision. A migrated finding has no
+    // record of what the model read, so its unchanged passage is rechecked: the support awaits extraction again and
+    // the fact keeps it as history.
+    in.hash = "v2";
+    in.chunks[1].text = "Budget is approved and signed.";
+    ASSERT_TRUE(store.put_item(in, 3000));
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_revisions"), 2);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets WHERE state IN ('current','unverified')"), 0);
+    EXPECT_EQ(number("SELECT count(*) FROM knowledge_facts"), 1);
+    EXPECT_EQ(number("SELECT count(*) FROM extract_queue q JOIN chunks c ON c.id=q.chunk_id WHERE c.text='Apollo starts in May.'"), 1);
+    ASSERT_TRUE(store.db().exec("PRAGMA wal_checkpoint(TRUNCATE)"));
+    holder.reset();
+
+    // The older client refuses to open the upgraded database, and the refusal changes nothing.
+    MigrationOutcome refused;
+    auto older = open_and_migrate_consistently(copy, *key, pre_evidence_kg_migrations(), refused, knowledge::register_kg_writer);
+    ASSERT_FALSE(older);
+    EXPECT_EQ(older.error().code, "schema_too_new");
+    auto reopened = knowledge::open_kg_database(copy, *key, refused);
+    ASSERT_TRUE(reopened) << reopened.error().message;
+    EXPECT_FALSE(refused.migrated);
+    auto revisions = (*reopened)->prepare("SELECT count(*) FROM knowledge_revisions");
+    ASSERT_TRUE(revisions.step());
+    EXPECT_EQ(revisions.col_int(0), 2);
+}
+
 TEST(Database, EvidenceMigrationFailureRollsBackSchemaAndWriterBarrier) {
     TempRoot t;
     auto root = DataRoot::open(t.path);
@@ -709,11 +817,11 @@ TEST(Database, EvidenceMigrationFailureRollsBackSchemaAndWriterBarrier) {
     auto key = keys.get_or_create("rollback.db");
     ASSERT_TRUE(key);
     MigrationOutcome initial;
-    auto db = knowledge::open_kg_database(root->file("rollback.db"), *key, initial);
+    auto db = open_and_migrate_consistently(root->file("rollback.db"), *key, pre_evidence_kg_migrations(), initial);
     ASSERT_TRUE(db);
     ASSERT_TRUE((*db)->exec("INSERT INTO items(source,ext_id,title) VALUES('files','a','preserved')"));
     db->reset();
-    auto migrations = knowledge::kg_migrations();
+    auto migrations = pre_evidence_kg_migrations();
     migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql() + "THIS IS NOT SQL;"});
     MigrationOutcome outcome;
     auto failed = open_and_migrate_consistently(root->file("rollback.db"), *key, migrations, outcome, knowledge::register_kg_writer);
@@ -740,7 +848,6 @@ TEST(Database, KnowledgeCategoryDecisionsSurviveSuggestionsAndMerges) {
     auto key = keys.get_or_create("categories.db");
     ASSERT_TRUE(key);
     auto migrations = knowledge::kg_migrations();
-    migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql()});
     MigrationOutcome outcome;
     auto db = open_and_migrate_consistently(root->file("categories.db"), *key, migrations, outcome, knowledge::register_kg_writer);
     ASSERT_TRUE(db) << db.error().message;
@@ -830,7 +937,6 @@ TEST(Database, KnowledgeAnalysisBindsOnlyCurrentSupportedUtf8Excerpts) {
     auto key = keys.get_or_create("analysis-evidence.db");
     ASSERT_TRUE(key);
     auto migrations = knowledge::kg_migrations();
-    migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql()});
     MigrationOutcome outcome;
     auto db = open_and_migrate_consistently(root->file("analysis-evidence.db"), *key, migrations, outcome,
                                              knowledge::register_kg_writer);
@@ -899,7 +1005,6 @@ TEST(Database, KnowledgeAnalysisBatchIsSavedWhollyOrNotAtAll) {
     auto key = keys.get_or_create("analysis-batch.db");
     ASSERT_TRUE(key);
     auto migrations = knowledge::kg_migrations();
-    migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql()});
     MigrationOutcome outcome;
     auto db = open_and_migrate_consistently(root->file("analysis-batch.db"), *key, migrations, outcome, knowledge::register_kg_writer);
     ASSERT_TRUE(db) << db.error().message;
@@ -1003,7 +1108,6 @@ TEST(Database, SourceRevisionKeepsUnchangedEvidenceAndIndependentSupport) {
     auto key = keys.get_or_create("revisions.db");
     ASSERT_TRUE(key);
     auto migrations = knowledge::kg_migrations();
-    migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql()});
     MigrationOutcome outcome;
     auto db = open_and_migrate_consistently(root->file("revisions.db"), *key, migrations, outcome, knowledge::register_kg_writer);
     ASSERT_TRUE(db) << db.error().message;
@@ -1144,7 +1248,6 @@ TEST(Database, SourceRevisionRechecksOnlyFindingsWhoseExtractionInputsChanged) {
     auto key = keys.get_or_create("inputs.db");
     ASSERT_TRUE(key);
     auto migrations = knowledge::kg_migrations();
-    migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql()});
     MigrationOutcome outcome;
     auto db = open_and_migrate_consistently(root->file("inputs.db"), *key, migrations, outcome, knowledge::register_kg_writer);
     ASSERT_TRUE(db) << db.error().message;
@@ -1253,7 +1356,6 @@ TEST(Database, SourceRevisionInvalidatesDerivationsThroughRequiredFacts) {
     auto key = keys.get_or_create("derived.db");
     ASSERT_TRUE(key);
     auto migrations = knowledge::kg_migrations();
-    migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql()});
     MigrationOutcome outcome;
     auto db = open_and_migrate_consistently(root->file("derived.db"), *key, migrations, outcome, knowledge::register_kg_writer);
     ASSERT_TRUE(db) << db.error().message;
@@ -1329,7 +1431,6 @@ TEST(Database, DerivationDepthAndRevisionHistoryAreBounded) {
     auto key = keys.get_or_create("bounds.db");
     ASSERT_TRUE(key);
     auto migrations = knowledge::kg_migrations();
-    migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql()});
     MigrationOutcome outcome;
     auto db = open_and_migrate_consistently(root->file("bounds.db"), *key, migrations, outcome, knowledge::register_kg_writer);
     ASSERT_TRUE(db) << db.error().message;
@@ -1418,7 +1519,6 @@ TEST(Database, LargeSourceChangeWithdrawsInStepsAndRecoversIfInterrupted) {
     auto key = keys.get_or_create("steps.db");
     ASSERT_TRUE(key);
     auto migrations = knowledge::kg_migrations();
-    migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql()});
     MigrationOutcome outcome;
     auto db = open_and_migrate_consistently(root->file("steps.db"), *key, migrations, outcome, knowledge::register_kg_writer);
     ASSERT_TRUE(db) << db.error().message;
@@ -1506,7 +1606,6 @@ TEST(Database, LargeSourceChangeIsStagedHiddenAndSwitched) {
     auto key = keys.get_or_create("staged.db");
     ASSERT_TRUE(key);
     auto migrations = knowledge::kg_migrations();
-    migrations.push_back({5, knowledge::kg_evidence_migration_sql()});
     MigrationOutcome outcome;
     auto db = open_and_migrate_consistently(root->file("staged.db"), *key, migrations, outcome, knowledge::register_kg_writer);
     ASSERT_TRUE(db) << db.error().message;
@@ -1615,7 +1714,6 @@ TEST(Database, DISABLED_KnowledgeCascadeScale) {
     auto key = keys.get_or_create("cascade-scale.db");
     ASSERT_TRUE(key);
     auto migrations = knowledge::kg_migrations();
-    migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql()});
     MigrationOutcome outcome;
     auto db = open_and_migrate_consistently(root->file("cascade-scale.db"), *key, migrations, outcome, knowledge::register_kg_writer);
     ASSERT_TRUE(db) << db.error().message;
@@ -1806,7 +1904,6 @@ TEST(Database, KnowledgeConflictDecisionRechecksEvidenceAndForgetsHistory) {
     auto key = keys.get_or_create("review.db");
     ASSERT_TRUE(key);
     auto migrations = knowledge::kg_migrations();
-    migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql()});
     MigrationOutcome outcome;
     auto db = open_and_migrate_consistently(root->file("review.db"), *key, migrations, outcome, knowledge::register_kg_writer);
     ASSERT_TRUE(db) << db.error().message;
@@ -1875,7 +1972,6 @@ TEST(Database, KnowledgeImpactSnapshotReportsIndependentAndRequiredSupport) {
     auto key = keys.get_or_create("impact.db");
     ASSERT_TRUE(key);
     auto migrations = knowledge::kg_migrations();
-    migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql()});
     MigrationOutcome outcome;
     auto db = open_and_migrate_consistently(root->file("impact.db"), *key, migrations, outcome, knowledge::register_kg_writer);
     ASSERT_TRUE(db) << db.error().message;
@@ -1967,7 +2063,6 @@ TEST(Database, DISABLED_KnowledgeImpactScale) {
     auto key = keys.get_or_create("impact-scale.db");
     ASSERT_TRUE(key);
     auto migrations = knowledge::kg_migrations();
-    migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql()});
     MigrationOutcome outcome;
     auto db = open_and_migrate_consistently(root->file("impact-scale.db"), *key, migrations, outcome, knowledge::register_kg_writer);
     ASSERT_TRUE(db) << db.error().message;
@@ -2072,7 +2167,7 @@ TEST(Database, KnowledgeWriterBarrierRejectsLegacyConnectionOnCopiedEncryptedDat
     ASSERT_TRUE(key);
     {
         MigrationOutcome outcome;
-        auto db = open_and_migrate(root->file("kg.db"), *key, knowledge::kg_migrations(), outcome);
+        auto db = open_and_migrate(root->file("kg.db"), *key, pre_evidence_kg_migrations(), outcome);
         ASSERT_TRUE(db);
         ASSERT_TRUE((*db)->exec("INSERT INTO items(source,ext_id,title) VALUES('files','one','original');"
                                 "INSERT INTO chunks(item_id,ord,text) VALUES(1,0,'evidence');"));
@@ -2112,7 +2207,7 @@ TEST(Database, PrototypeKnowledgeSupportSetsOnCopiedEncryptedDatabase) {
     ASSERT_TRUE(key);
     {
         MigrationOutcome outcome;
-        auto db = open_and_migrate(root->file("kg.db"), *key, knowledge::kg_migrations(), outcome);
+        auto db = open_and_migrate(root->file("kg.db"), *key, pre_evidence_kg_migrations(), outcome);
         ASSERT_TRUE(db);
         ASSERT_TRUE((*db)->exec(R"sql(
           INSERT INTO items(id,source,ext_id) VALUES(1,'files','a'),(2,'files','b'),(3,'files','c');
