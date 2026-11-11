@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <functional>
 #include <map>
 #include <limits>
 #include <mutex>
@@ -1564,19 +1565,55 @@ bool recheck_retained(Statement* recorded, const PassagePlan& plan, const std::o
     return recorded->col_int(0) != 0 && previous->updated_at != in.updated_at;
 }
 
+// Splits a stepped operation so that each step's cascade stays bounded. Withdrawing a finding or deleting an excerpt
+// also invalidates or removes every fact derived from it, through required facts, so a step is sized by that work
+// rather than by its count: each id costs 1 plus the facts that depend on what it supports (to the depth bound),
+// and a step takes ids in order up to kWithdrawStep of cost, at least one. `seeds` turns an id list into
+// "SELECT k, fact" rows: the facts each id currently supports. Costs are read kCostedPerLock ids per lock hold.
+std::vector<std::vector<long long>> cascade_steps(Database& db, const std::vector<long long>& ids,
+                                                  const std::function<std::string(const std::string&)>& seeds) {
+    constexpr size_t kCostedPerLock = 1024;
+    std::map<long long, long long> dependents;
+    for (size_t at = 0; at < ids.size(); at += kCostedPerLock) {
+        const std::lock_guard lock(db.mutex());
+        const std::vector<long long> part(ids.begin() + static_cast<std::ptrdiff_t>(at),
+                                          ids.begin() + static_cast<std::ptrdiff_t>(std::min(ids.size(), at + kCostedPerLock)));
+        auto s = db.prepare("WITH RECURSIVE dep(k,fact,d) AS (SELECT k,fact,0 FROM (" + seeds(id_list(part)) +
+                            ") UNION SELECT dep.k,s.fact_id,dep.d+1 FROM dep JOIN knowledge_support_facts x ON x.required_fact_id=dep.fact "
+                            "JOIN knowledge_support_sets s ON s.id=x.support_id WHERE dep.d<" + std::to_string(kMaxDerivationDepth) +
+                            ") SELECT k,sum(d>0) FROM dep GROUP BY k");
+        while (s.step()) dependents[s.col_int(0)] = s.col_int(1);
+    }
+    std::vector<std::vector<long long>> steps;
+    long long cost = 0;
+    for (const long long id : ids) {
+        const auto found = dependents.find(id);
+        const long long own = 1 + (found == dependents.end() ? 0 : found->second);
+        if (steps.empty() || (cost + own > static_cast<long long>(kWithdrawStep) && !steps.back().empty())) {
+            steps.emplace_back();
+            cost = 0;
+        }
+        steps.back().push_back(id);
+        cost += own;
+    }
+    return steps;
+}
+
 }  // namespace
 
 Status KgStore::withdraw_findings(const std::vector<long long>& chunk_ids) {
-    for (size_t at = 0; at < chunk_ids.size(); at += kWithdrawStep) {
+    const auto steps = cascade_steps(*db_, chunk_ids, [](const std::string& ids) {
+        return "SELECT r.chunk_id AS k,s.fact_id AS fact FROM relations r JOIN knowledge_support_sets s ON s.legacy_relation_id=r.id "
+               "WHERE r.chunk_id IN (" + ids + ") AND s.state IN ('current','unverified')";
+    });
+    for (size_t at = 0; at < steps.size(); ++at) {
         // Each step is its own transaction, and the lock is released between steps so that searches, the indexer
         // and a concurrent forget are not held behind one large item. The lock is not fair: pause so a waiting
         // thread actually gets it.
         if (at) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         const std::lock_guard lock(db_->mutex());
         if (!sqlite3_get_autocommit(db_->raw())) return {};
-        const std::vector<long long> part(chunk_ids.begin() + static_cast<std::ptrdiff_t>(at),
-                                          chunk_ids.begin() + static_cast<std::ptrdiff_t>(std::min(chunk_ids.size(), at + kWithdrawStep)));
-        const std::string ids = id_list(part);
+        const std::string ids = id_list(steps[at]);
         const auto step = db_->transaction([&]() -> Status {
             // A passage that had findings is queued again first, so that if the change never completes the
             // passage recovers its findings instead of silently keeping fewer.
@@ -1736,23 +1773,29 @@ Status KgStore::prepare_item_removal_steps(const std::string& source, const std:
     }
     if (Status s = withdraw_findings(passages); !s) return s;
     // Then the item's excerpts, which takes the supports, category assignments and review entries that rest on them.
-    for (;;) {
+    // Excerpts recorded meanwhile are deleted with the item.
+    std::vector<long long> excerpts;
+    {
+        const std::lock_guard lock(db_->mutex());
+        auto s = db_->prepare("SELECT e.id FROM knowledge_evidence e JOIN knowledge_revisions v ON v.id=e.revision_id WHERE v.item_id=?1 "
+                              "ORDER BY e.id");
+        s.bind(1, item_id);
+        while (s.step()) excerpts.push_back(s.col_int(0));
+    }
+    const auto steps = cascade_steps(*db_, excerpts, [](const std::string& ids) {
+        return "SELECT se.evidence_id AS k,s.fact_id AS fact FROM knowledge_support_evidence se "
+               "JOIN knowledge_support_sets s ON s.id=se.support_id WHERE se.evidence_id IN (" + ids + ")";
+    });
+    for (const auto& part : steps) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         const std::lock_guard lock(db_->mutex());
         if (!sqlite3_get_autocommit(db_->raw())) return {};
-        int removed = 0;
         const auto step = db_->transaction([&]() -> Status {
-            if (Status s = db_->exec("DELETE FROM knowledge_evidence WHERE id IN (SELECT e.id FROM knowledge_evidence e "
-                                     "JOIN knowledge_revisions v ON v.id=e.revision_id WHERE v.item_id=" + std::to_string(item_id) +
-                                     " LIMIT " + std::to_string(kWithdrawStep) + ")");
-                !s)
-                return s;
-            removed = db_->changes();
-            return {};
+            return db_->exec("DELETE FROM knowledge_evidence WHERE id IN (" + id_list(part) + ")");
         });
         if (!step) return step;
-        if (!removed) return {};
     }
+    return {};
 }
 
 namespace {

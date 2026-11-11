@@ -1641,7 +1641,7 @@ INSERT INTO knowledge_support_evidence(support_id,evidence_id) SELECT id,(id-1)/
     std::atomic<int> phase{0};  // which operation a wait overlapped, to attribute the longest ones
     const char* const phases[] = {"withdrawal and staging", "switch", "cleanup", "forget"};
     std::vector<long long> waits;
-    std::map<int, long long> longest;  // by phase
+    std::map<std::pair<int, int>, long long> longest;  // by the phases a wait started and ended in
     std::thread probe([&] {
         int n = 0;
         while (probing) {
@@ -1650,7 +1650,8 @@ INSERT INTO knowledge_support_evidence(support_id,evidence_id) SELECT id,(id-1)/
             store.set_meta("probe", std::to_string(++n));
             const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
             waits.push_back(ms);
-            longest[std::max(during, static_cast<int>(phase))] = std::max(longest[std::max(during, static_cast<int>(phase))], ms);
+            auto& slot = longest[{during, static_cast<int>(phase)}];
+            slot = std::max(slot, ms);
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     });
@@ -1680,7 +1681,9 @@ INSERT INTO knowledge_support_evidence(support_id,evidence_id) SELECT id,(id-1)/
     ASSERT_TRUE(removed);
     std::cout << "[ knowledge cascade ] concurrent small writes during the large revision and forget: " << waits.size()
               << " samples, p95 " << p95(waits) << " ms, max " << *std::max_element(waits.begin(), waits.end()) << " ms; longest wait during";
-    for (const auto& [during, ms] : longest) std::cout << " " << phases[during] << " " << ms << " ms;";
+    for (const auto& [during, ms] : longest)
+        std::cout << " " << phases[during.first] << (during.first == during.second ? "" : std::string(" into ") + phases[during.second]) << " "
+                  << ms << " ms;";
     std::cout << "\n";
     EXPECT_EQ(number("SELECT count(*) FROM knowledge_facts"), 90000);
     EXPECT_EQ(number("SELECT count(*) FROM knowledge_support_sets"), 90000);
