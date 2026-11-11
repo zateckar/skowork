@@ -394,7 +394,16 @@ public:
     // at most `related` current, not rejected facts that share its subject or object (same subject and predicate
     // first, then the same predicate and object, then any shared entity), plus the other side of each of its reviews
     // needing a recheck. Passages per fact are bounded by `passages`.
-    ConsistencyWork consistency_work(int limit, int related, int passages, const std::set<long long>& skip);
+    // With `similar` > 0, up to that many of the `related` places go to facts that share no entity or predicate but
+    // whose passages are semantically close to the fact's own (stored passage vectors of the active embedding, cosine
+    // at least `min_similarity`), so a fact about an unmerged alias or in other words is compared too. The vector scan
+    // runs without holding the store lock; the generation read first fences what is saved.
+    ConsistencyWork consistency_work(int limit, int related, int passages, const std::set<long long>& skip, int similar = 0,
+                                     double min_similarity = 1.0);
+    // For each of `chunks` that has a stored vector of the active embedding: up to `limit` other passages at cosine
+    // `min_similarity` or more, nearest first, from one binary scan keeping `coarse` candidates per passage.
+    std::map<long long, std::vector<std::pair<long long, double>>> similar_passages(const std::vector<long long>& chunks, int limit,
+                                                                                   int coarse, double min_similarity);
     // Facts awaiting consistency analysis (status).
     long long consistency_pending();
     // Up to `limit` current, not rejected facts that automatic categorization has not checked, skipping `skip`, read

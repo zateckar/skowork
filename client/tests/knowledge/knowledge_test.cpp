@@ -3080,6 +3080,99 @@ TEST(KnowledgeConsistency, UnavailableOrBudgetLimitedAnalysisStaysPendingAndUnsa
     EXPECT_FALSE(review_of(kg.svc->reviews(50), july, august).is_null());
 }
 
+// improve-skowork-and-knowledge-control 8.7: facts about the same thing under other names are compared through their
+// semantically similar passages (an unmerged project alias with a differently worded deadline), facts with unrelated
+// passages are not, and on a hub entity with many facts each fact is still compared with at most five others.
+TEST(KnowledgeConsistency, SimilarPassagesBringInFactsNamedDifferentlyWithinTheBounds) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    const std::map<std::string, std::string> files = {{"approved.txt", "The approved Phoenix deadline is June."},
+                                                      {"fenix.txt", "Project Fénix is due in July."},
+                                                      {"canteen.txt", "The canteen opens at noon."},
+                                                      {"hub.txt", "Phoenix milestones are listed here."}};
+    for (const auto& [file, text] : files) {
+        write_file(kg.folder / file, text);
+        ASSERT_TRUE(kg.svc->add_document(kg.file_path(file)));
+        kg.idle();
+    }
+    auto& store = kg.svc->store();
+    const auto chunk_of = [&](const std::string& file) {
+        const auto it = store.item("files", kg.file_path(file));
+        return it ? store.chunks_of_item(it->id).at(0).id : 0;
+    };
+    const auto entity = [&](const char* type, const std::string& name) { return store.resolve_entity(type, name, "", 1); };
+    const auto fact = [&](long long subject, const char* predicate, long long object, const std::string& file) -> long long {
+        const long long relation = store.add_relation(subject, predicate, object, 0.9, "", "", chunk_of(file));
+        const auto f = relation ? store.fact_of_relation(*store.relation(relation)) : std::nullopt;
+        return f.value_or(0);
+    };
+    const long long phoenix = entity("Project", "Phoenix");
+    const long long june = fact(phoenix, "deadline", entity("Date", "June"), "approved.txt");
+    const long long fenix = fact(entity("Project", "Fénix"), "due", entity("Date", "July"), "fenix.txt");  // not merged
+    const long long canteen = fact(entity("Place", "Canteen"), "opens_at", entity("Time", "Noon"), "canteen.txt");
+    ASSERT_TRUE(june && fenix && canteen);
+    std::vector<long long> milestones;
+    for (int i = 0; i < 30; ++i)
+        milestones.push_back(fact(phoenix, "milestone", entity("Milestone", "M" + std::to_string(i)), "hub.txt"));
+
+    // The embedding model finds the approved deadline and the Fénix passage nearly the same, the hub passage close,
+    // and the canteen unrelated to all of them.
+    const auto [model, dim] = store.active_embedding();
+    ASSERT_FALSE(model.empty());
+    const auto vec = [&, d = dim](std::initializer_list<std::pair<int, float>> parts) {
+        std::vector<float> v(static_cast<size_t>(d), 0.0f);
+        for (const auto& [i, x] : parts) v[static_cast<size_t>(i)] = x;
+        return v;
+    };
+    store.store_vectors({{chunk_of("approved.txt"), vec({{0, 1.0f}, {1, 1.0f}, {2, 0.1f}})},
+                         {chunk_of("fenix.txt"), vec({{0, 1.0f}, {1, 1.0f}, {3, 0.2f}})},
+                         {chunk_of("hub.txt"), vec({{0, 1.0f}, {1, 0.8f}, {4, 0.5f}})},
+                         {chunk_of("canteen.txt"), vec({{20, 1.0f}, {21, 1.0f}})}},
+                        model, dim);
+
+    std::vector<std::string> requests;
+    kg.gw.consistency = [&](const model::ChatRequest& r) {
+        requests.push_back(r.messages.back().content);
+        return R"({"categories": [], "conflicts": []})";
+    };
+    kg.idle();
+    ASSERT_FALSE(requests.empty());
+    // Every "Compare fact X with facts ..." line: the fact and those it is compared with.
+    std::vector<std::pair<long long, std::vector<long long>>> compared;
+    for (const auto& r : requests)
+        for (size_t at = r.find("Compare fact "); at != std::string::npos; at = r.find("Compare fact ", at + 1)) {
+            const size_t end = r.find(".\n", at);
+            std::istringstream line(r.substr(at + 13, end - at - 13));
+            long long target = 0;
+            std::string with, facts_word;
+            line >> target >> with >> facts_word;
+            std::vector<long long> others;
+            for (long long o; line >> o;) others.push_back(o);
+            compared.emplace_back(target, others);
+        }
+    const auto pair_compared = [&](long long a, long long b) {
+        return std::any_of(compared.begin(), compared.end(), [&](const auto& c) {
+            const auto has = [&](long long x) { return std::find(c.second.begin(), c.second.end(), x) != c.second.end(); };
+            return (c.first == a && has(b)) || (c.first == b && has(a));
+        });
+    };
+    EXPECT_TRUE(pair_compared(june, fenix)) << "the paraphrased deadline of the unmerged alias is compared";
+    for (const long long other : {june, fenix})
+        EXPECT_FALSE(pair_compared(canteen, other)) << "the unrelated fact is not compared";
+    EXPECT_FALSE(std::any_of(compared.begin(), compared.end(), [&](const auto& c) { return c.first == canteen; }));
+    // The hub: 31 facts share Phoenix, yet each fact is compared with at most five, and the similar ones keep their place.
+    ASSERT_FALSE(compared.empty());
+    for (const auto& [target, others] : compared) EXPECT_LE(others.size(), 5u) << "fact " << target;
+    const auto june_line = std::find_if(compared.begin(), compared.end(), [&](const auto& c) { return c.first == june; });
+    ASSERT_NE(june_line, compared.end());
+    EXPECT_NE(std::find(june_line->second.begin(), june_line->second.end(), fenix), june_line->second.end());
+    // Bounded requests: at most three facts to check per request, each with at most five others.
+    for (const auto& r : requests) {
+        size_t lines = 0;
+        for (size_t at = r.find("Compare fact "); at != std::string::npos; at = r.find("Compare fact ", at + 1)) ++lines;
+        EXPECT_LE(lines, 3u);
+    }
+    EXPECT_EQ(kg.svc->status()["consistency"]["pending"], 0);
+}
 // improve-skowork-and-knowledge-control 7.4: the knowledge tools and the Knowledge view read through one state filter.
 TEST(KnowledgeRetrieval, ToolsAndKnowledgeViewShareTheKnowledgeStateFilter) {
     Kg kg({{"knowledge.directory_enrichment", "off"}});

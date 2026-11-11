@@ -1237,6 +1237,10 @@ namespace {
 constexpr int kConsistencyBatch = 3;     // unchecked facts per consistency request
 constexpr int kConsistencyRelated = 5;   // related facts compared with each (beyond reviews awaiting a recheck)
 constexpr int kConsistencyPassages = 2;  // passages shown per fact
+constexpr int kConsistencySimilar = 2;   // of the related places, at most this many for semantically similar passages
+// The cosine of stored passage vectors above which two passages count as about the same thing. Not yet measured on the
+// production embedding model (task 1.4); below it a fact is compared only through shared entities and predicates.
+constexpr double kConsistencySimilarity = 0.75;
 
 // True when one fact's period ends before the other's begins. Dates are ISO prefixes of varying precision, so "2025"
 // does not end before "2025-03": a date that is a prefix of the other overlaps it.
@@ -1270,7 +1274,7 @@ bool KnowledgeService::consistency_step() {
         consistency_skip_since_ = now_ms();
     }
     const auto work = store_->consistency_work(consistency_single_left_ > 0 ? 1 : kConsistencyBatch, kConsistencyRelated,
-                                               kConsistencyPassages, consistency_skip_);
+                                               kConsistencyPassages, consistency_skip_, kConsistencySimilar, kConsistencySimilarity);
     if (work.targets.empty()) return false;
 
     // As for categorization, only passages of Sources permitted now are shown. A fact is compared only with related

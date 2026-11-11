@@ -202,6 +202,11 @@ With policy.knowledge.consistency on (on|off; default on) and extraction enabled
 - **WHEN** one Source says Alice led a project in 2024 and another says Bob leads it from 2025
 - **THEN** the dates are preserved and the facts are not treated as contradictory merely because their names differ
 
+#### Scenario: The same thing named differently
+- **WHEN** a fact names a project by an alias that was not merged with it, or states its claim with a differently worded predicate
+- **THEN** consistency analysis also compares it with facts whose passages are semantically similar, within the same per-request bounds and the shared daily budget, while facts with unrelated passages are not compared
+- **AND** on an entity with many facts, the number of facts compared with each new fact stays bounded
+
 ### Requirement: User Resolution Of Inconsistencies
 Review SHALL let the user keep both facts with distinct scope, prefer one with a reason, correct a fact or defer the decision. A resolution is tied to the evidence revisions reviewed, is reversible while its evidence remains, and is reopened when relevant new evidence invalidates its basis.
 

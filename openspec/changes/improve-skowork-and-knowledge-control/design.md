@@ -457,7 +457,7 @@ Add speech to the Policy bundle top-level glossary and also reconcile the alread
     
     `KnowledgeConsistency.UnavailableOrBudgetLimitedAnalysisStaysPendingAndUnsafeAnswersAreRefused` covers consistency off, extraction off, the model unavailable with backoff, a Source turned off between request and save, an answer citing an invented fact, and the spent shared budget. The `fuzz_kg_analysis` target fuzzes the validator with invented ids and spans, cycles, reversed duplicates, self-pairs, oversized numbers and text, repeated quotes, unknown kinds and invalid UTF-8. Its 200,000-run smoke test passes on GCC. 218 knowledge, storage, RPC and shell tests pass on the debug build.
   - **Limits:**
-    - Related facts come only from shared entities and predicates; semantic-similarity candidates are 8.7.
+    - Related facts came only from shared entities and predicates; semantic-similarity candidates came later (see "Similar candidates").
     - Whether two values or units disagree is the model's judgment; the client enforces only the period rule.
     - A fact is compared only with related facts the user may read now. Turning a Source on again does not recheck facts already compared without it.
     - The native Review workspace is part of 10.1, and the impact preview's conflict counts are part of 8.8.
@@ -590,6 +590,25 @@ Add speech to the Policy bundle top-level glossary and also reconcile the alread
     
     765 win, 70 UI and 8 analysis tests pass on the debug build.
   - **Limits:** the bound of 50 facts per name is enforced but not exercised by a test. Name quality on a real model is not measured (1.4).
+- **Similar candidates, 8.7, 2026-11-11:**
+  - **What is compared:** besides facts that share an entity or predicate, consistency analysis now also compares a fact with facts whose passages are semantically close to its own. That covers a project under an alias that was not merged and a claim in other words. Of the 5 related places per fact, at most 2 go to such facts. The facts that share an entity or predicate fill the rest, so the bound per fact and per request (3 facts, 5 related each, 2 passages per fact) is unchanged, and so is the use of the shared `extraction_daily_calls`.
+  - **How:** no model call is added. The stored passage vectors of the active embedding are compared:
+    - one binary scan per request serves the passages of all its facts, keeping 50 candidates each;
+    - the candidates are rescored with the int8 vectors, and a passage counts when its cosine is at least 0.75;
+    - nearest first, the facts a close passage currently supports, other than the fact itself, its own passages and facts already related, fill the similar places.
+    
+    Without stored vectors (embedding off or not yet run) nothing changes.
+  - **Locking:** `consistency_work` reads the generation and picks the facts to check under the store lock, releases it for the vector scan, and takes it again to read the related facts. Anything that changes meanwhile is refused at saving by the generation fence (`apply_analysis`), as before.
+  - **Tests:** `KnowledgeConsistency.SimilarPassagesBringInFactsNamedDifferentlyWithinTheBounds` sets the passage vectors by hand. It checks that:
+    - the June deadline of Phoenix is compared with "Project Fénix is due in July", an unmerged entity with another predicate, even next to a hub passage whose 30 milestone facts share Phoenix;
+    - the canteen fact, whose passage is unrelated, is compared with nothing;
+    - every fact is compared with at most 5 others, and a request checks at most 3 facts.
+    
+    With the similar places set to 0, the same test fails on the first check. The existing consistency tests pass unchanged; 766 win, 70 UI and 8 analysis tests pass on the debug build.
+  - **Limits:**
+    - The 0.75 threshold is not measured on the production embedding model; models differ in how similar unrelated passages score (1.4).
+    - Similarity is per passage, so a passage with many facts offers them in id order, newest first.
+    - The binary scan reads all stored vectors once per request. That is the cost of one semantic search, while holding the lock as search does.
 - **Progress audit and triage, 2026-11-09:** code was compared with every task. Tasks were split or added where code and specification disagree (2.4, 4.5, 5.6, 6.6), where a prerequisite was implicit (7.5, 7.6, 7.7, 8.5, 9.5), and narrowed where two tasks claimed the same evidence (1.4, 5.5, 6.5). Publication code in the control plane is unmounted library code with unit tests; no publication route, schema installation or policy key exists. The earlier note that multi-pass summarization is not enabled is superseded by the multi-pass note above. tasks.md carries the per-task status and the delivery order.
 - Final immutable speech artifact URL/mirror and manifest digest, verified package sizes, proxy behavior and actual language-fixture timing.
 - Actual configured model ids and context metadata, token-count strategy supported by those models, and measured compaction coverage/latency.

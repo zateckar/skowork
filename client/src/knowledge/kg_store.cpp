@@ -1760,8 +1760,9 @@ long long KgStore::category_pending() {
     return s.step() ? s.col_int(0) : 0;
 }
 
-ConsistencyWork KgStore::consistency_work(int limit, int related, int passage_limit, const std::set<long long>& skip) {
-    const std::lock_guard lock(db_->mutex());
+ConsistencyWork KgStore::consistency_work(int limit, int related, int passage_limit, const std::set<long long>& skip, int similar,
+                                          double min_similarity) {
+    std::unique_lock lock(db_->mutex());
     ConsistencyWork out;
     if (db_->user_version() < kKgConsistencySchemaVersion || limit <= 0 || related < 0 || passage_limit <= 0) return out;
     const auto generation = generation_of(*db_);
@@ -1788,6 +1789,23 @@ ConsistencyWork KgStore::consistency_work(int limit, int related, int passage_li
         out.facts.emplace(id, std::move(f));
         return true;
     };
+    std::vector<long long> targets;
+    for (long long id : ids) {
+        if (static_cast<int>(targets.size()) >= limit) break;
+        if (load(id)) targets.push_back(id);
+    }
+
+    // Passages semantically close to the targets' own, found without holding the lock (one scan for all of them).
+    std::map<long long, std::vector<std::pair<long long, double>>> near;
+    if (similar > 0 && related > 0 && !targets.empty()) {
+        std::vector<long long> own;
+        for (long long id : targets)
+            for (const auto& p : out.facts.at(id).passages) own.push_back(p.id);
+        lock.unlock();
+        near = similar_passages(own, similar * 2, 50, min_similarity);
+        lock.lock();
+    }
+
     // Related facts in order of relevance; each query is bounded and served by an index on the subject or object.
     const long long fetch = std::max(1, related) * 3LL;
     auto same_claim = db_->prepare("SELECT id FROM knowledge_facts WHERE subject=?1 AND predicate=?2 AND id<>?3 ORDER BY id DESC LIMIT ?4");
@@ -1796,9 +1814,14 @@ ConsistencyWork KgStore::consistency_work(int limit, int related, int passage_li
                                "UNION SELECT id FROM knowledge_facts WHERE object IN (?1,?2) AND id<>?3) ORDER BY id DESC LIMIT ?4");
     auto rechecks = db_->prepare("SELECT id,left_fact,right_fact FROM knowledge_conflicts "
                                  "WHERE (left_fact=?1 OR right_fact=?1) AND state='needs_recheck' AND cleared=0 ORDER BY id LIMIT 8");
-    for (long long id : ids) {
-        if (static_cast<int>(out.targets.size()) >= limit) break;
-        if (!load(id)) continue;
+    // The facts a passage currently supports (current revision, current or unverified support).
+    auto supported = db_->prepare(
+        "SELECT DISTINCT s.fact_id FROM knowledge_evidence e JOIN knowledge_revisions v ON v.id=e.revision_id AND v.current=1 "
+        "JOIN knowledge_support_evidence se ON se.evidence_id=e.id "
+        "JOIN knowledge_support_sets s ON s.id=se.support_id AND s.state IN ('current','unverified') "
+        "WHERE e.chunk_id=?1 AND s.fact_id<>?2 ORDER BY s.fact_id DESC LIMIT ?3");
+    for (long long id : targets) {
+        if (!out.facts.count(id)) continue;
         const KnowledgeFactRow fact = out.facts.at(id).fact;
         ConsistencyTarget target{id, {}};
         const auto add = [&](long long other) {
@@ -1815,8 +1838,36 @@ ConsistencyWork KgStore::consistency_work(int limit, int related, int passage_li
                 out.rechecks.push_back({rechecks.col_int(0), rechecks.col_int(1), rechecks.col_int(2)});
         }
         const size_t bound = target.related.size() + static_cast<size_t>(related);
+
+        // Similar candidates: facts of the nearest passages that are not the fact's own, at most `similar` of them.
+        std::vector<long long> close;
+        {
+            std::set<long long> own;
+            std::vector<std::pair<long long, double>> nearest;
+            for (const auto& p : out.facts.at(id).passages) {
+                own.insert(p.id);
+                if (const auto it = near.find(p.id); it != near.end()) nearest.insert(nearest.end(), it->second.begin(), it->second.end());
+            }
+            std::stable_sort(nearest.begin(), nearest.end(), [](const auto& x, const auto& y) { return x.second > y.second; });
+            for (const auto& [chunk, score] : nearest) {
+                if (static_cast<int>(close.size()) >= std::min(similar, related)) break;
+                if (own.count(chunk)) continue;
+                supported.reset();
+                supported.bind(1, chunk).bind(2, id).bind(3, static_cast<long long>(similar) * 2);
+                std::vector<long long> found;
+                while (supported.step()) found.push_back(supported.col_int(0));
+                for (long long other : found) {
+                    if (static_cast<int>(close.size()) >= std::min(similar, related)) break;
+                    if (std::find(close.begin(), close.end(), other) == close.end() &&
+                        std::find(target.related.begin(), target.related.end(), other) == target.related.end())
+                        close.push_back(other);
+                }
+            }
+        }
+        // Facts sharing an entity or predicate first, leaving room for the similar ones within the same bound.
+        const size_t structural = bound - close.size();
         for (auto* q : {&same_claim, &same_value, &shared}) {
-            if (target.related.size() >= bound) break;
+            if (target.related.size() >= structural) break;
             q->reset();
             if (q == &shared) q->bind(1, fact.subject).bind(2, fact.object);
             else q->bind(1, q == &same_claim ? fact.subject : fact.object).bind(2, fact.predicate);
@@ -1824,15 +1875,93 @@ ConsistencyWork KgStore::consistency_work(int limit, int related, int passage_li
             std::vector<long long> found;
             while (q->step()) found.push_back(q->col_int(0));
             for (long long other : found) {
-                if (target.related.size() >= bound) break;
+                if (target.related.size() >= structural) break;
                 add(other);
             }
+        }
+        for (long long other : close) {
+            if (target.related.size() >= bound) break;
+            add(other);
         }
         out.targets.push_back(std::move(target));
     }
     return out;
 }
 
+std::map<long long, std::vector<std::pair<long long, double>>> KgStore::similar_passages(const std::vector<long long>& chunks, int limit,
+                                                                                         int coarse, double min_similarity) {
+    std::map<long long, std::vector<std::pair<long long, double>>> out;
+    if (chunks.empty() || limit <= 0 || coarse <= 0) return out;
+    const auto [model, dim] = active_embedding();
+    if (model.empty() || dim <= 0) return out;
+    struct Query {
+        long long chunk = 0;
+        std::vector<std::uint8_t> bin, i8;
+        std::priority_queue<std::pair<int, long long>> best;  // the `coarse` smallest Hamming distances so far
+    };
+    std::vector<Query> queries;
+    long long mid = 0;
+    {
+        const std::lock_guard lock(db_->mutex());
+        mid = model_id(*db_, model, dim, false);
+        if (!mid) return out;
+        auto s = db_->prepare("SELECT b.bin,i.i8 FROM vec_bin b JOIN vec_i8 i ON i.model_id=b.model_id AND i.chunk_id=b.chunk_id "
+                              "WHERE b.model_id=?1 AND b.chunk_id=?2");
+        for (long long chunk : std::set<long long>(chunks.begin(), chunks.end())) {
+            s.reset();
+            s.bind(1, mid).bind(2, chunk);
+            if (s.step()) queries.push_back({chunk, s.col_blob(0), s.col_blob(1), {}});
+        }
+    }
+    if (queries.empty()) return out;
+    {
+        // One pass over the binary rows serves every query.
+        const std::lock_guard lock(db_->mutex());
+        auto s = db_->prepare("SELECT chunk_id,bin FROM vec_bin WHERE model_id=?1");
+        s.bind(1, mid);
+        while (s.step()) {
+            const long long id = s.col_int(0);
+            const auto b = s.col_blob(1);
+            for (auto& q : queries) {
+                if (id == q.chunk || b.size() != q.bin.size()) continue;
+                const int d = hamming(b.data(), q.bin.data(), b.size());
+                if (static_cast<int>(q.best.size()) < coarse) q.best.emplace(d, id);
+                else if (d < q.best.top().first) {
+                    q.best.pop();
+                    q.best.emplace(d, id);
+                }
+            }
+        }
+    }
+    std::map<long long, std::vector<long long>> candidates;
+    std::set<long long> all;
+    for (auto& q : queries)
+        for (; !q.best.empty(); q.best.pop()) {
+            candidates[q.chunk].push_back(q.best.top().second);
+            all.insert(q.best.top().second);
+        }
+    if (all.empty()) return out;
+    std::map<long long, std::vector<std::uint8_t>> vectors;
+    {
+        const std::lock_guard lock(db_->mutex());
+        auto s = db_->prepare("SELECT chunk_id,i8 FROM vec_i8 WHERE model_id=?1 AND chunk_id IN (" +
+                              id_list(std::vector<long long>(all.begin(), all.end())) + ")");
+        s.bind(1, mid);
+        while (s.step()) vectors.emplace(s.col_int(0), s.col_blob(1));
+    }
+    for (const auto& q : queries) {
+        auto& found = out[q.chunk];
+        for (long long id : candidates[q.chunk]) {
+            const auto it = vectors.find(id);
+            if (it == vectors.end() || it->second.size() != q.i8.size()) continue;
+            const double score = int8_cosine(it->second.data(), q.i8.data(), q.i8.size());
+            if (score >= min_similarity) found.emplace_back(id, score);
+        }
+        std::sort(found.begin(), found.end(), [](const auto& x, const auto& y) { return x.second > y.second || (x.second == y.second && x.first > y.first); });
+        if (static_cast<int>(found.size()) > limit) found.resize(static_cast<size_t>(limit));
+    }
+    return out;
+}
 long long KgStore::consistency_pending() {
     const std::lock_guard lock(db_->mutex());
     if (db_->user_version() < kKgConsistencySchemaVersion) return 0;
