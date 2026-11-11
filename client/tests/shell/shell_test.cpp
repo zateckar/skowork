@@ -5493,3 +5493,169 @@ TEST(ShellSkills, RestorePreviousVersionIsOfferedOnlyWithAKeptVersion) {
     ASSERT_TRUE(w.until([&] { return read_text(private_dir / "agent-report" / "SKILL.md").find("First text.") != std::string::npos; }));
     EXPECT_NE(read_text(kept_dir / "agent-report" / "SKILL.md").find("Second text."), std::string::npos);
 }
+
+
+// add-api-connectors 6.3 and 6.4 (client/api-connectors Connector Status, Personal Token Entry): the Connectors section
+// shows each API connector with its kind, state and usable tools, the reason none is usable ("add your token", "token
+// rejected, replace it"), and when a token was set but never its text. Add token opens a masked field; Save sends the
+// token once in connectors.token.set and clears the field; Remove token sends connectors.token.remove.
+TEST(ShellPages, ConnectorsShowApiStatesAndTakeAPersonalTokenOnce) {
+    Fixture f;
+    const std::u16string token = u"pat-91b2c7-SECRET-VALUE";
+    const std::string token8 = "pat-91b2c7-SECRET-VALUE";
+    std::mutex mx;
+    std::vector<std::pair<std::string, json>> calls;
+    const json set_at = {{"set", true}, {"set_at", "2026-11-10T10:00:05.000Z"}};
+    json conns = json::array({
+        {{"id", "orders"}, {"name", "Orders"}, {"kind", "api"}, {"auth", "user-pat"}, {"state", "ready"}, {"offered_tools", 2}, {"token", set_at}},
+        {{"id", "jira"}, {"name", "Jira"}, {"kind", "api"}, {"auth", "user-pat"}, {"state", "needs-token"}, {"offered_tools", 0},
+         {"help_text", "Create a personal access token in your Jira profile."}, {"help_link", "https://jira.example/profile"}, {"token", {{"set", false}}}},
+        {{"id", "wiki"}, {"name", "Wiki"}, {"kind", "api"}, {"auth", "user-pat"}, {"state", "token-rejected"}, {"offered_tools", 0}, {"token", set_at}},
+        {{"id", "weather"}, {"name", "Weather"}, {"kind", "api"}, {"auth", "none"}, {"state", "not-applicable"}, {"offered_tools", 1}},
+    });
+    f.rpc.add("connectors.list", RpcExposure::ui, [&](const json&) -> Result<json> {
+        std::lock_guard l(mx);
+        return json{{"connectors", conns}};
+    });
+    f.rpc.add("connectors.token.set", RpcExposure::ui, [&](const json& p) -> Result<json> {
+        std::lock_guard l(mx);
+        calls.emplace_back("set", p);
+        for (auto& c : conns)
+            if (c["id"] == p["id"]) {
+                c["state"] = "ready";
+                c["offered_tools"] = 3;
+                c["token"] = set_at;
+            }
+        return json{{"id", p["id"]}, {"state", "ready"}, {"token", set_at}};
+    });
+    f.rpc.add("connectors.token.remove", RpcExposure::ui, [&](const json& p) -> Result<json> {
+        std::lock_guard l(mx);
+        calls.emplace_back("remove", p);
+        for (auto& c : conns)
+            if (c["id"] == p["id"]) {
+                c["state"] = "needs-token";
+                c["offered_tools"] = 0;
+                c["token"] = {{"set", false}};
+            }
+        return json{{"id", p["id"]}, {"state", "needs-token"}, {"token", nullptr}};
+    });
+    const auto call_count = [&] {
+        std::lock_guard l(mx);
+        return calls.size();
+    };
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    // The texts of the labels in one connector's item (they are not separate accessibility elements).
+    const auto labels = [&w](const std::string& id) {
+        std::vector<std::u16string> out;
+        w.with(id, [&](ui::Node& n) {
+            std::function<void(ui::Node&)> walk = [&](ui::Node& x) {
+                if (auto* l = dynamic_cast<ui::Label*>(&x)) out.push_back(l->text());
+                for (const auto& c : x.children()) walk(*c);
+            };
+            walk(n);
+            return true;
+        });
+        return out;
+    };
+    const auto has_label = [&](const std::string& id, const std::u16string& text) {
+        const auto all = labels(id);
+        return std::find(all.begin(), all.end(), text) != all.end();
+    };
+
+    w.run([&] { w.main().open("#/settings"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("api-connector-wiki"); }));
+    Announcements said(w);  // the window exists once the page is open
+    {
+        Uia uia;
+        auto m = uia.by_id(w.hwnd());
+        EXPECT_EQ(m[L"api-connector-orders"].name, L"Orders, API, Ready");
+        EXPECT_EQ(m[L"api-connector-jira"].name, L"Jira, API, Needs a token");
+        EXPECT_EQ(m[L"api-connector-wiki"].name, L"Wiki, API, Token rejected");
+        EXPECT_EQ(m[L"api-connector-weather"].name, L"Weather, API, Ready");
+        EXPECT_EQ(m[L"settings-connector-token-open-orders"].name, L"Replace token");
+        EXPECT_EQ(m[L"settings-connector-token-open-jira"].name, L"Add token");
+        EXPECT_EQ(m[L"settings-connector-token-open-wiki"].name, L"Add token");
+        EXPECT_TRUE(has(m, L"settings-connector-token-remove-orders"));
+        EXPECT_TRUE(has(m, L"settings-connector-token-remove-wiki"));
+        EXPECT_FALSE(has(m, L"settings-connector-token-remove-jira"));   // no token to remove
+        EXPECT_FALSE(has(m, L"settings-connector-token-open-weather"));  // no personal token for this connector
+    }
+    EXPECT_TRUE(has_label("api-connector-orders", u"2 of 2 tools usable"));
+    EXPECT_TRUE(has_label("api-connector-orders", u"Token set on 2026-11-10 10:00 UTC"));
+    EXPECT_TRUE(has_label("api-connector-jira", u"Warning: no usable tools: add your token to use this connector"));
+    EXPECT_TRUE(has_label("api-connector-jira", u"No token set"));
+    EXPECT_TRUE(has_label("api-connector-jira", u"Create a personal access token in your Jira profile."));
+    EXPECT_TRUE(has_label("api-connector-jira", u"Help: https://jira.example/profile"));
+    EXPECT_TRUE(has_label("api-connector-wiki", u"Warning: no usable tools: token rejected, replace it"));
+    EXPECT_TRUE(has_label("api-connector-weather", u"1 of 1 tools usable"));
+
+    // Add token: a masked field; Save sends the typed token once and clears the field.
+    ASSERT_TRUE(w.invoke("settings-connector-token-open-jira"));
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-connector-token-jira"); }));
+    // The edit control has the password style: the typed characters are not shown.
+    bool masked = false;
+    ASSERT_TRUE(w.until([&] {
+        w.with("settings-connector-token-jira", [&](ui::Node& n) {
+            const HWND h = static_cast<ui::TextField&>(n).hwnd();
+            masked = h && (::GetWindowLongW(h, GWL_STYLE) & ES_PASSWORD) != 0;
+            return true;
+        });
+        return masked;
+    }));
+    w.type("settings-connector-token-jira", token);
+    ASSERT_TRUE(w.invoke("settings-connector-token-save-jira"));
+    ASSERT_TRUE(w.until([&] { return call_count() == 1; }));
+    {
+        std::lock_guard l(mx);
+        EXPECT_EQ(calls[0].first, "set");
+        EXPECT_EQ(calls[0].second, (json{{"id", "jira"}, {"token", token8}}));
+    }
+    ASSERT_TRUE(w.until([&] { return said.heard(u"Token saved."); }));
+    ASSERT_TRUE(w.until([&] { return !w.exists("settings-connector-token-jira") && has_label("api-connector-jira", u"3 of 3 tools usable"); }));
+    {
+        Uia uia;
+        auto m = uia.by_id(w.hwnd());
+        EXPECT_EQ(m[L"api-connector-jira"].name, L"Jira, API, Ready");
+        // The token is in no element's name, no field and no setting.
+        const std::wstring wtoken(token.begin(), token.end());
+        for (const auto& [id, el] : m) EXPECT_EQ(el.name.find(wtoken), std::wstring::npos) << std::string(id.begin(), id.end());
+    }
+    w.run([&] {
+        for (ui::TextField* tf : w.shell().ui().fields) EXPECT_EQ(tf->text().find(token), std::u16string::npos);
+    });
+    const auto settings = (*f.rpc.find("settings.get", false))(json::object());
+    ASSERT_TRUE(settings);
+    EXPECT_EQ(settings->dump().find(token8), std::string::npos);
+
+    // Remove token.
+    ASSERT_TRUE(w.invoke("settings-connector-token-remove-orders"));
+    ASSERT_TRUE(w.until([&] { return call_count() == 2; }));
+    {
+        std::lock_guard l(mx);
+        EXPECT_EQ(calls[1].first, "remove");
+        EXPECT_EQ(calls[1].second, (json{{"id", "orders"}}));
+    }
+    ASSERT_TRUE(w.until([&] { return said.heard(u"Token removed."); }));
+    ASSERT_TRUE(w.until([&] { return has_label("api-connector-orders", u"No token set"); }));
+
+    // Cancel discards a typed token without sending it.
+    ASSERT_TRUE(w.invoke("settings-connector-token-open-orders"));
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-connector-token-orders"); }));
+    w.type("settings-connector-token-orders", u"typed-but-cancelled");
+    ASSERT_TRUE(w.invoke("settings-connector-token-cancel-orders"));
+    ASSERT_TRUE(w.until([&] { return !w.exists("settings-connector-token-orders"); }));
+    ASSERT_TRUE(w.invoke("settings-connector-token-open-orders"));
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-connector-token-orders"); }));
+    std::u16string reopened = u"?";
+    w.with("settings-connector-token-orders", [&](ui::Node& n) {
+        reopened = static_cast<ui::TextField&>(n).text();
+        return true;
+    });
+    EXPECT_TRUE(reopened.empty());
+    EXPECT_EQ(call_count(), 2u);
+
+    std::vector<std::string> problems;
+    w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
+    EXPECT_TRUE(problems.empty()) << problems.front();
+}

@@ -425,6 +425,8 @@ TEST(AppsBridge, ListedConfirmedReadToolsOnlyUnderPolicy) {
 // ---- 2.4 Tools in a Run ------------------------------------------------------------------------------------------------
 
 TEST(AppsTools, CreateWriteOpenWithConfirmationUnderPolicyAndModeOff) {
+    // apps.create and apps.open are not offered without the Node runtime (a checkout that has not fetched it).
+    if (!node_present()) GTEST_SKIP() << "client/runtime/node is missing (dev/scripts/fetch-node-runtime.ps1)";
     Rig r;
     std::vector<std::string> opened;
     AppToolsEnv te;

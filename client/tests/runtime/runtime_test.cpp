@@ -2,7 +2,9 @@
 // find_tools, Questions and approvals, idempotent resume, the message queue and cancellation, untrusted-data
 // delimiters, large tool results, compaction and subagents, and the red-team pass of add-policy-and-sandbox (5.2). The
 // model is scripted; nothing here needs a network.
+#include "api_connectors/connectors.h"
 #include "app/skill_save_tool.h"
+#include "support/http_server.h"
 #include "support/runtime_harness.h"
 #include <sstream>
 
@@ -3795,4 +3797,111 @@ TEST(RuntimeSkillSave, OfferedToolSetHasNoSharingTool) {
         EXPECT_EQ(tool.find("share"), std::string::npos) << tool;
         EXPECT_EQ(tool.find("publish"), std::string::npos) << tool;
     }
+}
+
+// add-api-connectors 6.2 (client/api-connectors Risk And Approval, API Results Are Untrusted): with the real policy
+// handler and the connector manager on a fake control plane, a read operation runs at once and its result is untrusted
+// with provenance api:<connector>/<operation>; a write operation under policy approve asks first and a rejected call is
+// never sent; a call that policy denies is never sent.
+TEST(RuntimeApiConnectors, WriteAsksRejectedAndDeniedCallsAreNotSentAndResultsAreUntrusted) {
+    test::LoopbackHttpServer cp([](const test::LoopbackHttpServer::Request&) {
+        return test::LoopbackHttpServer::response(200, "OK", R"({"status":200,"body":{"id":"42","state":"open"},"truncated":false})",
+                                                  "Content-Type: application/json\r\n");
+    });
+    const json schema = {{"type", "object"}, {"properties", {{"id", {{"type", "string"}}}}}, {"required", json::array({"id"})}, {"additionalProperties", false}};
+    const auto op = [&](const std::string& name, const std::string& risk) {
+        return json{{"name", name}, {"description", "Works on one order by its id, in the order service of the warehouse."}, {"risk", risk}, {"input_schema", schema}};
+    };
+    const json entry = {{"id", "orders-api"}, {"name", "Orders"}, {"kind", "api"}, {"auth", "none"}, {"state", "ready"},
+                        {"operations", json::array({op("getOrder", "read"), op("createOrder", "external"), op("cancelOrder", "external")})}};
+    policy::PolicyBundle b;
+    b.sub = "u";
+    b.ver = 1;
+    b.exp = 4102444800;
+    b.policy = {{"mcp", {{"servers", json::array({entry})}}},
+                {"tools", {{"risk", {{"read", "allow"}, {"write-local", "approve"}, {"external", "approve"}, {"destructive", "deny"}}},
+                           {"rules", {{"api:orders-api/cancelOrder", "deny"}}}}}};
+    auto p = std::make_shared<const policy::EffectivePolicy>(b);
+
+    Env env;
+    policy::EnforcerEnv e;
+    e.policy = [p] { return p; };
+    e.workspace = narrow(env.tmp.path.wstring());
+    e.data_root = narrow(env.tmp.path.wstring());
+    env.policy_hook = std::make_shared<policy::PolicyEnforcer>(e);
+    env.make_runtime();
+    connectors::ManagerEnv ce;
+    ce.policy = [p] { return p; };
+    ce.request = [&cp](const std::string& method, const std::string& path, const std::string& body) -> Result<HttpResponse> {
+        HttpRequest r;
+        r.method = method;
+        r.url = cp.url("/" + path);
+        r.body = body;
+        if (!body.empty()) r.headers.emplace_back("Content-Type", "application/json");
+        r.connect_timeout = 3s;
+        r.idle_timeout = 10s;
+        return http().send(r);
+    };
+    ce.add_tool = [&env](ToolDef d) { return env.rt->add_tool(std::move(d)); };
+    ce.remove_tool = [&env](const std::string& id) { return env.rt->remove_tool(id); };
+    connectors::ConnectorManager mgr(std::move(ce));
+    mgr.apply();
+    env.start();
+    const auto sent = [&cp](const std::string& operation) {
+        size_t n = 0;
+        for (const auto& r : cp.requests())
+            if (r.path == "/api/v1/connectors/orders-api/operations/" + operation + "/call") ++n;
+        return n;
+    };
+
+    // The operations are loaded through find_tools like any deferred tool; the denied one is withheld.
+    env.model.push_calls({{"c0", "find_tools", {{"query", "order"}}}});
+    // A read operation runs without asking; its result is untrusted and names the operation.
+    env.model.push_calls({{"c1", "api:orders-api/getOrder", {{"id", "42"}, {"rationale", "look up the order"}}},
+                          {"c2", "api:orders-api/cancelOrder", {{"id", "42"}, {"rationale", "the user asked"}}}});
+    env.model.push_calls({{"c3", "api:orders-api/createOrder", {{"id", "43"}, {"rationale", "the user asked"}}}});
+    env.model.push_text("not created");
+    const std::string thread_id = env.thread();
+    const std::string run_id = env.run(thread_id, "look up order 42, cancel it and create order 43");
+    ASSERT_TRUE(env.wait(run_id, RunState::interrupted)) << "state " << static_cast<int>(env.rec(run_id).state) << "; c1: " << env.tool_content(run_id, "c1")
+                                                         << "; c2: " << env.tool_content(run_id, "c2") << "; c3: " << env.tool_content(run_id, "c3");
+    EXPECT_NE(env.tool_content(run_id, "c1").find("\"id\":\"42\""), std::string::npos) << env.tool_content(run_id, "c1");
+    bool untrusted = false;
+    for (const auto& ev : env.rt->events(run_id))
+        if (ev.kind == "tool_result" && jstr(ev.payload, "call_id") == "c1") {
+            const json* prov = jobj(ev.payload, "provenance");
+            ASSERT_NE(prov, nullptr);
+            EXPECT_EQ(jstr(*prov, "source_kind"), "api");
+            EXPECT_EQ(jstr(*prov, "source_id"), "orders-api/getOrder");
+            untrusted = !jbool(*prov, "trusted", true);
+        }
+    EXPECT_TRUE(untrusted);
+    EXPECT_EQ(sent("getOrder"), 1u);
+
+    const std::string found = env.tool_content(run_id, "c0");
+    EXPECT_NE(found.find("api:orders-api/getOrder"), std::string::npos) << found;
+    EXPECT_NE(found.find("api:orders-api/createOrder"), std::string::npos) << found;
+    EXPECT_EQ(found.find("cancelOrder"), std::string::npos) << found;  // withdrawn by the connector manager, not registered
+
+    // Denied by policy: refused, never sent.
+    EXPECT_NE(env.tool_content(run_id, "c2"), "<no result>");
+    EXPECT_EQ(env.tool_content(run_id, "c2").find("\"state\":\"open\""), std::string::npos) << env.tool_content(run_id, "c2");
+    EXPECT_EQ(sent("cancelOrder"), 0u);
+
+    // A write operation under approve: the run waits for the user, nothing is sent yet.
+    const auto actions = env.rt->pending_actions(thread_id);
+    ASSERT_EQ(actions.size(), 1u);
+    EXPECT_EQ(actions[0].kind, "approval");
+    const auto action = *env.rt->store().action(actions[0].id);
+    EXPECT_EQ(jstr(action.payload, "tool"), "api:orders-api/createOrder");
+    EXPECT_EQ(jstr(action.payload, "risk"), "external");
+    EXPECT_EQ(sent("createOrder"), 0u);
+
+    // Rejected: still never sent.
+    ASSERT_TRUE(env.rt->resolve_approval(actions[0].id, ApprovalResolution::reject()));
+    ASSERT_TRUE(env.wait(run_id, RunState::succeeded));
+    EXPECT_NE(env.tool_content(run_id, "c3").find("rejected"), std::string::npos) << env.tool_content(run_id, "c3");
+    EXPECT_EQ(sent("createOrder"), 0u);
+    EXPECT_EQ(cp.requests().size(), 1u);
+    mgr.shutdown();
 }
