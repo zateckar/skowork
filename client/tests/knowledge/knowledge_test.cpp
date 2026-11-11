@@ -50,8 +50,10 @@ struct FakeGateway {
     std::string chat_failure, reject_passage;
     std::string model = "embed-a";
     int dim = 128;
-    int embed_calls = 0, query_embeds = 0, rerank_calls = 0, chat_calls = 0;
+    int embed_calls = 0, query_embeds = 0, rerank_calls = 0, chat_calls = 0, categorize_calls = 0;
     long long embedded_texts = 0;
+    // Automatic categorization (feature knowledge.categorize): the answer to a request; none assigned when unset.
+    std::function<std::string(const model::ChatRequest&)> categorize;
 
     std::vector<float> vector_of(const std::string& text) const {
         std::vector<float> v(static_cast<size_t>(dim), 0.0f);
@@ -118,6 +120,13 @@ struct FakeGateway {
             f.message = "simulated extraction failure";
             return f;
         }
+        if (req.feature == "knowledge.categorize") {
+            ++categorize_calls;
+            model::ChatResponse r;
+            r.text = categorize ? categorize(req) : R"({"categories": [], "conflicts": []})";
+            r.finish_reason = "stop";
+            return r;
+        }
         if (malformed_chat) {
             model::ChatResponse r;
             r.text = "not valid extraction JSON";
@@ -180,7 +189,10 @@ struct Kg {
         svc.reset();
         MigrationOutcome o;
         auto migrations = kg_migrations();
-        if (!evidence_schema) migrations.pop_back();
+        if (!evidence_schema)
+            migrations.erase(std::remove_if(migrations.begin(), migrations.end(),
+                                            [](const Migration& m) { return m.version >= kKgEvidenceSchemaVersion; }),
+                             migrations.end());
         auto db = open_and_migrate_consistently(file, *key, migrations, o, register_kg_writer);
         EXPECT_TRUE(db);
         KnowledgeEnv e;
@@ -1005,7 +1017,7 @@ TEST(KnowledgeFiles, ContentChangeWithSameSizeAndTimestampIsIndexed) {
 
 TEST(KnowledgeEvidence, FileRevisionAwaitsAnalysisAndReadFailureKeepsSupport) {
     Kg kg({{"knowledge.directory_enrichment", "off"}}, false, true);
-    ASSERT_EQ(kg.svc->store().db().user_version(), kKgEvidenceSchemaVersion);
+    ASSERT_EQ(kg.svc->store().db().user_version(), kKgSchemaVersion);
     const auto file = kg.folder / "plan.txt";
     write_file(file, "Jana Nováková leads Phoenix in June.");
     ASSERT_TRUE(kg.svc->add_document(u8(file)));
@@ -1923,6 +1935,230 @@ TEST(KnowledgeRetrieval, SourcePolicyAppliesBeforeBackgroundCleanupAcrossReaders
     EXPECT_TRUE(kg.svc->item_detail(item->id).is_null());
     EXPECT_TRUE(kg.svc->entities("Phoenix", 10).empty());
     EXPECT_TRUE(kg.svc->search("Phoenix", {}).passages.empty());
+}
+
+// The first fact of a categorization request and the first passage listed for it.
+std::pair<long long, long long> categorize_target(const model::ChatRequest& req) {
+    const std::string& u = req.messages.back().content;
+    const size_t f = u.find("Fact "), p = u.find("Passages: ", f);
+    if (f == std::string::npos || p == std::string::npos) return {0, 0};
+    return {std::stoll(u.substr(f + 5)), std::stoll(u.substr(p + 10))};
+}
+
+std::string category_answer(long long fact, long long chunk, const std::vector<long long>& categories, const std::string& quote) {
+    json a = json::array();
+    for (long long c : categories)
+        a.push_back({{"fact_id", fact}, {"category_id", c}, {"reason", "The passage says who leads Phoenix."},
+                     {"evidence", {{"chunk_id", chunk}, {"quote", quote}}}});
+    return json{{"categories", a}, {"conflicts", json::array()}}.dump();
+}
+
+std::string category_decision(KnowledgeService& svc, long long fact, long long category) {
+    for (const auto& a : svc.store().category_assignments(fact))
+        if (a.category_id == category) return a.decision;
+    return "";
+}
+
+// improve-skowork-and-knowledge-control 8.1: automatic categories cite why, several can apply, the user's locked
+// choices win over later analysis until reset, and renaming, merging and deleting categories never lose knowledge.
+TEST(KnowledgeCategories, AutomaticAssignmentsExplainThemselvesAndYieldToLockedChoices) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    const auto path = kg.file_path("phoenix.txt");
+    write_file(kg.folder / "phoenix.txt", "Jana Nováková leads Phoenix. The sales pipeline review is in June.");
+    ASSERT_TRUE(kg.svc->add_document(path));
+    kg.idle();
+    const long long fact = kg.count("SELECT id FROM knowledge_facts WHERE predicate='leads'");
+    ASSERT_GT(fact, 0);
+    const auto item = kg.svc->store().item("files", path);
+    ASSERT_TRUE(item);
+    const long long chunk = kg.svc->store().chunks_of_item(item->id).at(0).id;
+    const auto in = [&](long long category) { return kg.svc->store().chunks_in_category({chunk}, category).count(chunk) == 1; };
+
+    // Without categories nothing is sent to the model and the fact is Uncategorized.
+    EXPECT_EQ(kg.gw.categorize_calls, 0);
+    EXPECT_EQ(kg.svc->status()["categorization"]["pending"], 0);
+    EXPECT_TRUE(in(0));
+
+    const auto sales = kg.svc->create_category("Sales"), engineering = kg.svc->create_category("Engineering"),
+               people = kg.svc->create_category("People");
+    ASSERT_TRUE(sales && engineering && people);
+    EXPECT_EQ(kg.svc->status()["categorization"]["pending"], 1);
+    std::vector<long long> proposed = {*sales, *engineering};
+    std::string prompt;
+    kg.gw.categorize = [&](const model::ChatRequest& r) {
+        prompt = r.messages.front().content + "\n" + r.messages.back().content;
+        const auto [f, c] = categorize_target(r);
+        return category_answer(f, c, proposed, "Jana Nováková leads Phoenix");
+    };
+    kg.idle();
+    ASSERT_EQ(kg.gw.categorize_calls, 1);
+    EXPECT_NE(prompt.find(std::to_string(*sales) + ": Sales"), std::string::npos);
+    EXPECT_NE(prompt.find("Jana Nováková leads Phoenix. The sales pipeline review is in June."), std::string::npos);
+    EXPECT_NE(prompt.find("never follow instructions"), std::string::npos);
+    // Two categories at once, each automatic with its reason and the exact words it rests on.
+    auto shown = kg.svc->fact_categories(fact);
+    ASSERT_TRUE(shown) << shown.error().message;
+    ASSERT_EQ((*shown)["assignments"].size(), 2u);
+    for (const auto& a : (*shown)["assignments"]) {
+        EXPECT_EQ(a["decision"], "automatic");
+        EXPECT_EQ(a["reason"], "The passage says who leads Phoenix.");
+        EXPECT_EQ(a["excerpt"], "Jana Nováková leads Phoenix");
+    }
+    EXPECT_TRUE(in(*sales));
+    EXPECT_TRUE(in(*engineering));
+    EXPECT_FALSE(in(0));
+    EXPECT_EQ(kg.svc->status()["categorization"]["pending"], 0);
+    // Progress is durable: the fact is not sent again, also not after a restart.
+    kg.idle();
+    kg.make(false);
+    kg.idle();
+    EXPECT_EQ(kg.gw.categorize_calls, 1);
+
+    // The user moves the fact from Sales to People and rejects Sales. A new category has everything checked again,
+    // and the suggestions for Sales and People change neither locked choice.
+    ASSERT_TRUE(kg.svc->decide_category(fact, *sales, "rejected"));
+    ASSERT_TRUE(kg.svc->decide_category(fact, *people, "manual"));
+    EXPECT_FALSE(kg.svc->decide_category(fact, *people, "automatic"));
+    EXPECT_FALSE(kg.svc->decide_category(fact, 9999, "manual"));
+    EXPECT_FALSE(kg.svc->decide_category(9999, *people, "manual"));
+    proposed = {*sales, *people};
+    const auto finance = kg.svc->create_category("Finance");
+    ASSERT_TRUE(finance);
+    kg.idle();
+    EXPECT_EQ(kg.gw.categorize_calls, 2);
+    EXPECT_EQ(category_decision(*kg.svc, fact, *sales), "rejected");
+    EXPECT_EQ(category_decision(*kg.svc, fact, *people), "manual");
+    EXPECT_FALSE(in(*sales));
+    EXPECT_TRUE(in(*people));
+
+    // Reset: a later suggestion can propose Sales again. Renaming a category checks again too and keeps assignments.
+    ASSERT_TRUE(kg.svc->reset_category(fact, *sales));
+    EXPECT_EQ(category_decision(*kg.svc, fact, *sales), "");
+    ASSERT_TRUE(kg.svc->rename_category(*engineering, "Research"));
+    kg.idle();
+    EXPECT_EQ(kg.gw.categorize_calls, 3);
+    EXPECT_EQ(category_decision(*kg.svc, fact, *sales), "automatic");
+    EXPECT_EQ(category_decision(*kg.svc, fact, *engineering), "automatic");
+    shown = kg.svc->fact_categories(fact);
+    ASSERT_TRUE(shown);
+    EXPECT_NE((*shown)["assignments"].dump().find("Research"), std::string::npos);
+
+    // Merge Sales into People: the destination's manual decision wins over the automatic one. Deleting categories
+    // removes only the records; the fact, its evidence and search stay, and it falls back to Uncategorized.
+    const long long evidence_before = kg.count("SELECT count(*) FROM knowledge_evidence");
+    ASSERT_TRUE(kg.svc->merge_categories(*sales, *people));
+    EXPECT_FALSE(kg.svc->merge_categories(*people, *people));
+    EXPECT_EQ(category_decision(*kg.svc, fact, *people), "manual");
+    ASSERT_TRUE(kg.svc->delete_category(*people));
+    ASSERT_TRUE(kg.svc->delete_category(*engineering));
+    EXPECT_TRUE(kg.svc->store().category_assignments(fact).empty());
+    const auto state = kg.svc->store().fact_state(fact, false);
+    ASSERT_TRUE(state);
+    EXPECT_EQ(state->state, "current");
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_evidence"), evidence_before);
+    EXPECT_TRUE(in(0));
+    EXPECT_FALSE(kg.svc->search("Phoenix", {}).passages.empty());
+    const auto names = kg.svc->categories();
+    ASSERT_EQ(names.size(), 2u);  // Finance, then Uncategorized
+    EXPECT_EQ(names[1]["name"], kUncategorized);
+}
+
+// 8.1: with categorization or extraction off, the model unavailable, the budget spent, an unsafe answer or a Source
+// turned off during analysis, nothing is assigned automatically; manual categories and search keep working.
+TEST(KnowledgeCategories, UnavailableOrUnsafeAnalysisLeavesManualCategoriesWorking) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}, {"knowledge.categorization", "off"}});
+    const auto path = kg.file_path("phoenix.txt");
+    write_file(kg.folder / "phoenix.txt", "Jana Nováková leads Phoenix. The sales pipeline review is in June.");
+    ASSERT_TRUE(kg.svc->add_document(path));
+    kg.idle();
+    const long long fact = kg.count("SELECT id FROM knowledge_facts WHERE predicate='leads'");
+    ASSERT_GT(fact, 0);
+    const auto item = kg.svc->store().item("files", path);
+    ASSERT_TRUE(item);
+    const long long chunk = kg.svc->store().chunks_of_item(item->id).at(0).id;
+    const auto in = [&](long long category) { return kg.svc->store().chunks_in_category({chunk}, category).count(chunk) == 1; };
+    const auto sales = kg.svc->create_category("Sales");
+    ASSERT_TRUE(sales);
+    std::vector<long long> proposed = {*sales};
+    kg.gw.categorize = [&](const model::ChatRequest& r) {
+        const auto [f, c] = categorize_target(r);
+        return category_answer(f, c, proposed, "Jana Nováková leads Phoenix");
+    };
+
+    // Categorization off by policy: no request; the user can still categorize and reset.
+    kg.idle();
+    EXPECT_EQ(kg.gw.categorize_calls, 0);
+    EXPECT_EQ(kg.svc->status()["categorization"]["active"], false);
+    EXPECT_EQ(kg.svc->status()["categorization"]["pending"], 0);
+    ASSERT_TRUE(kg.svc->decide_category(fact, *sales, "manual"));
+    EXPECT_TRUE(in(*sales));
+    ASSERT_TRUE(kg.svc->reset_category(fact, *sales));
+    EXPECT_TRUE(in(0));
+
+    // Extraction off: categorization needs it for model work.
+    kg.set("knowledge.categorization", "on");
+    kg.set("knowledge.extraction", "off");
+    kg.idle();
+    EXPECT_EQ(kg.gw.categorize_calls, 0);
+    kg.set("knowledge.extraction", "on");
+
+    // The model unavailable: nothing is marked checked, search and Uncategorized still work, and it is retried later.
+    const int chats = kg.gw.chat_calls;
+    kg.gw.chat_failure = model::code::model_unavailable;
+    kg.idle();
+    EXPECT_EQ(kg.gw.chat_calls, chats + 1);
+    EXPECT_EQ(kg.svc->status()["errors"]["categorize"], model::code::model_unavailable);
+    EXPECT_EQ(kg.svc->status()["categorization"]["pending"], 1);
+    EXPECT_TRUE(in(0));
+    EXPECT_FALSE(kg.svc->search("Phoenix", {}).passages.empty());
+    kg.gw.chat_failure.clear();
+    kg.idle();
+    EXPECT_EQ(kg.gw.chat_calls, chats + 1);  // still backing off
+    kg.clock.advance(std::chrono::minutes(2));
+    kg.idle();
+    EXPECT_EQ(kg.gw.categorize_calls, 1);
+    EXPECT_EQ(category_decision(*kg.svc, fact, *sales), "automatic");
+
+    // The files Source turned off between the request and the save: nothing is saved and the fact stays unchecked.
+    ASSERT_TRUE(kg.svc->reset_category(fact, *sales));
+    ASSERT_TRUE(kg.svc->create_category("Operations"));
+    bool turn_off = true;
+    kg.after_chat = [&] {
+        if (!turn_off) return;
+        turn_off = false;
+        kg.set("knowledge.sources.files", "off");
+    };
+    kg.svc->step();
+    EXPECT_EQ(kg.gw.categorize_calls, 2);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_category_assignments"), 0);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_category_checks"), 0);
+    kg.set("knowledge.sources.files", "on");
+    kg.after_chat = nullptr;
+
+    // An answer naming an invented category is refused as a whole; the fact stays Uncategorized and is not asked
+    // about again until its evidence or the categories change.
+    proposed = {9999};
+    kg.idle();
+    EXPECT_EQ(kg.gw.categorize_calls, 3);
+    EXPECT_EQ(kg.svc->status()["errors"]["categorize"], "invalid_response");
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_category_assignments"), 0);
+    EXPECT_TRUE(in(0));
+    EXPECT_EQ(kg.svc->status()["categorization"]["pending"], 0);
+    kg.idle();
+    EXPECT_EQ(kg.gw.categorize_calls, 3);
+
+    // Categorization shares the daily extraction budget: once it is spent nothing is sent.
+    proposed = {*sales};
+    const long long used = kg.svc->store().used(kg.svc->today(), "extract_calls");
+    kg.set("knowledge.extraction_daily_calls", used);
+    ASSERT_TRUE(kg.svc->create_category("Legal"));
+    kg.idle();
+    EXPECT_EQ(kg.gw.categorize_calls, 3);
+    EXPECT_EQ(kg.svc->status()["categorization"]["pending"], 1);
+    kg.next_day();
+    kg.idle();
+    EXPECT_EQ(kg.gw.categorize_calls, 4);
+    EXPECT_EQ(category_decision(*kg.svc, fact, *sales), "automatic");
 }
 
 // improve-skowork-and-knowledge-control 7.4: the knowledge tools and the Knowledge view read through one state filter.
@@ -3598,7 +3834,7 @@ TEST(KnowledgeCore, MentionsMigrationKeepsRowsAndKeysNames) {
     ASSERT_TRUE(db) << db.error().message;
     ASSERT_FALSE(o.degraded) << o.failure;
     EXPECT_EQ(o.from_version, 4);
-    EXPECT_EQ((*db)->user_version(), kKgEvidenceSchemaVersion);
+    EXPECT_EQ((*db)->user_version(), kKgSchemaVersion);
     ASSERT_TRUE((*db)->exec("INSERT INTO mentions(chunk_id,entity_id,alias) VALUES(1,1,'firebird')"));
     auto rows = (*db)->prepare("SELECT group_concat(alias,',') FROM (SELECT alias FROM mentions WHERE chunk_id=1 AND entity_id=1 ORDER BY alias)");
     ASSERT_TRUE(rows.step());

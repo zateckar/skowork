@@ -34,8 +34,10 @@ std::filesystem::path temp_root() {
 
 // kg.db as a client from before the evidence schema creates and migrates it.
 std::vector<Migration> pre_evidence_kg_migrations() {
-    const auto& all = knowledge::kg_migrations();
-    return {all.begin(), all.end() - 1};
+    std::vector<Migration> out;
+    for (const auto& m : knowledge::kg_migrations())
+        if (m.version < knowledge::kKgEvidenceSchemaVersion) out.push_back(m);
+    return out;
 }
 
 std::string slurp(const std::filesystem::path& p) {
@@ -655,7 +657,7 @@ INSERT INTO fact_tombstones(source,ext_id,item_hash,fact_key) VALUES('files','a'
     auto db = open_and_migrate_consistently(copy, *key, migrations, outcome, knowledge::register_kg_writer);
     ASSERT_TRUE(db) << db.error().message;
     ASSERT_FALSE(outcome.degraded) << outcome.failure;
-    ASSERT_EQ((*db)->user_version(), knowledge::kKgEvidenceSchemaVersion);
+    ASSERT_EQ((*db)->user_version(), knowledge::kKgSchemaVersion);
     auto counts = (*db)->prepare(R"sql(SELECT
       (SELECT count(*) FROM knowledge_revisions),
       (SELECT count(*) FROM knowledge_facts),
@@ -809,7 +811,7 @@ TEST(Database, KnowledgeProfileUpgradesToEvidenceSchemaAndOlderClientRefusesIt) 
     ASSERT_FALSE(upgraded.degraded) << upgraded.failure;
     EXPECT_TRUE(upgraded.migrated);
     EXPECT_EQ(upgraded.from_version, knowledge::kKgEvidenceSchemaVersion - 1);
-    EXPECT_EQ(upgraded.to_version, knowledge::kKgEvidenceSchemaVersion);
+    EXPECT_EQ(upgraded.to_version, knowledge::kKgSchemaVersion);
     {
         auto backup = Database::open(root->file("kg-profile-copy.db.bak"), *key, true);
         ASSERT_TRUE(backup);

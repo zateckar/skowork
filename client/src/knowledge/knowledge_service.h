@@ -34,6 +34,7 @@ using PolicyLookup = std::function<std::optional<json>(const std::string& key)>;
 struct KnowledgeConfig {
     std::map<std::string, bool> source_policy;  // kind -> policy allows (knowledge.sources.<kind>, default on)
     bool extraction = true;                     // knowledge.extraction
+    bool categorization = true;                 // knowledge.categorization (model work also needs extraction)
     bool directory_enrichment = true;           // knowledge.directory_enrichment
     long long max_file_mb = 25;                 // knowledge.max_file_mb
     long long embedding_daily_tokens = 10'000'000;
@@ -187,6 +188,20 @@ public:
     // The categories a filter can name: [{id, name}], then Uncategorized.
     json categories();
 
+    // ---- Categories (Inspectable Category Assignment) ----
+    // Category records organize local knowledge only: none of these changes a publication or deletes knowledge.
+    Result<long long> create_category(const std::string& name);
+    Status rename_category(long long id, const std::string& name);
+    Status delete_category(long long id);
+    Status merge_categories(long long from, long long into);
+    // A locked choice of the user for one fact: decision manual (assign) or rejected; automatic analysis never
+    // overwrites it until reset_category removes it.
+    Status decide_category(long long fact_id, long long category_id, const std::string& decision);
+    Status reset_category(long long fact_id, long long category_id);
+    // The fact's assignments: [{category_id, name, decision, reason, excerpt?}]; an automatic one says why with the
+    // excerpt it cites while that passage is permitted. not_found when the fact is not current, permitted knowledge.
+    Result<json> fact_categories(long long fact_id);
+
     // ---- Tools ----
     std::vector<runtime::ToolDef> tools();
 
@@ -295,6 +310,8 @@ private:
     void reconcile();
     bool embed_step();
     bool extract_step();
+    // Automatic categorization (design D7): one bounded batch of unchecked facts against the existing categories.
+    bool categorize_step();
     bool enrich_step();
     // Returns the passages one of whose findings took its date from the item.
     std::vector<long long> store_extraction(const std::vector<ChunkRow>& batch, const Extraction& x);
@@ -325,7 +342,13 @@ private:
     std::map<long long, DeferredExtraction> extraction_deferred_;
     bool isolate_extraction_ = false;
     int isolated_extract_failures_ = 0;
-    std::string last_embed_error_, last_extract_error_;
+    std::string last_embed_error_, last_extract_error_, last_categorize_error_;
+    long long categorize_retry_at_ = 0;
+    int categorize_failures_ = 0;
+    int categorize_single_left_ = 0;            // a batch was refused: analyze this many facts one at a time
+    std::set<long long> category_skip_;         // facts without a permitted passage now; retried after a policy change
+    std::atomic<bool> category_skip_reset_{false};
+    long long category_skip_since_ = 0;
 
     std::thread thread_;
     std::condition_variable wake_;

@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -32,6 +33,8 @@ std::string kg_writer_barrier_sql();
 std::string kg_evidence_migration_sql();
 // The schema version the evidence migration installs.
 inline constexpr int kKgEvidenceSchemaVersion = 6;
+// The latest schema: the evidence schema plus durable automatic-categorization progress (task 8.1).
+inline constexpr int kKgSchemaVersion = 7;
 // The longest chain of facts a derivation may form through required facts; the evidence schema enforces it.
 inline constexpr int kMaxDerivationDepth = 32;
 // Superseded revisions of an item whose excerpts are kept as history beside the current one.
@@ -61,6 +64,9 @@ struct CategoryRow {
 struct CategoryAssignment {
     long long fact_id = 0, category_id = 0, evidence_id = 0;
     std::string decision, reason;
+    std::string category_name;  // the category's display name
+    long long chunk_id = 0;     // the passage of an automatic assignment's excerpt (0 when it is gone)
+    std::string excerpt;        // why an automatic assignment was made: the exact words the model cited
 };
 
 struct ConflictRow {
@@ -214,6 +220,20 @@ struct FactState {
 // The reserved name of the category filter for facts without an accepted category.
 inline constexpr const char* kUncategorized = "Uncategorized";
 
+// A fact automatic categorization has not checked since its evidence or the category list last changed, with the
+// complete passages (ids and text of current revisions) its current passage-level supports cite.
+struct CategoryCandidate {
+    KnowledgeFactRow fact;
+    std::vector<ChunkRow> passages;
+};
+
+// One bounded unit of automatic categorization read in a single graph snapshot.
+struct CategoryWork {
+    long long generation = 0;
+    std::vector<CategoryRow> categories;
+    std::vector<CategoryCandidate> facts;
+};
+
 class KgStore {
 public:
     explicit KgStore(std::unique_ptr<Database> db) : db_(std::move(db)) {}
@@ -241,8 +261,16 @@ public:
     // still be the one the analysis read, `still_permitted` (the caller's current policy for the analyzed Sources and
     // the analysis kind) is asked under the store lock, and every excerpt is bound to a current support in the current
     // revision. Automatic categories never replace manual or rejected decisions.
+    // `categorized` facts are recorded as checked by automatic categorization in the same transaction, so they are
+    // analyzed again only after their evidence or the category list changes.
     Status apply_analysis(const AnalysisProposals& proposals, long long expected_generation,
-                          const std::function<bool()>& still_permitted = {});
+                          const std::function<bool()>& still_permitted = {},
+                          const std::vector<long long>& categorized = {});
+    // Up to `limit` current, not rejected facts that automatic categorization has not checked, skipping `skip`, read
+    // with the categories and generation of one snapshot. Empty facts when there are no categories.
+    CategoryWork category_work(int limit, const std::set<long long>& skip);
+    // Facts awaiting automatic categorization (status).
+    long long category_pending();
     Status decide_conflict(long long conflict_id, const std::string& decision, const std::string& reason,
                            long long now, long long expected_generation);
     Status reopen_conflict(long long conflict_id, long long expected_generation);

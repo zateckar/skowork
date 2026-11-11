@@ -63,6 +63,20 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
         return e;
     });
     add("knowledge.categories", [](Svc& s, const json&) -> Result<json> { return json{{"categories", s.categories()}}; });
+    // Inspectable Category Assignment: the user's category records and locked decisions (UI only, never agent tools).
+    add("knowledge.category.create", [](Svc& s, const json& p) -> Result<json> {
+        auto r = s.create_category(jstr(p, "name"));
+        if (!r) return r.error();
+        return json{{"id", *r}};
+    });
+    add("knowledge.category.rename", [done](Svc& s, const json& p) { return done(s.rename_category(jint(p, "id"), jstr(p, "name"))); });
+    add("knowledge.category.delete", [done](Svc& s, const json& p) { return done(s.delete_category(jint(p, "id"))); });
+    add("knowledge.category.merge", [done](Svc& s, const json& p) { return done(s.merge_categories(jint(p, "from"), jint(p, "into"))); });
+    add("knowledge.category.decide", [done](Svc& s, const json& p) {
+        return done(s.decide_category(jint(p, "fact_id"), jint(p, "category_id"), jstr(p, "decision")));
+    });
+    add("knowledge.category.reset", [done](Svc& s, const json& p) { return done(s.reset_category(jint(p, "fact_id"), jint(p, "category_id"))); });
+    add("knowledge.fact.categories", [](Svc& s, const json& p) { return s.fact_categories(jint(p, "fact_id")); });
     // A citation of a file: opened only when it is an indexed item of the files Source, never an arbitrary path.
     add("knowledge.open", [done, open_file](Svc& s, const json& p) -> Result<json> {
         const std::string ref = jstr(p, "ref");

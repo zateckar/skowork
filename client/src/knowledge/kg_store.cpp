@@ -518,6 +518,23 @@ CREATE INDEX mentions_entity ON mentions(entity_id, alias);
         // improve-skowork-and-knowledge-control: revisions, exact evidence, canonical facts with independent and
         // required supports, categories, review and generation fences (design D6, task 7.6).
         {kKgEvidenceSchemaVersion, kg_evidence_migration_sql()},
+        // Task 8.1: which facts automatic categorization has checked. A fact is checked again when a support gains
+        // evidence (a new or carried-forward excerpt) or when a category is added or renamed; a check is progress,
+        // not knowledge, so it does not change the knowledge generation.
+        {kKgSchemaVersion, R"sql(
+CREATE TABLE knowledge_category_checks(
+  fact_id INTEGER PRIMARY KEY REFERENCES knowledge_facts(id) ON DELETE CASCADE,
+  checked_at INTEGER NOT NULL);
+CREATE TRIGGER knowledge_category_recheck_evidence AFTER INSERT ON knowledge_support_evidence BEGIN
+  DELETE FROM knowledge_category_checks WHERE fact_id=(SELECT fact_id FROM knowledge_support_sets WHERE id=new.support_id);
+END;
+CREATE TRIGGER knowledge_category_recheck_added AFTER INSERT ON knowledge_categories BEGIN
+  DELETE FROM knowledge_category_checks;
+END;
+CREATE TRIGGER knowledge_category_recheck_renamed AFTER UPDATE OF name ON knowledge_categories BEGIN
+  DELETE FROM knowledge_category_checks;
+END;
+)sql"},
     };
     return m;
 }
@@ -925,7 +942,7 @@ Status KgStore::set_category_assignment(long long fact, long long category, cons
 }
 
 Status KgStore::apply_analysis(const AnalysisProposals& proposals, long long expected_generation,
-                               const std::function<bool()>& still_permitted) {
+                               const std::function<bool()>& still_permitted, const std::vector<long long>& categorized) {
     const std::lock_guard lock(db_->mutex());
     if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge analysis is not available yet.");
     for (const auto& c : proposals.categories)
@@ -951,9 +968,21 @@ Status KgStore::apply_analysis(const AnalysisProposals& proposals, long long exp
             if (const auto recorded = write_conflict(*db_, c.left_id, c.right_id, *left, *right, c.reason); !recorded)
                 return recorded.error();
         }
+        // Recorded last: binding an excerpt above adds evidence, which clears a fact's earlier check.
+        if (!categorized.empty()) {
+            if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Categorization progress is not available yet.");
+            auto check = db_->prepare("INSERT OR REPLACE INTO knowledge_category_checks(fact_id,checked_at) "
+                                      "SELECT id,CAST(strftime('%s','now') AS INTEGER)*1000 FROM knowledge_facts WHERE id=?1");
+            for (long long fact : categorized) {
+                check.reset();
+                check.bind(1, fact);
+                if (auto recorded = check.run(); !recorded) return recorded;
+            }
+        }
         return {};
     });
 }
+
 
 Status KgStore::reset_category_assignment(long long fact, long long category) {
     const std::lock_guard lock(db_->mutex());
@@ -976,10 +1005,15 @@ std::vector<CategoryAssignment> KgStore::category_assignments(long long fact) {
     const std::lock_guard lock(db_->mutex());
     std::vector<CategoryAssignment> result;
     if (db_->user_version() < kKgEvidenceSchemaVersion) return result;
-    auto s = db_->prepare("SELECT fact_id,category_id,ifnull(evidence_id,0),decision,reason "
-                          "FROM knowledge_category_assignments WHERE fact_id=?1 ORDER BY category_id");
+    auto s = db_->prepare("SELECT a.fact_id,a.category_id,ifnull(a.evidence_id,0),a.decision,a.reason,c.name,"
+                          "ifnull(e.chunk_id,0),ifnull(e.excerpt,'') FROM knowledge_category_assignments a "
+                          "JOIN knowledge_categories c ON c.id=a.category_id "
+                          "LEFT JOIN knowledge_evidence e ON e.id=a.evidence_id "
+                          "WHERE a.fact_id=?1 ORDER BY c.normalized_name,a.category_id");
     s.bind(1, fact);
-    while (s.step()) result.push_back({s.col_int(0), s.col_int(1), s.col_int(2), s.col_text(3), s.col_text(4)});
+    while (s.step())
+        result.push_back({s.col_int(0), s.col_int(1), s.col_int(2), s.col_text(3), s.col_text(4), s.col_text(5), s.col_int(6),
+                          s.col_text(7)});
     return result;
 }
 
@@ -1232,6 +1266,59 @@ std::vector<long long> KgStore::facts_about(long long entity_id, int limit) {
     s.bind(1, entity_id).bind(2, std::min(limit, 1000));
     while (s.step()) out.push_back(s.col_int(0));
     return out;
+}
+
+CategoryWork KgStore::category_work(int limit, const std::set<long long>& skip) {
+    const std::lock_guard lock(db_->mutex());
+    CategoryWork out;
+    if (db_->user_version() < kKgSchemaVersion || limit <= 0) return out;
+    const auto generation = generation_of(*db_);
+    if (!generation) return out;
+    out.generation = *generation;
+    {
+        auto s = db_->prepare("SELECT id,name FROM knowledge_categories ORDER BY normalized_name,id");
+        while (s.step()) out.categories.push_back({s.col_int(0), s.col_text(1)});
+    }
+    if (out.categories.empty()) return out;
+    auto facts = db_->prepare(
+        "SELECT f.id FROM knowledge_facts f WHERE NOT EXISTS(SELECT 1 FROM knowledge_category_checks k WHERE k.fact_id=f.id) "
+        "AND EXISTS(SELECT 1 FROM knowledge_support_sets s WHERE s.fact_id=f.id AND s.state IN ('current','unverified')) "
+        "ORDER BY f.id LIMIT ?1");
+    facts.bind(1, static_cast<long long>(std::min<size_t>(static_cast<size_t>(limit) + skip.size(), 2000)));
+    std::vector<long long> ids;
+    while (facts.step())
+        if (!skip.count(facts.col_int(0))) ids.push_back(facts.col_int(0));
+    // Only whole passages a current support cites: the model quotes from them, and the quote must bind to that support.
+    auto passages = db_->prepare(
+        "SELECT DISTINCT c.id,c.item_id,c.heading,c.text,ifnull(c.at,0) FROM knowledge_support_sets s "
+        "JOIN knowledge_support_evidence se ON se.support_id=s.id JOIN knowledge_evidence e ON e.id=se.evidence_id "
+        "JOIN knowledge_revisions v ON v.id=e.revision_id JOIN chunks c ON c.id=e.chunk_id AND c.item_id=v.item_id "
+        "WHERE s.fact_id=?1 AND s.state IN ('current','unverified') AND v.current=1 AND e.precision='passage' "
+        "AND CAST(e.excerpt AS BLOB)=CAST(c.text AS BLOB) ORDER BY c.id LIMIT 3");
+    for (long long id : ids) {
+        if (static_cast<int>(out.facts.size()) >= limit) break;
+        if (fact_rejected(*db_, id)) continue;
+        auto fact = read_fact(*db_, id);
+        if (!fact) continue;
+        CategoryCandidate candidate{std::move(*fact), {}};
+        passages.reset();
+        passages.bind(1, id);
+        while (passages.step())
+            candidate.passages.push_back({passages.col_int(0), passages.col_int(1), passages.col_text(2), passages.col_text(3),
+                                          passages.col_int(4)});
+        out.facts.push_back(std::move(candidate));
+    }
+    return out;
+}
+
+long long KgStore::category_pending() {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return 0;
+    auto s = db_->prepare(
+        "SELECT count(*) FROM knowledge_facts f WHERE NOT EXISTS(SELECT 1 FROM knowledge_category_checks k WHERE k.fact_id=f.id) "
+        "AND EXISTS(SELECT 1 FROM knowledge_support_sets s WHERE s.fact_id=f.id AND s.state IN ('current','unverified')) "
+        "AND EXISTS(SELECT 1 FROM knowledge_categories)");
+    return s.step() ? s.col_int(0) : 0;
 }
 
 std::optional<long long> KgStore::find_category(const std::string& name) {
