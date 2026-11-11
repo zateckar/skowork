@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <random>
 #include <set>
 #include <thread>
 
@@ -210,6 +211,299 @@ TEST(MeetingCore, MeetingTriggerConditions) {
     EXPECT_FALSE(d.contains("transcript"));
 }
 
+// ---- improve-meeting-capture-quality: echo, vocabulary, track parts ---------------------------------------------------------
+
+namespace {
+
+Segment seg(std::string track, long long a, long long b, std::string text, std::optional<EchoEvidence> ev = std::nullopt) {
+    Segment s{std::move(track), a, b, "", std::move(text), ev, false};
+    s.speaker = s.track == "local" ? "me" : "s1";
+    return s;
+}
+constexpr EchoEvidence kCorrelated{true, false}, kCorrelatedQuiet{true, true}, kUnrelated{false, false};
+
+// Speech-like audio: a 300 Hz carrier whose loudness changes every 200 ms at random.
+std::vector<std::int16_t> babble(double seconds, double peak, unsigned seed) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> level(0.05, 1.0);
+    std::vector<std::int16_t> out(static_cast<size_t>(seconds * 16000));
+    double a = level(rng);
+    for (size_t i = 0; i < out.size(); ++i) {
+        if (i % 3200 == 0) a = level(rng);
+        out[i] = static_cast<std::int16_t>(peak * a * std::sin(2 * 3.14159265358979 * 300.0 * static_cast<double>(i) / 16000));
+    }
+    return out;
+}
+
+// What the microphone hears: `gain` of the remote track `delay` samples later, plus the user's own audio and a noise floor.
+std::vector<std::int16_t> leak(const std::vector<std::int16_t>& remote, double gain, size_t delay, const std::vector<std::int16_t>& own) {
+    std::mt19937 rng(7);
+    std::uniform_int_distribution<int> noise(-20, 20);
+    std::vector<std::int16_t> out(remote.size());
+    for (size_t i = 0; i < out.size(); ++i) {
+        double v = (i >= delay ? gain * remote[i - delay] : 0.0) + noise(rng) + (i < own.size() ? own[i] : 0);
+        out[i] = static_cast<std::int16_t>(std::clamp(v, -32767.0, 32767.0));
+    }
+    return out;
+}
+
+}  // namespace
+
+// 2.1: the echo rule on segment lists.
+TEST(MeetingEcho, RuleNeedsWordsAndAudio) {
+    const std::string sentence = "We will ship the new release next Tuesday after the review.";
+    // A long copy heard through the loudspeakers is echo.
+    std::vector<Segment> s = {seg("remote", 1000, 5000, sentence), seg("local", 1200, 5100, "we will ship the new release next tuesday after the review", kCorrelated)};
+    EXPECT_EQ(mark_echo(s), 1u);
+    EXPECT_TRUE(s[1].echo);
+    // Without correlated audio (a headset) the same words are kept.
+    s[1].evidence = kUnrelated;
+    EXPECT_EQ(mark_echo(s), 0u);
+    s[1].evidence.reset();
+    EXPECT_EQ(mark_echo(s), 0u);
+    // A 6-word partial match is not.
+    s = {seg("remote", 1000, 5000, sentence), seg("local", 1500, 4000, "We will ship it on Friday.", kCorrelatedQuiet)};
+    EXPECT_EQ(mark_echo(s), 0u);
+    // A short reply needs quiet audio as well: the user speaking over the remote side is louder than the leak.
+    s = {seg("remote", 1000, 3000, "Can you do that?"), seg("local", 1500, 2900, "Yes, I can do that.", kCorrelated)};
+    EXPECT_EQ(mark_echo(s), 0u);
+    s = {seg("remote", 1000, 3000, "Yes, I can do that."), seg("local", 1100, 3000, "Yes, I can do that.", kCorrelated)};
+    EXPECT_EQ(mark_echo(s), 0u);
+    s[1].evidence = kCorrelatedQuiet;
+    EXPECT_EQ(mark_echo(s), 1u);
+    // A read-back two seconds after the remote line ended is the user's own.
+    s = {seg("remote", 1000, 4000, sentence), seg("local", 6000, 9000, sentence, kCorrelatedQuiet)};
+    EXPECT_EQ(mark_echo(s), 0u);
+    // A copy split over two remote segments is echo.
+    s = {seg("remote", 1000, 3000, "We will ship the new release"), seg("remote", 3100, 5000, "next Tuesday after the review meeting."),
+         seg("local", 1100, 5000, "We will ship the new release next Tuesday after the review meeting.", kCorrelated)};
+    EXPECT_EQ(mark_echo(s), 1u);
+    EXPECT_TRUE(s[2].echo);
+    // Echo leaves the transcript and the knowledge turns, and survives storage.
+    const auto names = std::map<std::string, std::string>{{"me", "Jan"}, {"s1", "Eva"}};
+    EXPECT_EQ(transcript_markdown(s, names), "[00:01] Eva: We will ship the new release\n[00:03] Eva: next Tuesday after the review meeting.\n");
+    EXPECT_EQ(knowledge_turns(s, names).size(), 2u);
+    EXPECT_EQ(heard(s).size(), 2u);
+    auto back = parse_segments({{"segments", segments_json(s)}});
+    ASSERT_TRUE(back);
+    ASSERT_EQ(back->size(), 3u);
+    ASSERT_EQ((*back)[1].track, "local");  // sorted by time
+    EXPECT_TRUE((*back)[1].echo);
+    ASSERT_TRUE((*back)[1].evidence);
+    EXPECT_TRUE((*back)[1].evidence->correlated);
+    EXPECT_FALSE((*back)[0].evidence);
+    // Only local segments can be echo.
+    EXPECT_FALSE((*parse_segments({{"segments", {{{"track", "remote"}, {"start_ms", 0}, {"end_ms", 1}, {"text", "x"}, {"echo", true}}}}}))[0].echo);
+    EXPECT_EQ(echo_tokens("Dobrý den, Břetislave!"), (std::vector<std::string>{"dobrý", "den", "břetislave"}));
+}
+
+// 2.2: the audio evidence the worker returns for local segments.
+TEST(MeetingEcho, EvidenceFollowsTheLoudspeakerLeak) {
+    const auto remote = concat({babble(12, 9000, 1), silence(4), babble(4, 9000, 2)});
+    // The user speaks over the remote side at 6-10 s, and alone at 13-15 s.
+    std::vector<std::int16_t> own(remote.size(), 0);
+    const auto voice = babble(4, 7000, 3);
+    std::copy(voice.begin(), voice.end(), own.begin() + 6 * 16000);
+    const auto alone = babble(2, 7000, 4);
+    std::copy(alone.begin(), alone.end(), own.begin() + 13 * 16000);
+    const auto local = leak(remote, 0.08, 1600, own);  // 100 ms behind
+    const auto ev = echo_evidence(local, remote, 16000, {{1000, 5000}, {6200, 9800}, {13000, 15000}, {16500, 19500}});
+    ASSERT_EQ(ev.size(), 4u);
+    EXPECT_TRUE(ev[0].correlated);
+    EXPECT_TRUE(ev[0].quiet);
+    EXPECT_FALSE(ev[1].quiet);       // the user's own voice is louder than the leak
+    EXPECT_FALSE(ev[2].correlated);  // the remote side was silent
+    EXPECT_TRUE(ev[3].correlated);
+    EXPECT_TRUE(ev[3].quiet);
+    // A headset: the microphone never follows the remote track, so no span is correlated.
+    const auto headset = leak(remote, 0.0, 0, babble(20, 5000, 9));
+    for (const auto& e : echo_evidence(headset, remote, 16000, {{1000, 5000}, {6200, 9800}, {16500, 19500}})) EXPECT_FALSE(e.correlated);
+    // No remote audio at all.
+    for (const auto& e : echo_evidence(local, {}, 16000, {{0, 1000}})) EXPECT_FALSE(e.correlated);
+}
+
+// 3.1: building the meeting vocabulary.
+TEST(MeetingVocabulary, AttendeesOrganisationsAndUserTerms) {
+    EXPECT_EQ(organisation_of("jan.novak@skoda-auto.cz"), "Skoda Auto");
+    EXPECT_EQ(organisation_of("eva@mail.contoso.com"), "Contoso");
+    EXPECT_EQ(organisation_of("p@acme.co.uk"), "Acme");
+    EXPECT_EQ(organisation_of("x@gmail.com"), "");
+    EXPECT_EQ(organisation_of("x@SEZNAM.CZ"), "");
+    EXPECT_EQ(organisation_of("x@abc.de"), "");  // a label under 4 letters
+    EXPECT_EQ(organisation_of("not an address"), "");
+    const auto v = meeting_terms({"Eva Svobodová", "Petr Zatecka", "max@example.org"},
+                                 {"eva.svobodova@skoda-auto.cz", "petr@gmail.com", "max@example.org"});
+    EXPECT_EQ(v, (std::vector<std::string>{"Eva", "Svobodová", "Petr", "Zatecka", "Skoda Auto", "Example"}));
+    // No calendar event: nothing from the meeting.
+    EXPECT_TRUE(meeting_terms({}, {}).empty());
+    std::vector<std::string> terms = {"Zatecka"};
+    merge_terms(terms, {"zatecka", " Břetislav ", ""});
+    EXPECT_EQ(terms, (std::vector<std::string>{"Zatecka", "Břetislav"}));
+}
+
+// 3.2: respelling against the vocabulary.
+TEST(MeetingVocabulary, RespellingFixesOneEditAndKeepsEndings) {
+    const std::vector<std::string> v = {"Břetislav", "Oldřich", "Zatecka", "Jan Novák"};
+    EXPECT_EQ(respell("Přetislav, syn kníže Olřicha.", v), "Břetislav, syn kníže Oldřicha.");
+    EXPECT_EQ(respell("Pan Zatekca přišel.", v), "Pan Zatecka přišel.");     // a swap of neighbours
+    EXPECT_EQ(respell("Pan Zatiska přišel.", v), "Pan Zatiska přišel.");     // two edits
+    EXPECT_EQ(respell("Pane Zatecko!", v), "Pane Zatecko!");                 // an ending replacing a letter is two edits
+    EXPECT_EQ(respell("Mluvil s Novákem.", v), "Mluvil s Novákem.");          // exact stem, kept
+    EXPECT_EQ(respell("Mluvil s Nobákem.", v), "Mluvil s Novákem.");          // one edit in the stem, ending kept
+    EXPECT_EQ(respell("zatekca a Jaan", v), "zatekca a Jaan");               // lowercase, and under 5 letters
+    EXPECT_EQ(respell("zatecka", v), "Zatecka");                             // an exact match takes the term's case
+    EXPECT_EQ(respell("Unrelated words stay.", v), "Unrelated words stay.");
+    EXPECT_EQ(respell("Paní Svobodové", {"Svobodová"}), "Paní Svobodové");   // a different ending is an inflected form
+    EXPECT_EQ(respell("Pana Nováka", v), "Pana Nováka");
+    EXPECT_EQ(respell("Anything", {}), "Anything");
+}
+
+// 4.1: a track cut at any byte keeps all audio up to the last complete chunk, and chunks hold at most a second.
+TEST(MeetingAudio, TruncatedTrackKeepsEveryCompleteChunk) {
+    TempRoot tmp;
+    const auto file = tmp.path / L"local.skau";
+    const auto pcm = tone(3.5, 5000);
+    size_t header = 0;
+    {
+        auto w = TrackWriter::create(tmp.path / L"empty.skau", TrackKind::local, 16000, 0);
+        ASSERT_TRUE(w);
+        ASSERT_TRUE((*w)->close());
+        header = static_cast<size_t>(std::filesystem::file_size(tmp.path / L"empty.skau"));
+    }
+    auto w = TrackWriter::create(file, TrackKind::local, 16000, 0);
+    ASSERT_TRUE(w);
+    ASSERT_TRUE((*w)->append(pcm.data(), 40000));  // 2.5 s, not closed: two seconds are on disk
+    auto open = read_track(file);
+    ASSERT_TRUE(open);
+    EXPECT_EQ(open->pcm.size(), 32000u);
+    ASSERT_TRUE((*w)->append(pcm.data() + 40000, pcm.size() - 40000));
+    ASSERT_TRUE((*w)->close());
+    std::ifstream in(file, std::ios::binary);
+    const std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    const auto parsed = parse_container(reinterpret_cast<const std::uint8_t*>(raw.data()), raw.size());
+    ASSERT_TRUE(parsed);
+    ASSERT_EQ(parsed->chunks.size(), 4u);
+    for (const auto& c : parsed->chunks) EXPECT_LE(c.sealed.size(), 32000u + 16u);
+    const auto cut = tmp.path / L"cut.skau";
+    size_t last = 0;
+    for (size_t at = header; at <= raw.size(); at += (at % 7 == 0 ? 97 : 89)) {
+        std::ofstream(cut, std::ios::binary | std::ios::trunc).write(raw.data(), static_cast<std::streamsize>(at));
+        auto t = read_track(cut);
+        ASSERT_TRUE(t) << "cut at " << at << ": " << t.error().message;
+        EXPECT_TRUE(t->pcm.size() % 16000 == 0 || t->pcm.size() == pcm.size()) << at;
+        EXPECT_GE(t->pcm.size(), last) << at;
+        EXPECT_TRUE(std::equal(t->pcm.begin(), t->pcm.end(), pcm.begin())) << at;
+        last = t->pcm.size();
+    }
+    EXPECT_GE(last, 48000u);
+}
+
+// 4.4: parts of a continued track are placed on the meeting's clock.
+TEST(MeetingAudio, TrackPartsJoinWithSilenceBetween) {
+    const auto a = tone(1.0, 4000), b = tone(0.5, 4000), r = tone(2.0, 3000);
+    const auto joined = join_parts({{"local", 10'000, a, 16000}, {"remote", 10'000, r, 16000}, {"local", 13'000, b, 16000}});
+    ASSERT_EQ(joined.size(), 2u);
+    EXPECT_EQ(joined[0].track, "local");
+    ASSERT_EQ(joined[0].pcm.size(), 3u * 16000 + b.size());
+    EXPECT_TRUE(std::equal(a.begin(), a.end(), joined[0].pcm.begin()));
+    EXPECT_TRUE(std::all_of(joined[0].pcm.begin() + 16000, joined[0].pcm.begin() + 48000, [](std::int16_t x) { return x == 0; }));
+    EXPECT_TRUE(std::equal(b.begin(), b.end(), joined[0].pcm.begin() + 48000));
+    EXPECT_EQ(joined[1].pcm, r);
+    // A later part that starts before the previous one ended (clock skew) follows it directly.
+    const auto skew = join_parts({{"local", 0, a, 16000}, {"local", 500, b, 16000}});
+    EXPECT_EQ(skew[0].pcm.size(), a.size() + b.size());
+    EXPECT_TRUE(join_parts({}).empty());
+}
+
+namespace {
+
+// A synthetic stream on a test clock for supervise(): the track holds one sample per millisecond.
+struct SyntheticStream {
+    long long now = 0, fail_at = -1, recover_at = -1, switch_at = -1;
+    bool open_now = true, switched = false;
+    int opens = 0;
+    std::vector<long long> attempts;
+    std::vector<std::pair<long long, bool>> trouble;
+    long long samples = 0, stop_at = 0;
+
+    void run() {
+        SupervisedStream s;
+        s.open = [&]() -> Status {
+            attempts.push_back(now);
+            if (recover_at < 0 || now < recover_at) return make_error("audio", "no microphone");
+            ++opens;
+            open_now = true;
+            return {};
+        };
+        s.close = [&] { open_now = false; };
+        s.pump = [&]() -> Status {
+            if (fail_at >= 0 && now >= fail_at) {
+                fail_at = -1;
+                return make_error("audio", "the audio stream failed");
+            }
+            samples = std::max(samples, now);  // audio arrives up to now
+            return {};
+        };
+        s.device_changed = [&] {
+            if (switch_at < 0 || now < switch_at || switched) return false;
+            switched = true;
+            return true;
+        };
+        s.fill = [&] { samples = std::max(samples, now); };
+        s.now_ms = [&] { return now; };
+        s.wait = [&](long long ms) { now += ms; };
+        s.stopping = [&] { return now >= stop_at; };
+        s.trouble = [&](bool t) { trouble.emplace_back(now, t); };
+        supervise(s);
+    }
+};
+
+}  // namespace
+
+// 4.2: a failed stream is reopened, the track stays continuous and trouble is raised and cleared.
+TEST(MeetingCapture, SupervisedStreamReopensAndReportsTrouble) {
+    SyntheticStream a;
+    a.fail_at = 2000;
+    a.recover_at = 4500;
+    a.stop_at = 10'000;
+    a.run();
+    EXPECT_FALSE(a.open_now);  // closed at the end
+    EXPECT_EQ(a.samples, 9'900);  // continuous meeting time up to the last step
+    ASSERT_GE(a.attempts.size(), 3u);
+    EXPECT_EQ(a.attempts[0], 2000);  // at once
+    EXPECT_EQ(a.attempts[1], 3000);  // then every second
+    EXPECT_EQ(a.attempts.back(), 5000);
+    EXPECT_EQ(a.trouble, (std::vector<std::pair<long long, bool>>{{2000, true}, {5000, false}}));
+
+    // A changed default device: reopened at once without trouble.
+    SyntheticStream b;
+    b.recover_at = 0;
+    b.switch_at = 3000;
+    b.stop_at = 6000;
+    b.run();
+    EXPECT_EQ(b.opens, 1);
+    EXPECT_EQ(b.attempts, std::vector<long long>{3000});
+    EXPECT_TRUE(b.trouble.empty());
+    EXPECT_EQ(b.samples, 5900);
+
+    // Never recovers: retried every second for 30 seconds, then every 10 seconds; the track is still filled.
+    SyntheticStream c;
+    c.fail_at = 1000;
+    c.stop_at = 70'000;
+    c.run();
+    EXPECT_EQ(c.samples, 69'900);
+    EXPECT_EQ(c.trouble, (std::vector<std::pair<long long, bool>>{{1000, true}}));
+    std::vector<long long> expected;
+    for (long long t = 1000; t < 31'000; t += 1000) expected.push_back(t);
+    for (long long t = 31'000; t < 70'000; t += 10'000) expected.push_back(t);
+    EXPECT_EQ(c.attempts, expected);
+    // The indicator's words for it.
+    EXPECT_EQ(trouble_text("local", "en"), "Not recording: microphone");
+    EXPECT_EQ(trouble_text("remote,local", "cs"), "Nenahrává se: zvuk schůzky, mikrofon");
+    EXPECT_EQ(trouble_text("", "de"), "");
+}
+
 // ---- the encrypted container and the stt worker ---------------------------------------------------------------------------
 
 TEST(MeetingAudio, TracksAreEncryptedAndRoundTrip) {
@@ -329,8 +623,8 @@ bool models_fetched() {
 }
 
 // A 16-bit mono PCM WAV, resampled linearly to 16 kHz.
-std::vector<std::int16_t> wav16k(const char* name) {
-    std::ifstream in(stt_fixtures() / name, std::ios::binary);
+std::vector<std::int16_t> wav16k(const std::filesystem::path& file) {
+    std::ifstream in(file, std::ios::binary);
     const std::vector<char> b((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     if (b.size() < 44) return {};
     std::uint32_t rate = 0;
@@ -359,6 +653,7 @@ std::vector<std::int16_t> wav16k(const char* name) {
     }
     return out;
 }
+std::vector<std::int16_t> wav16k(const char* name) { return wav16k(stt_fixtures() / name); }
 
 struct SttRun {
     TempRoot tmp;
@@ -424,6 +719,37 @@ TEST(MeetingSherpa, FixtureMeetingIsTranscribedDiarizedAndMerged) {
     EXPECT_EQ(all_text(*segs, "s1").find("child"), std::string::npos) << all_text(*segs, "s1");
     std::printf("[ stt ] %.1f s of audio per track, %.1f s to transcribe (cold start included): %s\n", remote_s + static_cast<double>(me.size()) / 16000, secs,
                 out->dump().substr(0, 600).c_str());
+}
+
+// improve-meeting-capture-quality 3.3: the vocabulary as hotwords (beam search, score 2.0) and respelling, on the fixture
+// that says "Břetislav … knížete Oldřicha".
+TEST(MeetingSherpa, VocabularyHotwordsAndRespelling) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    if (!models_fetched()) GTEST_SKIP() << "client/models/stt is not fetched (dev/scripts/fetch-stt-models.ps1)";
+    SttRun r;
+    const std::string cs = r.track(L"cs.skau", TrackKind::remote, concat({silence(0.5), wav16k("parakeet-cs.wav"), silence(0.5)}));
+    const std::vector<std::string> vocabulary = {"Břetislav", "Oldřich"};
+    auto out = r.transcribe({{"tracks", {cs}}, {"language", "cs"}, {"vocabulary", vocabulary}});
+    ASSERT_TRUE(out) << out.error().code << ": " << out.error().message;
+    auto segs = parse_segments(*out);
+    ASSERT_TRUE(segs);
+    std::string decoded, spelled;
+    for (const auto& s : *segs) {
+        decoded += s.text + " ";
+        spelled += respell(s.text, vocabulary) + " ";
+    }
+    // Decoded per VAD segment, the model hears "Zoislav … knížete Olřicha" (2026-11-11): the name of two edits stays, and
+    // respelling restores "Oldřicha". The decoded text is printed so a change of score or model shows.
+    EXPECT_NE(spelled.find("Oldřicha"), std::string::npos) << spelled;
+    EXPECT_EQ(spelled.find("Olřicha"), std::string::npos) << spelled;
+    // A similar-sounding term can replace an unknown word (design Risks): recorded, so a change of score or model shows.
+    auto with = r.transcribe({{"tracks", {cs}}, {"language", "cs"}, {"vocabulary", {"Břetislav", "Oldřich", "Zatecka"}}});
+    ASSERT_TRUE(with);
+    std::string text;
+    for (const auto& s : *parse_segments(*with)) text += s.text + " ";
+    if (text.empty()) std::printf("[ stt ] second result: %s\n", with->dump().substr(0, 800).c_str());
+    std::printf("[ stt ] hotwords Břetislav, Oldřich: %s\n[ stt ] with Zatecka (Zatislav %s): %s\n", decoded.c_str(),
+                text.find("Zatislav") != std::string::npos ? "present" : "absent", text.c_str());
 }
 
 // German is identified and transcribed by Parakeet; Whisper small transcribes when forced (the fallback path); Spanish is
@@ -625,7 +951,119 @@ TEST(MeetingCapture, DISABLED_TestToneInAnotherAppStaysOutOfTheMeetingTrack) {
     EXPECT_LT(level[L"meeting-app.skau"], 5) << "another application's tone stays out of the meeting app's track";
 }
 
+// Echo fixtures (improve-meeting-capture-quality spike 1.3): a separate process plays fixture speech with pauses through
+// the default output, standing in for the meeting app; its process-loopback track is the remote track and the default
+// communications microphone the local track, while the user speaks in the pauses as told. Both tracks are written as
+// WAV to WORKBENCH_ECHO_OUT (default client/build/echo-fixtures) under WORKBENCH_ECHO_LABEL, then transcribed with the
+// sherpa-onnx engine and printed. It plays audio aloud and records the microphone, so it is run by hand:
+//   set WORKBENCH_ECHO_LABEL=speakers  (or headset)
+//   win_tests --gtest_also_run_disabled_tests --gtest_filter=MeetingEcho.DISABLED_RecordLoudspeakerFixture
+TEST(MeetingEcho, DISABLED_RecordLoudspeakerFixture) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    if (!models_fetched()) GTEST_SKIP() << "client/models/stt is not fetched";
+    const auto env = [](const wchar_t* n, const wchar_t* d) {
+        wchar_t v[512] = {};
+        return ::GetEnvironmentVariableW(n, v, 512) ? std::wstring(v) : std::wstring(d);
+    };
+    const std::wstring label = env(L"WORKBENCH_ECHO_LABEL", L"speakers");
+    const std::filesystem::path out =
+        std::filesystem::path(env(L"WORKBENCH_ECHO_OUT", (std::filesystem::path(WORKBENCH_SOURCE_DIR) / "build" / "echo-fixtures").wstring().c_str())) / label;
+    std::filesystem::create_directories(out);
+    // The remote side: five utterances, each followed by a pause for the user's turn (the script is given to the user).
+    const auto program = concat({silence(5.0), wav16k("parakeet-en.wav"), silence(6.0), wav16k("whisper-0.wav"), silence(7.0),
+                                 wav16k("parakeet-de.wav"), silence(5.0), wav16k("whisper-1.wav"), silence(7.0),
+                                 wav16k("parakeet-cs.wav"), silence(4.0)});
+    write_wav(out / L"program.wav", program, 16000);
+    // WORKBENCH_ECHO_PLAYER: a player taking the WAV as its argument (for example one that plays on a chosen device);
+    // without it the default output device plays it.
+    const std::wstring player = env(L"WORKBENCH_ECHO_PLAYER", L"");
+    std::wstring cmd = player.empty()
+        ? L"powershell.exe -NoProfile -NonInteractive -Command \"(New-Object Media.SoundPlayer '" + (out / L"program.wav").wstring() + L"').PlaySync()\""
+        : player + L" \"" + (out / L"program.wav").wstring() + L"\"";
+    STARTUPINFOW si{sizeof si};
+    PROCESS_INFORMATION pi{};
+    ASSERT_TRUE(::CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi));
+    struct Track {
+        const wchar_t* name;
+        TrackKind kind;
+        CaptureSource source;
+        std::shared_ptr<TrackWriter> writer;
+        std::unique_ptr<AudioCapture> capture;
+    };
+    std::vector<Track> tracks;
+    tracks.push_back({L"remote.skau", TrackKind::remote, {CaptureSource::Kind::process, pi.dwProcessId}, {}, {}});
+    tracks.push_back({L"local.skau", TrackKind::local, {CaptureSource::Kind::mic, 0}, {}, {}});
+    for (auto& t : tracks) {
+        auto w = TrackWriter::create(out / t.name, t.kind, 16000, 0);
+        ASSERT_TRUE(w) << w.error().message;
+        t.writer = std::move(*w);
+        auto c = AudioCapture::start(t.source, t.writer);
+        if (!c) {
+            ::TerminateProcess(pi.hProcess, 1);
+            ::CloseHandle(pi.hThread), ::CloseHandle(pi.hProcess);
+            GTEST_SKIP() << "no capture on this machine (" << path_to_utf8(t.name) << "): " << c.error().message;
+        }
+        t.capture = std::move(*c);
+    }
+    std::printf("[ echo ] recording %ls: %.0f s\n", label.c_str(), static_cast<double>(program.size()) / 16000);
+    ::ResumeThread(pi.hThread);
+    EXPECT_EQ(::WaitForSingleObject(pi.hProcess, 180000), WAIT_OBJECT_0);
+    ::CloseHandle(pi.hThread), ::CloseHandle(pi.hProcess);
+    std::this_thread::sleep_for(1500ms);
+    std::vector<std::string> files;
+    for (auto& t : tracks) {
+        t.capture->stop();
+        EXPECT_EQ(t.capture->error(), "") << path_to_utf8(t.name);
+        ASSERT_TRUE(t.writer->close());
+        auto r = read_track(out / t.name);
+        ASSERT_TRUE(r) << r.error().message;
+        double peak = 0;
+        for (const auto x : r->pcm) peak = std::max(peak, std::abs(static_cast<double>(x)));
+        write_wav(out / (std::wstring(t.name).substr(0, std::wstring(t.name).find(L'.')) + L".wav"), r->pcm, 16000);
+        std::printf("[ echo ] %ls: %.1f s, peak %.0f\n", t.name, static_cast<double>(r->pcm.size()) / 16000, peak);
+        files.push_back(path_to_utf8(out / t.name));
+    }
+    SttRun r;
+    auto res = r.transcribe({{"tracks", files}, {"language", "en"}});
+    ASSERT_TRUE(res) << res.error().code << ": " << res.error().message;
+    auto segs = parse_segments(*res);
+    ASSERT_TRUE(segs);
+    std::ofstream(out / L"segments.json") << res->dump(2);
+    for (const auto& g : *segs) std::printf("[ echo ] %6lld-%6lld %-6s %-3s %s\n", g.start_ms, g.end_ms, g.track.c_str(), g.speaker.c_str(), g.text.c_str());
+}
+
 // ---- the recording indicator ------------------------------------------------------------------------------------------------
+
+// improve-meeting-capture-quality 2.2: the echo evidence on the recordings of spike 1.3, which stay on the machine that
+// made them (client/build/echo-fixtures, not committed: they hold the user's voice). "speakers": loudspeakers with the
+// headset microphone on the desk; "headset": worn. Skipped where they are absent.
+TEST(MeetingEcho, EvidenceOnTheSpikeRecordings) {
+    const auto root = std::filesystem::path(WORKBENCH_SOURCE_DIR) / "build" / "echo-fixtures";
+    std::error_code ec;
+    if (!std::filesystem::exists(root / "speakers" / "segments.json", ec)) GTEST_SKIP() << "no spike 1.3 recordings on this machine";
+    for (const char* label : {"speakers", "headset"}) {
+        const auto dir = root / label;
+        const auto local = wav16k(dir / "local.wav"), remote = wav16k(dir / "remote.wav");
+        std::ifstream in(dir / "segments.json", std::ios::binary);
+        const json result = json::parse(std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()), nullptr, false);
+        auto segs = parse_segments(result);
+        ASSERT_TRUE(segs) << label;
+        std::vector<std::pair<long long, long long>> spans;
+        for (const auto& s : *segs)
+            if (s.track == "local") spans.emplace_back(s.start_ms, s.end_ms);
+        const auto ev = echo_evidence(local, remote, 16000, spans);
+        size_t k = 0, correlated = 0;
+        for (auto& s : *segs) {
+            if (s.track != "local") continue;
+            s.evidence = ev[k++];
+            correlated += s.evidence->correlated ? 1 : 0;
+            std::printf("[ echo ] %s %6lld ms correlated=%d quiet=%d: %s\n", label, s.start_ms, s.evidence->correlated, s.evidence->quiet, s.text.c_str());
+        }
+        // Every local segment of both recordings is the user's own speech: none may be hidden.
+        EXPECT_EQ(mark_echo(*segs), 0u) << label;
+        if (std::string(label) == "headset") EXPECT_EQ(correlated, 0u);
+    }
+}
 
 TEST(MeetingIndicator, TopmostWithoutOwnerAndStopsWithinTwoSeconds) {
     std::atomic<bool> stopped{false};
@@ -654,11 +1092,13 @@ namespace {
 struct FakeRecorder final : Recorder {
     std::shared_ptr<TrackWriter> writer;
     std::atomic<int>* stopped = nullptr;
+    std::atomic<bool>* troubled = nullptr;  // the microphone recorder's device state
     void stop() override {
         if (writer) (void)writer->close();
         if (stopped) ++*stopped;
         writer.reset();
     }
+    [[nodiscard]] bool trouble() const override { return troubled && troubled->load(); }
 };
 
 struct Asked {
@@ -711,7 +1151,12 @@ struct Meetings {
             auto r = std::make_unique<FakeRecorder>();
             r->writer = std::move(w);
             r->stopped = &recorders_stopped;
+            if (local) r->troubled = &mic_trouble;
             return std::unique_ptr<Recorder>(std::move(r));
+        };
+        e.indicator_warning = [this](const std::shared_ptr<void>&, const std::string& tracks) {
+            const std::lock_guard lock(mx);
+            warnings.push_back(tracks);
         };
         e.indicator = [this](const std::string& label, std::function<void()> on_stop) -> std::shared_ptr<void> {
             ++indicators_live;
@@ -769,6 +1214,7 @@ struct Meetings {
             {
                 const std::lock_guard lock(mx);
                 messages.push_back(message);
+                preambles.push_back(preamble);
             }
             return env.rt->start_run(thread, message, o);
         };
@@ -924,10 +1370,12 @@ struct Meetings {
     bool fail_process = false;
     std::vector<CaptureSource> sources;
     std::atomic<int> recorders_stopped{0}, indicators_live{0};
+    std::atomic<bool> mic_trouble{false};
+    std::vector<std::string> warnings;
     std::string indicator_label;
     std::function<void()> indicator_stop;
     std::map<std::string, json> origins;
-    std::vector<std::string> deleted, withdrawn, messages, knowledge_removed, trigger_texts;
+    std::vector<std::string> deleted, withdrawn, messages, preambles, knowledge_removed, trigger_texts;
     std::vector<Asked> asked;
     std::vector<json> transcribe_calls;
     std::function<Result<json>(const json&)> transcribe_override;
@@ -1292,6 +1740,263 @@ TEST(MeetingService, RenamingASpeakerUpdatesTheTranscriptAndKnowledge) {
     ASSERT_TRUE(f.svc->forget(id));
     EXPECT_TRUE(f.svc->store().list().empty());
     EXPECT_EQ(f.knowledge_removed, std::vector<std::string>{id});
+}
+
+// ---- improve-meeting-capture-quality in the service ------------------------------------------------------------------------
+
+namespace {
+
+size_t occurrences(const std::string& text, const std::string& what) {
+    size_t n = 0;
+    for (size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) ++n;
+    return n;
+}
+
+}  // namespace
+
+// 2.3, 2.4: echo is left out of the outputs and the knowledge, listed in the section, and restored like a rename.
+TEST(MeetingService, EchoIsLeftOutAndCanBeRestored) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+    f.make();
+    f.env.model.push_text("Summary.");
+    const std::string sentence = "We will ship the new release next Tuesday after the review.";
+    f.transcribe_override = [&](const json&) -> Result<json> {
+        return json{{"language", "en"},
+                    {"segments",
+                     {{{"track", "remote"}, {"start_ms", 1000}, {"end_ms", 5000}, {"speaker", "s1"}, {"text", sentence}},
+                      {{"track", "local"}, {"start_ms", 1200}, {"end_ms", 5100}, {"text", sentence}, {"evidence", {{"correlated", true}, {"quiet", true}}}},
+                      {{"track", "local"}, {"start_ms", 7000}, {"end_ms", 8000}, {"text", "Yes, I can do that."},
+                       {"evidence", {{"correlated", false}, {"quiet", true}}}}}}};
+    };
+    const std::string id = f.capture_one();
+    f.svc->run_transcriptions();
+    ASSERT_TRUE(f.settle(id));
+    ASSERT_EQ(f.messages.size(), 1u);
+    EXPECT_EQ(occurrences(f.messages[0], "next Tuesday"), 1u) << f.messages[0];
+    EXPECT_NE(f.messages[0].find("Jan Novák: Yes, I can do that."), std::string::npos);
+    ASSERT_EQ(f.knowledge.size(), 1u);
+    EXPECT_EQ(f.knowledge[0].second.size(), 2u);
+    json st = f.svc->status();
+    ASSERT_EQ(st["meetings"][0]["echo"].size(), 1u);
+    EXPECT_EQ(jint(st["meetings"][0]["echo"][0], "start_ms"), 1200);
+    EXPECT_EQ(occurrences(jstr(st["meetings"][0], "transcript"), "next Tuesday"), 1u);
+    // Restore: back in the transcript at its time, and re-indexed.
+    ASSERT_TRUE(f.svc->restore_echo(id, 1200));
+    st = f.svc->status();
+    EXPECT_TRUE(st["meetings"][0]["echo"].empty());
+    const std::string transcript = jstr(st["meetings"][0], "transcript");
+    EXPECT_NE(transcript.find("[00:01] Jan Novák: We will ship"), std::string::npos) << transcript;
+    ASSERT_EQ(f.knowledge.size(), 2u);
+    EXPECT_EQ(f.knowledge[1].second.size(), 3u);
+    EXPECT_FALSE(f.svc->restore_echo(id, 1200));
+    EXPECT_FALSE(f.svc->restore_echo("mtg_none", 1200));
+}
+
+// 3.1, 3.4, 3.5: the vocabulary goes to transcription and respelling, never into the trusted preamble; the user's terms.
+TEST(MeetingService, VocabularyReachesTranscriptionOnly) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+    const long long now = f.env.clock.unix_millis();
+    f.calendar = {{"ev-1", "", "Supplier sync", "https://teams.microsoft.com/l/meetup-join/1", "Eva", now + 3 * kMinMs, now + 63 * kMinMs,
+                   {"Eva Svobodová", "Petr Zatecka"}, {"eva.svobodova@skoda-auto.cz", "petr@gmail.com"}}};
+    f.make();
+    f.env.model.push_text("Summary.");
+    ASSERT_TRUE(f.svc->add_term("Břetislav"));
+    ASSERT_TRUE(f.svc->add_term(" Břetislav "));  // already there
+    EXPECT_FALSE(f.svc->add_term("  "));
+    f.transcribe_override = [&](const json&) -> Result<json> {
+        return json{{"language", "cs"},
+                    {"segments", {{{"track", "remote"}, {"start_ms", 0}, {"end_ms", 3000}, {"speaker", "s1"}, {"text", "Přetislav mluvil se Zateckou."}},
+                                  {{"track", "remote"}, {"start_ms", 4000}, {"end_ms", 6000}, {"speaker", "s2"}, {"text", "Ano."}}}}};
+    };
+    const std::string id = f.capture_one();
+    EXPECT_EQ(f.only()->vocabulary, (std::vector<std::string>{"Eva", "Svobodová", "Petr", "Zatecka", "Skoda Auto"}));
+    f.svc->run_transcriptions();
+    ASSERT_TRUE(f.settle(id));
+    ASSERT_EQ(f.transcribe_calls.size(), 1u);
+    const json& v = f.transcribe_calls[0]["vocabulary"];
+    for (const char* t : {"Eva", "Svobodová", "Petr", "Zatecka", "Skoda Auto", "Jan", "Novák", "Břetislav"})
+        EXPECT_NE(std::find(v.begin(), v.end(), json(t)), v.end()) << t;
+    // Respelled, ending kept.
+    EXPECT_NE(f.messages[0].find("Břetislav mluvil se Zateckou."), std::string::npos) << f.messages[0];
+    // Name Absent From The Transcript: the trusted preamble holds no vocabulary term.
+    ASSERT_EQ(f.preambles.size(), 1u);
+    for (const char* t : {"Eva", "Svobodová", "Petr", "Zatecka", "Skoda", "Břetislav"}) EXPECT_EQ(f.preambles[0].find(t), std::string::npos) << t;
+    // The section lists the terms; removing one; the limit of 200.
+    EXPECT_EQ(f.svc->status()["terms"], json::array({"Břetislav"}));
+    ASSERT_TRUE(f.svc->remove_term("Břetislav"));
+    for (int i = 0; i < 200; ++i) ASSERT_TRUE(f.svc->add_term("term" + std::to_string(i)));
+    auto over = f.svc->add_term("one more");
+    ASSERT_FALSE(over);
+    EXPECT_EQ(over.error().code, "limit");
+    EXPECT_EQ(f.svc->status()["terms"].size(), 200u);
+}
+
+// 3.1: an unscheduled meeting: only the user's own name and terms.
+TEST(MeetingService, UnscheduledMeetingHasOnlyTheUsersTerms) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+    f.make();
+    ASSERT_TRUE(f.svc->add_term("Zatecka"));
+    const std::string id = f.capture_one();
+    EXPECT_TRUE(f.only()->vocabulary.empty());
+    f.svc->run_transcriptions();
+    ASSERT_EQ(f.transcribe_calls.size(), 1u);
+    EXPECT_EQ(f.transcribe_calls[0]["vocabulary"], json::array({"Jan", "Novák", "Zatecka"}));
+}
+
+// 4.3: trouble on a track shows on the indicator and in the section, and clears.
+TEST(MeetingService, CaptureTroubleIsShownAndClears) {
+    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+    f.make();
+    f.teams_call();
+    f.svc->tick();
+    f.svc->on_answer(f.last_asked().id, "Start");
+    ASSERT_EQ(f.only()->state, "capturing");
+    EXPECT_TRUE(f.svc->status()["capture"]["trouble"].empty());
+    f.mic_trouble = true;
+    f.svc->tick();
+    EXPECT_EQ(f.svc->status()["capture"]["trouble"], json::array({"local"}));
+    EXPECT_EQ(f.warnings, std::vector<std::string>{"local"});
+    f.svc->tick();
+    EXPECT_EQ(f.warnings.size(), 1u);  // a state, not events
+    f.mic_trouble = false;
+    f.svc->tick();
+    EXPECT_TRUE(f.svc->status()["capture"]["trouble"].empty());
+    EXPECT_EQ(f.warnings, (std::vector<std::string>{"local", ""}));
+}
+
+namespace {
+
+// A capture ended by the client stopping: the service's record is left as it was, "capturing".
+std::string capture_then_crash(Meetings& f) {
+    f.teams_call();
+    f.svc->tick();
+    f.svc->on_answer(f.last_asked().id, "Start");
+    auto m = f.only();
+    EXPECT_EQ(m->state, "capturing");
+    f.advance(kMinMs);
+    f.svc->stop();  // closes the tracks
+    m->state = "capturing";
+    EXPECT_TRUE(f.svc->store().put(*m));
+    f.svc.reset();
+    return m->id;
+}
+
+}  // namespace
+
+// 4.4: Continue after a restart: one meeting, part files, later speech at its real time; no notice again.
+TEST(MeetingService, ContinueCaptureAfterARestart) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", true}});
+    f.teams_call();
+    f.make();
+    f.svc->tick();
+    f.svc->on_answer(f.last_asked().id, "Start");
+    f.svc->on_answer(f.last_asked().id, "I posted the notice");
+    auto m = f.only();
+    ASSERT_EQ(m->state, "capturing");
+    const std::string id = m->id;
+    f.svc->stop();
+    m->state = "capturing";
+    ASSERT_TRUE(f.svc->store().put(*m));
+    f.svc.reset();
+    const size_t asked_before = f.asked_count();
+    // Started again two minutes later while the call still runs.
+    f.advance(2 * kMinMs);
+    f.make();
+    EXPECT_EQ(f.only()->state, "interrupted");
+    f.svc->tick();
+    ASSERT_EQ(f.asked_count(), asked_before + 1);
+    const auto q = f.last_asked();
+    EXPECT_EQ(q.prompt.rfind("Continue capture?", 0), 0u) << q.prompt;
+    EXPECT_EQ(q.choices, (std::vector<std::string>{"Continue", "Finish"}));
+    EXPECT_EQ(q.thread, m->thread_id);
+    f.svc->on_answer(q.id, "Continue");
+    EXPECT_EQ(f.asked_count(), asked_before + 1);  // no participant notice again
+    m = f.only();
+    EXPECT_EQ(m->id, id);
+    EXPECT_EQ(m->state, "capturing");
+    EXPECT_EQ(f.indicators_live.load(), 1);
+    const auto dir = path_from_utf8(m->audio_dir);
+    EXPECT_TRUE(std::filesystem::exists(dir / L"remote.2.skau"));
+    EXPECT_TRUE(std::filesystem::exists(dir / L"local.2.skau"));
+    f.hang_up();
+    f.advance(31 * kSec);
+    f.svc->tick();
+    EXPECT_EQ(f.only()->state, "pending");
+    // One transcription of all parts: the second part's speech lies two minutes after the first part began (its fake
+    // audio starts at once), at its real meeting time.
+    f.svc->run_transcriptions();
+    ASSERT_EQ(f.transcribe_calls.size(), 1u);
+    EXPECT_EQ(f.transcribe_calls[0]["tracks"].size(), 4u);
+    m = f.only();
+    long long latest = 0;
+    for (const auto& s : m->segments) latest = std::max(latest, jint(s, "start_ms"));
+    EXPECT_GE(latest, 2 * kMinMs) << m->segments.dump();
+    EXPECT_LT(latest, 2 * kMinMs + 5 * kSec) << m->segments.dump();
+}
+
+// 4.4: Finish, the expiry, no detection, and policy disabled after the restart.
+TEST(MeetingService, InterruptedCaptureFinishesExpiresOrIsDeleted) {
+    {  // Finish: queued, nothing captured after the restart.
+        Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+        f.make();
+        capture_then_crash(f);
+        f.make();
+        f.svc->tick();
+        const size_t sources = f.source_count();
+        f.svc->on_answer(f.last_asked().id, "Finish");
+        EXPECT_EQ(f.only()->state, "pending");
+        EXPECT_EQ(f.source_count(), sources);
+    }
+    {  // Ignored for 2 minutes: withdrawn and queued.
+        Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+        f.make();
+        capture_then_crash(f);
+        f.make();
+        f.svc->tick();
+        const auto q = f.last_asked();
+        f.advance(2 * kMinMs + kSec);
+        f.svc->tick();
+        EXPECT_EQ(f.only()->state, "pending");
+        EXPECT_NE(std::find(f.withdrawn.begin(), f.withdrawn.end(), q.id), f.withdrawn.end());
+    }
+    {  // Not detected within 10 minutes: no Question, queued.
+        Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+        f.make();
+        capture_then_crash(f);
+        f.hang_up();
+        const size_t asked = f.asked_count();
+        f.make();
+        f.svc->tick();
+        EXPECT_EQ(f.only()->state, "interrupted");
+        f.advance(10 * kMinMs);
+        f.svc->tick();
+        EXPECT_EQ(f.only()->state, "pending");
+        // Detected again later: a new meeting, not a continuation.
+        f.teams_call();
+        f.svc->tick();
+        EXPECT_EQ(f.asked_count(), asked + 1);
+        EXPECT_EQ(f.last_asked().prompt.rfind("Start capture?", 0), 0u);
+    }
+    {  // Policy disabled after the restart: the audio goes, no Question.
+        Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+        f.make();
+        const std::string id = capture_then_crash(f);
+
+        f.policy = {{"meeting_capture.enabled", false}};
+        const size_t asked = f.asked_count();
+        f.make();
+        f.svc->tick();
+        const auto m = f.svc->store().get(id);
+        ASSERT_TRUE(m);
+        EXPECT_EQ(m->state, "discarded");
+        EXPECT_TRUE(m->audio_deleted);
+        EXPECT_FALSE(std::filesystem::exists(path_from_utf8(m->audio_dir)));
+        EXPECT_EQ(f.asked_count(), asked);
+    }
 }
 
 // Manual Audio Source Capture.

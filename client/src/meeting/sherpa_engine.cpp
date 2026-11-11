@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <fstream>
 #include <mutex>
 #include <type_traits>
 
@@ -145,6 +146,51 @@ constexpr size_t kBatchSamples = 20 * kRate;
 constexpr size_t kLanguageWindow = 30 * kRate;  // Whisper's input length
 constexpr size_t kLanguageMinimum = 8 * kRate;  // speech per language vote
 constexpr int kLanguageVotes = 3;
+
+// The hotword list and the BPE vocabulary sherpa-onnx needs to encode it, written into the worker's temporary folder
+// for the moment the recognizer is created, then removed.
+struct HotwordFiles {
+    fs::path hotwords, vocab;
+
+    bool write(const std::string& tokens_file, const std::vector<std::string>& terms) {
+        wchar_t tmp[MAX_PATH + 1] = {};
+        if (::GetTempPathW(MAX_PATH + 1, tmp) == 0) return false;
+        const std::wstring stem = L"workbench-stt-" + std::to_wstring(::GetCurrentProcessId()) + L"-" + std::to_wstring(::GetTickCount64());
+        hotwords = fs::path(tmp) / (stem + L".hotwords");
+        vocab = fs::path(tmp) / (stem + L".bpe.vocab");
+        std::ifstream in(fs::path(widen(tokens_file)), std::ios::binary);
+        std::ofstream v(vocab, std::ios::binary | std::ios::trunc);
+        if (!in || !v) return remove(), false;
+        // tokens.txt: "<token> <id>" per line. The vocabulary takes "<token>\t-<id>", without the special <...> tokens.
+        for (std::string line; std::getline(in, line);) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const auto sp = line.rfind(' ');
+            if (sp == std::string::npos || sp == 0) continue;
+            const std::string token = line.substr(0, sp), id = line.substr(sp + 1);
+            if (token.size() > 2 && token.front() == '<' && token.back() == '>') continue;
+            v << token << '\t' << '-' << id << '\n';
+        }
+        std::ofstream h(hotwords, std::ios::binary | std::ios::trunc);
+        size_t n = 0;
+        for (const auto& t : terms) {
+            std::string clean;
+            for (const char ch : t) clean.push_back(ch == ':' || ch == '\n' || ch == '\r' || ch == '\t' ? ' ' : ch);
+            clean = trim(clean);
+            if (clean.empty()) continue;
+            h << clean << '\n';
+            ++n;
+        }
+        v.close();
+        h.close();
+        if (!v || !h || n == 0) return remove(), false;
+        return true;
+    }
+    void remove() {
+        std::error_code ec;
+        if (!hotwords.empty()) fs::remove(hotwords, ec);
+        if (!vocab.empty()) fs::remove(vocab, ec);
+    }
+};
 
 class SherpaEngine : public SpeechEngine {
 public:
@@ -348,7 +394,33 @@ private:
         c.model_config.num_threads = threads_;
         c.model_config.provider = "cpu";
         c.decoding_method = "greedy_search";
+        // The meeting vocabulary as hotwords (improve-meeting-capture-quality D2): Parakeet only, modified beam search
+        // with 4 paths at score 2.0, and a BPE vocabulary generated from tokens.txt so sherpa-onnx can encode the terms.
+        HotwordFiles hot;
+        std::string hot_file, bpe_file;
+        if (parakeet && !hotwords_.empty() && hot.write(paths_.parakeet_tokens, hotwords_)) {
+            hot_file = narrow(hot.hotwords.wstring());
+            bpe_file = narrow(hot.vocab.wstring());
+            c.decoding_method = "modified_beam_search";
+            c.max_active_paths = 4;
+            c.hotwords_file = hot_file.c_str();
+            c.hotwords_score = 2.0f;
+            c.model_config.modeling_unit = "bpe";
+            c.model_config.bpe_vocab = bpe_file.c_str();
+        }
         const auto* rec = api_->SherpaOnnxCreateOfflineRecognizer(&c);
+        if (!rec && !hot_file.empty()) {
+            // Hotwords must never cost the transcript: decode as before without them.
+            trace("hotwords refused");
+            c.decoding_method = "greedy_search";
+            c.max_active_paths = 0;
+            c.hotwords_file = nullptr;
+            c.hotwords_score = 0;
+            c.model_config.modeling_unit = nullptr;
+            c.model_config.bpe_vocab = nullptr;
+            rec = api_->SherpaOnnxCreateOfflineRecognizer(&c);
+        }
+        hot.remove();
         if (!rec) return make_error("stt_failed", "The speech recognizer does not start.");
         trace("recognizer loaded");
         int batches = 0;
@@ -385,10 +457,13 @@ private:
         return out;
     }
 
+    void set_hotwords(std::vector<std::string> terms) override { hotwords_ = std::move(terms); }
+
     const Api* api_;
     Paths paths_;
     int threads_;
     bool force_whisper_;
+    std::vector<std::string> hotwords_;
 };
 
 #ifdef WORKBENCH_DEV_ENDPOINTS

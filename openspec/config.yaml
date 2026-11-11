@@ -212,6 +212,7 @@ context: |
   41 add-agent-created-skills         [Managed]
   42 add-offline-sign-in              [Hardening]
   43 add-api-connectors               [Managed]
+  44 improve-meeting-capture-quality  [Hardening, Knowledge]
 
 rules:
   proposal:

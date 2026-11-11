@@ -3,7 +3,7 @@
 // 200-299 policy-and-sandbox, 300-399 work-inbox, 400-499 core-tools-and-mcp, 500-599 browser-use,
 // 600-699 telemetry, 700-799 computer-use, 800-899 skills, 900-999 scheduler, 1000-1099 mail-calendar,
 // 1100-1199 knowledge (app.db side), 1200-1299 meeting-capture, 1300-1399 skills additions made after them, 1400-1499 user-messaging,
-// 1500-1599 fix-long-thread-model-calls.
+// 1500-1599 fix-long-thread-model-calls, 1600-1699 agent-created-skills, 1700-1799 improve-meeting-capture-quality.
 #include "storage/app_store.h"
 
 namespace wb {
@@ -482,6 +482,47 @@ CREATE TABLE agent_skills(
   thread_id TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL);
+)sql"},
+        // client/meeting-capture (improve-meeting-capture-quality): the state "interrupted" (Continue Capture After A
+        // Restart, D4) needs a new CHECK, so the table is rebuilt; the vocabulary taken from the matched calendar event
+        // (Meeting Vocabulary, D2); and the user's own terms (User Vocabulary Terms).
+        {1700, R"sql(
+CREATE TABLE meetings_1700(
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL CHECK(state IN ('offered','notice','capturing','interrupted','pending','transcribing','summarizing','done',
+                                      'declined','discarded','failed','unsupported','expired')),
+  source TEXT NOT NULL DEFAULT '',
+  app TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '',
+  event_id TEXT NOT NULL DEFAULT '',
+  series_id TEXT NOT NULL DEFAULT '',
+  event_link TEXT NOT NULL DEFAULT '',
+  attendees TEXT NOT NULL DEFAULT '[]',
+  detected_at INTEGER NOT NULL,
+  started_at INTEGER NOT NULL DEFAULT 0,
+  ended_at INTEGER NOT NULL DEFAULT 0,
+  pid INTEGER NOT NULL DEFAULT 0,
+  audio_dir TEXT NOT NULL DEFAULT '',
+  audio_deleted INTEGER NOT NULL DEFAULT 0,
+  user_started INTEGER NOT NULL DEFAULT 0,
+  language TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT '',
+  action_id TEXT NOT NULL DEFAULT '',
+  run_id TEXT NOT NULL DEFAULT '',
+  segments TEXT NOT NULL DEFAULT '[]',
+  speakers TEXT NOT NULL DEFAULT '{}',
+  vocabulary TEXT NOT NULL DEFAULT '[]');
+INSERT INTO meetings_1700(id,thread_id,state,source,app,title,event_id,series_id,event_link,attendees,detected_at,started_at,
+  ended_at,pid,audio_dir,audio_deleted,user_started,language,error,action_id,run_id,segments,speakers)
+  SELECT id,thread_id,state,source,app,title,event_id,series_id,event_link,attendees,detected_at,started_at,ended_at,pid,
+  audio_dir,audio_deleted,user_started,language,error,action_id,run_id,segments,speakers FROM meetings;
+DROP TABLE meetings;
+ALTER TABLE meetings_1700 RENAME TO meetings;
+CREATE INDEX meetings_detected ON meetings(detected_at);
+CREATE TABLE meeting_terms(
+  term TEXT PRIMARY KEY,
+  added_at INTEGER NOT NULL);
 )sql"},
     };
     return migrations;

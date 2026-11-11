@@ -1651,6 +1651,7 @@ void App::start_meetings() {
         struct Wasapi final : meeting::Recorder {
             std::unique_ptr<meeting::AudioCapture> c;
             void stop() override { c->stop(); }
+            [[nodiscard]] bool trouble() const override { return c->trouble(); }
         };
         auto c = meeting::AudioCapture::start(source, std::move(writer));
         if (!c) return c.error();
@@ -1663,15 +1664,21 @@ void App::start_meetings() {
         const std::wstring stop = lang == "cs" ? L"Zastavit" : lang == "de" ? L"Stoppen" : L"Stop";
         return std::make_shared<meeting::Indicator>(meeting::Indicator::Options{widen(label), stop, std::nullopt}, std::move(on_stop));
     };
+    // Capture Trouble Indication: the tracks without a working stream ("local", "remote", "system", "mic").
+    env.indicator_warning = [this](const std::shared_ptr<void>& handle, const std::string& tracks) {
+        if (auto* i = static_cast<meeting::Indicator*>(handle.get())) i->set_warning(widen(meeting::trouble_text(tracks, ui_language())));
+    };
     env.calendar = [this](long long from, long long to) {
         std::vector<meeting::CalendarEvent> out;
         if (!mail_svc || !mail_svc->connected()) return out;
         const std::string me = to_lower(mail_svc->account());
         for (const auto& e : mail_svc->store().events_between(from, to)) {
             if (e.withheld || e.masked || e.cancelled) continue;
-            meeting::CalendarEvent c{e.id, e.series_master_id, e.subject, e.online_url, e.organizer.name, e.start_at, e.end_at, {}};
+            meeting::CalendarEvent c{e.id, e.series_master_id, e.subject, e.online_url, e.organizer.name, e.start_at, e.end_at, {}, {}};
             const auto add = [&](const std::string& name, const std::string& address) {
                 if (!address.empty() && to_lower(address) == me) return;
+                if (!address.empty() && std::find(c.addresses.begin(), c.addresses.end(), address) == c.addresses.end())
+                    c.addresses.push_back(address);
                 const std::string n = name.empty() ? address : name;
                 if (!n.empty() && std::find(c.attendees.begin(), c.attendees.end(), n) == c.attendees.end()) c.attendees.push_back(n);
             };

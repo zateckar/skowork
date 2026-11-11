@@ -189,56 +189,111 @@ std::string AudioCapture::error() const {
     return error_;
 }
 
+bool AudioCapture::trouble() const { return trouble_.load(); }
+
 void AudioCapture::run(CaptureSource source, std::shared_ptr<TrackWriter> writer, std::function<void(Status)> started) {
     ComInit com;
-    DWORD flags = 0;
-    auto client = open_client(source, flags);
-    if (!client) return started(client.error());
-    WAVEFORMATEX fmt{};
-    fmt.wFormatTag = WAVE_FORMAT_PCM;
-    fmt.nChannels = 1;
-    fmt.nSamplesPerSec = kRate;
-    fmt.wBitsPerSample = 16;
-    fmt.nBlockAlign = 2;
-    fmt.nAvgBytesPerSec = kRate * 2;
-    HRESULT hr = (*client)->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 2'000'000 /* 200 ms */, 0, &fmt, nullptr);
-    if (FAILED(hr)) return started(make_error("audio", hr_text("the audio stream cannot be initialised", hr)));
-    unique_handle ready(::CreateEventW(nullptr, FALSE, FALSE, nullptr));
+    // One stream on the device the source follows; reopened by supervise() after a failure or a change of the default
+    // endpoint (Capture Across Device Changes, improve-meeting-capture-quality D3).
+    com_ptr<IAudioClient> client;
     com_ptr<IAudioCaptureClient> cap;
-    if (FAILED(hr = (*client)->SetEventHandle(ready.get())) ||
-        FAILED(hr = (*client)->GetService(kIAudioCaptureClient, cap.put_void())) || FAILED(hr = (*client)->Start()))
-        return started(make_error("audio", hr_text("the audio stream cannot be started", hr)));
+    unique_handle ready(::CreateEventW(nullptr, FALSE, FALSE, nullptr));
+    std::wstring device;  // the default endpoint the stream was opened on; empty for process loopback
+    const auto default_id = [&]() -> std::wstring {
+        if (source.kind == CaptureSource::Kind::process) return {};
+        com_ptr<IMMDeviceEnumerator> en;
+        if (FAILED(::CoCreateInstance(kMMDeviceEnumerator, nullptr, CLSCTX_INPROC_SERVER, kIMMDeviceEnumerator, en.put_void()))) return {};
+        com_ptr<IMMDevice> dev;
+        const bool mic = source.kind == CaptureSource::Kind::mic;
+        if (FAILED(en->GetDefaultAudioEndpoint(mic ? eCapture : eRender, mic ? eCommunications : eConsole, dev.put()))) return {};
+        LPWSTR id = nullptr;
+        if (FAILED(dev->GetId(&id)) || !id) return {};
+        std::wstring out = id;
+        ::CoTaskMemFree(id);
+        return out;
+    };
+    const auto close = [&] {
+        if (client) client->Stop();
+        cap.reset();
+        client.reset();
+    };
+    const auto open = [&]() -> Status {
+        close();
+        DWORD flags = 0;
+        auto c = open_client(source, flags);
+        if (!c) return c.error();
+        WAVEFORMATEX fmt{};
+        fmt.wFormatTag = WAVE_FORMAT_PCM;
+        fmt.nChannels = 1;
+        fmt.nSamplesPerSec = kRate;
+        fmt.wBitsPerSample = 16;
+        fmt.nBlockAlign = 2;
+        fmt.nAvgBytesPerSec = kRate * 2;
+        HRESULT hr = (*c)->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 2'000'000 /* 200 ms */, 0, &fmt, nullptr);
+        if (FAILED(hr)) return make_error("audio", hr_text("the audio stream cannot be initialised", hr));
+        com_ptr<IAudioCaptureClient> k;
+        if (FAILED(hr = (*c)->SetEventHandle(ready.get())) || FAILED(hr = (*c)->GetService(kIAudioCaptureClient, k.put_void())) ||
+            FAILED(hr = (*c)->Start()))
+            return make_error("audio", hr_text("the audio stream cannot be started", hr));
+        client = std::move(*c);
+        cap = std::move(k);
+        device = default_id();
+        return {};
+    };
+    if (Status s = open(); !s) return started(s);
     started({});
     const long long t0 = steady_ms();
-    std::uint64_t base = writer->samples();
-    while (!stop_) {
-        ::WaitForSingleObject(ready.get(), 100);
+    const std::uint64_t base = writer->samples();
+    long long checked = t0;
+    SupervisedStream s;
+    s.open = open;
+    s.close = close;
+    s.pump = [&]() -> Status {
         UINT32 packet = 0;
-        while (SUCCEEDED(cap->GetNextPacketSize(&packet)) && packet > 0) {
+        HRESULT hr = S_OK;
+        while (SUCCEEDED(hr = cap->GetNextPacketSize(&packet)) && packet > 0) {
             BYTE* data = nullptr;
             UINT32 frames = 0;
             DWORD bflags = 0;
             if (FAILED(hr = cap->GetBuffer(&data, &frames, &bflags, nullptr, nullptr))) break;
-            Status s = (bflags & AUDCLNT_BUFFERFLAGS_SILENT) ? writer->append_silence(frames)
+            Status w = (bflags & AUDCLNT_BUFFERFLAGS_SILENT) ? writer->append_silence(frames)
                                                              : writer->append(reinterpret_cast<const std::int16_t*>(data), frames);
             cap->ReleaseBuffer(frames);
-            if (!s) {
+            if (!w) {
                 const std::lock_guard lock(mx_);
-                error_ = s.error().message;
-                stop_ = true;
-                break;
+                error_ = w.error().message;
+                stop_ = true;  // the track cannot be written: end the capture
+                return {};
             }
         }
-        if (FAILED(hr)) {
-            const std::lock_guard lock(mx_);
-            error_ = hr_text("the audio stream failed", hr);
-            break;
-        }
-        // Loopback streams deliver nothing while the app is silent: fill the gap so both tracks keep the meeting's time.
+        if (FAILED(hr)) return make_error("audio", hr_text("the audio stream failed", hr));
+        return {};
+    };
+    s.device_changed = [&] {
+        if (source.kind == CaptureSource::Kind::process || steady_ms() - checked < 1000) return false;
+        checked = steady_ms();
+        const std::wstring now = default_id();
+        return !now.empty() && now != device;
+    };
+    // Loopback streams deliver nothing while the app is silent, and a closed stream nothing at all: fill the gap so
+    // every track keeps the meeting's time.
+    s.fill = [&] {
         const auto expected = base + static_cast<std::uint64_t>(steady_ms() - t0) * kRate / 1000;
         if (const auto have = writer->samples(); have + kRate / 2 < expected) (void)writer->append_silence(static_cast<size_t>(expected - have));
-    }
-    (*client)->Stop();
+    };
+    s.now_ms = [] { return steady_ms(); };
+    s.wait = [&](long long ms) {
+        if (client) ::WaitForSingleObject(ready.get(), static_cast<DWORD>(ms));
+        else ::Sleep(static_cast<DWORD>(ms));
+    };
+    s.stopping = [&] { return stop_.load(); };
+    s.trouble = [&](bool t) {
+        trouble_ = t;
+        const std::lock_guard lock(mx_);
+        error_ = t ? "the audio device is not available" : "";
+    };
+    supervise(s);
+    close();
     (void)writer->close();
 }
 
@@ -393,11 +448,14 @@ namespace {
 
 constexpr wchar_t kIndicatorClass[] = L"WorkbenchRecordingIndicator";
 constexpr UINT kStopId = 1;
+constexpr UINT kWarningChanged = WM_APP + 1;
+constexpr int kIndicatorHeight = 38, kWarningHeight = 20;
 
 struct IndicatorState {
     std::wstring label;
     long long started = 0;
     std::function<void()> on_stop;
+    const Indicator* self = nullptr;
 };
 
 LRESULT CALLBACK indicator_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -407,6 +465,17 @@ LRESULT CALLBACK indicator_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         ::SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams));
         break;
     case WM_TIMER: ::InvalidateRect(h, nullptr, TRUE); return 0;
+    case kWarningChanged: {
+        // A second line while a track is not being recorded.
+        RECT wr;
+        ::GetWindowRect(h, &wr);
+        const bool warn = st && st->self && !st->self->warning().empty();
+        const int want = kIndicatorHeight + (warn ? kWarningHeight : 0);
+        if (wr.bottom - wr.top != want)
+            ::SetWindowPos(h, nullptr, 0, 0, wr.right - wr.left, want, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        ::InvalidateRect(h, nullptr, TRUE);
+        return 0;
+    }
     case WM_COMMAND:
         if (LOWORD(wp) == kStopId && st && st->on_stop) {
             ::EnableWindow(reinterpret_cast<HWND>(lp), FALSE);
@@ -439,8 +508,14 @@ LRESULT CALLBACK indicator_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             ::SetBkMode(dc, TRANSPARENT);
             ::SetTextColor(dc, RGB(255, 255, 255));
             HGDIOBJ f = ::SelectObject(dc, ::GetStockObject(DEFAULT_GUI_FONT));
-            RECT tr{30, 0, rc.right - 76, rc.bottom};
+            RECT tr{30, 0, rc.right - 76, kIndicatorHeight - 2};
             ::DrawTextW(dc, text, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+            if (const std::wstring w = st->self ? st->self->warning() : std::wstring{}; !w.empty()) {
+                ::SetTextColor(dc, RGB(251, 191, 36));  // amber
+                RECT wrc{10, kIndicatorHeight - 4, rc.right - 8, rc.bottom - 2};
+                const std::wstring line = L"⚠ " + w;
+                ::DrawTextW(dc, line.c_str(), -1, &wrc, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+            }
             ::SelectObject(dc, f);
         }
         ::EndPaint(h, &ps);
@@ -463,6 +538,20 @@ Indicator::Indicator(Options o, std::function<void()> on_stop) : on_stop_(std::m
     ready.wait();  // run() publishes the window (or its failure) before its message loop
 }
 
+void Indicator::set_warning(std::wstring text) {
+    {
+        const std::lock_guard lock(warning_mx_);
+        if (warning_ == text) return;
+        warning_ = std::move(text);
+    }
+    if (HWND h = static_cast<HWND>(hwnd_.load())) ::PostMessageW(h, kWarningChanged, 0, 0);
+}
+
+std::wstring Indicator::warning() const {
+    const std::lock_guard lock(warning_mx_);
+    return warning_;
+}
+
 Indicator::~Indicator() {
     if (thread_id_) ::PostThreadMessageW(thread_id_, WM_QUIT, 0, 0);
     if (thread_.joinable()) thread_.join();
@@ -480,8 +569,8 @@ void Indicator::run(Options o, std::promise<void>& shown) {
     wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = kIndicatorClass;
     ::RegisterClassExW(&wc);  // fails harmlessly when already registered
-    IndicatorState st{o.label, started_, on_stop_};
-    constexpr int w = 300, hgt = 38;
+    IndicatorState st{o.label, started_, on_stop_, this};
+    constexpr int w = 300, hgt = kIndicatorHeight;
     int x = 0, y = 0;
     if (o.position) {
         x = o.position->first;
@@ -506,6 +595,7 @@ void Indicator::run(Options o, std::promise<void>& shown) {
     ::ShowWindow(h, SW_SHOWNOACTIVATE);
     stop_ = stop;
     hwnd_ = h;
+    if (!warning().empty()) ::PostMessageW(h, kWarningChanged, 0, 0);  // set before the window existed
     shown.set_value();
     while (::GetMessageW(&msg, nullptr, 0, 0) > 0) {
         ::TranslateMessage(&msg);

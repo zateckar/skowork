@@ -920,6 +920,8 @@ private:
     json apps_ = nullptr;                 // apps.list
     std::string meetings_open_;           // the meeting whose transcript is shown
     std::map<std::string, std::u16string> speaker_drafts_;  // "<meeting>-<speaker>" -> the name being typed
+    std::string meetings_echo_open_;      // the meeting whose echo segments are listed
+    std::u16string term_draft_;           // the vocabulary term being typed
     std::u16string knowledge_merge_name_;
     std::shared_ptr<int> alive_ = std::make_shared<int>(0);
 };

@@ -1,5 +1,5 @@
 // The Meetings settings section's host methods (client/meeting-capture Meetings Settings Section), UI only:
-// meetings.status, .sources, .stop, .capture, .transcribe_now, .rename_speaker, .remove_series and .forget.
+// meetings.status, .sources, .stop, .capture, .transcribe_now, .rename_speaker, .restore_echo, .add_term, .remove_term, .remove_series and .forget.
 #pragma once
 
 #include "host/rpc.h"

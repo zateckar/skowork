@@ -48,6 +48,15 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
             (void)json(transcript_markdown(*segs, names)).dump();
             (void)knowledge_turns(*segs, names).dump();
             if (!parse_segments({{"segments", segments_json(*segs)}})) __builtin_trap();
+            // improve-meeting-capture-quality: echo marking only ever hides local segments.
+            auto marked = *segs;
+            const size_t n = mark_echo(marked);
+            size_t hidden = 0;
+            for (const auto& s : marked) {
+                if (s.echo && s.track != "local") __builtin_trap();
+                hidden += s.echo ? 1 : 0;
+            }
+            if (hidden != n || heard(marked).size() != marked.size() - n) __builtin_trap();
         }
         if (validate_meeting_conditions(j)) (void)meeting_matches(j, {{"event", "detected"}, {"app", "ms-teams.exe"}, {"title", text}});
         (void)parse_config([&j](const std::string& k) -> std::optional<json> {
@@ -60,6 +69,24 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     const size_t nl = text.find('\n');
     if (nl != std::string::npos) {
         if (const auto e = parse_app_entry(text.substr(0, nl))) (void)glob_match(e->title_glob, std::string_view(text).substr(nl + 1));
+        // The first line as vocabulary terms and an address, the rest as transcript text (any bytes, not only UTF-8).
+        const std::vector<std::string> vocabulary = meeting_terms({text.substr(0, nl)}, {text.substr(0, nl)});
+        (void)organisation_of(text.substr(0, nl));
+        (void)respell(std::string_view(text).substr(nl + 1), vocabulary);
+        (void)respell(std::string_view(text).substr(nl + 1), {text.substr(0, nl)});
+    }
+    (void)echo_tokens(text);
+    // Two halves as the microphone and the remote track.
+    if (samples >= 4) {
+        const std::vector<std::int16_t> a(pcm.begin(), pcm.begin() + static_cast<std::ptrdiff_t>(samples / 2)), b(pcm.begin() + static_cast<std::ptrdiff_t>(samples / 2), pcm.end());
+        (void)echo_evidence(a, b, 400, {{0, 100}, {50, 30}, {-5, 1'000'000}});
+    }
+    {  // Track parts from the input's numbers.
+        std::vector<TrackPart> parts;
+        for (size_t i = 0; i + 3 <= size && parts.size() < 4; i += 3)
+            parts.push_back({(data[i] & 1) ? "local" : "remote", static_cast<long long>(data[i + 1]) * 100 - 5000,
+                             std::vector<std::int16_t>(data[i + 2], 1), 16000});
+        (void)join_parts(std::move(parts));
     }
     return 0;
 }

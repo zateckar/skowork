@@ -26,12 +26,15 @@ public:
     ~AudioCapture();
     void stop();
     [[nodiscard]] std::string error() const;  // a failure after the start, if any
+    // True while the stream is closed and cannot be reopened (Capture Trouble Indication).
+    [[nodiscard]] bool trouble() const;
 
 private:
     AudioCapture() = default;
     void run(CaptureSource source, std::shared_ptr<TrackWriter> writer, std::function<void(Status)> started);
     std::thread thread_;
     std::atomic<bool> stop_{false};
+    std::atomic<bool> trouble_{false};
     mutable std::mutex mx_;
     std::string error_;
 };
@@ -58,9 +61,14 @@ public:
     Indicator& operator=(const Indicator&) = delete;
     [[nodiscard]] void* hwnd() const { return hwnd_.load(); }
     [[nodiscard]] void* stop_button() const { return stop_.load(); }
+    // A second line naming the tracks that are not being recorded; empty removes it (Capture Trouble Indication).
+    void set_warning(std::wstring text);
+    [[nodiscard]] std::wstring warning() const;
 
 private:
     void run(Options o, std::promise<void>& shown);
+    mutable std::mutex warning_mx_;
+    std::wstring warning_;
     std::thread thread_;
     unsigned long thread_id_ = 0;
     std::atomic<void*> hwnd_{nullptr}, stop_{nullptr};

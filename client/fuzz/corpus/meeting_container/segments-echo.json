@@ -1,0 +1,1 @@
+{"segments":[{"track":"remote","start_ms":1000,"end_ms":5000,"speaker":"s1","text":"We will ship the new release next Tuesday after the review."},{"track":"local","start_ms":1200,"end_ms":5100,"text":"we will ship the new release next tuesday after the review","evidence":{"correlated":true,"quiet":true},"echo":true}]}

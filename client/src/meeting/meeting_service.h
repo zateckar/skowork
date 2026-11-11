@@ -29,6 +29,8 @@ class Recorder {
 public:
     virtual ~Recorder() = default;
     virtual void stop() = 0;
+    // True while the stream has no working device (Capture Trouble Indication).
+    [[nodiscard]] virtual bool trouble() const { return false; }
 };
 
 struct MeetingEnv {
@@ -39,6 +41,8 @@ struct MeetingEnv {
     std::function<Result<std::unique_ptr<Recorder>>(const CaptureSource& source, std::shared_ptr<TrackWriter> writer)> record;
     // Shows the recording indicator; the returned handle hides it when destroyed.
     std::function<std::shared_ptr<void>(const std::string& label, std::function<void()> on_stop)> indicator;
+    // Shows on the indicator which tracks are not being recorded ("" clears it).
+    std::function<void(const std::shared_ptr<void>& indicator, const std::string& warning)> indicator_warning;
     // Calendar events overlapping [from, to) from the mail-calendar local copy.
     std::function<std::vector<CalendarEvent>(long long from, long long to)> calendar;
     // Creates the meeting-origin Thread (title, origin ref {meeting_id, title, link}) and returns its id.
@@ -102,6 +106,11 @@ public:
     Status capture_manual(const std::string& source);
     Status transcribe_now(const std::string& meeting_id);
     Status rename_speaker(const std::string& meeting_id, const std::string& speaker, const std::string& name);
+    // Echo Review: a local segment left out as echo, by its start time, returns to the transcript.
+    Status restore_echo(const std::string& meeting_id, long long start_ms);
+    // User Vocabulary Terms.
+    Status add_term(const std::string& term);
+    Status remove_term(const std::string& term);
     Status remove_series(const std::string& series_id);
     Status forget(const std::string& meeting_id);  // the meeting, its audio and its knowledge item
     [[nodiscard]] json audio_sources();
@@ -113,6 +122,8 @@ private:
         std::string meeting_id;
         std::vector<std::unique_ptr<Recorder>> recorders;
         std::vector<std::shared_ptr<TrackWriter>> writers;
+        std::vector<std::string> kinds;  // the track of each recorder
+        std::string trouble;             // the tracks shown as not recorded
         std::shared_ptr<void> indicator;
         long long live_at = 0;  // the last live transcription
     };
@@ -123,7 +134,11 @@ private:
     void raise_consent(MeetingRecord& m);
     void after_consent(MeetingRecord& m);
     void raise_notice(MeetingRecord& m);
-    Status begin_capture(MeetingRecord& m, const CaptureSource& source, bool with_mic);
+    Status begin_capture(MeetingRecord& m, const CaptureSource& source, bool with_mic, int part = 1);
+    void interrupted_detected(MeetingRecord& m, const AppMatch& app);
+    void check_trouble();
+    std::vector<std::string> vocabulary_of(const MeetingRecord& m);
+    std::vector<Segment> finish_segments(std::vector<Segment> segs, const std::vector<std::string>& vocabulary);
     void finish_capture(bool discard, const std::string& reason);
     void decline(MeetingRecord& m, const std::string& reason);
     void transcribe_one(MeetingRecord m);

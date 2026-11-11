@@ -74,6 +74,7 @@ struct CalendarEvent {
     std::string id, series_id, subject, online_url, organizer;
     long long start = 0, end = 0;  // unix ms
     std::vector<std::string> attendees;  // names (or addresses when the name is unknown), the user excluded
+    std::vector<std::string> addresses;  // the attendees' email addresses, the user excluded (Meeting Vocabulary)
 };
 
 // The closest event with an online-meeting link whose start is within 10 minutes of `now`, or that is under way.
@@ -154,17 +155,59 @@ Result<ParsedContainer> parse_container(const std::uint8_t* data, size_t n);
 
 // ---- transcripts ----
 
+// What a local-track segment's own audio says about echo (improve-meeting-capture-quality design D1): the microphone
+// followed the remote track over the segment at the meeting's loudspeaker lag (correlated), and it was no louder than
+// the leak usually is in this meeting (quiet).
+struct EchoEvidence {
+    bool correlated = false, quiet = false;
+};
+
 struct Segment {
     std::string track;    // remote | local | system | mic
     long long start_ms = 0, end_ms = 0;  // from the start of the capture
     std::string speaker;  // "me" for the local track, "s1", "s2", ... for clusters of the other tracks
     std::string text;
+    std::optional<EchoEvidence> evidence;  // local-track segments of a meeting with a remote track
+    bool echo = false;                     // left out of the transcript as echo (Echo Removal From The Local Track)
 };
 
-// The worker's result: {language, segments: [{track, start_ms, end_ms, speaker, text}]}. Fails ("invalid") when the
-// shape is wrong; segments come back sorted by start time.
+// The worker's result: {language, segments: [{track, start_ms, end_ms, speaker, text, evidence?, echo?}]}. Fails
+// ("invalid") when the shape is wrong; segments come back sorted by start time.
 Result<std::vector<Segment>> parse_segments(const json& j);
 json segments_json(const std::vector<Segment>& segments);
+
+// ---- echo (improve-meeting-capture-quality design D1) ----
+
+// Words for comparing what two tracks said: lower-cased, split at anything that is not a letter or a digit.
+std::vector<std::string> echo_tokens(std::string_view text);
+// Echo evidence for each span (ms from the start of the capture) of the local track, computed from the loudness of
+// both tracks over 20 ms frames: the loudspeaker lag is searched between 0 and 300 ms over the first ten minutes.
+// Without a measurable echo path in the meeting (a headset), no span is correlated.
+std::vector<EchoEvidence> echo_evidence(const std::vector<std::int16_t>& local, const std::vector<std::int16_t>& remote,
+                                        std::uint32_t rate, const std::vector<std::pair<long long, long long>>& spans_ms);
+// Marks the local segments that repeat remote speech heard through the loudspeakers: their words match a remote segment
+// that overlaps them or ended at most 1 second before (60% of 8 or more words, 80% of 6 or 7, all but one word of 4 or
+// 5, every word of fewer; a long segment is also compared with those remote segments joined), and their evidence is
+// correlated, and quiet as well for fewer than 6 words. Returns how many are marked.
+size_t mark_echo(std::vector<Segment>& segments);
+// The segments a transcript shows (echo left out).
+std::vector<Segment> heard(const std::vector<Segment>& segments);
+
+// ---- vocabulary (Meeting Vocabulary, Vocabulary Spelling; design D2) ----
+
+inline constexpr size_t kMaxUserTerms = 200;
+// The organisation in a work address ("jan@skoda-auto.cz" gives "Skoda Auto"), or empty for public mail providers and
+// labels shorter than 4 letters. A second-level public suffix (co.uk, com.au) is skipped.
+std::string organisation_of(std::string_view address);
+// The meeting's own terms: each attendee name split into its words (addresses skipped) and the attendees' organisations,
+// without duplicates.
+std::vector<std::string> meeting_terms(const std::vector<std::string>& attendees, const std::vector<std::string>& addresses);
+// Adds the words of `more` that are not already in `terms` (case-insensitive).
+void merge_terms(std::vector<std::string>& terms, const std::vector<std::string>& more);
+// A recognised word of 5 or more letters that starts with a capital takes the spelling of a vocabulary word one edit
+// away (a swap of neighbouring letters is one edit), either whole or without an ending of up to 3 letters, which it
+// keeps. A word equal to a term apart from case takes the term's case. Everything else is left as it is.
+std::string respell(std::string_view text, const std::vector<std::string>& vocabulary);
 
 // Speaker names: "me" is the user; remote clusters get "Speaker N", or the attendee's name when the meeting has exactly
 // one other attendee and one remote cluster (a confident match). `existing` keeps names the user set.
@@ -217,7 +260,38 @@ public:
     virtual ~SpeechEngine() = default;
     // language: a code, or empty to detect it. Returns {language, segments}.
     virtual Result<json> transcribe(const std::vector<TrackAudio>& tracks, const std::string& language) = 0;
+    // The meeting vocabulary the decoder favours (design D2); engines without hotwords ignore it.
+    virtual void set_hotwords(std::vector<std::string> terms) { (void)terms; }
 };
+
+// The capture of one track across stream failures and device changes (Capture Across Device Changes, design D3). The
+// stream is open when supervise() is called. A stream that fails or whose default device changed is closed and
+// reopened at once, then every second, and every 10 seconds after 30 seconds without a stream; the track is padded with
+// silence up to the wall clock throughout, and trouble() reports whether the track has a working stream.
+struct SupervisedStream {
+    std::function<Status()> open;            // starts the stream on the current default device
+    std::function<Status()> pump;            // moves the available audio into the track; an error: the stream broke
+    std::function<bool()> device_changed;    // the default device the stream follows is another one now
+    std::function<void()> close;
+    std::function<void()> fill;              // pads the track with silence up to the wall clock
+    std::function<long long()> now_ms;
+    std::function<void(long long ms)> wait;  // waits for audio up to ms
+    std::function<bool()> stopping;
+    std::function<void(bool)> trouble;
+};
+void supervise(SupervisedStream& s);
+// The indicator's warning for the tracks without a working stream ("local,remote"), in the UI language; "" for none.
+std::string trouble_text(const std::string& tracks, const std::string& language);
+
+// The tracks of one capture across part files (Continue Capture After A Restart, design D4): every file of a kind is
+// placed at its header start time relative to the earliest start of all files, with silence between parts.
+struct TrackPart {
+    std::string track;
+    long long start_ms = 0;
+    std::vector<std::int16_t> pcm;
+    std::uint32_t rate = 16000;
+};
+std::vector<TrackAudio> join_parts(std::vector<TrackPart> parts);
 
 // Development builds: every VAD span becomes "Segment N" on its track; remote spans are split into two speakers by
 // loudness. The language is the requested one, else "en".

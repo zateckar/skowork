@@ -16,6 +16,25 @@ namespace {
 
 constexpr std::wstring_view kPurpose = L"workbench-meeting-audio";
 
+// Echo evidence for each local segment against the other track (improve-meeting-capture-quality D1).
+void attach_echo_evidence(json& result, const std::vector<TrackAudio>& tracks) {
+    const auto local = std::find_if(tracks.begin(), tracks.end(), [](const TrackAudio& t) { return t.track == "local"; });
+    const auto other = std::find_if(tracks.begin(), tracks.end(), [](const TrackAudio& t) { return t.track != "local"; });
+    json* segs = result.contains("segments") ? &result["segments"] : nullptr;
+    if (local == tracks.end() || other == tracks.end() || !segs || !segs->is_array()) return;
+    if (local->rate != other->rate) return;
+    std::vector<std::pair<long long, long long>> spans;
+    std::vector<json*> at;
+    for (auto& s : *segs)
+        if (s.is_object() && jstr(s, "track") == "local") {
+            spans.emplace_back(jint(s, "start_ms"), jint(s, "end_ms"));
+            at.push_back(&s);
+        }
+    if (spans.empty()) return;
+    const auto ev = echo_evidence(local->pcm, other->pcm, local->rate, spans);
+    for (size_t i = 0; i < at.size(); ++i) (*at[i])["evidence"] = {{"correlated", ev[i].correlated}, {"quiet", ev[i].quiet}};
+}
+
 }  // namespace
 
 std::filesystem::path path_from_utf8(const std::string& s) { return std::filesystem::path(widen(s)); }
@@ -146,21 +165,32 @@ Result<json> stt_request(const std::string& method, const json& params) {
         if (!e) return e.error();
         engine = std::move(*e);
     }
-    std::vector<TrackAudio> tracks;
+    // A track continued after a client restart comes in several part files; their header start times place them on
+    // the meeting's clock (improve-meeting-capture-quality D4).
+    std::vector<TrackPart> parts;
     for (const auto& p : *paths) {
         if (!p.is_string()) return make_error("invalid_params", "tracks is a list of files");
         auto t = read_track(path_from_utf8(p.get<std::string>()));
         if (!t) return t.error();
-        tracks.push_back({to_string(t->header.kind), std::move(t->pcm), t->header.sample_rate});
+        parts.push_back({to_string(t->header.kind), t->header.start_ms, std::move(t->pcm), t->header.sample_rate});
+    }
+    std::vector<TrackAudio> tracks = join_parts(std::move(parts));
+    if (const json* v = jobj(params, "vocabulary"); v && v->is_array()) {
+        std::vector<std::string> terms;
+        for (const auto& t : *v)
+            if (t.is_string() && terms.size() < 400) terms.push_back(t.get<std::string>());
+        engine->set_hotwords(std::move(terms));
     }
     auto r = engine->transcribe(tracks, jstr(params, "language"));
     if (!r) return r;
+    attach_echo_evidence(*r, tracks);
     // Dictation (add-dictation D5): a short dictation detected as an unsupported language is transcribed in the
     // fallback language (the window's) instead.
     if (const std::string lang = jstr(*r, "language"), fallback = jstr(params, "fallback_language");
         jstr(params, "language").empty() && !supported_language(lang) && supported_language(fallback)) {
         r = engine->transcribe(tracks, fallback);
         if (!r) return r;
+        attach_echo_evidence(*r, tracks);
     }
     if (const std::string lang = jstr(*r, "language"); !supported_language(lang))
         return make_error("unsupported_language", lang);

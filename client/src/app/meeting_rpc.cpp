@@ -42,6 +42,21 @@ void register_meeting_rpc(RpcRegistry& rpc, std::function<meeting::MeetingServic
         if (!s) return s.error();
         return done((*s)->rename_speaker(jstr(p, "id"), jstr(p, "speaker"), jstr(p, "name")));
     });
+    rpc.add("meetings.restore_echo", RpcExposure::ui, [svc, done](const json& p) -> Result<json> {
+        auto s = svc();
+        if (!s) return s.error();
+        return done((*s)->restore_echo(jstr(p, "id"), jint(p, "start_ms", -1)));
+    });
+    rpc.add("meetings.add_term", RpcExposure::ui, [svc, done](const json& p) -> Result<json> {
+        auto s = svc();
+        if (!s) return s.error();
+        return done((*s)->add_term(jstr(p, "term")));
+    });
+    rpc.add("meetings.remove_term", RpcExposure::ui, [svc, done](const json& p) -> Result<json> {
+        auto s = svc();
+        if (!s) return s.error();
+        return done((*s)->remove_term(jstr(p, "term")));
+    });
     rpc.add("meetings.remove_series", RpcExposure::ui, [svc, done](const json& p) -> Result<json> {
         auto s = svc();
         if (!s) return s.error();

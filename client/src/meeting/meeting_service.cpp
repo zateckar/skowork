@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 
 namespace wb::meeting {
 namespace {
@@ -20,6 +22,49 @@ const char* const kNotNow = "Not now";
 const char* const kAlways = "Always capture this series";
 const char* const kNoticeGiven = "I posted the notice";
 const char* const kCancel = "Cancel";
+const char* const kContinue = "Continue";
+const char* const kFinish = "Finish";
+constexpr long long kResumeWindow = 10 * kMinute;  // Continue Capture After A Restart
+
+// The meeting time of the last audio in a meeting's files: the moment the client stopped. Read from the containers
+// (header start plus the samples sealed), without decrypting them.
+long long last_written(const std::filesystem::path& dir, long long fallback) {
+    std::error_code ec;
+    long long last = 0;
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        if (e.path().extension() != ".skau") continue;
+        std::ifstream in(e.path(), std::ios::binary);
+        const std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const auto c = parse_container(data.data(), data.size());
+        if (!c || c->header.sample_rate == 0) continue;
+        std::uint64_t samples = 0;
+        if (!c->chunks.empty()) {
+            const auto& k = c->chunks.back();
+            samples = k.offset + (k.sealed.size() > 16 ? (k.sealed.size() - 16) / 2 : 0);  // AES-GCM adds a 16-byte tag
+        }
+        last = std::max<long long>(last, c->header.start_ms + static_cast<long long>(samples * 1000 / c->header.sample_rate));
+    }
+    return last > 0 ? std::min(last, fallback) : fallback;
+}
+
+// Part files of a continued capture: "<kind>.skau", then "<kind>.2.skau" and so on (design D4).
+int parts_in(const std::filesystem::path& dir) {
+    int n = 0;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        if (e.path().extension() != ".skau") continue;
+        const std::string stem = path_to_utf8(e.path().stem());
+        const auto dot = stem.find('.');
+        n = std::max(n, dot == std::string::npos ? 1 : std::atoi(stem.c_str() + dot + 1));
+    }
+    return n;
+}
+
+CaptureSource source_of(const MeetingRecord& m) {
+    return m.source == "system" ? CaptureSource{CaptureSource::Kind::system, 0}
+           : m.source == "mic"  ? CaptureSource{CaptureSource::Kind::mic, 0}
+                                : CaptureSource{CaptureSource::Kind::process, m.pid};
+}
 
 std::string app_display(const std::string& process) {
     std::string n = process;
@@ -54,11 +99,19 @@ MeetingService::~MeetingService() { stop(); }
 void MeetingService::start() {
     {
         const std::lock_guard lock(mx_);
-        // After a crash or shutdown: interrupted work goes back to the queue, open Questions are stale.
-        for (auto m : store_->in_states({"transcribing", "capturing"})) {
+        // After a crash or shutdown: interrupted work goes back to the queue, open Questions are stale. A capture that
+        // was running waits up to 10 minutes for its meeting to be detected again (Continue Capture After A Restart).
+        for (auto m : store_->in_states({"transcribing"})) {
             m.state = "pending";
             if (!m.ended_at) m.ended_at = now();
             (void)store_->put(m);
+        }
+        for (auto m : store_->in_states({"capturing", "interrupted"})) {
+            if (m.state == "capturing") m.ended_at = last_written(path_from_utf8(m.audio_dir), now());
+            m.state = "interrupted";
+            m.action_id.clear();
+            (void)store_->put(m);
+
         }
         for (auto m : store_->in_states({"offered", "notice"})) decline(m, "SkoWork restarted");
     }
@@ -115,6 +168,16 @@ void MeetingService::policy_changed() {
             // Policy revoked: stop at once and delete what was captured (Disabled Unless Enabled By Policy).
             finish_capture(true, "Meeting capture was turned off by your organisation.");
             for (auto m : store_->in_states({"offered", "notice"})) decline(m, "meeting capture turned off");
+            // Audio of a capture interrupted by a restart goes as for a capture running when policy was revoked.
+            for (auto m : store_->in_states({"interrupted"})) {
+                if (env_.withdraw && !m.action_id.empty()) env_.withdraw(m.action_id, "Meeting capture was turned off.");
+                asked_at_.erase(m.action_id);
+                m.action_id.clear();
+                delete_audio(m);
+                m.state = "discarded";
+                m.error = "Meeting capture was turned off by your organisation.";
+                (void)store_->put(m);
+            }
             detector_.reset();
         } else {
             detector_ = std::make_unique<Detector>(cfg_.apps);
@@ -144,6 +207,16 @@ void MeetingService::tick() {
             if (d.kind == "detected") detected(d.app);
             else ended(d.app);
         }
+    check_trouble();
+    // An interrupted meeting not detected again within 10 minutes is transcribed as it is.
+    for (auto m : store_->in_states({"interrupted"}))
+        if (m.action_id.empty() && now() - m.ended_at >= kResumeWindow) {
+            m.state = "pending";
+            (void)store_->put(m);
+            log::info(kLog, "interrupted capture not resumed; transcription queued");
+            wake_.notify_all();
+            notify();
+        }
     // Prompt Ignored: an unanswered "Start capture?" is withdrawn after 2 minutes.
     for (auto it = asked_at_.begin(); it != asked_at_.end();) {
         if (now() - it->second < kQuestionExpiry) {
@@ -156,6 +229,13 @@ void MeetingService::tick() {
             if (env_.withdraw) env_.withdraw(action, "No answer within 2 minutes.");
             m->action_id.clear();
             decline(*m, "no answer");
+        } else if (m && m->state == "interrupted") {
+            if (env_.withdraw) env_.withdraw(action, "No answer within 2 minutes.");
+            m->action_id.clear();
+            m->state = "pending";
+            (void)store_->put(*m);
+            wake_.notify_all();
+            notify();
         }
     }
     // The outputs Run ended.
@@ -175,6 +255,12 @@ void MeetingService::detected(const AppMatch& app) {
         if (m.pid == app.root) return;
     std::optional<CalendarEvent> cal;
     if (env_.calendar) cal = match_calendar(env_.calendar(now() - 4 * 60 * kMinute, now() + 15 * kMinute), now());
+    // The meeting a restart interrupted: same application, and the same calendar event where it had one.
+    for (auto m : store_->in_states({"interrupted"})) {
+        if (!m.action_id.empty() || !iequals(m.app, app.process) || now() - m.ended_at >= kResumeWindow) continue;
+        if (!m.event_id.empty() && (!cal || cal->id != m.event_id)) continue;
+        return interrupted_detected(m, app);
+    }
     MeetingRecord m;
     m.id = "mtg_" + random_urlsafe(9);
     m.state = "offered";
@@ -187,6 +273,7 @@ void MeetingService::detected(const AppMatch& app) {
         m.event_id = cal->id;
         m.series_id = cal->series_id;
         m.attendees = cal->attendees;
+        m.vocabulary = meeting_terms(cal->attendees, cal->addresses);
     }
     if (m.title.empty()) m.title = app_display(app.process) + " call";
     const json ref = {{"meeting_id", m.id}, {"title", m.title}, {"link", "#/settings"}};
@@ -207,6 +294,25 @@ void MeetingService::detected(const AppMatch& app) {
     notify();
 }
 
+void MeetingService::interrupted_detected(MeetingRecord& m, const AppMatch& app) {
+    // Asked even for an opted-in series: the client cannot know why it stopped (design D4).
+    const std::string prompt = "Continue capture? " + m.title + " (" + app_display(m.app) + ")";
+    auto a = env_.ask ? env_.ask(m.thread_id, prompt, {kContinue, kFinish}, "") : Result<std::string>(make_error("unavailable"));
+    if (!a) {
+        m.state = "pending";
+        (void)store_->put(m);
+        wake_.notify_all();
+        notify();
+        return;
+    }
+    m.pid = app.root;
+    m.action_id = *a;
+    asked_at_[*a] = now();
+    (void)store_->put(m);
+    log::info(kLog, "interrupted meeting detected again");
+    notify();
+}
+
 void MeetingService::ended(const AppMatch& app) {
     if (capture_)
         if (auto m = store_->get(capture_->meeting_id); m && m->pid == app.root && starts_with(m->source, "app:") && !m->user_started)
@@ -217,6 +323,16 @@ void MeetingService::ended(const AppMatch& app) {
             asked_at_.erase(m.action_id);
             m.action_id.clear();
             decline(m, "the meeting ended");
+        }
+    for (auto m : store_->in_states({"interrupted"}))
+        if (m.pid == app.root && !m.action_id.empty()) {
+            if (env_.withdraw) env_.withdraw(m.action_id, "The meeting ended.");
+            asked_at_.erase(m.action_id);
+            m.action_id.clear();
+            m.state = "pending";
+            (void)store_->put(m);
+            wake_.notify_all();
+            notify();
         }
 }
 
@@ -236,10 +352,7 @@ void MeetingService::raise_consent(MeetingRecord& m) {
 
 void MeetingService::after_consent(MeetingRecord& m) {
     if (cfg_.require_notice) return raise_notice(m);
-    const CaptureSource src = m.source == "system" ? CaptureSource{CaptureSource::Kind::system, 0}
-                              : m.source == "mic"  ? CaptureSource{CaptureSource::Kind::mic, 0}
-                                                   : CaptureSource{CaptureSource::Kind::process, m.pid};
-    (void)begin_capture(m, src, starts_with(m.source, "app:") && !m.user_started);
+    (void)begin_capture(m, source_of(m), starts_with(m.source, "app:") && !m.user_started);
 }
 
 void MeetingService::raise_notice(MeetingRecord& m) {
@@ -258,7 +371,7 @@ void MeetingService::raise_notice(MeetingRecord& m) {
     notify();
 }
 
-Status MeetingService::begin_capture(MeetingRecord& m, const CaptureSource& source, bool with_mic) {
+Status MeetingService::begin_capture(MeetingRecord& m, const CaptureSource& source, bool with_mic, int part) {
     if (capture_) return make_error("busy", "A capture is already running.");
     if (!available_) return make_error("unavailable", "Meeting capture is turned off.");
     if (!env_.record) return make_error("unavailable", "Audio capture is not available.");
@@ -270,17 +383,28 @@ Status MeetingService::begin_capture(MeetingRecord& m, const CaptureSource& sour
     auto cap = std::make_unique<Capture>();
     cap->meeting_id = m.id;
     const auto open = [&](TrackKind k, const CaptureSource& s) -> Status {
-        auto w = TrackWriter::create(dir / (std::string(to_string(k)) + ".skau"), k, 16000, t0);
+        const std::string name = std::string(to_string(k)) + (part > 1 ? "." + std::to_string(part) : std::string{}) + ".skau";
+        auto w = TrackWriter::create(dir / name, k, 16000, t0);
         if (!w) return w.error();
         std::shared_ptr<TrackWriter> writer(std::move(*w));
         auto r = env_.record(s, writer);
         if (!r) return r.error();
         cap->writers.push_back(writer);
         cap->recorders.push_back(std::move(*r));
+        cap->kinds.push_back(to_string(k));
         return {};
     };
     m.audio_dir = path_to_utf8(dir);
-    if (Status s = open(kind, source); !s) {
+    if (Status s = open(kind, source); !s && part > 1) {
+        // A continued capture that cannot start: what was captured before the restart is transcribed.
+        for (auto& r : cap->recorders) r->stop();
+        m.state = "pending";
+        m.error = "The capture could not be continued: " + s.error().message;
+        (void)store_->put(m);
+        notify();
+        wake_.notify_all();
+        return s;
+    } else if (!s) {
         for (auto& r : cap->recorders) r->stop();
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
@@ -301,7 +425,7 @@ Status MeetingService::begin_capture(MeetingRecord& m, const CaptureSource& sour
         });
     capture_ = std::move(cap);
     m.state = "capturing";
-    m.started_at = t0;
+    if (part == 1) m.started_at = t0;
     m.action_id.clear();
     (void)store_->put(m);
     log::info(kLog, "capture started (" + std::string(to_string(kind)) + (with_mic ? " and microphone)" : ")"));
@@ -348,7 +472,10 @@ void MeetingService::on_answer(const std::string& action_id, const std::string& 
     auto m = store_->by_action(action_id);
     if (!m) return;
     m->action_id.clear();
-    if (!available_) return decline(*m, "meeting capture turned off");
+    if (!available_) {
+        if (m->state != "interrupted") decline(*m, "meeting capture turned off");
+        return;
+    }
     if (m->state == "offered") {
         if (answer == kNotNow) return decline(*m, "declined");
         if (answer == kAlways && !m->series_id.empty()) (void)store_->add_series(m->series_id, m->title, now());
@@ -357,10 +484,19 @@ void MeetingService::on_answer(const std::string& action_id, const std::string& 
     }
     if (m->state == "notice") {
         if (answer != kNoticeGiven) return decline(*m, "cancelled");
-        const CaptureSource src = m->source == "system" ? CaptureSource{CaptureSource::Kind::system, 0}
-                                  : m->source == "mic"  ? CaptureSource{CaptureSource::Kind::mic, 0}
-                                                        : CaptureSource{CaptureSource::Kind::process, m->pid};
-        (void)begin_capture(*m, src, starts_with(m->source, "app:") && !m->user_started);
+        (void)begin_capture(*m, source_of(*m), starts_with(m->source, "app:") && !m->user_started);
+    }
+    if (m->state == "interrupted") {
+        if (answer == kContinue && !capture_) {
+            // The same meeting, in new part files; the participant notice is not repeated.
+            (void)begin_capture(*m, source_of(*m), starts_with(m->source, "app:") && !m->user_started,
+                                parts_in(path_from_utf8(m->audio_dir)) + 1);
+            return;
+        }
+        m->state = "pending";
+        (void)store_->put(*m);
+        notify();
+        wake_.notify_all();
     }
 }
 
@@ -404,10 +540,16 @@ void MeetingService::live_step() {
     std::error_code ec;
     for (const auto& e : std::filesystem::directory_iterator(path_from_utf8(m->audio_dir), ec))
         if (e.path().extension() == ".skau") tracks.push_back(path_to_utf8(e.path()));
-    auto r = env_.transcribe({{"tracks", tracks}, {"language", m->language}});
+    std::vector<std::string> vocabulary;
+    {
+        const std::lock_guard lock(mx_);
+        vocabulary = vocabulary_of(*m);
+    }
+    auto r = env_.transcribe({{"tracks", tracks}, {"language", m->language}, {"vocabulary", vocabulary}});
     if (!r) return;
     auto segs = parse_segments(*r);
     if (!segs) return;
+    *segs = finish_segments(std::move(*segs), vocabulary);
     const std::lock_guard lock(mx_);
     auto cur = store_->get(m->id);
     if (!cur || cur->state != "capturing") return;
@@ -424,8 +566,13 @@ void MeetingService::transcribe_one(MeetingRecord m) {
     if (!m.audio_deleted)
         for (const auto& e : std::filesystem::directory_iterator(path_from_utf8(m.audio_dir), ec))
             if (e.path().extension() == ".skau") tracks.push_back(path_to_utf8(e.path()));
+    std::vector<std::string> vocabulary;
+    {
+        const std::lock_guard lock(mx_);
+        vocabulary = vocabulary_of(m);
+    }
     Result<json> r = tracks.empty() ? Result<json>(make_error("no_audio", "The meeting has no audio."))
-                     : env_.transcribe ? env_.transcribe({{"tracks", tracks}, {"language", m.language}})
+                     : env_.transcribe ? env_.transcribe({{"tracks", tracks}, {"language", m.language}, {"vocabulary", vocabulary}})
                                        : Result<json>(make_error("model_missing", "Transcription is not available."));
     const std::lock_guard lock(mx_);
     auto cur = store_->get(m.id);
@@ -454,6 +601,7 @@ void MeetingService::transcribe_one(MeetingRecord m) {
         notify();
         return;
     }
+    *segs = finish_segments(std::move(*segs), vocabulary);
     m.language = jstr(*r, "language");
     m.segments = segments_json(*segs);
     m.speakers = name_speakers(*segs, env_.user_name ? env_.user_name() : std::string{}, m.attendees, m.speakers);
@@ -462,6 +610,21 @@ void MeetingService::transcribe_one(MeetingRecord m) {
     if (!cfg_.keep_audio) delete_audio(m);
     if (env_.knowledge) env_.knowledge(m, knowledge_turns(*segs, m.speakers));
     start_outputs(m);
+}
+
+std::vector<std::string> MeetingService::vocabulary_of(const MeetingRecord& m) {
+    // The meeting's terms, the user's own name and the user's terms (Meeting Vocabulary).
+    std::vector<std::string> v = m.vocabulary;
+    if (env_.user_name)
+        if (const std::string me = env_.user_name(); !me.empty()) merge_terms(v, split(me, ' '));
+    merge_terms(v, store_->terms());
+    return v;
+}
+
+std::vector<Segment> MeetingService::finish_segments(std::vector<Segment> segs, const std::vector<std::string>& vocabulary) {
+    for (auto& s : segs) s.text = respell(s.text, vocabulary);  // Vocabulary Spelling
+    if (const size_t n = mark_echo(segs)) log::info(kLog, std::to_string(n) + " local segments left out as echo");
+    return segs;
 }
 
 void MeetingService::start_outputs(MeetingRecord& m) {
@@ -546,7 +709,10 @@ json MeetingService::meeting_json(const MeetingRecord& m) {
     if (auto s = parse_segments({{"segments", m.segments}})) segs = std::move(*s);
     json speakers = json::array();
     for (const auto& [id, name] : m.speakers) speakers.push_back({{"id", id}, {"name", name}});
-    return {{"id", m.id},           {"title", m.title},         {"state", m.state},        {"app", m.app},
+    json echo = json::array();  // Echo Review
+    for (const auto& s : segs)
+        if (s.echo) echo.push_back({{"start_ms", s.start_ms}, {"text", s.text}});
+    return {{"echo", echo}, {"id", m.id},           {"title", m.title},         {"state", m.state},        {"app", m.app},
             {"source", m.source},   {"detected_at", m.detected_at}, {"started_at", m.started_at}, {"ended_at", m.ended_at},
             {"language", m.language}, {"error", m.error},      {"thread_id", m.thread_id}, {"event_id", m.event_id},
             {"series_id", m.series_id}, {"has_audio", !m.audio_deleted && !m.audio_dir.empty()},
@@ -566,7 +732,7 @@ json MeetingService::status() {
     if (capture_)
         if (auto m = store_->get(capture_->meeting_id))
             out["capture"] = {{"meeting_id", m->id}, {"title", m->title}, {"source", m->source}, {"started_at", m->started_at},
-                              {"elapsed_ms", now() - m->started_at}};
+                              {"elapsed_ms", now() - m->started_at}, {"trouble", capture_->trouble.empty() ? json::array() : json(split(capture_->trouble, ','))}};
     json list = json::array();
     for (const auto& m : store_->list(50))
         if (m.state != "declined") list.push_back(meeting_json(m));
@@ -575,7 +741,22 @@ json MeetingService::status() {
     for (const auto& [id, title] : store_->series()) series.push_back({{"id", id}, {"title", title}});
     out["series"] = series;
     if (cfg_.allow_manual && !capture_) out["sources"] = audio_sources();
+    out["terms"] = store_->terms();
+    out["max_terms"] = kMaxUserTerms;
     return out;
+}
+
+void MeetingService::check_trouble() {
+    // Capture Trouble Indication: the tracks without a working stream, on the indicator and in the section.
+    if (!capture_) return;
+    std::string t;
+    for (size_t i = 0; i < capture_->recorders.size(); ++i)
+        if (capture_->recorders[i]->trouble()) t += (t.empty() ? "" : ",") + capture_->kinds[i];
+    if (t == capture_->trouble) return;
+    capture_->trouble = t;
+    log::info(kLog, t.empty() ? "capture streams recovered" : "capture streams not recording: " + t);
+    if (env_.indicator_warning) env_.indicator_warning(capture_->indicator, t);
+    notify();
 }
 
 json MeetingService::audio_sources() {
@@ -676,6 +857,48 @@ Status MeetingService::rename_speaker(const std::string& meeting_id, const std::
         if (env_.knowledge && (m->state == "done" || m->state == "summarizing"))
             if (auto segs = parse_segments({{"segments", m->segments}})) env_.knowledge(*m, knowledge_turns(*segs, m->speakers));
     }
+    notify();
+    return {};
+}
+
+Status MeetingService::restore_echo(const std::string& meeting_id, long long start_ms) {
+    {
+        const std::lock_guard lock(mx_);
+        auto m = store_->get(meeting_id);
+        if (!m) return make_error("not_found", "No such meeting.");
+        auto segs = parse_segments({{"segments", m->segments}});
+        if (!segs) return segs.error();
+        bool found = false;
+        for (auto& s : *segs)
+            if (s.echo && s.start_ms == start_ms) s.echo = false, found = true;
+        if (!found) return make_error("not_found", "No such segment.");
+        m->segments = segments_json(*segs);
+        (void)store_->put(*m);
+        // Re-indexed as for a speaker rename.
+        if (env_.knowledge && (m->state == "done" || m->state == "summarizing")) env_.knowledge(*m, knowledge_turns(*segs, m->speakers));
+    }
+    notify();
+    return {};
+}
+
+Status MeetingService::add_term(const std::string& term) {
+    const std::string t = trim(term);
+    if (t.empty() || t.size() > 100) return make_error("invalid_params", "A term is 1 to 100 characters.");
+    {
+        const std::lock_guard lock(mx_);
+        const auto have = store_->terms();
+        for (const auto& x : have)
+            if (x == t) return {};
+        if (have.size() >= kMaxUserTerms)
+            return make_error("limit", "You have " + std::to_string(kMaxUserTerms) + " terms, the most there can be. Remove one first.");
+        if (Status s = store_->add_term(t, now()); !s) return s;
+    }
+    notify();
+    return {};
+}
+
+Status MeetingService::remove_term(const std::string& term) {
+    if (Status s = store_->remove_term(term); !s) return s;
     notify();
     return {};
 }

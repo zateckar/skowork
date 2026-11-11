@@ -1,11 +1,13 @@
 // Meetings (client/meeting-capture Meetings Settings Section): whether capture is available, the running capture with
 // Stop, manual capture of an audio source when policy allows it, the captured meetings with their state, Transcribe now,
-// the transcript and speaker renaming, and the series opted in for automatic capture. The host does the work
-// (meetings.status, .stop, .capture, .transcribe_now, .rename_speaker, .remove_series, .forget).
+// the transcript and speaker renaming, the segments left out as echo with Restore, the user's vocabulary terms, and the
+// series opted in for automatic capture. The host does the work (meetings.status, .stop, .capture, .transcribe_now,
+// .rename_speaker, .restore_echo, .add_term, .remove_term, .remove_series, .forget).
 #include "shell/shell.h"
 #include "ui/text16.h"
 #include "ui/textfield.h"
 
+#include <cstdio>
 #include <ctime>
 
 namespace wb::shell {
@@ -80,6 +82,15 @@ void PagePane::build_meetings(Node& c) {
                 load_meetings();
             });
         })->enabled = busy_.empty();
+        // Capture Trouble Indication: the tracks without a working stream.
+        if (const json* tr = jobj(*cap, "trouble"); tr && tr->is_array() && !tr->empty()) {
+            bool mic = false, audio = false;
+            for (const auto& t : *tr) (t == "local" || t == "mic" ? mic : audio) = true;
+            const std::u16string trouble = mic && audio ? shell_.t("settings.meetings.trouble_both")
+                                        : mic       ? shell_.t("settings.meetings.trouble_mic")
+                                                    : shell_.t("settings.meetings.trouble_audio");
+            text(c, trouble, Paint::warning, "settings-meetings-trouble");
+        }
     } else if (jbool(meetings_, "allow_manual")) {
         // Manual Audio Source Capture.
         c.emplace<ui::Label>(shell_.ui(), shell_.t("settings.meetings.manual"), TextStyle::body_strong)->role = ui::Role::heading;
@@ -150,6 +161,45 @@ void PagePane::build_meetings(Node& c) {
             button(*actions, "meeting-forget-" + id, shell_.t("settings.meetings.forget"), [this, id] {
                 act("meetings", "meetings.forget", {{"id", id}}, [this](const json&) { load_meetings(); });
             }, ui::Button::Kind::subtle)->enabled = busy_.empty();
+            // Echo Review: how many segments were left out, the list, and Restore.
+            if (const json* echo = jobj(m, "echo"); echo && echo->is_array() && !echo->empty()) {
+                const bool echo_open = meetings_echo_open_ == id;
+                auto* er = item->emplace<Node>();
+                er->axis = ui::Axis::row;
+                er->gap = 8;
+                er->emplace<ui::Label>(shell_.ui(), shell_.t("settings.meetings.echo_count", {{"count", u16(std::to_string(echo->size()))}}),
+                                       TextStyle::caption, Paint::text_secondary, false, "meeting-echo-count-" + id);
+                button(*er, "meeting-echo-" + id, shell_.t(echo_open ? "settings.meetings.echo_hide" : "settings.meetings.echo_show"),
+                       [this, id, echo_open] {
+                           meetings_echo_open_ = echo_open ? std::string{} : id;
+                           rebuild();
+                       }, ui::Button::Kind::subtle);
+                if (echo_open) {
+                    auto* el = item->emplace<Node>("meeting-echo-list-" + id);
+                    el->role = ui::Role::list;
+                    el->name = shell_.t("settings.meetings.echo_list");
+                    el->gap = 4;
+                    for (const auto& e : *echo) {
+                        const long long at = jint(e, "start_ms");
+                        const std::string key = id + "-" + std::to_string(at);
+                        auto* row = el->emplace<Node>("meeting-echo-" + key);
+                        row->role = ui::Role::list_item;
+                        row->axis = ui::Axis::row;
+                        row->gap = 8;
+                        char stamp[16];
+                        std::snprintf(stamp, sizeof stamp, "[%02lld:%02lld] ", at / 60000, (at / 1000) % 60);
+                        const std::u16string line = u16(stamp) + u16(jstr(e, "text"));
+                        row->name = line;
+                        row->emplace<ui::Label>(shell_.ui(), line, TextStyle::body, Paint::text_secondary, true)->role = ui::Role::none;
+                        button(*row, "meeting-echo-restore-" + key, shell_.t("settings.meetings.echo_restore"), [this, id, at] {
+                            act("meetings", "meetings.restore_echo", {{"id", id}, {"start_ms", at}}, [this](const json&) {
+                                shell_.announce(shell_.t("settings.meetings.echo_restored"));
+                                load_meetings();
+                            });
+                        }, ui::Button::Kind::subtle)->enabled = busy_.empty();
+                    }
+                }
+            }
             if (!open || !has_text) continue;
             // Speaker Diarization And Naming: rename, and the transcript shows the new names.
             if (const json* sp = jobj(m, "speakers"))
@@ -176,6 +226,51 @@ void PagePane::build_meetings(Node& c) {
                 }
             auto* t = item->emplace<ui::Label>(shell_.ui(), u16(jstr(m, "transcript")), TextStyle::body, Paint::text, true, "meeting-transcript-" + id);
             t->name = shell_.t("settings.meetings.transcript");
+        }
+
+    // User Vocabulary Terms: names and words transcription should spell as written here.
+    c.emplace<ui::Label>(shell_.ui(), shell_.t("settings.meetings.terms"), TextStyle::body_strong)->role = ui::Role::heading;
+    text(c, shell_.t("settings.meetings.terms_body"), Paint::text_secondary);
+    {
+        auto* add = c.emplace<Node>();
+        add->axis = ui::Axis::row;
+        add->gap = 8;
+        auto* f = add->emplace<ui::TextField>(shell_.ui(), "settings-meetings-term", shell_.t("settings.meetings.term"));
+        f->set_text(term_draft_);
+        ui::TextField* fp = f;
+        f->on_change = [this, fp] { term_draft_ = fp->text(); };
+        button(*add, "settings-meetings-term-add", shell_.t("settings.meetings.term_add"), [this] {
+            const std::string typed = ui::to_utf8(term_draft_);
+            if (typed.find_first_not_of(" \t") == std::string::npos) return;
+            act("meetings", "meetings.add_term", {{"term", typed}}, [this](const json&) {
+                term_draft_.clear();
+                shell_.announce(shell_.t("settings.meetings.term_added"));
+                load_meetings();
+            });
+        })->enabled = busy_.empty();
+    }
+    auto* tl = c.emplace<Node>("settings-meetings-terms");
+    tl->role = ui::Role::list;
+    tl->name = shell_.t("settings.meetings.terms");
+    tl->gap = 4;
+    const json* terms = jobj(meetings_, "terms");
+    if (!terms || terms->empty()) text(*tl, shell_.t("settings.meetings.no_terms"), Paint::text_secondary, "settings-meetings-no-terms");
+    if (terms)
+        for (size_t i = 0; i < terms->size(); ++i) {
+            if (!(*terms)[i].is_string()) continue;
+            const std::string term = (*terms)[i].get<std::string>();
+            const std::string n = std::to_string(i);  // terms can hold any letters; ids stay plain
+            auto* item = tl->emplace<Node>("term-" + n);
+            item->role = ui::Role::list_item;
+            item->axis = ui::Axis::row;
+            item->gap = 8;
+            item->name = u16(term);
+            item->emplace<ui::Label>(shell_.ui(), u16(term), TextStyle::body, Paint::text, false)->role = ui::Role::none;
+            auto* rm = button(*item, "term-remove-" + n, shell_.t("settings.meetings.term_remove"), [this, term] {
+                act("meetings", "meetings.remove_term", {{"term", term}}, [this](const json&) { load_meetings(); });
+            }, ui::Button::Kind::subtle);
+            rm->name = shell_.t("settings.meetings.term_remove_named", {{"name", u16(term)}});
+            rm->enabled = busy_.empty();
         }
 
     // Series opted in for automatic capture.

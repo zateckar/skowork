@@ -4467,6 +4467,93 @@ TEST(ShellMeetings, SectionShowsCaptureMeetingsTranscriptAndSeries) {
     window = nullptr;
 }
 
+// improve-meeting-capture-quality 2.4, 3.4, 4.3: the echo count with Restore, the user's vocabulary terms, and the
+// trouble state of a running capture, over a scripted meetings.* host.
+TEST(ShellMeetings, EchoReviewTermsAndCaptureTrouble) {
+    std::mutex mx;
+    std::vector<std::pair<std::string, json>> calls;
+    json status = {{"available", true},
+                   {"allow_manual", false},
+                   {"capture", {{"meeting_id", "m3"}, {"title", "Budget review"}, {"started_at", 1'790'000'000'000LL}, {"trouble", {"local"}}}},
+                   {"meetings",
+                    {{{"id", "m2"}, {"title", "Daily stand-up"}, {"state", "done"}, {"has_audio", false},
+                      {"transcript", "[00:01] Eva: We ship on Tuesday.\n"}, {"speakers", json::array()},
+                      {"echo", {{{"start_ms", 1200}, {"text", "We ship on Tuesday."}}}}},
+                     {{"id", "m1"}, {"title", "Teams call"}, {"state", "done"}, {"has_audio", false}, {"transcript", "[00:00] Eva: Hi.\n"},
+                      {"speakers", json::array()}, {"echo", json::array()}}}},
+                   {"series", json::array()},
+                   {"terms", json::array()}};
+    std::atomic<ShellThread*> window{nullptr};
+    Fixture f;
+    const auto changed = [&window] {
+        if (ShellThread* w = window.load()) w->post([w] { w->main().emit("meetings.changed", json::object()); });
+    };
+    f.rpc.add("meetings.status", RpcExposure::ui, [&](const json&) -> Result<json> {
+        const std::lock_guard l(mx);
+        return status;
+    });
+    for (const char* m : {"meetings.restore_echo", "meetings.add_term", "meetings.remove_term"}) {
+        const std::string method = m;
+        f.rpc.add(method, RpcExposure::ui, [&, method](const json& p) -> Result<json> {
+            const std::lock_guard l(mx);
+            calls.emplace_back(method, p);
+            if (method == "meetings.restore_echo") {
+                status["meetings"][0]["echo"] = json::array();
+                status["meetings"][0]["transcript"] = "[00:01] Eva: We ship on Tuesday.\n[00:01] Jan Novák: We ship on Tuesday.\n";
+            }
+            if (method == "meetings.add_term") status["terms"].push_back(jstr(p, "term"));
+            if (method == "meetings.remove_term") status["terms"] = json::array();
+            return json::object();
+        });
+    }
+    const auto called = [&](const std::string& method) {
+        const std::lock_guard l(mx);
+        for (const auto& c : calls)
+            if (c.first == method) return c.second;
+        return json();
+    };
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    window = &w;
+    w.run([&] { w.main().open("#/settings"); });
+
+    // Capture Trouble Indication: the microphone is not being recorded, then it recovers.
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-meetings-trouble"); }));
+    EXPECT_NE(label_text(w, "settings-meetings-trouble").find(u"microphone"), std::u16string::npos);
+    {
+        const std::lock_guard l(mx);
+        status["capture"]["trouble"] = json::array();
+    }
+    changed();
+    ASSERT_TRUE(w.until([&] { return !w.exists("settings-meetings-trouble"); }));
+
+    // Echo Review: the count only where something was left out; the list and Restore.
+    ASSERT_TRUE(w.exists("meeting-echo-count-m2"));
+    EXPECT_FALSE(w.exists("meeting-echo-count-m1"));
+    EXPECT_EQ(label_text(w, "meeting-echo-count-m2"), u"Left out as echo: 1");
+    ASSERT_TRUE(w.invoke("meeting-echo-m2"));
+    ASSERT_TRUE(w.until([&] { return w.exists("meeting-echo-restore-m2-1200"); }));
+    ASSERT_TRUE(w.invoke("meeting-echo-restore-m2-1200"));
+    ASSERT_TRUE(w.until([&] { return !w.exists("meeting-echo-count-m2"); }));
+    EXPECT_EQ(jstr(called("meetings.restore_echo"), "id"), "m2");
+    EXPECT_EQ(jint(called("meetings.restore_echo"), "start_ms"), 1200);
+    ASSERT_TRUE(w.invoke("meeting-show-m2"));
+    ASSERT_TRUE(w.until([&] { return w.exists("meeting-transcript-m2"); }));
+    EXPECT_NE(label_text(w, "meeting-transcript-m2").find(u"Jan Novák: We ship on Tuesday."), std::u16string::npos);
+
+    // User Vocabulary Terms: add, listed, remove.
+    ASSERT_TRUE(w.exists("settings-meetings-no-terms"));
+    w.type("settings-meetings-term", u"Břetislav");
+    ASSERT_TRUE(w.invoke("settings-meetings-term-add"));
+    ASSERT_TRUE(w.until([&] { return w.exists("term-remove-0"); }));
+    EXPECT_EQ(jstr(called("meetings.add_term"), "term"), "Břetislav");
+    EXPECT_EQ(Uia().by_id(w.hwnd())[L"term-remove-0"].name, L"Remove Břetislav");
+    ASSERT_TRUE(w.invoke("term-remove-0"));
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-meetings-no-terms"); }));
+    EXPECT_EQ(jstr(called("meetings.remove_term"), "term"), "Břetislav");
+    window = nullptr;
+}
+
 // client/local-apps Apps View (add-local-apps 2.5) over a scripted apps.* host: the list with name, description, size
 // and last use; Open asks for the MCP tools first; Stop, Show folder; Change with the agent starts a Thread; Delete
 // asks first.
