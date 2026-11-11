@@ -33,8 +33,10 @@ std::string kg_writer_barrier_sql();
 std::string kg_evidence_migration_sql();
 // The schema version the evidence migration installs.
 inline constexpr int kKgEvidenceSchemaVersion = 6;
-// The latest schema: the evidence schema plus durable automatic-categorization progress (task 8.1).
-inline constexpr int kKgSchemaVersion = 7;
+// Durable automatic-categorization progress (task 8.1).
+inline constexpr int kKgCategoryChecksSchemaVersion = 7;
+// The latest schema: durable consistency-analysis progress, inconsistency kinds and cleared rechecks (task 8.2).
+inline constexpr int kKgSchemaVersion = 8;
 // The longest chain of facts a derivation may form through required facts; the evidence schema enforces it.
 inline constexpr int kMaxDerivationDepth = 32;
 // Superseded revisions of an item whose excerpts are kept as history beside the current one.
@@ -72,6 +74,9 @@ struct CategoryAssignment {
 struct ConflictRow {
     long long id = 0, left_fact = 0, right_fact = 0, left_evidence = 0, right_evidence = 0;
     std::string explanation, state, decision, decision_reason;
+    std::string kind = "conflict";  // conflict | uncertain_entity
+    // needs_recheck only: both facts were compared again and the disagreement was not found; it no longer disputes them.
+    bool cleared = false;
 };
 
 struct ConflictDecision {
@@ -204,6 +209,7 @@ struct FactDispute {
     std::string state, explanation;
     KnowledgeFactRow other;
     std::optional<FactCitation> own, other_citation;
+    std::string kind = "conflict";
 };
 
 // The shared knowledge state filter (client/knowledge-graph Retrieval Respects Knowledge State). `state` is current or
@@ -232,6 +238,23 @@ struct CategoryWork {
     long long generation = 0;
     std::vector<CategoryRow> categories;
     std::vector<CategoryCandidate> facts;
+};
+
+// One bounded unit of consistency analysis read in a single graph snapshot: unchecked target facts, each with its
+// bounded related facts, and every fact's complete passages (as for categorization). `rechecks` are reviews needing a
+// recheck whose two facts are both included: if the analysis does not find them again they are cleared.
+struct ConsistencyTarget {
+    long long fact_id = 0;
+    std::vector<long long> related;
+};
+struct ConsistencyRecheck {
+    long long conflict_id = 0, left_fact = 0, right_fact = 0;
+};
+struct ConsistencyWork {
+    long long generation = 0;
+    std::vector<ConsistencyTarget> targets;
+    std::map<long long, CategoryCandidate> facts;  // targets and related facts
+    std::vector<ConsistencyRecheck> rechecks;
 };
 
 class KgStore {
@@ -263,9 +286,20 @@ public:
     // revision. Automatic categories never replace manual or rejected decisions.
     // `categorized` facts are recorded as checked by automatic categorization in the same transaction, so they are
     // analyzed again only after their evidence or the category list changes.
+    // `consistency_checked` facts are recorded as checked by consistency analysis, and `cleared` reviews still needing
+    // a recheck (not proposed again by this analysis) are marked as compared again without the disagreement.
     Status apply_analysis(const AnalysisProposals& proposals, long long expected_generation,
                           const std::function<bool()>& still_permitted = {},
-                          const std::vector<long long>& categorized = {});
+                          const std::vector<long long>& categorized = {},
+                          const std::vector<long long>& consistency_checked = {},
+                          const std::vector<long long>& cleared = {});
+    // Up to `limit` current, not rejected facts that consistency analysis has not checked, skipping `skip`, each with
+    // at most `related` current, not rejected facts that share its subject or object (same subject and predicate
+    // first, then the same predicate and object, then any shared entity), plus the other side of each of its reviews
+    // needing a recheck. Passages per fact are bounded by `passages`.
+    ConsistencyWork consistency_work(int limit, int related, int passages, const std::set<long long>& skip);
+    // Facts awaiting consistency analysis (status).
+    long long consistency_pending();
     // Up to `limit` current, not rejected facts that automatic categorization has not checked, skipping `skip`, read
     // with the categories and generation of one snapshot. Empty facts when there are no categories.
     CategoryWork category_work(int limit, const std::set<long long>& skip);
@@ -275,6 +309,7 @@ public:
                            long long now, long long expected_generation);
     Status reopen_conflict(long long conflict_id, long long expected_generation);
     std::vector<ConflictRow> conflicts(int limit);
+    std::optional<ConflictRow> conflict(long long conflict_id);
     std::vector<ConflictDecision> conflict_history(long long conflict_id);
 
     // ---- Knowledge state (Retrieval Respects Knowledge State) ----
@@ -283,6 +318,8 @@ public:
     // The fact's state, accepted categories, citations and unresolved reviews; nullopt when there is no such fact.
     // Without `history` only excerpts of current supports in current revisions are cited.
     std::optional<FactState> fact_state(long long fact_id, bool history);
+    // One stored excerpt as a citation (a review's reviewed excerpt); nullopt when it was forgotten.
+    std::optional<FactCitation> evidence_citation(long long evidence_id);
     // Facts about the entity, newest first, for a history request; the caller keeps those that are not current.
     std::vector<long long> facts_about(long long entity_id, int limit);
     // A category by name (case and accents ignored); 0 for kUncategorized, nullopt when there is none.

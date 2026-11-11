@@ -35,6 +35,7 @@ struct KnowledgeConfig {
     std::map<std::string, bool> source_policy;  // kind -> policy allows (knowledge.sources.<kind>, default on)
     bool extraction = true;                     // knowledge.extraction
     bool categorization = true;                 // knowledge.categorization (model work also needs extraction)
+    bool consistency = true;                    // knowledge.consistency (model work also needs extraction)
     bool directory_enrichment = true;           // knowledge.directory_enrichment
     long long max_file_mb = 25;                 // knowledge.max_file_mb
     long long embedding_daily_tokens = 10'000'000;
@@ -202,6 +203,19 @@ public:
     // excerpt it cites while that passage is permitted. not_found when the fact is not current, permitted knowledge.
     Result<json> fact_categories(long long fact_id);
 
+    // ---- Review (Possible Inconsistency Review, User Resolution Of Inconsistencies) ----
+    // {generation, consistency {policy, active, pending}, items: [{review_id, kind, state, explanation, decision,
+    // reason, left, right}]}: unresolved reviews first, then decided ones; each side is the fact with its dates, scope
+    // and the reviewed excerpt while its Source is permitted. A review whose fact is no longer permitted knowledge,
+    // or whose recheck found no disagreement, is left out.
+    json reviews(int limit);
+    // The user's decision on a review: keep_both, prefer_left or prefer_right (with a reason) or defer. It is tied to
+    // the two excerpts shown and refused (stale) when knowledge changed since `generation` or the review needs a recheck.
+    Status decide_review(long long review_id, const std::string& decision, const std::string& reason, long long generation);
+    Status reopen_review(long long review_id, long long generation);
+    // Earlier decisions with the excerpts they were based on: [{decision, reason, decided_at, left, right}].
+    Result<json> review_history(long long review_id);
+
     // ---- Tools ----
     std::vector<runtime::ToolDef> tools();
 
@@ -312,6 +326,8 @@ private:
     bool extract_step();
     // Automatic categorization (design D7): one bounded batch of unchecked facts against the existing categories.
     bool categorize_step();
+    // Possible inconsistency review (design D7): unchecked facts against bounded related facts.
+    bool consistency_step();
     bool enrich_step();
     // Returns the passages one of whose findings took its date from the item.
     std::vector<long long> store_extraction(const std::vector<ChunkRow>& batch, const Extraction& x);
@@ -349,6 +365,13 @@ private:
     std::set<long long> category_skip_;         // facts without a permitted passage now; retried after a policy change
     std::atomic<bool> category_skip_reset_{false};
     long long category_skip_since_ = 0;
+    std::string last_consistency_error_;
+    long long consistency_retry_at_ = 0;
+    int consistency_failures_ = 0;
+    int consistency_single_left_ = 0;           // a batch was refused: check this many facts one at a time
+    std::set<long long> consistency_skip_;      // facts without a permitted passage now; retried after a policy change
+    std::atomic<bool> consistency_skip_reset_{false};
+    long long consistency_skip_since_ = 0;
 
     std::thread thread_;
     std::condition_variable wake_;

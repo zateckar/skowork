@@ -50,10 +50,12 @@ struct FakeGateway {
     std::string chat_failure, reject_passage;
     std::string model = "embed-a";
     int dim = 128;
-    int embed_calls = 0, query_embeds = 0, rerank_calls = 0, chat_calls = 0, categorize_calls = 0;
+    int embed_calls = 0, query_embeds = 0, rerank_calls = 0, chat_calls = 0, categorize_calls = 0, consistency_calls = 0;
     long long embedded_texts = 0;
     // Automatic categorization (feature knowledge.categorize): the answer to a request; none assigned when unset.
     std::function<std::string(const model::ChatRequest&)> categorize;
+    // Possible inconsistency checks (feature knowledge.consistency): the answer to a request; nothing found when unset.
+    std::function<std::string(const model::ChatRequest&)> consistency;
 
     std::vector<float> vector_of(const std::string& text) const {
         std::vector<float> v(static_cast<size_t>(dim), 0.0f);
@@ -124,6 +126,13 @@ struct FakeGateway {
             ++categorize_calls;
             model::ChatResponse r;
             r.text = categorize ? categorize(req) : R"({"categories": [], "conflicts": []})";
+            r.finish_reason = "stop";
+            return r;
+        }
+        if (req.feature == "knowledge.consistency") {
+            ++consistency_calls;
+            model::ChatResponse r;
+            r.text = consistency ? consistency(req) : R"({"categories": [], "conflicts": []})";
             r.finish_reason = "stop";
             return r;
         }
@@ -2159,6 +2168,316 @@ TEST(KnowledgeCategories, UnavailableOrUnsafeAnalysisLeavesManualCategoriesWorki
     kg.idle();
     EXPECT_EQ(kg.gw.categorize_calls, 4);
     EXPECT_EQ(category_decision(*kg.svc, fact, *sales), "automatic");
+}
+
+// A possible inconsistency the fake model reports when both facts are in a consistency request, quoting the first
+// passage listed for each.
+struct WantedConflict {
+    long long left = 0, right = 0;
+    std::string kind, left_quote, right_quote;
+};
+
+long long listed_passage(const std::string& request, long long fact) {
+    const size_t f = request.find("Fact " + std::to_string(fact) + ": ");
+    if (f == std::string::npos) return 0;
+    const size_t p = request.find("Passages: ", f);
+    return p == std::string::npos ? 0 : std::stoll(request.substr(p + 10));
+}
+
+std::string consistency_answer(const model::ChatRequest& req, const std::vector<WantedConflict>& wanted) {
+    const std::string& u = req.messages.back().content;
+    json conflicts = json::array();
+    for (const auto& w : wanted) {
+        const long long l = listed_passage(u, w.left), r = listed_passage(u, w.right);
+        if (!l || !r) continue;
+        conflicts.push_back({{"left_id", w.left}, {"right_id", w.right}, {"kind", w.kind}, {"reason", "The two facts disagree."},
+                             {"left_evidence", {{"chunk_id", l}, {"quote", w.left_quote}}},
+                             {"right_evidence", {{"chunk_id", r}, {"quote", w.right_quote}}}});
+    }
+    return json{{"categories", json::array()}, {"conflicts", conflicts}}.dump();
+}
+
+// The review of two facts in a knowledge.reviews answer, or null.
+json review_of(const json& reviews, long long a, long long b) {
+    for (const auto& i : reviews["items"]) {
+        const long long l = i["left"]["fact_id"].get<long long>(), r = i["right"]["fact_id"].get<long long>();
+        if ((l == a && r == b) || (l == b && r == a)) return i;
+    }
+    return nullptr;
+}
+
+// improve-skowork-and-knowledge-control 8.2: new facts are compared with bounded related facts on the small role; a
+// possible inconsistency cites both excerpts and dates, different periods and the same amount in other units are not
+// disagreements, an uncertain match of people is labeled as such, and a decision is tied to the excerpts reviewed: it
+// is reopened when changed evidence still disagrees and cleared when a recheck no longer finds the disagreement.
+TEST(KnowledgeConsistency, NewFactsAreComparedIncrementallyAndDecisionsFollowTheirEvidence) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    const std::map<std::string, std::string> files = {
+        {"approved.txt", "The approved Phoenix deadline is June."},
+        {"draft.txt", "Draft: the Phoenix deadline is July."},
+        {"budget.txt", "The Phoenix budget is 5 million EUR."},
+        {"budget2.txt", "Phoenix budget: 5000 kEUR."},
+        {"roles.txt", "Alice Svobodová headed Phoenix in 2024."},
+        {"roles2.txt", "Bob Dvořák heads Phoenix from 2025."},
+        {"owner.txt", "Petr Novotný owns the Phoenix budget."},
+        {"owner2.txt", "P. Novotný owns the Phoenix budget."}};
+    // Separate extraction requests: a changed passage rechecks every finding of the request that saw it.
+    for (const auto& [name, text] : files) {
+        write_file(kg.folder / name, text);
+        ASSERT_TRUE(kg.svc->add_document(kg.file_path(name)));
+        kg.idle();
+    }
+    EXPECT_EQ(kg.gw.consistency_calls, 0);  // no facts yet
+    const auto chunk_of = [&](const std::string& name) {
+        const auto it = kg.svc->store().item("files", kg.file_path(name));
+        return it ? kg.svc->store().chunks_of_item(it->id).at(0).id : 0;
+    };
+    const auto entity = [&](const char* type, const char* name) { return kg.svc->store().resolve_entity(type, name, "", 1); };
+    const auto fact = [&](long long subject, const char* predicate, long long object, const char* from, const char* to,
+                          const std::string& file) -> long long {
+        auto& store = kg.svc->store();
+        const long long relation = store.add_relation(subject, predicate, object, 0.9, from, to, chunk_of(file));
+        EXPECT_TRUE(relation) << file;
+        const auto f = relation ? store.fact_of_relation(*store.relation(relation)) : std::nullopt;
+        EXPECT_TRUE(f) << file;
+        return f.value_or(0);
+    };
+    const long long phoenix = entity("Project", "Phoenix");
+    const long long june = fact(phoenix, "deadline", entity("Date", "June"), "", "", "approved.txt");
+    const long long july = fact(phoenix, "deadline", entity("Date", "July"), "", "", "draft.txt");
+    const long long eur = fact(phoenix, "budget", entity("Amount", "5 million EUR"), "", "", "budget.txt");
+    const long long keur = fact(phoenix, "budget", entity("Amount", "5000 kEUR"), "", "", "budget2.txt");
+    const long long alice = fact(entity("Person", "Alice Svobodová"), "heads", phoenix, "2024", "2024", "roles.txt");
+    const long long bob = fact(entity("Person", "Bob Dvořák"), "heads", phoenix, "2025", "", "roles2.txt");
+    const long long petr = fact(phoenix, "budget_owner", entity("Person", "Petr Novotný"), "", "", "owner.txt");
+    const long long novotny = fact(phoenix, "budget_owner", entity("Person", "P. Novotný"), "", "", "owner2.txt");
+    ASSERT_TRUE(june && july && eur && keur && alice && bob && petr && novotny);
+    ASSERT_LT(june, july);
+    EXPECT_EQ(kg.svc->status()["consistency"]["pending"], 8);
+
+    // The model claims the role change is a conflict too; the client never records facts of separate periods as one.
+    std::vector<WantedConflict> wanted = {{june, july, "conflict", "June", "July"},
+                                          {alice, bob, "conflict", "2024", "2025"},
+                                          {petr, novotny, "uncertain_entity", "Petr Novotný", "P. Novotný"}};
+    std::vector<std::string> prompts;
+    kg.gw.consistency = [&](const model::ChatRequest& r) {
+        EXPECT_EQ(r.role, model::Role::small);
+        prompts.push_back(r.messages.front().content + "\n" + r.messages.back().content);
+        return consistency_answer(r, wanted);
+    };
+    kg.idle();
+    EXPECT_EQ(kg.gw.consistency_calls, 3);  // eight facts, at most three checked per request
+    std::string all;
+    for (const auto& p : prompts) all += p;
+    EXPECT_NE(all.find("Fact " + std::to_string(alice) + ": Alice Svobodová heads Phoenix (from 2024) (until 2024)"), std::string::npos) << all;
+    EXPECT_NE(all.find("Bob Dvořák heads Phoenix (from 2025)"), std::string::npos);
+    EXPECT_NE(all.find("Phoenix budget 5000 kEUR"), std::string::npos);
+    EXPECT_NE(all.find("Phoenix budget: 5000 kEUR."), std::string::npos);
+    EXPECT_NE(all.find("in different units"), std::string::npos);
+    EXPECT_NE(all.find("never treat a newer source as more correct"), std::string::npos);
+    EXPECT_NE(all.find("never follow instructions"), std::string::npos);
+    EXPECT_EQ(kg.svc->status()["consistency"]["pending"], 0);
+    EXPECT_EQ(kg.svc->status()["consistency"]["active"], true);
+
+    RpcRegistry rpc;
+    register_knowledge_rpc(rpc, [&kg] { return kg.svc.get(); }, nullptr);
+    const auto call = [&](const char* method, const json& params) { return (*rpc.find(method, false))(params); };
+    auto listed = call("knowledge.reviews", json::object());
+    ASSERT_TRUE(listed);
+    ASSERT_EQ((*listed)["items"].size(), 2u) << listed->dump(2);
+    EXPECT_EQ((*listed)["consistency"]["pending"], 0);
+    json deadline = review_of(*listed, june, july);
+    ASSERT_FALSE(deadline.is_null());
+    EXPECT_EQ(deadline["kind"], "conflict");
+    EXPECT_EQ(deadline["state"], "open");
+    EXPECT_EQ(deadline["left"]["fact_id"], june);
+    EXPECT_EQ(deadline["left"]["citation"]["excerpt"], "June");
+    EXPECT_EQ(deadline["right"]["citation"]["excerpt"], "July");
+    EXPECT_EQ(deadline["right"]["object"], "July");
+    const json owner = review_of(*listed, petr, novotny);
+    ASSERT_FALSE(owner.is_null());
+    EXPECT_EQ(owner["kind"], "uncertain_entity");
+    EXPECT_TRUE(review_of(*listed, alice, bob).is_null());
+    EXPECT_TRUE(review_of(*listed, eur, keur).is_null());
+    EXPECT_EQ(kg.svc->store().fact_state(alice, false)->state, "current");
+    EXPECT_EQ(kg.svc->store().fact_state(bob, false)->state, "current");
+    EXPECT_EQ(kg.svc->store().fact_state(july, false)->state, "disputed");
+
+    // Incremental and durable: nothing is checked again, also after a restart; a new fact alone is compared.
+    const int calls = kg.gw.consistency_calls;
+    kg.idle();
+    kg.make(false);
+    kg.idle();
+    EXPECT_EQ(kg.gw.consistency_calls, calls);
+    write_file(kg.folder / "kickoff.txt", "The Phoenix kickoff is in May.");
+    ASSERT_TRUE(kg.svc->add_document(kg.file_path("kickoff.txt")));
+    kg.idle();
+    const long long kickoff = fact(phoenix, "kickoff", entity("Date", "May"), "", "", "kickoff.txt");
+    prompts.clear();
+    kg.idle();
+    ASSERT_EQ(kg.gw.consistency_calls, calls + 1);
+    const std::string& only = prompts.at(0);
+    EXPECT_NE(only.find("Compare fact " + std::to_string(kickoff) + " with facts"), std::string::npos);
+    EXPECT_EQ(only.find("Compare fact ", only.find("Compare fact ") + 1), std::string::npos) << only;
+
+    // A decision needs a reason to prefer one side and the generation it was made on.
+    listed = call("knowledge.reviews", json::object());
+    ASSERT_TRUE(listed);
+    const long long generation = (*listed)["generation"].get<long long>();
+    const long long id = review_of(*listed, june, july)["review_id"].get<long long>();
+    EXPECT_FALSE(call("knowledge.review.decide", {{"id", id}, {"decision", "prefer_left"}, {"reason", ""}, {"generation", generation}}));
+    EXPECT_FALSE(call("knowledge.review.decide", {{"id", id}, {"decision", "prefer_left"}, {"reason", "Approved plan"}, {"generation", generation - 1}}));
+    ASSERT_TRUE(call("knowledge.review.decide", {{"id", id}, {"decision", "prefer_left"}, {"reason", "Approved plan"}, {"generation", generation}}));
+    deadline = review_of(*call("knowledge.reviews", json::object()), june, july);
+    EXPECT_EQ(deadline["state"], "resolved");
+    EXPECT_EQ(deadline["decision"], "prefer_left");
+    EXPECT_EQ(deadline["right"]["state"], "rejected");
+
+    // The draft is revised and still says July: the decision does not carry over. The review needed a recheck, and
+    // the analysis of the changed evidence presents it again, with the earlier decision kept as history.
+    write_file(kg.folder / "draft.txt", "Draft v2: the Phoenix deadline is July.");
+    kg.svc->sweep_now();
+    kg.idle();
+    ASSERT_EQ(kg.svc->store().conflict(id)->state, "needs_recheck");
+    EXPECT_EQ(kg.svc->store().conflict(id)->decision, "");
+    ASSERT_EQ(fact(phoenix, "deadline", entity("Date", "July"), "", "", "draft.txt"), july);
+    kg.idle();
+    listed = call("knowledge.reviews", json::object());
+    ASSERT_TRUE(listed);
+    deadline = review_of(*listed, june, july);
+    ASSERT_FALSE(deadline.is_null()) << listed->dump(2);
+    EXPECT_EQ(deadline["state"], "open");
+    EXPECT_EQ(deadline["decision"], "");
+    EXPECT_EQ(deadline["right"]["citation"]["revision"], 2);
+    auto history = call("knowledge.review.history", {{"id", id}});
+    ASSERT_TRUE(history);
+    ASSERT_EQ((*history)["decisions"].size(), 1u);
+    EXPECT_EQ((*history)["decisions"][0]["decision"], "prefer_left");
+    EXPECT_EQ((*history)["decisions"][0]["reason"], "Approved plan");
+    EXPECT_EQ((*history)["decisions"][0]["right"]["revision"], 1);
+    EXPECT_FALSE((*history)["decisions"][0]["right"]["current_revision"].get<bool>());
+
+    // Keep both; then the draft changes again and the recheck no longer finds a disagreement: the review is cleared,
+    // neither fact is disputed, and both decisions remain explainable.
+    ASSERT_TRUE(call("knowledge.review.decide", {{"id", id}, {"decision", "keep_both"}, {"reason", "Separate milestones"},
+                                                 {"generation", (*listed)["generation"]}}));
+    wanted.clear();
+    write_file(kg.folder / "draft.txt", "Draft v3: the Phoenix deadline is July.");
+    kg.svc->sweep_now();
+    kg.idle();
+    ASSERT_EQ(fact(phoenix, "deadline", entity("Date", "July"), "", "", "draft.txt"), july);
+    kg.idle();
+    const auto cleared = kg.svc->store().conflict(id);
+    ASSERT_TRUE(cleared);
+    EXPECT_EQ(cleared->state, "needs_recheck");
+    EXPECT_TRUE(cleared->cleared);
+    EXPECT_TRUE(review_of(*call("knowledge.reviews", json::object()), june, july).is_null());
+    EXPECT_EQ(kg.svc->store().fact_state(july, false)->state, "current");
+    EXPECT_EQ(kg.svc->store().fact_state(june, false)->state, "current");
+    EXPECT_EQ(kg.svc->store().conflict_history(id).size(), 2u);
+    EXPECT_EQ(kg.svc->status()["consistency"]["pending"], 0);
+}
+
+// 8.2: with consistency or extraction off, the model unavailable, a Source turned off during analysis or the budget
+// spent, nothing is recorded and the facts stay pending; an answer citing an invented fact is refused as a whole.
+TEST(KnowledgeConsistency, UnavailableOrBudgetLimitedAnalysisStaysPendingAndUnsafeAnswersAreRefused) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}, {"knowledge.consistency", "off"}});
+    for (const auto& [name, text] : std::map<std::string, std::string>{{"approved.txt", "The approved Phoenix deadline is June."},
+                                                                       {"draft.txt", "Draft: the Phoenix deadline is July."}}) {
+        write_file(kg.folder / name, text);
+        ASSERT_TRUE(kg.svc->add_document(kg.file_path(name)));
+    }
+    kg.idle();
+    auto& store = kg.svc->store();
+    const long long phoenix = store.resolve_entity("Project", "Phoenix", "", 1);
+    const auto fact = [&](const char* date, const std::string& file) -> long long {
+        const auto it = store.item("files", kg.file_path(file));
+        const long long relation = store.add_relation(phoenix, "deadline", store.resolve_entity("Date", date, "", 1), 0.9, "", "",
+                                                      it ? store.chunks_of_item(it->id).at(0).id : 0);
+        const auto f = relation ? store.fact_of_relation(*store.relation(relation)) : std::nullopt;
+        return f.value_or(0);
+    };
+    const long long june = fact("June", "approved.txt"), july = fact("July", "draft.txt");
+    ASSERT_TRUE(june && july);
+    std::vector<WantedConflict> wanted = {{june, july, "conflict", "June", "July"}};
+    kg.gw.consistency = [&](const model::ChatRequest& r) { return consistency_answer(r, wanted); };
+    const auto pending = [&] { return kg.svc->status()["consistency"]["pending"].get<long long>(); };
+
+    // Off by policy, or extraction off: no request, nothing pending and nothing reported as checked.
+    kg.idle();
+    EXPECT_EQ(kg.gw.consistency_calls, 0);
+    EXPECT_EQ(kg.svc->status()["consistency"]["active"], false);
+    EXPECT_EQ(pending(), 0);
+    EXPECT_EQ(kg.svc->reviews(50)["consistency"]["policy"], "off");
+    kg.set("knowledge.consistency", "on");
+    kg.set("knowledge.extraction", "off");
+    kg.idle();
+    EXPECT_EQ(kg.gw.consistency_calls, 0);
+    kg.set("knowledge.extraction", "on");
+    EXPECT_EQ(pending(), 2);
+
+    // The model unavailable: nothing is checked and it is retried after a backoff.
+    const int chats = kg.gw.chat_calls;
+    kg.gw.chat_failure = model::code::model_unavailable;
+    kg.idle();
+    EXPECT_EQ(kg.gw.chat_calls, chats + 1);
+    EXPECT_EQ(kg.svc->status()["errors"]["consistency"], model::code::model_unavailable);
+    EXPECT_EQ(pending(), 2);
+    kg.gw.chat_failure.clear();
+    kg.idle();
+    EXPECT_EQ(kg.gw.chat_calls, chats + 1);
+    kg.clock.advance(std::chrono::minutes(2));
+
+    // The files Source turned off between the request and the save: nothing is saved and both stay pending.
+    bool turn_off = true;
+    kg.after_chat = [&] {
+        if (!turn_off) return;
+        turn_off = false;
+        kg.set("knowledge.sources.files", "off");
+    };
+    kg.svc->step();
+    EXPECT_EQ(kg.gw.consistency_calls, 1);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_conflicts"), 0);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_consistency_checks"), 0);
+    kg.set("knowledge.sources.files", "on");
+    kg.after_chat = nullptr;
+
+    // An answer citing an invented fact is refused as a whole; the batch is retried one fact at a time, and a fact
+    // still answered invalidly is recorded as checked with nothing found instead of spending the budget again.
+    kg.gw.consistency = [&](const model::ChatRequest& r) {
+        json a = json::parse(consistency_answer(r, wanted));
+        if (!a["conflicts"].empty()) {
+            json invented = a["conflicts"][0];
+            invented["right_id"] = 9999;
+            a["conflicts"].push_back(std::move(invented));
+        }
+        return a.dump();
+    };
+    kg.idle();
+    EXPECT_EQ(kg.gw.consistency_calls, 4);  // the batch, then each fact alone
+    EXPECT_EQ(kg.svc->status()["errors"]["consistency"], "invalid_response");
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_conflicts"), 0);
+    EXPECT_EQ(pending(), 0);
+    kg.idle();
+    EXPECT_EQ(kg.gw.consistency_calls, 4);
+
+    // Consistency analysis shares the daily extraction budget: once spent, a new fact waits for the next day.
+    kg.gw.consistency = [&](const model::ChatRequest& r) { return consistency_answer(r, wanted); };
+    write_file(kg.folder / "late.txt", "Late note: the Phoenix deadline is August.");
+    ASSERT_TRUE(kg.svc->add_document(kg.file_path("late.txt")));
+    kg.idle();
+    const long long august = fact("August", "late.txt");
+    ASSERT_TRUE(august);
+    wanted = {{july, august, "conflict", "July", "August"}};
+    kg.set("knowledge.extraction_daily_calls", store.used(kg.svc->today(), "extract_calls"));
+    kg.idle();
+    EXPECT_EQ(kg.gw.consistency_calls, 4);
+    EXPECT_EQ(pending(), 1);
+    kg.next_day();
+    kg.idle();
+    EXPECT_EQ(kg.gw.consistency_calls, 5);
+    EXPECT_EQ(pending(), 0);
+    EXPECT_FALSE(review_of(kg.svc->reviews(50), july, august).is_null());
 }
 
 // improve-skowork-and-knowledge-control 7.4: the knowledge tools and the Knowledge view read through one state filter.

@@ -1095,7 +1095,7 @@ TEST(Database, KnowledgeAnalysisBatchIsSavedWhollyOrNotAtAll) {
     batch.categories = {{june, *dates, "a deadline", {plan_chunk, 0, 8}},
                         {budget, *money, "a budget", {plan_chunk, 15, 21}},
                         {budget, *dates, "mentions approval", {plan_chunk, 15, 21}}};
-    batch.conflicts = {{june, july, "different deadlines", {plan_chunk, 9, 13}, {draft_chunk, 9, 13}}};
+    batch.conflicts = {{june, july, "different deadlines", "conflict", {plan_chunk, 9, 13}, {draft_chunk, 9, 13}}};
     const auto count = [&](const std::string& sql) {
         auto s = store.db().prepare(sql);
         return s.step() ? s.col_int(0) : -1LL;

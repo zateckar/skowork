@@ -27,6 +27,8 @@ struct CategoryProposal {
 struct ConflictProposal {
     long long left_id = 0, right_id = 0;
     std::string reason;
+    // "conflict": incompatible claims; "uncertain_entity": the two facts may or may not be about the same person or thing.
+    std::string kind = "conflict";
     AnalysisSpan left, right;
 };
 

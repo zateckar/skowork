@@ -521,7 +521,7 @@ CREATE INDEX mentions_entity ON mentions(entity_id, alias);
         // Task 8.1: which facts automatic categorization has checked. A fact is checked again when a support gains
         // evidence (a new or carried-forward excerpt) or when a category is added or renamed; a check is progress,
         // not knowledge, so it does not change the knowledge generation.
-        {kKgSchemaVersion, R"sql(
+        {kKgCategoryChecksSchemaVersion, R"sql(
 CREATE TABLE knowledge_category_checks(
   fact_id INTEGER PRIMARY KEY REFERENCES knowledge_facts(id) ON DELETE CASCADE,
   checked_at INTEGER NOT NULL);
@@ -533,6 +533,34 @@ CREATE TRIGGER knowledge_category_recheck_added AFTER INSERT ON knowledge_catego
 END;
 CREATE TRIGGER knowledge_category_recheck_renamed AFTER UPDATE OF name ON knowledge_categories BEGIN
   DELETE FROM knowledge_category_checks;
+END;
+)sql"},
+        // Task 8.2: which facts consistency analysis has checked, the kind of a possible inconsistency, and whether a
+        // review that needed a recheck was compared again without being found. An excerpt that analysis binds inside a
+        // passage the same support already cites is not new evidence: it clears neither check, so categorization and
+        // consistency analysis cannot keep invalidating each other's progress.
+        {kKgSchemaVersion, R"sql(
+CREATE TABLE knowledge_consistency_checks(
+  fact_id INTEGER PRIMARY KEY REFERENCES knowledge_facts(id) ON DELETE CASCADE,
+  checked_at INTEGER NOT NULL);
+CREATE INDEX knowledge_fact_object ON knowledge_facts(object,predicate);
+ALTER TABLE knowledge_conflicts ADD COLUMN kind TEXT NOT NULL DEFAULT 'conflict' CHECK(kind IN ('conflict','uncertain_entity'));
+ALTER TABLE knowledge_conflicts ADD COLUMN cleared INTEGER NOT NULL DEFAULT 0 CHECK(cleared IN (0,1));
+DROP TRIGGER knowledge_category_recheck_evidence;
+CREATE TRIGGER knowledge_analysis_recheck_evidence AFTER INSERT ON knowledge_support_evidence
+WHEN NOT EXISTS(SELECT 1 FROM knowledge_evidence n
+  JOIN knowledge_support_evidence se ON se.support_id=new.support_id AND se.evidence_id<>n.id
+  JOIN knowledge_evidence o ON o.id=se.evidence_id
+  WHERE n.id=new.evidence_id AND n.precision='exact' AND o.revision_id=n.revision_id AND o.chunk_id=n.chunk_id)
+BEGIN
+  DELETE FROM knowledge_category_checks WHERE fact_id=(SELECT fact_id FROM knowledge_support_sets WHERE id=new.support_id);
+  DELETE FROM knowledge_consistency_checks WHERE fact_id=(SELECT fact_id FROM knowledge_support_sets WHERE id=new.support_id);
+END;
+CREATE TRIGGER knowledge_consistency_recheck_review AFTER UPDATE OF state ON knowledge_conflicts
+WHEN new.state='needs_recheck' AND old.state<>'needs_recheck'
+BEGIN
+  UPDATE knowledge_conflicts SET cleared=0 WHERE id=new.id;
+  DELETE FROM knowledge_consistency_checks WHERE fact_id IN (new.left_fact,new.right_fact);
 END;
 )sql"},
     };
@@ -890,19 +918,31 @@ INSERT INTO knowledge_category_assignments(fact_id,category_id,decision,reason,e
 }
 
 Result<long long> write_conflict(Database& db, long long left_fact, long long right_fact, long long left_evidence, long long right_evidence,
-                                 const std::string& explanation) {
-    if (left_fact <= 0 || right_fact <= 0 || left_fact == right_fact || trim(explanation).empty() || explanation.size() > 512)
+                                 const std::string& explanation, const std::string& kind = "conflict") {
+    if (left_fact <= 0 || right_fact <= 0 || left_fact == right_fact || trim(explanation).empty() || explanation.size() > 512 ||
+        (kind != "conflict" && kind != "uncertain_entity"))
         return make_error("invalid", "A possible inconsistency needs two facts and an explanation.");
+    // Before the consistency schema a review has no kind and cannot be cleared.
+    const bool kinds = db.user_version() >= kKgSchemaVersion;
+    if (!kinds && kind != "conflict") return make_error("schema", "Possible inconsistency kinds are not available yet.");
     if (left_fact > right_fact) {
         std::swap(left_fact, right_fact);
         std::swap(left_evidence, right_evidence);
     }
     if (!active_exact_evidence(db, left_fact, left_evidence) || !active_exact_evidence(db, right_fact, right_evidence))
         return make_error("invalid", "Both facts need current, exact supporting excerpts.");
-    auto upsert = db.prepare(R"sql(
+    // A review found again is no longer cleared; its kind follows the latest analysis while it is undecided.
+    auto upsert = db.prepare(std::string(kinds ? R"sql(
+INSERT INTO knowledge_conflicts(left_fact,right_fact,left_evidence,right_evidence,explanation,state,kind)
+ VALUES(?1,?2,?3,?4,?5,'open',?6)
+ ON CONFLICT(left_fact,right_fact) DO UPDATE SET
+ cleared=0,
+ kind=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence
+                OR state IN ('open','needs_recheck') THEN excluded.kind ELSE kind END,)sql"
+                                               : R"sql(
 INSERT INTO knowledge_conflicts(left_fact,right_fact,left_evidence,right_evidence,explanation,state)
  VALUES(?1,?2,?3,?4,?5,'open')
- ON CONFLICT(left_fact,right_fact) DO UPDATE SET
+ ON CONFLICT(left_fact,right_fact) DO UPDATE SET)sql") + R"sql(
  state=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence OR state='needs_recheck'
             THEN 'open' ELSE state END,
  decision=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence OR state='needs_recheck'
@@ -913,6 +953,7 @@ INSERT INTO knowledge_conflicts(left_fact,right_fact,left_evidence,right_evidenc
                         OR state IN ('open','needs_recheck') THEN excluded.explanation ELSE explanation END,
  left_evidence=excluded.left_evidence,right_evidence=excluded.right_evidence)sql");
     upsert.bind(1, left_fact).bind(2, right_fact).bind(3, left_evidence).bind(4, right_evidence).bind(5, explanation);
+    if (kinds) upsert.bind(6, kind);
     if (auto result = upsert.run(); !result) return result.error();
     auto find = db.prepare("SELECT id FROM knowledge_conflicts WHERE left_fact=?1 AND right_fact=?2");
     find.bind(1, left_fact).bind(2, right_fact);
@@ -942,7 +983,8 @@ Status KgStore::set_category_assignment(long long fact, long long category, cons
 }
 
 Status KgStore::apply_analysis(const AnalysisProposals& proposals, long long expected_generation,
-                               const std::function<bool()>& still_permitted, const std::vector<long long>& categorized) {
+                               const std::function<bool()>& still_permitted, const std::vector<long long>& categorized,
+                               const std::vector<long long>& consistency_checked, const std::vector<long long>& cleared) {
     const std::lock_guard lock(db_->mutex());
     if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge analysis is not available yet.");
     for (const auto& c : proposals.categories)
@@ -965,12 +1007,29 @@ Status KgStore::apply_analysis(const AnalysisProposals& proposals, long long exp
             if (!left) return left.error();
             const auto right = bind_span(*db_, c.right_id, c.right);
             if (!right) return right.error();
-            if (const auto recorded = write_conflict(*db_, c.left_id, c.right_id, *left, *right, c.reason); !recorded)
+            if (const auto recorded = write_conflict(*db_, c.left_id, c.right_id, *left, *right, c.reason, c.kind); !recorded)
                 return recorded.error();
+        }
+        if ((!consistency_checked.empty() || !cleared.empty()) && db_->user_version() < kKgSchemaVersion)
+            return make_error("schema", "Consistency progress is not available yet.");
+        // A review proposed again above is open; one that still needs a recheck was compared and not found again.
+        for (long long id : cleared) {
+            auto clear = db_->prepare("UPDATE knowledge_conflicts SET cleared=1 WHERE id=?1 AND state='needs_recheck'");
+            clear.bind(1, id);
+            if (auto done = clear.run(); !done) return done;
+        }
+        if (!consistency_checked.empty()) {
+            auto check = db_->prepare("INSERT OR REPLACE INTO knowledge_consistency_checks(fact_id,checked_at) "
+                                      "SELECT id,CAST(strftime('%s','now') AS INTEGER)*1000 FROM knowledge_facts WHERE id=?1");
+            for (long long fact : consistency_checked) {
+                check.reset();
+                check.bind(1, fact);
+                if (auto recorded = check.run(); !recorded) return recorded;
+            }
         }
         // Recorded last: binding an excerpt above adds evidence, which clears a fact's earlier check.
         if (!categorized.empty()) {
-            if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Categorization progress is not available yet.");
+            if (db_->user_version() < kKgCategoryChecksSchemaVersion) return make_error("schema", "Categorization progress is not available yet.");
             auto check = db_->prepare("INSERT OR REPLACE INTO knowledge_category_checks(fact_id,checked_at) "
                                       "SELECT id,CAST(strftime('%s','now') AS INTEGER)*1000 FROM knowledge_facts WHERE id=?1");
             for (long long fact : categorized) {
@@ -1122,13 +1181,28 @@ std::vector<ConflictRow> KgStore::conflicts(int limit) {
     const std::lock_guard lock(db_->mutex());
     std::vector<ConflictRow> result;
     if (db_->user_version() < kKgEvidenceSchemaVersion || limit <= 0) return result;
-    auto s = db_->prepare("SELECT id,left_fact,right_fact,left_evidence,right_evidence,explanation,state,decision,decision_reason "
-                          "FROM knowledge_conflicts ORDER BY id DESC LIMIT ?1");
+    const bool kinds = db_->user_version() >= kKgSchemaVersion;
+    auto s = db_->prepare(std::string("SELECT id,left_fact,right_fact,left_evidence,right_evidence,explanation,state,decision,decision_reason,") +
+                          (kinds ? "kind,cleared" : "'conflict',0") +
+                          " FROM knowledge_conflicts ORDER BY CASE state WHEN 'open' THEN 0 WHEN 'needs_recheck' THEN 1 "
+                          "WHEN 'deferred' THEN 2 ELSE 3 END,id DESC LIMIT ?1");
     s.bind(1, std::min(limit, 1000));
     while (s.step())
         result.push_back({s.col_int(0), s.col_int(1), s.col_int(2), s.col_int(3), s.col_int(4), s.col_text(5), s.col_text(6),
-                          s.col_text(7), s.col_text(8)});
+                          s.col_text(7), s.col_text(8), s.col_text(9), s.col_int(10) != 0});
     return result;
+}
+
+std::optional<ConflictRow> KgStore::conflict(long long id) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return std::nullopt;
+    const bool kinds = db_->user_version() >= kKgSchemaVersion;
+    auto s = db_->prepare(std::string("SELECT id,left_fact,right_fact,left_evidence,right_evidence,explanation,state,decision,decision_reason,") +
+                          (kinds ? "kind,cleared" : "'conflict',0") + " FROM knowledge_conflicts WHERE id=?1");
+    s.bind(1, id);
+    if (!s.step()) return std::nullopt;
+    return ConflictRow{s.col_int(0), s.col_int(1), s.col_int(2), s.col_int(3), s.col_int(4), s.col_text(5), s.col_text(6),
+                       s.col_text(7), s.col_text(8), s.col_text(9), s.col_int(10) != 0};
 }
 
 std::vector<ConflictDecision> KgStore::conflict_history(long long id) {
@@ -1194,6 +1268,12 @@ std::optional<long long> KgStore::fact_of_relation(const RelationRow& r) {
     return s.col_int(0);
 }
 
+std::optional<FactCitation> KgStore::evidence_citation(long long evidence_id) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return std::nullopt;
+    return read_citation(*db_, evidence_id);
+}
+
 std::optional<FactState> KgStore::fact_state(long long fact_id, bool history) {
     const std::lock_guard lock(db_->mutex());
     if (db_->user_version() < kKgEvidenceSchemaVersion) return std::nullopt;
@@ -1236,21 +1316,25 @@ std::optional<FactState> KgStore::fact_state(long long fact_id, bool history) {
     else if (!current) out.state = unsupported ? "unsupported" : "superseded";
     else {
         // An unresolved review counts only while its other side is current knowledge too.
-        auto s = db_->prepare("SELECT id,CASE WHEN left_fact=?1 THEN right_fact ELSE left_fact END,state,explanation,"
+        // A recheck that compared both facts again without finding the disagreement no longer disputes them.
+        const bool kinds = db_->user_version() >= kKgSchemaVersion;
+        auto s = db_->prepare(std::string("SELECT id,CASE WHEN left_fact=?1 THEN right_fact ELSE left_fact END,state,explanation,"
                               "CASE WHEN left_fact=?1 THEN left_evidence ELSE right_evidence END,"
-                              "CASE WHEN left_fact=?1 THEN right_evidence ELSE left_evidence END "
-                              "FROM knowledge_conflicts WHERE (left_fact=?1 OR right_fact=?1) "
-                              "AND state IN ('open','deferred','needs_recheck') ORDER BY id");
+                              "CASE WHEN left_fact=?1 THEN right_evidence ELSE left_evidence END,") +
+                              (kinds ? "kind" : "'conflict'") +
+                              " FROM knowledge_conflicts WHERE (left_fact=?1 OR right_fact=?1) "
+                              "AND state IN ('open','deferred','needs_recheck')" + (kinds ? " AND cleared=0" : "") + " ORDER BY id");
         s.bind(1, fact_id);
-        struct Row { long long id, other, own_evidence, other_evidence; std::string state, explanation; };
+        struct Row { long long id, other, own_evidence, other_evidence; std::string state, explanation, kind; };
         std::vector<Row> rows;
-        while (s.step()) rows.push_back({s.col_int(0), s.col_int(1), s.col_int(4), s.col_int(5), s.col_text(2), s.col_text(3)});
+        while (s.step())
+            rows.push_back({s.col_int(0), s.col_int(1), s.col_int(4), s.col_int(5), s.col_text(2), s.col_text(3), s.col_text(6)});
         for (const auto& r : rows) {
             if (!fact_supported(*db_, r.other) || fact_rejected(*db_, r.other)) continue;
             auto other = read_fact(*db_, r.other);
             if (!other) continue;
             out.disputes.push_back({r.id, r.state, r.explanation, std::move(*other), read_citation(*db_, r.own_evidence),
-                                    read_citation(*db_, r.other_evidence)});
+                                    read_citation(*db_, r.other_evidence), r.kind});
         }
         out.state = out.disputes.empty() ? "current" : "disputed";
     }
@@ -1271,7 +1355,7 @@ std::vector<long long> KgStore::facts_about(long long entity_id, int limit) {
 CategoryWork KgStore::category_work(int limit, const std::set<long long>& skip) {
     const std::lock_guard lock(db_->mutex());
     CategoryWork out;
-    if (db_->user_version() < kKgSchemaVersion || limit <= 0) return out;
+    if (db_->user_version() < kKgCategoryChecksSchemaVersion || limit <= 0) return out;
     const auto generation = generation_of(*db_);
     if (!generation) return out;
     out.generation = *generation;
@@ -1313,11 +1397,100 @@ CategoryWork KgStore::category_work(int limit, const std::set<long long>& skip) 
 
 long long KgStore::category_pending() {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < kKgSchemaVersion) return 0;
+    if (db_->user_version() < kKgCategoryChecksSchemaVersion) return 0;
     auto s = db_->prepare(
         "SELECT count(*) FROM knowledge_facts f WHERE NOT EXISTS(SELECT 1 FROM knowledge_category_checks k WHERE k.fact_id=f.id) "
         "AND EXISTS(SELECT 1 FROM knowledge_support_sets s WHERE s.fact_id=f.id AND s.state IN ('current','unverified')) "
         "AND EXISTS(SELECT 1 FROM knowledge_categories)");
+    return s.step() ? s.col_int(0) : 0;
+}
+
+ConsistencyWork KgStore::consistency_work(int limit, int related, int passage_limit, const std::set<long long>& skip) {
+    const std::lock_guard lock(db_->mutex());
+    ConsistencyWork out;
+    if (db_->user_version() < kKgSchemaVersion || limit <= 0 || related < 0 || passage_limit <= 0) return out;
+    const auto generation = generation_of(*db_);
+    if (!generation) return out;
+    out.generation = *generation;
+    auto unchecked = db_->prepare(
+        "SELECT f.id FROM knowledge_facts f WHERE NOT EXISTS(SELECT 1 FROM knowledge_consistency_checks k WHERE k.fact_id=f.id) "
+        "AND EXISTS(SELECT 1 FROM knowledge_support_sets s WHERE s.fact_id=f.id AND s.state IN ('current','unverified')) "
+        "ORDER BY f.id LIMIT ?1");
+    unchecked.bind(1, static_cast<long long>(std::min<size_t>(static_cast<size_t>(limit) * 4 + skip.size(), 2000)));
+    std::vector<long long> ids;
+    while (unchecked.step())
+        if (!skip.count(unchecked.col_int(0))) ids.push_back(unchecked.col_int(0));
+    auto passages = db_->prepare(
+        "SELECT DISTINCT c.id,c.item_id,c.heading,c.text,ifnull(c.at,0) FROM knowledge_support_sets s "
+        "JOIN knowledge_support_evidence se ON se.support_id=s.id JOIN knowledge_evidence e ON e.id=se.evidence_id "
+        "JOIN knowledge_revisions v ON v.id=e.revision_id JOIN chunks c ON c.id=e.chunk_id AND c.item_id=v.item_id "
+        "WHERE s.fact_id=?1 AND s.state IN ('current','unverified') AND v.current=1 AND e.precision='passage' "
+        "AND CAST(e.excerpt AS BLOB)=CAST(c.text AS BLOB) ORDER BY c.id LIMIT ?2");
+    const auto load = [&](long long id) -> bool {
+        if (out.facts.count(id)) return true;
+        if (!fact_supported(*db_, id) || fact_rejected(*db_, id)) return false;
+        auto fact = read_fact(*db_, id);
+        if (!fact) return false;
+        CategoryCandidate f{std::move(*fact), {}};
+        passages.reset();
+        passages.bind(1, id).bind(2, static_cast<long long>(passage_limit));
+        while (passages.step())
+            f.passages.push_back({passages.col_int(0), passages.col_int(1), passages.col_text(2), passages.col_text(3),
+                                  passages.col_int(4)});
+        out.facts.emplace(id, std::move(f));
+        return true;
+    };
+    // Related facts in order of relevance; each query is bounded and served by an index on the subject or object.
+    const long long fetch = std::max(1, related) * 3LL;
+    auto same_claim = db_->prepare("SELECT id FROM knowledge_facts WHERE subject=?1 AND predicate=?2 AND id<>?3 ORDER BY id DESC LIMIT ?4");
+    auto same_value = db_->prepare("SELECT id FROM knowledge_facts WHERE object=?1 AND predicate=?2 AND id<>?3 ORDER BY id DESC LIMIT ?4");
+    auto shared = db_->prepare("SELECT id FROM (SELECT id FROM knowledge_facts WHERE subject IN (?1,?2) AND id<>?3 "
+                               "UNION SELECT id FROM knowledge_facts WHERE object IN (?1,?2) AND id<>?3) ORDER BY id DESC LIMIT ?4");
+    auto rechecks = db_->prepare("SELECT id,left_fact,right_fact FROM knowledge_conflicts "
+                                 "WHERE (left_fact=?1 OR right_fact=?1) AND state='needs_recheck' AND cleared=0 ORDER BY id LIMIT 8");
+    for (long long id : ids) {
+        if (static_cast<int>(out.targets.size()) >= limit) break;
+        if (!load(id)) continue;
+        const KnowledgeFactRow fact = out.facts.at(id).fact;
+        ConsistencyTarget target{id, {}};
+        const auto add = [&](long long other) {
+            if (other == id || std::find(target.related.begin(), target.related.end(), other) != target.related.end()) return;
+            if (load(other)) target.related.push_back(other);
+        };
+        // The other side of a review awaiting a recheck is always compared, beyond the bound.
+        rechecks.reset();
+        rechecks.bind(1, id);
+        while (rechecks.step()) {
+            const long long other = rechecks.col_int(1) == id ? rechecks.col_int(2) : rechecks.col_int(1);
+            add(other);
+            if (std::find(target.related.begin(), target.related.end(), other) != target.related.end())
+                out.rechecks.push_back({rechecks.col_int(0), rechecks.col_int(1), rechecks.col_int(2)});
+        }
+        const size_t bound = target.related.size() + static_cast<size_t>(related);
+        for (auto* q : {&same_claim, &same_value, &shared}) {
+            if (target.related.size() >= bound) break;
+            q->reset();
+            if (q == &shared) q->bind(1, fact.subject).bind(2, fact.object);
+            else q->bind(1, q == &same_claim ? fact.subject : fact.object).bind(2, fact.predicate);
+            q->bind(3, id).bind(4, fetch);
+            std::vector<long long> found;
+            while (q->step()) found.push_back(q->col_int(0));
+            for (long long other : found) {
+                if (target.related.size() >= bound) break;
+                add(other);
+            }
+        }
+        out.targets.push_back(std::move(target));
+    }
+    return out;
+}
+
+long long KgStore::consistency_pending() {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return 0;
+    auto s = db_->prepare(
+        "SELECT count(*) FROM knowledge_facts f WHERE NOT EXISTS(SELECT 1 FROM knowledge_consistency_checks k WHERE k.fact_id=f.id) "
+        "AND EXISTS(SELECT 1 FROM knowledge_support_sets s WHERE s.fact_id=f.id AND s.state IN ('current','unverified'))");
     return s.step() ? s.col_int(0) : 0;
 }
 

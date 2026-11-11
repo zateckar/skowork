@@ -199,6 +199,10 @@ Review SHALL let the user keep both facts with distinct scope, prefer one with a
 - **WHEN** evidence underlying a resolution is invalidated before consistency analysis can check its replacement
 - **THEN** Review marks the prior decision as needing recheck rather than treating the old resolution as current or claiming a new disagreement was verified
 
+#### Scenario: Recheck no longer finds the disagreement
+- **WHEN** consistency analysis compares both facts of a review needing recheck with their current evidence and reports no inconsistency between them
+- **THEN** the review no longer marks either fact as disputed, and its earlier decisions remain explainable in history
+
 ### Requirement: Knowledge Impact Preview
 Before an explicit import, replacement, exclusion or forget operation is committed, the client SHALL show its estimated effects: added, supported, changed, disputed, unsupported or removed facts, category changes and affected shares. Incomplete analysis is marked pending with its limitations; confirming incomplete analysis cannot silently approve later conflict resolutions or publication additions.
 

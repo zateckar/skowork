@@ -77,6 +77,13 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
     });
     add("knowledge.category.reset", [done](Svc& s, const json& p) { return done(s.reset_category(jint(p, "fact_id"), jint(p, "category_id"))); });
     add("knowledge.fact.categories", [](Svc& s, const json& p) { return s.fact_categories(jint(p, "fact_id")); });
+    // Possible inconsistency review: the user's decisions, tied to the excerpts and knowledge generation shown (UI only).
+    add("knowledge.reviews", [](Svc& s, const json& p) -> Result<json> { return s.reviews(static_cast<int>(jint(p, "limit", 50))); });
+    add("knowledge.review.decide", [done](Svc& s, const json& p) {
+        return done(s.decide_review(jint(p, "id"), jstr(p, "decision"), jstr(p, "reason"), jint(p, "generation")));
+    });
+    add("knowledge.review.reopen", [done](Svc& s, const json& p) { return done(s.reopen_review(jint(p, "id"), jint(p, "generation"))); });
+    add("knowledge.review.history", [](Svc& s, const json& p) { return s.review_history(jint(p, "id")); });
     // A citation of a file: opened only when it is an indexed item of the files Source, never an arbitrary path.
     add("knowledge.open", [done, open_file](Svc& s, const json& p) -> Result<json> {
         const std::string ref = jstr(p, "ref");

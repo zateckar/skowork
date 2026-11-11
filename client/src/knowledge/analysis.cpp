@@ -76,9 +76,15 @@ std::optional<AnalysisProposals> parse_analysis_proposals(std::string_view text,
         const auto le = c.find("left_evidence"), re = c.find("right_evidence");
         if (!left || !right || *left == *right || !facts.count(*left) || !facts.count(*right) || !why || le == c.end() ||
             re == c.end() || !seen_conflicts.emplace(std::min(*left, *right), std::max(*left, *right)).second) return std::nullopt;
+        std::string kind = "conflict";
+        if (const auto k = c.find("kind"); k != c.end()) {
+            if (!k->is_string()) return std::nullopt;
+            kind = k->get<std::string>();
+            if (kind != "conflict" && kind != "uncertain_entity") return std::nullopt;
+        }
         const auto a = evidence(*le, *left, facts), b = evidence(*re, *right, facts);
         if (!a || !b) return std::nullopt;
-        out.conflicts.push_back({*left, *right, *why, *a, *b});
+        out.conflicts.push_back({*left, *right, *why, kind, *a, *b});
     }
     return out;
 }

@@ -439,6 +439,29 @@ Add speech to the Policy bundle top-level glossary and also reconcile the alread
     - Suggestions of new category names are not implemented (8.6).
     - Only passages a support cites whole can be quoted, so a fact supported only by exact excerpts is checked without a request.
     - Category quality on a real model is not measured (1.4).
+- **Possible inconsistencies, 2026-11-11:**
+  - **Progress:** kg.db migration 8 records which facts consistency analysis has checked (`knowledge_consistency_checks`). A fact is checked again when one of its supports gains evidence, or when one of its reviews needs a recheck. An exact excerpt that analysis binds inside a passage its support already cites is not new evidence: from migration 8 it clears neither this check nor the categorization check, so the two analyses cannot keep reopening each other's work.
+  - **Kinds and rechecks:** a review has a kind, `conflict` or `uncertain_entity` (the facts disagree only if two names mean the same person or thing). A review needing a recheck is `cleared` when analysis compares both facts again and does not report it; a cleared review disputes neither fact and keeps its history. Reporting it again reopens it with the new excerpts and without the old decision.
+  - **Scheduling:** `KnowledgeService::consistency_step` runs only when knowledge.consistency and knowledge.extraction are both on and extraction had nothing to do in that round. It uses the small role and counts each request against `extraction_daily_calls`. A request checks at most 3 unchecked facts. Each is compared with at most 5 related facts: same subject and predicate first, then same predicate and object, then any shared entity. The other side of a review awaiting a recheck is always added. Each fact shows at most 2 whole passages from Sources permitted now. A fact with no related facts the user may read is checked without a request.
+  - **Prompt and saving:** the prompt lists each fact with its unit, scope and dates, and states that different periods and the same amount in other units are not conflicts. It says never to pick a winner or treat a newer Source as more correct, and treats facts and passages as data. The answer goes through `parse_analysis_proposals` with no categories allowed. The client then drops any proposal whose two facts cover periods that do not overlap. The rest is saved with `apply_analysis`, together with the checks and the cleared rechecks, behind the same generation and policy fence as categorization. Failures back off and fall back to one fact at a time, as for categorization.
+  - **User side:** the UI-only RPCs `knowledge.reviews`, `knowledge.review.decide` (keep_both, prefer_left or prefer_right with a reason, defer), `knowledge.review.reopen` and `knowledge.review.history` list reviews with both facts, their dates and scope and the reviewed excerpts, unresolved first. They take the knowledge generation the user saw, so a decision on changed knowledge is refused. A review is shown only while both excerpts' Sources are permitted. Status reports the consistency policy, whether it is active, the facts not yet compared and the last error.
+  - **Tests:** `KnowledgeConsistency.NewFactsAreComparedIncrementallyAndDecisionsFollowTheirEvidence` covers:
+    - two deadlines for one milestone, cited with both excerpts;
+    - a role change across 2024 and 2025 that the model wrongly reports and the client drops;
+    - one budget in EUR and kEUR, with units shown to the model;
+    - an uncertain owner name;
+    - durable, incremental progress across a restart;
+    - refused decisions without a reason or on an old generation;
+    - a resolution reopened by a revised draft, with the old decision in history;
+    - a review cleared by a recheck.
+    
+    `KnowledgeConsistency.UnavailableOrBudgetLimitedAnalysisStaysPendingAndUnsafeAnswersAreRefused` covers consistency off, extraction off, the model unavailable with backoff, a Source turned off between request and save, an answer citing an invented fact, and the spent shared budget. The `fuzz_kg_analysis` target fuzzes the validator with invented ids and spans, cycles, reversed duplicates, self-pairs, oversized numbers and text, repeated quotes, unknown kinds and invalid UTF-8. Its 200,000-run smoke test passes on GCC. 218 knowledge, storage, RPC and shell tests pass on the debug build.
+  - **Limits:**
+    - Related facts come only from shared entities and predicates; semantic-similarity candidates are 8.7.
+    - Whether two values or units disagree is the model's judgment; the client enforces only the period rule.
+    - A fact is compared only with related facts the user may read now. Turning a Source on again does not recheck facts already compared without it.
+    - The native Review workspace is part of 10.1, and the impact preview's conflict counts are part of 8.3.
+    - Inconsistency quality on a real model is not measured (1.4).
 - **Progress audit and triage, 2026-11-09:** code was compared with every task. Tasks were split or added where code and specification disagree (2.4, 4.5, 5.6, 6.6), where a prerequisite was implicit (7.5, 7.6, 7.7, 8.5, 9.5), and narrowed where two tasks claimed the same evidence (1.4, 5.5, 6.5). Publication code in the control plane is unmounted library code with unit tests; no publication route, schema installation or policy key exists. The earlier note that multi-pass summarization is not enabled is superseded by the multi-pass note above. tasks.md carries the per-task status and the delivery order.
 - Final immutable speech artifact URL/mirror and manifest digest, verified package sizes, proxy behavior and actual language-fixture timing.
 - Actual configured model ids and context metadata, token-count strategy supported by those models, and measured compaction coverage/latency.
