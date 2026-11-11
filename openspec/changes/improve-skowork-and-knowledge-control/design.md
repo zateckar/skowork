@@ -544,12 +544,18 @@ Add speech to the Policy bundle top-level glossary and also reconcile the alread
     - UI Automation checks on the fact reader and the entity reader.
     
     The Knowledge golden image now shows the section bar. 764 win, 70 UI and 7 analysis tests pass on the debug build.
-  - **Not done yet (rest of 10.1):**
-    - D5's Knowledge list of categories, Uncategorized and facts, with a paginated read. Entities stand in for now.
-    - Review's changed evidence and suggested categories, and its filter by reason.
-    - Paginated reads for the entity and review lists, which read at most 200 now, and paging through more than 20 revisions.
-    - Restoring scroll position on Back.
-    - Keyboard checks of the other dialogs (share, confirm, rename, edit).
+  - **Rest of 10.1, 2026-11-11:**
+    - **Knowledge list:** D5's list of categories: All knowledge, each category, Uncategorized and Entities. A category opens its facts, newest first, through the new `knowledge.facts {category?, before, limit}`; a category's facts include automatic and manual assignments, and category 0 lists facts with neither. Only current or disputed facts with an excerpt the user may read are listed.
+    - **Review:** a kind filter (possible inconsistencies, changed evidence, suggested categories). Changed evidence lists `knowledge.changes` and opens each report. Suggested categories, from the new `knowledge.category.suggestions {after, limit}`, list automatic assignments of facts the user may read; Keep makes one manual, Reject rejects it, and both can be undone. A review opens through the new `knowledge.review {id}`, which carries the generation.
+    - **Fact categories:** the fact reader lists its categories with Keep, Reject and Reset, and Add category opens a menu of the categories.
+    - **Paging:** `knowledge.entities` and `knowledge.reviews` take an `after` cursor, and every list ends with Load more while a `next` cursor is returned. The item's revisions page by 20 with `before`. A review page scans at most 5,000 candidates.
+    - **Scroll:** Back to the list restores the list's scroll and the open row, on a wide and a narrow window; a reader returned to by Back restores its own scroll.
+    - **Dialogs by keyboard:** the toolkit now lets Enter or Space press the focused button inside a modal dialog; before, the key stopped at the dialog. Share, edit and forget's confirm close with Escape; rename completes with Enter in its field; forget completes with Tab to OK and Enter.
+    - **Decisions:**
+      - The window opens on the section it last showed, starting at Sources, instead of D5's Knowledge. Thirteen existing flows, Save as note and origin links open into Sources, and opening on Sources keeps the window from moving when counts arrive.
+      - A finished edit, rename or delete refreshes the open item in place instead of reopening it.
+    - **Limits:** an entity's reader shows at most 30 of its facts, the existing limit of `knowledge.entity`. The revisions' Load more button is not exercised by the shell test; their `before` paging is tested at the RPC.
+    - **Tests:** `ShellKnowledge.WorkspaceTraversesEvidenceRevisionsAndReviews` now also covers each new RPC's paging; the category list and a category's facts across Load more (50, then 57); entities across Load more; the review kinds; Keep, undo, Add and Reject on suggestions; the dialogs above by keyboard; and the restored scroll on both window widths. 764 win, 70 UI and 7 analysis tests pass on the debug build.
     
     Publications in Sharing are 10.2 and 10.3.
 - **Progress audit and triage, 2026-11-09:** code was compared with every task. Tasks were split or added where code and specification disagree (2.4, 4.5, 5.6, 6.6), where a prerequisite was implicit (7.5, 7.6, 7.7, 8.5, 9.5), and narrowed where two tasks claimed the same evidence (1.4, 5.5, 6.5). Publication code in the control plane is unmounted library code with unit tests; no publication route, schema installation or policy key exists. The earlier note that multi-pass summarization is not enabled is superseded by the multi-pass note above. tasks.md carries the per-task status and the delivery order.

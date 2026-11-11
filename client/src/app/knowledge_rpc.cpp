@@ -48,8 +48,9 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
         if (!r) return r.error();
         return json{{"id", *r}};
     });
+    // Entities in pages: {entities, next}; pass next as `after` to continue.
     add("knowledge.entities", [](Svc& s, const json& p) -> Result<json> {
-        return json{{"entities", s.entities(jstr(p, "query"), static_cast<int>(jint(p, "limit", 20)))}};
+        return s.entities_page(jstr(p, "query"), static_cast<int>(jint(p, "limit", 20)), p.value("after", json(nullptr)));
     });
     add("knowledge.items", [](Svc& s, const json& p) -> Result<json> {
         return json{{"items", s.items(jstr(p, "query"), static_cast<int>(jint(p, "limit", 20)))}};
@@ -78,7 +79,23 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
     add("knowledge.category.reset", [done](Svc& s, const json& p) { return done(s.reset_category(jint(p, "fact_id"), jint(p, "category_id"))); });
     add("knowledge.fact.categories", [](Svc& s, const json& p) { return s.fact_categories(jint(p, "fact_id")); });
     // Possible inconsistency review: the user's decisions, tied to the excerpts and knowledge generation shown (UI only).
-    add("knowledge.reviews", [](Svc& s, const json& p) -> Result<json> { return s.reviews(static_cast<int>(jint(p, "limit", 50))); });
+    add("knowledge.reviews", [](Svc& s, const json& p) -> Result<json> {
+        const json after = p.value("after", json(nullptr));
+        return s.reviews_page(static_cast<int>(jint(p, "limit", 50)), after.is_object() ? static_cast<int>(jint(after, "rank", -1)) : -1,
+                              after.is_object() ? jint(after, "id") : 0);
+    });
+    add("knowledge.review", [](Svc& s, const json& p) { return s.review(jint(p, "id")); });
+    add("knowledge.category.suggestions", [](Svc& s, const json& p) -> Result<json> {
+        const json after = p.value("after", json(nullptr));
+        return s.category_suggestions(after.is_object() ? jint(after, "fact_id") : 0, after.is_object() ? jint(after, "category_id") : 0,
+                                      static_cast<int>(jint(p, "limit", 50)));
+    });
+    // Current knowledge in pages: {category: id, or 0 for Uncategorized; absent for all}, before the last id seen.
+    add("knowledge.facts", [](Svc& s, const json& p) -> Result<json> {
+        std::optional<long long> category;
+        if (p.contains("category") && p["category"].is_number_integer()) category = p["category"].get<long long>();
+        return s.facts_page(category, jint(p, "before", 0), static_cast<int>(jint(p, "limit", 50)));
+    });
     add("knowledge.review.decide", [done](Svc& s, const json& p) {
         return done(s.decide_review(jint(p, "id"), jstr(p, "decision"), jstr(p, "reason"), jint(p, "generation")));
     });

@@ -1803,20 +1803,117 @@ json review_side(KnowledgeService& svc, long long fact_id, long long evidence_id
 }  // namespace
 
 json KnowledgeService::reviews(int limit) {
+    json out = reviews_page(std::clamp(limit, 1, 500), -1, 0);
+    out.erase("next");
+    return out;
+}
+
+json KnowledgeService::reviews_page(int limit, int after_rank, long long after_id) {
     const auto cfg = config();
-    json items = json::array();
-    for (const auto& c : store_->conflicts(std::clamp(limit, 1, 500))) {
-        if (c.cleared) continue;  // compared again without finding the disagreement
-        json left = review_side(*this, c.left_fact, c.left_evidence), right = review_side(*this, c.right_fact, c.right_evidence);
-        if (left.is_null() || right.is_null()) continue;
-        items.push_back({{"review_id", c.id}, {"kind", c.kind}, {"state", c.state}, {"explanation", c.explanation},
-                         {"decision", c.decision}, {"reason", c.decision_reason}, {"left", std::move(left)}, {"right", std::move(right)}});
+    // The generation is read before the reviews, so a decision made on this page is refused if knowledge changed since.
+    const long long generation = store_->knowledge_generation().value_or(0);
+    limit = std::clamp(limit, 1, 500);
+    json items = json::array(), next = nullptr;
+    int rank = after_rank;
+    long long id = after_id;
+    for (int scanned = 0; static_cast<int>(items.size()) < limit && scanned < 5000;) {
+        const auto page = store_->conflicts_page(rank, id, 200);
+        if (page.empty()) break;
+        for (const auto& c : page) {
+            ++scanned;
+            rank = KgStore::conflict_rank(c.state);
+            id = c.id;
+            if (c.cleared) continue;  // compared again without finding the disagreement
+            json left = review_side(*this, c.left_fact, c.left_evidence), right = review_side(*this, c.right_fact, c.right_evidence);
+            if (left.is_null() || right.is_null()) continue;
+            items.push_back({{"review_id", c.id}, {"kind", c.kind}, {"state", c.state}, {"explanation", c.explanation},
+                             {"decision", c.decision}, {"reason", c.decision_reason}, {"left", std::move(left)}, {"right", std::move(right)}});
+            if (static_cast<int>(items.size()) == limit) break;
+        }
+        if (page.size() < 200 && static_cast<int>(items.size()) < limit) {
+            rank = -2;  // the end
+            break;
+        }
     }
-    return {{"generation", store_->knowledge_generation().value_or(0)},
-            {"consistency", {{"policy", cfg.consistency ? "on" : "off"},
-                             {"active", cfg.consistency && cfg.extraction},
-                             {"pending", cfg.consistency && cfg.extraction ? store_->consistency_pending() : 0}}},
-            {"items", std::move(items)}};
+    if (rank != -2 && (rank >= 0) && !store_->conflicts_page(rank, id, 1).empty()) next = {{"rank", rank}, {"id", id}};
+    json out = {{"generation", generation},
+                {"consistency", {{"policy", cfg.consistency ? "on" : "off"},
+                                 {"active", cfg.consistency && cfg.extraction},
+                                 {"pending", cfg.consistency && cfg.extraction ? store_->consistency_pending() : 0}}},
+                {"items", std::move(items)}};
+    if (!next.is_null()) out["next"] = std::move(next);
+    return out;
+}
+
+Result<json> KnowledgeService::review(long long id) {
+    const long long generation = store_->knowledge_generation().value_or(0);
+    const auto c = store_->conflict(id);
+    if (!c || c->cleared) return make_error("not_found", "This review is no longer available.");
+    json left = review_side(*this, c->left_fact, c->left_evidence), right = review_side(*this, c->right_fact, c->right_evidence);
+    if (left.is_null() || right.is_null()) return make_error("not_found", "This review is no longer available.");
+    return json{{"review_id", c->id}, {"kind", c->kind}, {"state", c->state}, {"explanation", c->explanation}, {"decision", c->decision},
+                {"reason", c->decision_reason}, {"left", std::move(left)}, {"right", std::move(right)}, {"generation", generation}};
+}
+
+json KnowledgeService::category_suggestions(long long before_fact, long long after_category, int limit) {
+    limit = std::clamp(limit, 1, 200);
+    json items = json::array(), next = nullptr;
+    long long fact = before_fact, category = after_category;
+    bool end = false;
+    for (int scanned = 0; static_cast<int>(items.size()) < limit && scanned < 5000;) {
+        const auto page = store_->category_suggestions(fact, category, 200);
+        for (const auto& a : page) {
+            ++scanned;
+            fact = a.fact_id;
+            category = a.category_id;
+            // Only what the user may read: the fact through a permitted citation, the suggestion with its excerpt.
+            if (!fact_permitted(*this, a.fact_id) || !a.chunk_id || !chunk_visible(a.chunk_id)) continue;
+            const auto state = store_->fact_state(a.fact_id, false);
+            if (!state) continue;
+            items.push_back({{"fact_id", a.fact_id}, {"fact", fact_row_json(state->fact)}, {"state", state->state},
+                             {"category_id", a.category_id}, {"name", a.category_name}, {"reason", a.reason}, {"excerpt", a.excerpt}});
+            if (static_cast<int>(items.size()) == limit) break;
+        }
+        if (page.size() < 200 && static_cast<int>(items.size()) < limit) {
+            end = true;
+            break;
+        }
+    }
+    json out = {{"items", std::move(items)}};
+    if (!end && fact > 0 && !store_->category_suggestions(fact, category, 1).empty()) out["next"] = {{"fact_id", fact}, {"category_id", category}};
+    return out;
+}
+
+json KnowledgeService::facts_page(std::optional<long long> category, long long before, int limit) {
+    limit = std::clamp(limit, 1, 200);
+    json facts = json::array();
+    long long cursor = before;
+    bool end = false;
+    for (int scanned = 0; static_cast<int>(facts.size()) < limit && scanned < 5000;) {
+        const auto page = store_->fact_page(category, cursor, 200);
+        for (const long long id : page) {
+            ++scanned;
+            cursor = id;
+            const auto state = store_->fact_state(id, false);
+            if (!state || (state->state != "current" && state->state != "disputed")) continue;
+            bool visible = false;
+            for (const auto& c : state->citations)
+                if (const auto it = store_->item(c.item_id); it && item_visible(*it)) visible = true;
+            if (!visible) continue;  // knowledge only from items the user may not read now is not listed
+            json j = fact_row_json(state->fact);
+            j["state"] = state->state;
+            j["categories"] = category_names(state->categories);
+            facts.push_back(std::move(j));
+            if (static_cast<int>(facts.size()) == limit) break;
+        }
+        if (static_cast<int>(page.size()) < 200 && static_cast<int>(facts.size()) < limit) {
+            end = true;
+            break;
+        }
+    }
+    json out = {{"facts", std::move(facts)}};
+    if (!end && cursor > 0 && !store_->fact_page(category, cursor, 1).empty()) out["next"] = cursor;
+    return out;
 }
 
 Status KnowledgeService::decide_review(long long id, const std::string& decision, const std::string& reason, long long generation) {
@@ -2837,12 +2934,13 @@ Status KnowledgeService::remove_exclusion(const std::string& kind, const std::st
     return {};
 }
 
-std::vector<EntityRow> KnowledgeService::visible_entities(const std::string& query, int limit) {
+std::vector<EntityRow> KnowledgeService::visible_entities(const std::string& query, int limit, std::optional<EntityCursor>* cursor) {
     std::vector<EntityRow> out;
     if (limit <= 0) return out;
     const int batch_size = std::clamp(limit, 32, 200);
     const auto normalized_query = normalize_name(query);
-    std::optional<EntityCursor> after;
+    std::optional<EntityCursor> after = cursor ? *cursor : std::nullopt;
+    if (cursor) *cursor = std::nullopt;
     for (;;) {
         const auto batch = store_->find_entities_page(query, batch_size, after);
         if (batch.empty()) break;
@@ -2858,7 +2956,10 @@ std::vector<EntityRow> KnowledgeService::visible_entities(const std::string& que
                     })) continue;
             }
             out.push_back(row.entity);
-            if (static_cast<int>(out.size()) >= limit) return out;
+            if (static_cast<int>(out.size()) >= limit) {
+                if (cursor) *cursor = EntityCursor{row.score, row.entity.name, row.entity.id};
+                return out;
+            }
         }
         if (static_cast<int>(batch.size()) < batch_size) break;
         const auto& last = batch.back();
@@ -2871,6 +2972,17 @@ json KnowledgeService::entities(const std::string& query, int limit) {
     json out = json::array();
     for (const auto& e : visible_entities(query, limit))
         out.push_back({{"id", e.id}, {"type", e.type}, {"name", e.name}, {"email", e.email}, {"department", e.department}, {"title", e.title}});
+    return out;
+}
+
+json KnowledgeService::entities_page(const std::string& query, int limit, const json& after) {
+    std::optional<EntityCursor> cursor;
+    if (after.is_object()) cursor = EntityCursor{jint(after, "score"), jstr(after, "name"), jint(after, "id")};
+    json list = json::array();
+    for (const auto& e : visible_entities(query, std::clamp(limit, 1, 200), &cursor))
+        list.push_back({{"id", e.id}, {"type", e.type}, {"name", e.name}, {"email", e.email}, {"department", e.department}, {"title", e.title}});
+    json out = {{"entities", std::move(list)}};
+    if (cursor) out["next"] = {{"score", cursor->score}, {"name", cursor->name}, {"id", cursor->id}};
     return out;
 }
 

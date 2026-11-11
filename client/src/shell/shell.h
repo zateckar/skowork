@@ -164,6 +164,7 @@ public:
     bool offline() const;
     // The width of the Knowledge view's list pane, kept while the window is open (improve-knowledge-view D1).
     float knowledge_list_w = 360;
+    std::string knowledge_section = "sources";  // the Knowledge view's last section in this window
     // Save as note (add-save-as-note D3, D4): the draft the Chats view hands to the Knowledge view, which opens it in
     // the editor.
     json knowledge_draft = nullptr;
@@ -630,6 +631,7 @@ private:
         long long id = 0;
         std::string selected;
         json cited;
+        float scroll = 0;  // the reader's scroll position
     };
 
     void rebuild();
@@ -647,7 +649,13 @@ private:
     void close_reader();                // Back: the previous reader, or the list on a narrow window
     // Workspace sections and readers (task 10.1).
     void set_section(const std::string& section);
-    void load_section();
+    void load_section(bool more = false);  // more: the next page of the shown list
+    void build_knowledge_list();
+    void build_review_list();
+    void more_button(const json& page);    // Load more when the page has a next one
+    void load_fact_categories(long long fact_id);
+    void build_fact_categories(ui::Node& parent, long long fact_id);
+    void list_chip(ui::Node& parent, const std::string& id, const std::u16string& label, bool on, std::function<void()> f);
     void rebuild_sections();
     void build_section_list();
     void push_place();                         // before a reader opened from the current one
@@ -659,6 +667,7 @@ private:
     void open_cited(const json& citation);     // the item of an excerpt, with the excerpt shown
     void load_detail(const std::string& method, const json& params, Reader mode, long long id);
     void load_item_changes(long long item_id);
+    void refresh_item(long long id);
     void ask_decision(long long review_id, const std::string& decision);
     void build_fact(ui::Node& parent);
     void build_entity(ui::Node& parent);
@@ -708,7 +717,16 @@ private:
 
     std::string tab_ = "files";  // the Source tab
     std::string section_ = "sources";
-    json entities_ = nullptr;      // knowledge.entities (Knowledge)
+    json entities_ = nullptr;      // knowledge.entities (Knowledge, Entities)
+    json categories_ = nullptr;    // knowledge.categories (Knowledge)
+    json facts_ = nullptr;         // knowledge.facts (Knowledge, a category or all)
+    std::string knowledge_scope_;  // Knowledge list: "" (categories), "all", "c<id>" (0: Uncategorized), "entities"
+    std::string review_kind_ = "inconsistencies";  // Review list: inconsistencies, changes, categories
+    json review_changes_ = nullptr;  // knowledge.changes (Review, changed evidence)
+    json suggestions_ = nullptr;     // knowledge.category.suggestions (Review)
+    json fact_categories_ = nullptr; // knowledge.fact.categories of the open fact
+    float pending_scroll_ = -1;      // the reader's scroll to restore once a reader opened by Back is shown
+    float list_scroll_ = 0;          // the list's position when the reader covered it (narrow window)
     json reviews_ = nullptr;       // knowledge.reviews (Review)
     json detail_ = nullptr;        // the open fact, entity, review or change report
     long long detail_id_ = 0;

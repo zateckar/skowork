@@ -174,7 +174,8 @@ public:
     bool relation_visible(const RelationRow& relation);
     bool fact_visible(const FactRow& fact);
     bool entity_visible(long long entity_id);
-    std::vector<EntityRow> visible_entities(const std::string& query, int limit);
+    // `cursor`, when given, is where to start and, on return, where to continue (nullopt: no more).
+    std::vector<EntityRow> visible_entities(const std::string& query, int limit, std::optional<EntityCursor>* cursor = nullptr);
     std::vector<std::string> visible_entity_aliases(const EntityRow& entity);
     // ---- The knowledge state filter (Retrieval Respects Knowledge State) ----
     // {category, history} of a tool call or Knowledge view request; an unknown category is not_found.
@@ -212,6 +213,16 @@ public:
     // and the reviewed excerpt while its Source is permitted. A review whose fact is no longer permitted knowledge,
     // or whose recheck found no disagreement, is left out.
     json reviews(int limit);
+    // The same in pages (Review section): `next` {rank, id} when more may follow; at most 5,000 are scanned per page.
+    json reviews_page(int limit, int after_rank, long long after_id);
+    // One review as the list shows it, with the generation to decide it at; not found when it is not shown.
+    Result<json> review(long long review_id);
+    // Automatic category assignments to review (Review section): [{fact_id, fact, state, category_id, name, reason,
+    // excerpt}], newest fact first, for facts the user may read; `next` {fact_id, category_id}.
+    json category_suggestions(long long before_fact, long long after_category, int limit);
+    // Current knowledge in pages (Knowledge section): all facts, a category's, or Uncategorized ones (category 0),
+    // newest first, each with its state and categories; `next` is the id to continue before.
+    json facts_page(std::optional<long long> category, long long before, int limit);
     // The user's decision on a review: keep_both, prefer_left or prefer_right (with a reason) or defer. It is tied to
     // the two excerpts shown and refused (stale) when knowledge changed since `generation` or the review needs a recheck.
     Status decide_review(long long review_id, const std::string& decision, const std::string& reason, long long generation);
@@ -259,6 +270,8 @@ public:
     Status add_exclusion(const std::string& kind, const std::string& value);
     Status remove_exclusion(const std::string& kind, const std::string& value);
     json entities(const std::string& query, int limit);
+    // The same in pages: {entities, next} where next {score, name, id} continues the list.
+    json entities_page(const std::string& query, int limit, const json& after);
     // Indexed items by title or reference, for forgetting one: [{id, source, title, ref}].
     json items(const std::string& query, int limit);
     json entity_profile(long long id, const KnowledgeFilter& filter = {});

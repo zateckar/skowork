@@ -325,6 +325,12 @@ public:
     std::vector<CategoryRow> categories();
     std::vector<CategoryAssignment> category_assignments(long long fact_id);
     std::vector<long long> uncategorized_facts(int limit);
+    // Current knowledge in pages, newest fact first (Knowledge section): facts with a current or unverified support,
+    // all of them (category unset), those assigned to a category (automatic or manual), or with none (category 0).
+    // Ids below `before` when it is set.
+    std::vector<long long> fact_page(std::optional<long long> category, long long before, int limit);
+    // Automatic category assignments to review, newest fact first, after the cursor (fact_id, category_id).
+    std::vector<CategoryAssignment> category_suggestions(long long before_fact, long long after_category, int limit);
     std::optional<long long> knowledge_generation();
     // Bind a validated analysis span to an existing support in the same graph snapshot.
     Result<BoundAnalysisEvidence> bind_analysis_evidence(long long fact_id, const AnalysisSpan& span,
@@ -360,6 +366,10 @@ public:
                            long long now, long long expected_generation);
     Status reopen_conflict(long long conflict_id, long long expected_generation);
     std::vector<ConflictRow> conflicts(int limit);
+    // Reviews in pages, in the order of conflicts(): by state rank (open, needs_recheck, deferred, resolved), then
+    // newest first; after (rank, id) when rank >= 0.
+    std::vector<ConflictRow> conflicts_page(int after_rank, long long after_id, int limit);
+    static int conflict_rank(const std::string& state);
     std::optional<ConflictRow> conflict(long long conflict_id);
     std::vector<ConflictDecision> conflict_history(long long conflict_id);
 

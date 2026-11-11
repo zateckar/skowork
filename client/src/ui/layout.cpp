@@ -616,13 +616,14 @@ bool Tree::key(const KeyEvent& e) {
     }
     for (Node* n = focused_; n; n = n->parent()) {
         if (n->on_key(e)) return true;
-        if (n == modal_) return false;  // keys do not leave a modal dialog
+        if (n == modal_) break;  // keys do not leave a modal dialog
     }
     if (modal_ && !focused_) return modal_->on_key(e);
     if (!focused_) return false;
+    // Enter and Space press the focused control, also a dialog's buttons.
     if ((e.key == kKeyEnter || e.key == kKeySpace) && !e.ctrl && !e.alt) return activate(*focused_);
-    // Page and Home/End keys scroll the nearest scrolling ancestor.
-    for (Node* n = focused_; n; n = n->parent()) {
+    // Page and Home/End keys scroll the nearest scrolling ancestor, within a modal dialog when one is open.
+    for (Node* n = focused_; n; n = n == modal_ ? nullptr : n->parent()) {
         if (!n->scrolls) continue;
         const float page = std::max(20.f, n->frame().h - 40.f);
         switch (e.key) {

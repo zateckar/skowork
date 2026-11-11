@@ -5660,10 +5660,14 @@ TEST(ShellPages, ConnectorsShowApiStatesAndTakeAPersonalTokenOnce) {
     EXPECT_TRUE(problems.empty()) << problems.front();
 }
 
-// improve-skowork-and-knowledge-control 10.1: the Knowledge workspace with the real service. Sections; an item's fact
-// opens with its evidence, an excerpt opens back in its item, and Back returns through them; an item's revisions show
-// what each changed; a possible inconsistency is decided from its review with the keyboard (Escape cancels, Enter
-// decides, a reason is required to prefer one side); on a narrow window Back keeps the keyboard on the row.
+// improve-skowork-and-knowledge-control 10.1: the Knowledge workspace with the real service.
+// - Sources: an item's fact opens with its evidence, an excerpt opens back in its item, and Back returns through them to
+//   where the reader was; an item's revisions show what each changed.
+// - Knowledge: categories, Uncategorized and entities; a category's facts and all facts in pages.
+// - Review: possible inconsistencies decided by keyboard (Escape cancels, a reason is required to prefer one side, Enter
+//   decides), changed evidence, and suggested categories kept, rejected, undone or added.
+// - The other dialogs by keyboard (share, rename, edit, forget); paged RPCs; on a narrow window Back returns to the list
+//   at its position with the keyboard on the row.
 TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
     struct Dir {
         ~Dir() {
@@ -5680,6 +5684,7 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
     };
     write(docs / L"approved.txt", "The approved Phoenix deadline is June.");
     write(docs / L"draft.txt", "Draft: the Phoenix deadline is July.");
+    write(docs / L"late.txt", "Late plan: the Phoenix deadline is August.");
     write(docs / L"notes.txt", "Notes: the Phoenix deadline is June.");
     auto root = DataRoot::open(dir.path / L"data");
     ASSERT_TRUE(root);
@@ -5695,6 +5700,7 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
     e.clock = &system_clock();
     e.policy = [](const std::string& key) -> std::optional<json> {
         if (key == "knowledge.extraction") return json("off");
+        if (key == "knowledge.sharing.groups") return json::array({"engineering"});
         return std::nullopt;
     };
     e.index = [](const std::string& m, const json& p) { return knowledge::index_request(m, p); };
@@ -5711,37 +5717,61 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
     knowledge::KnowledgeService svc(std::move(e), std::make_unique<knowledge::KgStore>(std::move(*db)));
     auto& store = svc.store();
     const auto path = [&](const wchar_t* name) { return wb::narrow((docs / name).wstring()); };
-    for (const wchar_t* name : {L"approved.txt", L"draft.txt", L"notes.txt"}) {
+    for (const wchar_t* name : {L"approved.txt", L"draft.txt", L"late.txt", L"notes.txt"}) {
         ASSERT_TRUE(svc.add_document(path(name)));
         svc.run_until_idle();
     }
     const auto approved = store.item("files", path(L"approved.txt")), draft = store.item("files", path(L"draft.txt")),
-               notes = store.item("files", path(L"notes.txt"));
-    ASSERT_TRUE(approved && draft && notes);
+               late = store.item("files", path(L"late.txt")), notes = store.item("files", path(L"notes.txt"));
+    ASSERT_TRUE(approved && draft && late && notes);
     const auto approved_chunk = store.chunks_of_item(approved->id).at(0), draft_chunk = store.chunks_of_item(draft->id).at(0),
-               notes_chunk = store.chunks_of_item(notes->id).at(0);
+               late_chunk = store.chunks_of_item(late->id).at(0), notes_chunk = store.chunks_of_item(notes->id).at(0);
     const long long phoenix = store.resolve_entity("Project", "Phoenix", "", 1);
-    const long long june = store.resolve_entity("Date", "June", "", 1), july = store.resolve_entity("Date", "July", "", 1);
-    const long long june_relation = store.add_relation(phoenix, "deadline", june, 0.9, "", "", approved_chunk.id);
-    const long long july_relation = store.add_relation(phoenix, "deadline", july, 0.9, "", "", draft_chunk.id);
-    ASSERT_TRUE(store.add_relation(phoenix, "deadline", june, 0.9, "", "", notes_chunk.id));
-    ASSERT_TRUE(june_relation && july_relation);
-    const auto june_fact = store.fact_of_relation(*store.relation(june_relation));
-    const auto july_fact = store.fact_of_relation(*store.relation(july_relation));
-    ASSERT_TRUE(june_fact && july_fact);
+    const auto relation_fact = [&](long long subject, const char* predicate, long long object, long long chunk) {
+        const long long relation = store.add_relation(subject, predicate, object, 0.9, "", "", chunk);
+        EXPECT_TRUE(relation);
+        const auto fact = relation ? store.fact_of_relation(*store.relation(relation)) : std::nullopt;
+        EXPECT_TRUE(fact);
+        return std::pair{relation, fact.value_or(0)};
+    };
+    const auto [june_relation, june_fact] = relation_fact(phoenix, "deadline", store.resolve_entity("Date", "June", "", 1), approved_chunk.id);
+    const long long july_fact = relation_fact(phoenix, "deadline", store.resolve_entity("Date", "July", "", 1), draft_chunk.id).second;
+    const long long august_fact = relation_fact(phoenix, "deadline", store.resolve_entity("Date", "August", "", 1), late_chunk.id).second;
+    ASSERT_TRUE(store.add_relation(phoenix, "deadline", store.resolve_entity("Date", "June", "", 1), 0.9, "", "", notes_chunk.id));
+    // 55 more facts, so the lists have more than one page.
+    long long milestone0 = 0;
+    for (int i = 0; i < 55; ++i) {
+        const long long m = store.resolve_entity("Milestone", "Milestone M" + std::to_string(i), "", 1);
+        if (!i) {
+            milestone0 = m;
+            store.add_mention(approved_chunk.id, m, "Milestone M0");  // listed with the item's entities
+        }
+        ASSERT_TRUE(store.add_relation(phoenix, "milestone", m, 0.9, "", "", approved_chunk.id));
+    }
+    ASSERT_TRUE(june_fact && july_fact && august_fact);
     const auto span = [](const knowledge::ChunkRow& c, const std::string& word) {
         const auto at = c.text.find(word);
         return knowledge::AnalysisSpan{c.id, at, at + word.size()};
     };
-    auto generation = store.knowledge_generation();
-    ASSERT_TRUE(generation);
-    const auto june_excerpt = store.bind_analysis_evidence(*june_fact, span(approved_chunk, "June"), *generation);
+    const auto generation = [&] { return store.knowledge_generation().value_or(0); };
+    const auto june_excerpt = store.bind_analysis_evidence(june_fact, span(approved_chunk, "June"), generation());
     ASSERT_TRUE(june_excerpt) << june_excerpt.error().message;
-    const auto july_excerpt = store.bind_analysis_evidence(*july_fact, span(draft_chunk, "July"), june_excerpt->generation);
+    const auto july_excerpt = store.bind_analysis_evidence(july_fact, span(draft_chunk, "July"), generation());
     ASSERT_TRUE(july_excerpt) << july_excerpt.error().message;
-    const auto review = store.record_conflict(*june_fact, *july_fact, june_excerpt->evidence_id, july_excerpt->evidence_id,
-                                              "Two deadlines for the same milestone", july_excerpt->generation);
+    const auto august_excerpt = store.bind_analysis_evidence(august_fact, span(late_chunk, "August"), generation());
+    ASSERT_TRUE(august_excerpt) << august_excerpt.error().message;
+    const auto review = store.record_conflict(june_fact, july_fact, june_excerpt->evidence_id, july_excerpt->evidence_id,
+                                              "Two deadlines for the same milestone", generation());
     ASSERT_TRUE(review) << review.error().message;
+    const auto review2 = store.record_conflict(june_fact, august_fact, june_excerpt->evidence_id, august_excerpt->evidence_id,
+                                               "A later deadline", generation());
+    ASSERT_TRUE(review2) << review2.error().message;
+    // Suggested categories for June and August; Risks is empty.
+    const auto planning = store.create_category("Planning");
+    const auto risks = store.create_category("Risks");
+    ASSERT_TRUE(planning && risks);
+    ASSERT_TRUE(store.set_category_assignment(june_fact, *planning, "automatic", "Names a deadline", june_excerpt->evidence_id, generation()));
+    ASSERT_TRUE(store.set_category_assignment(august_fact, *planning, "automatic", "Names a deadline", august_excerpt->evidence_id, generation()));
     // A revision of the notes takes one of June's two supports.
     write(docs / L"notes.txt", "The canteen opens at noon.");
     svc.sweep_now();
@@ -5751,6 +5781,54 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
 
     Fixture f;
     register_knowledge_rpc(f.rpc, [&svc] { return &svc; }, nullptr);
+    const auto call = [&](const char* method, const json& params) { return (*f.rpc.find(method, false))(params); };
+
+    // Paged reads: each page says where the next one starts, and the last says nothing.
+    {
+        const auto reports = call("knowledge.changes", json::object());
+        ASSERT_TRUE(reports);
+        ASSERT_EQ((*reports)["items"].size(), 1u) << reports->dump(2);  // the notes' revision
+        auto page = call("knowledge.reviews", {{"limit", 1}});
+        ASSERT_TRUE(page);
+        ASSERT_EQ((*page)["items"].size(), 1u);
+        ASSERT_TRUE(page->contains("next"));
+        page = call("knowledge.reviews", {{"limit", 1}, {"after", (*page)["next"]}});
+        ASSERT_TRUE(page);
+        ASSERT_EQ((*page)["items"].size(), 1u);
+        EXPECT_FALSE(page->contains("next"));
+        page = call("knowledge.category.suggestions", {{"limit", 1}});
+        ASSERT_TRUE(page);
+        ASSERT_EQ((*page)["items"].size(), 1u);
+        EXPECT_EQ((*page)["items"][0]["fact_id"], august_fact);  // newest fact first
+        EXPECT_EQ((*page)["items"][0]["reason"], "Names a deadline");
+        page = call("knowledge.category.suggestions", {{"limit", 1}, {"after", (*page)["next"]}});
+        ASSERT_TRUE(page);
+        EXPECT_EQ((*page)["items"][0]["fact_id"], june_fact);
+        EXPECT_FALSE(page->contains("next"));
+        page = call("knowledge.facts", {{"limit", 50}});
+        ASSERT_TRUE(page);
+        EXPECT_EQ((*page)["facts"].size(), 50u);
+        page = call("knowledge.facts", {{"limit", 50}, {"before", (*page)["next"]}});
+        ASSERT_TRUE(page);
+        EXPECT_EQ((*page)["facts"].size(), 8u);  // 3 deadlines and 55 milestones
+        EXPECT_FALSE(page->contains("next"));
+        page = call("knowledge.facts", {{"category", *planning}});
+        ASSERT_TRUE(page);
+        EXPECT_EQ((*page)["facts"].size(), 2u);  // June and August
+        page = call("knowledge.facts", {{"category", 0}, {"limit", 200}});
+        ASSERT_TRUE(page);
+        EXPECT_EQ((*page)["facts"].size(), 56u);
+        page = call("knowledge.entities", {{"limit", 2}});
+        ASSERT_TRUE(page);
+        ASSERT_EQ((*page)["entities"].size(), 2u);
+        const json first = (*page)["entities"];
+        page = call("knowledge.entities", {{"limit", 2}, {"after", (*page)["next"]}});
+        ASSERT_TRUE(page);
+        ASSERT_EQ((*page)["entities"].size(), 2u);
+        EXPECT_NE((*page)["entities"][0]["id"], first[0]["id"]);
+        EXPECT_NE((*page)["entities"][0]["id"], first[1]["id"]);
+    }
+
     const auto focused = [](ShellThread& w) {
         std::string id;
         w.run([&] {
@@ -5767,7 +5845,29 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
         });
         return out;
     };
-    const auto back_visible = [](ShellThread& w) { return w.with("knowledge-back", [](ui::Node& n) { return n.visible; }); };
+    const auto visible = [](ShellThread& w, const std::string& id) { return w.with(id, [](ui::Node& n) { return n.visible; }); };
+    const auto scroll_of = [](ShellThread& w, const std::string& id) {
+        float y = -1;
+        w.with(id, [&](ui::Node& n) {
+            y = n.scroll_y();
+            return true;
+        });
+        return y;
+    };
+    const auto scroll_to = [](ShellThread& w, const std::string& id, float y) {
+        w.with(id, [&](ui::Node& n) {
+            w.main().window()->tree().scroll_to(n, y);
+            return true;
+        });
+    };
+    const auto rows = [](ShellThread& w, const std::string& prefix) {        std::vector<std::string> out;
+        w.with("knowledge-items", [&](ui::Node& n) {
+            for (const auto& c : n.children())
+                if (c->automation_id().rfind(prefix, 0) == 0) out.push_back(c->automation_id());
+            return true;
+        });
+        return out;
+    };
     std::vector<std::string> problems;
     {
         ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
@@ -5777,12 +5877,16 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-section-review") && w.exists(approved_row); }));
         EXPECT_NE(label(w, "knowledge-section-sources").find(u"(selected)"), std::u16string::npos);
 
-        // Item → fact with its evidence → an excerpt in its item; Back returns through them.
+        // Item → fact with its evidence → an excerpt in its item; Back returns through them, the item where it was.
         ASSERT_TRUE(w.invoke(approved_row));
         ASSERT_TRUE(w.until([&] { return w.exists(fact_button); }));
-        EXPECT_FALSE(back_visible(w));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-no-changes"); }));
+        EXPECT_FALSE(visible(w, "knowledge-back"));
         ASSERT_TRUE(w.invoke("knowledge-item-goto-changes"));
         EXPECT_EQ(focused(w), "knowledge-item-changes");
+        scroll_to(w, "knowledge-reader", 300);
+        ASSERT_GT(scroll_of(w, "knowledge-reader"), 250.f);
+        const float item_scroll = scroll_of(w, "knowledge-reader");
         ASSERT_TRUE(w.invoke(fact_button));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-reader") && w.exists("knowledge-citation-0"); }));
         EXPECT_EQ(label(w, "knowledge-fact-state"), u"Disputed");
@@ -5797,7 +5901,9 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
         ASSERT_GE(approved_citation, 0);
         EXPECT_TRUE(retained);
         EXPECT_TRUE(w.exists("knowledge-fact-dispute-" + std::to_string(*review)));
-        EXPECT_TRUE(back_visible(w));
+        EXPECT_TRUE(w.exists("knowledge-fact-dispute-" + std::to_string(*review2)));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-category-" + std::to_string(*planning)); }));
+        EXPECT_TRUE(visible(w, "knowledge-back"));
         w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
         EXPECT_TRUE(problems.empty()) << problems.front();
         ASSERT_TRUE(w.invoke("knowledge-citation-open-" + std::to_string(approved_citation)));
@@ -5807,9 +5913,27 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
         ASSERT_TRUE(w.invoke("knowledge-back"));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-reader"); }));
         ASSERT_TRUE(w.invoke("knowledge-back"));
-        ASSERT_TRUE(w.until([&] { return w.exists(fact_button); }));
+        ASSERT_TRUE(w.until([&] { return w.exists(fact_button) && std::abs(scroll_of(w, "knowledge-reader") - item_scroll) < 1.f; }))
+            << scroll_of(w, "knowledge-reader");
         EXPECT_FALSE(w.exists("knowledge-item-excerpt"));
-        EXPECT_FALSE(back_visible(w));
+        EXPECT_FALSE(visible(w, "knowledge-back"));
+
+        // The other dialogs by keyboard: share (Escape), edit a fact (Escape), rename an entity (Enter in the field).
+        ASSERT_TRUE(w.invoke("knowledge-share"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-share-group-engineering"); }));
+        w.key(ui::kKeyEscape);
+        ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-share-group-engineering"); }));
+        EXPECT_TRUE(store.shares().empty());
+        ASSERT_TRUE(w.invoke("knowledge-fact-edit-relation-" + std::to_string(june_relation)));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-field"); }));
+        EXPECT_EQ(focused(w), "knowledge-fact-field");
+        w.key(ui::kKeyEscape);
+        ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-fact-field"); }));
+        ASSERT_TRUE(w.invoke("knowledge-entity-rename-" + std::to_string(milestone0)));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-rename-field"); }));
+        w.type("knowledge-rename-field", u"Kick-off");
+        EXPECT_TRUE(w.field_key("knowledge-rename-field", ui::kKeyEnter));
+        ASSERT_TRUE(w.until([&] { return store.entity(milestone0)->name == "Kick-off"; }));
 
         // The notes' revision: its change report names the fact that lost a support.
         ASSERT_TRUE(w.invoke("knowledge-row-" + std::to_string(notes->id)));
@@ -5823,7 +5947,7 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
         }));
         EXPECT_NE(label(w, change_row).find(u"Revision 2"), std::u16string::npos) << ui::to_utf8(label(w, change_row));
         ASSERT_TRUE(w.invoke(change_row));
-        const std::string changed_fact = "knowledge-change-fact-" + std::to_string(*june_fact);
+        const std::string changed_fact = "knowledge-change-fact-" + std::to_string(june_fact);
         ASSERT_TRUE(w.until([&] { return w.exists(changed_fact); }));
         EXPECT_NE(label(w, changed_fact).find(u"lost some support"), std::u16string::npos) << ui::to_utf8(label(w, changed_fact));
         ASSERT_TRUE(w.invoke(changed_fact));
@@ -5834,11 +5958,12 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
         // Review: the possible inconsistency from its section; Escape cancels, preferring needs a reason, Enter decides.
         const std::string review_row = "knowledge-review-row-" + std::to_string(*review);
         ASSERT_TRUE(w.invoke("knowledge-section-review"));
-        ASSERT_TRUE(w.until([&] { return w.exists(review_row); }));
-        EXPECT_FALSE(w.with("knowledge-tabs", [](ui::Node& n) { return n.visible; }));
+        ASSERT_TRUE(w.until([&] { return w.exists(review_row) && w.exists("knowledge-review-row-" + std::to_string(*review2)); }));
+        EXPECT_FALSE(visible(w, "knowledge-tabs"));
+        EXPECT_NE(label(w, "knowledge-review-kind-inconsistencies").find(u"(selected)"), std::u16string::npos);
         ASSERT_TRUE(w.invoke(review_row));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-review-prefer-left"); }));
-        EXPECT_FALSE(back_visible(w));  // a row opens afresh
+        EXPECT_FALSE(visible(w, "knowledge-back"));  // a row opens afresh
         EXPECT_EQ(label(w, "knowledge-citation-excerpt-left"), u"June");
         ASSERT_TRUE(w.invoke("knowledge-review-prefer-left"));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-decide-reason"); }));
@@ -5866,17 +5991,112 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
         ASSERT_TRUE(w.invoke("knowledge-back"));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-review-reader"); }));
 
-        // Knowledge: the entity and its facts.
+        // Changed evidence: the notes' revision.
+        ASSERT_TRUE(w.invoke("knowledge-review-kind-changes"));
+        const auto reports = call("knowledge.changes", json::object());
+        ASSERT_TRUE(reports && (*reports)["items"].size() == 1u);
+        const std::string report_row = "knowledge-review-change-" + std::to_string((*reports)["items"][0]["id"].get<long long>());
+        ASSERT_TRUE(w.until([&] { return w.exists(report_row); }));
+        ASSERT_TRUE(w.invoke(report_row));
+        ASSERT_TRUE(w.until([&] { return w.exists(changed_fact); }));
+
+        // Suggested categories: keep June's, undo it, add June to Risks from the menu, and reject August's. A rejected fact's (July's) would not be listed.
+        const std::string june_suggestion = "knowledge-suggestion-" + std::to_string(june_fact) + "-" + std::to_string(*planning);
+        const std::string planning_id = std::to_string(*planning), risks_id = std::to_string(*risks);
+        const auto decision = [&](long long fact, long long category) {
+            for (const auto& a : store.category_assignments(fact))
+                if (a.category_id == category) return a.decision;
+            return std::string("none");
+        };
+        ASSERT_TRUE(w.invoke("knowledge-review-kind-categories"));
+        ASSERT_TRUE(w.until([&] { return w.exists(june_suggestion); }));
+        ASSERT_TRUE(w.invoke(june_suggestion));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-category-keep-" + planning_id); }));
+        EXPECT_NE(label(w, "knowledge-fact-category-" + planning_id).find(u"Names a deadline"), std::u16string::npos);
+        ASSERT_TRUE(w.invoke("knowledge-fact-category-keep-" + planning_id));
+        ASSERT_TRUE(w.until([&] { return decision(june_fact, *planning) == "manual"; }));
+        ASSERT_TRUE(w.until([&] { return !w.exists(june_suggestion); }));  // no longer a suggestion to review
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-category-reset-" + planning_id); }));
+        ASSERT_TRUE(w.invoke("knowledge-fact-category-reset-" + planning_id));
+        ASSERT_TRUE(w.until([&] { return decision(june_fact, *planning) == "none"; }));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-category-add"); }));
+        ASSERT_TRUE(w.invoke("knowledge-fact-category-add"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-category-choose-" + risks_id); }));
+        ASSERT_TRUE(w.invoke("knowledge-fact-category-choose-" + risks_id));
+        ASSERT_TRUE(w.until([&] { return decision(june_fact, *risks) == "manual"; }));
+        const std::string august_suggestion = "knowledge-suggestion-" + std::to_string(august_fact) + "-" + planning_id;
+        ASSERT_TRUE(w.until([&] { return w.exists(august_suggestion); }));
+        ASSERT_TRUE(w.invoke(august_suggestion));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-category-reject-" + planning_id); }));
+        ASSERT_TRUE(w.invoke("knowledge-fact-category-reject-" + planning_id));
+        ASSERT_TRUE(w.until([&] { return decision(august_fact, *planning) == "rejected"; }));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-no-suggestions"); }));
+
+        // Knowledge: categories, a category's facts, all facts in pages, and the entities.
         ASSERT_TRUE(w.invoke("knowledge-section-knowledge"));
+        for (const std::string& row : std::vector<std::string>{"all", risks_id, planning_id, "0", "entities"})
+            ASSERT_TRUE(w.until([&] { return w.exists("knowledge-category-row-" + row); })) << row;
+        ASSERT_TRUE(w.invoke("knowledge-category-row-" + risks_id));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-facts-row-" + std::to_string(june_fact)); }));
+        EXPECT_EQ(rows(w, "knowledge-facts-row-").size(), 1u);
+        EXPECT_EQ(label(w, "knowledge-scope-title"), u"Risks");
+        ASSERT_TRUE(w.invoke("knowledge-scope-up"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-category-row-all"); }));
+        ASSERT_TRUE(w.invoke("knowledge-category-row-all"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-list-more"); }));
+        EXPECT_EQ(rows(w, "knowledge-facts-row-").size(), 50u);
+        ASSERT_TRUE(w.invoke("knowledge-list-more"));
+        ASSERT_TRUE(w.until([&] { return rows(w, "knowledge-facts-row-").size() == 57u; }));  // July was rejected in Review
+        EXPECT_FALSE(w.exists("knowledge-list-more"));
+        ASSERT_TRUE(w.invoke("knowledge-scope-up"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-category-row-entities"); }));
+        ASSERT_TRUE(w.invoke("knowledge-category-row-entities"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-list-more"); }));  // 60 entities: Phoenix is on the second page
+        EXPECT_EQ(rows(w, "knowledge-entities-row-").size(), 50u);
+        ASSERT_TRUE(w.invoke("knowledge-list-more"));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-entities-row-" + std::to_string(phoenix)); }));
         ASSERT_TRUE(w.invoke("knowledge-entities-row-" + std::to_string(phoenix)));
-        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-entity-fact-" + std::to_string(*june_fact)); }));
+        // The entity's facts open their evidence (the profile lists at most 30 of them).
+        std::string entity_fact;
+        ASSERT_TRUE(w.until([&] {
+            return w.with("knowledge-entity-facts", [&](ui::Node& n) {
+                for (const auto& c : n.children())
+                    if (c->automation_id().rfind("knowledge-entity-fact-", 0) == 0) entity_fact = c->automation_id();
+                return !entity_fact.empty();
+            });
+        }));
         w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
         EXPECT_TRUE(problems.empty()) << problems.front();
+        ASSERT_TRUE(w.invoke(entity_fact));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-reader"); }));
+        ASSERT_TRUE(w.invoke("knowledge-back"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-entity-reader"); }));
+
+        // Forget asks first: Escape cancels; Tab to Forget and Enter confirms.
+        ASSERT_TRUE(w.invoke("knowledge-section-sources"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-row-" + std::to_string(late->id)); }));
+        ASSERT_TRUE(w.invoke("knowledge-row-" + std::to_string(late->id)));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-more"); }));
+        ASSERT_TRUE(w.invoke("knowledge-item-more"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-forget"); }));
+        ASSERT_TRUE(w.invoke("knowledge-item-forget"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-forget-ok"); }));
+        w.key(ui::kKeyEscape);
+        ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-forget-ok"); }));
+        EXPECT_TRUE(store.item("files", path(L"late.txt")));
+        ASSERT_TRUE(w.invoke("knowledge-item-more"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-forget"); }));
+        ASSERT_TRUE(w.invoke("knowledge-item-forget"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-forget-ok"); }));
+        for (int i = 0; i < 6 && focused(w) != "knowledge-forget-ok"; ++i) w.key(ui::kKeyTab);
+        ASSERT_EQ(focused(w), "knowledge-forget-ok");
+        w.key(ui::kKeyEnter);
+        ASSERT_TRUE(w.until([&] { return !store.item("files", path(L"late.txt")); }));
         window = nullptr;
     }
 
-    // A narrow window shows one pane: Back goes through the nested readers, then to the list with the row focused.
+    // A narrow window shows one pane: Back goes through the nested readers, then to the list at its position with the
+    // keyboard on the row.
     {
         ShellThread w(f.rpc, 800, [&f] { return f.now(); });
         f.attach(w);
@@ -5887,12 +6107,32 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
         ASSERT_TRUE(w.until([&] { return w.exists(fact_button); }));
         ASSERT_TRUE(w.invoke(fact_button));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-reader"); }));
-        EXPECT_FALSE(w.with("knowledge-list-pane", [](ui::Node& n) { return n.visible; }));
+        EXPECT_FALSE(visible(w, "knowledge-list-pane"));
         ASSERT_TRUE(w.invoke("knowledge-back"));
         ASSERT_TRUE(w.until([&] { return w.exists(fact_button); }));
         ASSERT_TRUE(w.invoke("knowledge-back"));
-        ASSERT_TRUE(w.until([&] { return w.with("knowledge-list-pane", [](ui::Node& n) { return n.visible; }); }));
+        ASSERT_TRUE(w.until([&] { return visible(w, "knowledge-list-pane"); }));
         EXPECT_EQ(focused(w), approved_row);
+
+        ASSERT_TRUE(w.invoke("knowledge-section-knowledge"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-category-row-all"); }));
+        ASSERT_TRUE(w.invoke("knowledge-category-row-all"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-list-more"); }));
+        scroll_to(w, "knowledge-items", 100000);
+        const float list_scroll = scroll_of(w, "knowledge-items");
+        ASSERT_GT(list_scroll, 100.f);
+        const std::string last = rows(w, "knowledge-facts-row-").back();
+        ASSERT_TRUE(w.invoke(last));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-reader") && w.exists("knowledge-citation-open-0"); }));
+        ASSERT_TRUE(w.invoke("knowledge-citation-open-0"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-excerpt-text"); }));
+        ASSERT_TRUE(w.invoke("knowledge-back"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-reader"); }));
+        ASSERT_TRUE(w.invoke("knowledge-back"));
+        ASSERT_TRUE(w.until([&] { return visible(w, "knowledge-list-pane"); }));
+        EXPECT_EQ(focused(w), last);
+        EXPECT_NEAR(scroll_of(w, "knowledge-items"), list_scroll, 1.f);
+
         window = nullptr;
     }
 }

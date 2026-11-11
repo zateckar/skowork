@@ -1140,6 +1140,42 @@ std::vector<long long> KgStore::uncategorized_facts(int limit) {
     return result;
 }
 
+std::vector<long long> KgStore::fact_page(std::optional<long long> category, long long before, int limit) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<long long> result;
+    if (db_->user_version() < kKgEvidenceSchemaVersion || limit <= 0) return result;
+    std::string sql = "SELECT f.id FROM knowledge_facts f WHERE (?1<=0 OR f.id<?1) AND EXISTS (SELECT 1 FROM knowledge_support_sets s "
+                      "WHERE s.fact_id=f.id AND s.state IN ('current','unverified'))";
+    if (category && *category > 0)
+        sql += " AND EXISTS (SELECT 1 FROM knowledge_category_assignments a WHERE a.fact_id=f.id AND a.category_id=?3 "
+               "AND a.decision IN ('automatic','manual'))";
+    else if (category)
+        sql += " AND NOT EXISTS (SELECT 1 FROM knowledge_category_assignments a WHERE a.fact_id=f.id AND a.decision IN ('automatic','manual'))";
+    sql += " ORDER BY f.id DESC LIMIT ?2";
+    auto s = db_->prepare(sql);
+    s.bind(1, before).bind(2, std::min(limit, 1000));
+    if (category && *category > 0) s.bind(3, *category);
+    while (s.step()) result.push_back(s.col_int(0));
+    return result;
+}
+
+std::vector<CategoryAssignment> KgStore::category_suggestions(long long before_fact, long long after_category, int limit) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<CategoryAssignment> result;
+    if (db_->user_version() < kKgEvidenceSchemaVersion || limit <= 0) return result;
+    auto s = db_->prepare("SELECT a.fact_id,a.category_id,ifnull(a.evidence_id,0),a.decision,a.reason,c.name,"
+                          "ifnull(e.chunk_id,0),ifnull(e.excerpt,'') FROM knowledge_category_assignments a "
+                          "JOIN knowledge_categories c ON c.id=a.category_id "
+                          "LEFT JOIN knowledge_evidence e ON e.id=a.evidence_id "
+                          "WHERE a.decision='automatic' AND (?1<=0 OR a.fact_id<?1 OR (a.fact_id=?1 AND a.category_id>?2)) "
+                          "ORDER BY a.fact_id DESC,a.category_id LIMIT ?3");
+    s.bind(1, before_fact).bind(2, after_category).bind(3, std::min(limit, 1000));
+    while (s.step())
+        result.push_back({s.col_int(0), s.col_int(1), s.col_int(2), s.col_text(3), s.col_text(4), s.col_text(5), s.col_int(6),
+                          s.col_text(7)});
+    return result;
+}
+
 std::optional<long long> KgStore::knowledge_generation() {
     const std::lock_guard lock(db_->mutex());
     if (db_->user_version() < kKgEvidenceSchemaVersion) return std::nullopt;
@@ -1238,6 +1274,26 @@ std::vector<ConflictRow> KgStore::conflicts(int limit) {
                           " FROM knowledge_conflicts ORDER BY CASE state WHEN 'open' THEN 0 WHEN 'needs_recheck' THEN 1 "
                           "WHEN 'deferred' THEN 2 ELSE 3 END,id DESC LIMIT ?1");
     s.bind(1, std::min(limit, 1000));
+    while (s.step())
+        result.push_back({s.col_int(0), s.col_int(1), s.col_int(2), s.col_int(3), s.col_int(4), s.col_text(5), s.col_text(6),
+                          s.col_text(7), s.col_text(8), s.col_text(9), s.col_int(10) != 0});
+    return result;
+}
+
+int KgStore::conflict_rank(const std::string& state) {
+    return state == "open" ? 0 : state == "needs_recheck" ? 1 : state == "deferred" ? 2 : 3;
+}
+
+std::vector<ConflictRow> KgStore::conflicts_page(int after_rank, long long after_id, int limit) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<ConflictRow> result;
+    if (db_->user_version() < kKgEvidenceSchemaVersion || limit <= 0) return result;
+    const bool kinds = db_->user_version() >= kKgConsistencySchemaVersion;
+    auto s = db_->prepare(std::string("SELECT id,left_fact,right_fact,left_evidence,right_evidence,explanation,state,decision,decision_reason,") +
+                          (kinds ? "kind,cleared" : "'conflict',0") +
+                          ",rank FROM (SELECT *,CASE state WHEN 'open' THEN 0 WHEN 'needs_recheck' THEN 1 WHEN 'deferred' THEN 2 ELSE 3 END "
+                          "AS rank FROM knowledge_conflicts) WHERE ?1<0 OR rank>?1 OR (rank=?1 AND id<?2) ORDER BY rank,id DESC LIMIT ?3");
+    s.bind(1, after_rank).bind(2, after_id).bind(3, std::min(limit, 1000));
     while (s.step())
         result.push_back({s.col_int(0), s.col_int(1), s.col_int(2), s.col_int(3), s.col_int(4), s.col_text(5), s.col_text(6),
                           s.col_text(7), s.col_text(8), s.col_text(9), s.col_int(10) != 0});
