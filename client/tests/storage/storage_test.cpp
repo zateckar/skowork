@@ -889,6 +889,111 @@ INSERT INTO knowledge_support_evidence(support_id,evidence_id) VALUES(1,1);
     EXPECT_FALSE(store.bind_analysis_evidence(1, {1, 0, 7}, *generation));
 }
 
+// Task 8.5: one analysis's category suggestions and possible inconsistencies are saved together or not at all.
+TEST(Database, KnowledgeAnalysisBatchIsSavedWhollyOrNotAtAll) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get_or_create("analysis-batch.db");
+    ASSERT_TRUE(key);
+    auto migrations = knowledge::kg_migrations();
+    migrations.push_back({knowledge::kKgEvidenceSchemaVersion, knowledge::kg_evidence_migration_sql()});
+    MigrationOutcome outcome;
+    auto db = open_and_migrate_consistently(root->file("analysis-batch.db"), *key, migrations, outcome, knowledge::register_kg_writer);
+    ASSERT_TRUE(db) << db.error().message;
+    ASSERT_FALSE(outcome.degraded) << outcome.failure;
+    knowledge::KgStore store(std::move(*db));
+    const auto write = [&](const std::string& ext_id, const std::string& hash, const std::string& text) {
+        knowledge::ItemInput in;
+        in.source = "files";
+        in.ext_id = ext_id;
+        in.title = ext_id;
+        in.hash = hash;
+        in.updated_at = 1000;
+        in.chunks = {{"", text, 0}};
+        return store.put_item(in, 2000);
+    };
+    const auto plan = write("plan", "p1", "Deadline June. Budget approved.");
+    const auto draft = write("draft", "d1", "Deadline July.");
+    ASSERT_TRUE(plan && draft);
+    // After the writes: an item write deletes entities that nothing refers to yet.
+    ASSERT_TRUE(store.db().exec("INSERT INTO entities(id,type,name,key) VALUES(1,'project','Apollo','apollo'),(2,'date','June','june'),"
+                                "(3,'date','July','july'),(4,'amount','Budget','budget')"));
+    const long long plan_chunk = store.chunks_of_item(*plan)[0].id, draft_chunk = store.chunks_of_item(*draft)[0].id;
+    ASSERT_TRUE(store.add_relation(1, "deadline", 2, 0.9, "", "", plan_chunk));
+    ASSERT_TRUE(store.add_relation(1, "deadline", 3, 0.9, "", "", draft_chunk));
+    ASSERT_TRUE(store.add_relation(1, "budget", 4, 0.9, "", "", plan_chunk));
+    const auto fact = [&](long long object) {
+        auto s = store.db().prepare("SELECT id FROM knowledge_facts WHERE object=?1");
+        s.bind(1, object);
+        return s.step() ? s.col_int(0) : 0LL;
+    };
+    const long long june = fact(2), july = fact(3), budget = fact(4);
+    ASSERT_TRUE(june && july && budget);
+    const auto dates = store.create_category("Dates");
+    const auto money = store.create_category("Money");
+    ASSERT_TRUE(dates && money);
+    // A manual rejection made before the analysis is kept.
+    ASSERT_TRUE(store.set_category_assignment(budget, *dates, "rejected", "not a date"));
+
+    knowledge::AnalysisProposals batch;
+    batch.categories = {{june, *dates, "a deadline", {plan_chunk, 0, 8}},
+                        {budget, *money, "a budget", {plan_chunk, 15, 21}},
+                        {budget, *dates, "mentions approval", {plan_chunk, 15, 21}}};
+    batch.conflicts = {{june, july, "different deadlines", {plan_chunk, 9, 13}, {draft_chunk, 9, 13}}};
+    const auto count = [&](const std::string& sql) {
+        auto s = store.db().prepare(sql);
+        return s.step() ? s.col_int(0) : -1LL;
+    };
+    const auto saved_nothing = [&] {
+        return count("SELECT count(*) FROM knowledge_category_assignments WHERE decision='automatic'") == 0 &&
+               count("SELECT count(*) FROM knowledge_conflicts") == 0 &&
+               count("SELECT count(*) FROM knowledge_evidence WHERE precision='exact'") == 0;
+    };
+
+    // Policy for the analyzed Sources changed: asked under the store lock, it refuses the whole batch.
+    auto generation = store.knowledge_generation();
+    ASSERT_TRUE(generation);
+    EXPECT_FALSE(store.apply_analysis(batch, *generation, [] { return false; }));
+    EXPECT_TRUE(saved_nothing());
+
+    // One excerpt that is not current support refuses everything before it too.
+    auto broken = batch;
+    broken.conflicts[0].right = {plan_chunk, 0, 8};  // the plan passage does not support the July deadline
+    EXPECT_FALSE(store.apply_analysis(broken, *generation, [] { return true; }));
+    EXPECT_TRUE(saved_nothing());
+
+    // An exclusion between analysis and saving.
+    ASSERT_TRUE(store.add_user_exclusion("file", "C:\\elsewhere\\other.txt"));
+    EXPECT_FALSE(store.apply_analysis(batch, *generation, [] { return true; }));
+    EXPECT_TRUE(saved_nothing());
+
+    // A new revision of an analyzed Source between analysis and saving.
+    generation = store.knowledge_generation();
+    ASSERT_TRUE(generation);
+    ASSERT_TRUE(write("draft", "d2", "Deadline July, moved."));
+    EXPECT_FALSE(store.apply_analysis(batch, *generation, [] { return true; }));
+    EXPECT_TRUE(saved_nothing());
+
+    // Analysis of the current knowledge is saved in full; the manual rejection stays.
+    ASSERT_TRUE(store.add_relation(1, "deadline", 3, 0.9, "", "", store.chunks_of_item(*draft)[0].id));
+    batch.conflicts[0].right = {store.chunks_of_item(*draft)[0].id, 9, 13};
+    generation = store.knowledge_generation();
+    ASSERT_TRUE(generation);
+    const auto applied = store.apply_analysis(batch, *generation, [] { return true; });
+    ASSERT_TRUE(applied) << applied.error().message;
+    EXPECT_EQ(count("SELECT count(*) FROM knowledge_category_assignments WHERE decision='automatic'"), 2);
+    const auto budget_dates = store.category_assignments(budget);
+    ASSERT_EQ(budget_dates.size(), 2u);
+    for (const auto& a : budget_dates) EXPECT_EQ(a.decision, a.category_id == *dates ? "rejected" : "automatic");
+    const auto review = store.conflicts(10);
+    ASSERT_EQ(review.size(), 1u);
+    EXPECT_EQ(review[0].state, "open");
+    EXPECT_EQ(count("SELECT count(*) FROM knowledge_evidence WHERE precision='exact'"), 4);
+}
+
 TEST(Database, SourceRevisionKeepsUnchangedEvidenceAndIndependentSupport) {
     TempRoot t;
     auto root = DataRoot::open(t.path);

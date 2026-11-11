@@ -787,6 +787,119 @@ INSERT INTO knowledge_category_assignments(fact_id,category_id,decision,reason,e
     });
 }
 
+namespace {
+
+// The analysis writes below run inside a transaction their caller opened after checking its graph snapshot.
+
+std::optional<long long> generation_of(Database& db) {
+    auto s = db.prepare("SELECT value FROM knowledge_generation WHERE id=1");
+    if (!s.step()) return std::nullopt;
+    return s.col_int(0);
+}
+
+bool active_exact_evidence(Database& db, long long fact, long long evidence_id) {
+    auto evidence = db.prepare("SELECT 1 FROM knowledge_support_sets s "
+                               "JOIN knowledge_support_evidence se ON se.support_id=s.id "
+                               "JOIN knowledge_evidence e ON e.id=se.evidence_id "
+                               "JOIN knowledge_revisions v ON v.id=e.revision_id "
+                               "JOIN chunks c ON c.id=e.chunk_id AND c.item_id=v.item_id "
+                               "WHERE s.fact_id=?1 AND s.state IN ('current','unverified') AND v.current=1 "
+                               "AND e.id=?2 AND e.precision='exact' AND "
+                               "CAST(e.excerpt AS BLOB)=substr(CAST(c.text AS BLOB),e.byte_start+1,e.byte_end-e.byte_start)");
+    evidence.bind(1, fact).bind(2, evidence_id);
+    return evidence.step();
+}
+
+// An exact excerpt of a passage that belongs to a current support of the fact, in the current revision.
+Result<long long> bind_span(Database& db, long long fact, const AnalysisSpan& span) {
+    if (fact <= 0 || span.chunk_id <= 0 || span.end <= span.begin || span.end - span.begin > 2048 ||
+        span.end > static_cast<size_t>(std::numeric_limits<long long>::max()))
+        return make_error("invalid", "Invalid analysis excerpt.");
+    auto source = db.prepare(R"sql(
+SELECT s.id,e.revision_id,c.text FROM knowledge_support_sets s
+JOIN knowledge_support_evidence se ON se.support_id=s.id
+JOIN knowledge_evidence e ON e.id=se.evidence_id
+JOIN knowledge_revisions v ON v.id=e.revision_id
+JOIN chunks c ON c.id=e.chunk_id AND c.item_id=v.item_id
+WHERE s.fact_id=?1 AND s.state IN ('current','unverified') AND v.current=1 AND c.id=?2
+ AND ((e.precision='passage' AND CAST(e.excerpt AS BLOB)=CAST(c.text AS BLOB)) OR
+      (e.precision='exact' AND e.byte_start<=?3 AND e.byte_end>=?4 AND
+       CAST(e.excerpt AS BLOB)=substr(CAST(c.text AS BLOB),e.byte_start+1,e.byte_end-e.byte_start)))
+ORDER BY s.id,e.id LIMIT 1)sql");
+    source.bind(1, fact).bind(2, span.chunk_id).bind(3, static_cast<long long>(span.begin)).bind(4, static_cast<long long>(span.end));
+    if (!source.step()) return make_error("invalid", "The excerpt is not part of a current support for this fact.");
+    const auto support_id = source.col_int(0), revision_id = source.col_int(1);
+    const auto content = source.col_text(2);
+    const auto continuation = [](char c) { return (static_cast<unsigned char>(c) & 0xc0) == 0x80; };
+    if (span.end > content.size() || (span.begin && continuation(content[span.begin])) ||
+        (span.end < content.size() && continuation(content[span.end])))
+        return make_error("invalid", "The excerpt is outside the passage or splits a UTF-8 character.");
+    const std::string excerpt = content.substr(span.begin, span.end - span.begin);
+    auto insert = db.prepare("INSERT OR IGNORE INTO knowledge_evidence(revision_id,chunk_id,excerpt,precision,byte_start,byte_end) "
+                             "VALUES(?1,?2,?3,'exact',?4,?5)");
+    insert.bind(1, revision_id).bind(2, span.chunk_id).bind(3, excerpt).bind(4, static_cast<long long>(span.begin))
+        .bind(5, static_cast<long long>(span.end));
+    if (auto inserted = insert.run(); !inserted) return inserted.error();
+    auto find = db.prepare("SELECT id FROM knowledge_evidence WHERE revision_id=?1 AND chunk_id=?2 "
+                           "AND precision='exact' AND byte_start=?3 AND byte_end=?4 AND CAST(excerpt AS BLOB)=CAST(?5 AS BLOB)");
+    find.bind(1, revision_id).bind(2, span.chunk_id).bind(3, static_cast<long long>(span.begin)).bind(4, static_cast<long long>(span.end))
+        .bind(5, excerpt);
+    if (!find.step()) return make_error("stale", "The stored excerpt no longer matches the passage.");
+    const long long evidence_id = find.col_int(0);
+    auto attach = db.prepare("INSERT OR IGNORE INTO knowledge_support_evidence(support_id,evidence_id) VALUES(?1,?2)");
+    attach.bind(1, support_id).bind(2, evidence_id);
+    if (auto attached = attach.run(); !attached) return attached.error();
+    return evidence_id;
+}
+
+// A manual decision always wins over an automatic one; an automatic suggestion only replaces another.
+Status write_assignment(Database& db, long long fact, long long category, const std::string& decision, const std::string& reason,
+                        long long evidence_id) {
+    if (decision == "automatic" && !active_exact_evidence(db, fact, evidence_id))
+        return make_error("invalid", "Category evidence does not support this fact.");
+    auto s = db.prepare(R"sql(
+INSERT INTO knowledge_category_assignments(fact_id,category_id,decision,reason,evidence_id) VALUES(?1,?2,?3,?4,?5)
+ ON CONFLICT(fact_id,category_id) DO UPDATE SET decision=excluded.decision,reason=excluded.reason,evidence_id=excluded.evidence_id
+ WHERE excluded.decision<>'automatic' OR knowledge_category_assignments.decision='automatic')sql");
+    s.bind(1, fact).bind(2, category).bind(3, decision).bind(4, reason);
+    if (decision == "automatic") s.bind(5, evidence_id);
+    else s.bind_null(5);
+    return s.run();
+}
+
+Result<long long> write_conflict(Database& db, long long left_fact, long long right_fact, long long left_evidence, long long right_evidence,
+                                 const std::string& explanation) {
+    if (left_fact <= 0 || right_fact <= 0 || left_fact == right_fact || trim(explanation).empty() || explanation.size() > 512)
+        return make_error("invalid", "A possible inconsistency needs two facts and an explanation.");
+    if (left_fact > right_fact) {
+        std::swap(left_fact, right_fact);
+        std::swap(left_evidence, right_evidence);
+    }
+    if (!active_exact_evidence(db, left_fact, left_evidence) || !active_exact_evidence(db, right_fact, right_evidence))
+        return make_error("invalid", "Both facts need current, exact supporting excerpts.");
+    auto upsert = db.prepare(R"sql(
+INSERT INTO knowledge_conflicts(left_fact,right_fact,left_evidence,right_evidence,explanation,state)
+ VALUES(?1,?2,?3,?4,?5,'open')
+ ON CONFLICT(left_fact,right_fact) DO UPDATE SET
+ state=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence OR state='needs_recheck'
+            THEN 'open' ELSE state END,
+ decision=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence OR state='needs_recheck'
+               THEN '' ELSE decision END,
+ decision_reason=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence OR state='needs_recheck'
+                      THEN '' ELSE decision_reason END,
+ explanation=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence
+                        OR state IN ('open','needs_recheck') THEN excluded.explanation ELSE explanation END,
+ left_evidence=excluded.left_evidence,right_evidence=excluded.right_evidence)sql");
+    upsert.bind(1, left_fact).bind(2, right_fact).bind(3, left_evidence).bind(4, right_evidence).bind(5, explanation);
+    if (auto result = upsert.run(); !result) return result.error();
+    auto find = db.prepare("SELECT id FROM knowledge_conflicts WHERE left_fact=?1 AND right_fact=?2");
+    find.bind(1, left_fact).bind(2, right_fact);
+    if (!find.step()) return make_error("storage", "The review item could not be found.");
+    return find.col_int(0);
+}
+
+}  // namespace
+
 Status KgStore::set_category_assignment(long long fact, long long category, const std::string& decision,
                                         const std::string& reason, long long evidence_id,
                                         std::optional<long long> expected_generation) {
@@ -798,28 +911,42 @@ Status KgStore::set_category_assignment(long long fact, long long category, cons
         if (decision == "automatic") {
             if (evidence_id <= 0 || trim(reason).empty() || !expected_generation)
                 return make_error("invalid", "Automatic categories need an explanation, evidence and a knowledge snapshot.");
-            const auto current_generation = knowledge_generation();
+            const auto current_generation = generation_of(*db_);
             if (!current_generation || *current_generation != *expected_generation)
                 return make_error("stale", "Knowledge changed while the category was being analyzed.");
-            auto evidence = db_->prepare("SELECT 1 FROM knowledge_support_sets s "
-                                         "JOIN knowledge_support_evidence se ON se.support_id=s.id "
-                                         "JOIN knowledge_evidence e ON e.id=se.evidence_id "
-                                         "JOIN knowledge_revisions v ON v.id=e.revision_id "
-                                         "JOIN chunks c ON c.id=e.chunk_id AND c.item_id=v.item_id "
-                                         "WHERE s.fact_id=?1 AND s.state IN ('current','unverified') AND v.current=1 "
-                                         "AND e.id=?2 AND e.precision='exact' AND "
-                                         "CAST(e.excerpt AS BLOB)=substr(CAST(c.text AS BLOB),e.byte_start+1,e.byte_end-e.byte_start)");
-            evidence.bind(1, fact).bind(2, evidence_id);
-            if (!evidence.step()) return make_error("invalid", "Category evidence does not support this fact.");
         } else if (evidence_id != 0) return make_error("invalid", "Manual category decisions do not take model evidence.");
-        auto s = db_->prepare(R"sql(
-INSERT INTO knowledge_category_assignments(fact_id,category_id,decision,reason,evidence_id) VALUES(?1,?2,?3,?4,?5)
- ON CONFLICT(fact_id,category_id) DO UPDATE SET decision=excluded.decision,reason=excluded.reason,evidence_id=excluded.evidence_id
- WHERE excluded.decision<>'automatic' OR knowledge_category_assignments.decision='automatic')sql");
-        s.bind(1, fact).bind(2, category).bind(3, decision).bind(4, reason);
-        if (decision == "automatic") s.bind(5, evidence_id);
-        else s.bind_null(5);
-        return s.run();
+        return write_assignment(*db_, fact, category, decision, reason, evidence_id);
+    });
+}
+
+Status KgStore::apply_analysis(const AnalysisProposals& proposals, long long expected_generation,
+                               const std::function<bool()>& still_permitted) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge analysis is not available yet.");
+    for (const auto& c : proposals.categories)
+        if (c.category_id <= 0 || trim(c.reason).empty() || c.reason.size() > 512)
+            return make_error("invalid", "A category suggestion needs a category and an explanation.");
+    return db_->transaction([&]() -> Status {
+        // The graph generation changes with every revision, exclusion, Source setting and fact change, so an equal
+        // generation means the analysis read exactly what is stored now. Policy kept outside the store is asked here,
+        // under the same lock, so nothing can change between this check and the commit.
+        const auto generation = generation_of(*db_);
+        if (!generation || *generation != expected_generation) return make_error("stale", "Knowledge changed during analysis.");
+        if (still_permitted && !still_permitted()) return make_error("stale", "Analysis is no longer permitted for this knowledge.");
+        for (const auto& c : proposals.categories) {
+            const auto evidence = bind_span(*db_, c.fact_id, c.evidence);
+            if (!evidence) return evidence.error();
+            if (Status s = write_assignment(*db_, c.fact_id, c.category_id, "automatic", c.reason, *evidence); !s) return s;
+        }
+        for (const auto& c : proposals.conflicts) {
+            const auto left = bind_span(*db_, c.left_id, c.left);
+            if (!left) return left.error();
+            const auto right = bind_span(*db_, c.right_id, c.right);
+            if (!right) return right.error();
+            if (const auto recorded = write_conflict(*db_, c.left_id, c.right_id, *left, *right, c.reason); !recorded)
+                return recorded.error();
+        }
+        return {};
     });
 }
 
@@ -876,50 +1003,15 @@ Result<BoundAnalysisEvidence> KgStore::bind_analysis_evidence(long long fact, co
                                                                long long expected_generation) {
     const std::lock_guard lock(db_->mutex());
     if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge evidence is not available yet.");
-    if (fact <= 0 || span.chunk_id <= 0 || span.end <= span.begin || span.end - span.begin > 2048 ||
-        span.end > static_cast<size_t>(std::numeric_limits<long long>::max()))
-        return make_error("invalid", "Invalid analysis excerpt.");
     BoundAnalysisEvidence result;
     auto status = db_->transaction([&]() -> Status {
-        const auto generation = knowledge_generation();
+        const auto generation = generation_of(*db_);
         if (!generation || *generation != expected_generation)
             return make_error("stale", "Knowledge changed while the excerpt was being analyzed.");
-        auto source = db_->prepare(R"sql(
-SELECT s.id,e.revision_id,c.text FROM knowledge_support_sets s
-JOIN knowledge_support_evidence se ON se.support_id=s.id
-JOIN knowledge_evidence e ON e.id=se.evidence_id
-JOIN knowledge_revisions v ON v.id=e.revision_id
-JOIN chunks c ON c.id=e.chunk_id AND c.item_id=v.item_id
-WHERE s.fact_id=?1 AND s.state IN ('current','unverified') AND v.current=1 AND c.id=?2
- AND ((e.precision='passage' AND CAST(e.excerpt AS BLOB)=CAST(c.text AS BLOB)) OR
-      (e.precision='exact' AND e.byte_start<=?3 AND e.byte_end>=?4 AND
-       CAST(e.excerpt AS BLOB)=substr(CAST(c.text AS BLOB),e.byte_start+1,e.byte_end-e.byte_start)))
-ORDER BY s.id,e.id LIMIT 1)sql");
-        source.bind(1, fact).bind(2, span.chunk_id).bind(3, static_cast<long long>(span.begin))
-              .bind(4, static_cast<long long>(span.end));
-        if (!source.step()) return make_error("invalid", "The excerpt is not part of a current support for this fact.");
-        const auto support_id = source.col_int(0), revision_id = source.col_int(1);
-        const auto content = source.col_text(2);
-        const auto continuation = [](char c) { return (static_cast<unsigned char>(c) & 0xc0) == 0x80; };
-        if (span.end > content.size() || (span.begin && continuation(content[span.begin])) ||
-            (span.end < content.size() && continuation(content[span.end])))
-            return make_error("invalid", "The excerpt is outside the passage or splits a UTF-8 character.");
-        auto insert = db_->prepare("INSERT OR IGNORE INTO knowledge_evidence"
-                                   "(revision_id,chunk_id,excerpt,precision,byte_start,byte_end) "
-                                   "VALUES(?1,?2,?3,'exact',?4,?5)");
-        insert.bind(1, revision_id).bind(2, span.chunk_id).bind(3, content.substr(span.begin, span.end - span.begin))
-              .bind(4, static_cast<long long>(span.begin)).bind(5, static_cast<long long>(span.end));
-        if (auto inserted = insert.run(); !inserted) return inserted;
-        auto find = db_->prepare("SELECT id FROM knowledge_evidence WHERE revision_id=?1 AND chunk_id=?2 "
-                                 "AND precision='exact' AND byte_start=?3 AND byte_end=?4 AND CAST(excerpt AS BLOB)=CAST(?5 AS BLOB)");
-        find.bind(1, revision_id).bind(2, span.chunk_id).bind(3, static_cast<long long>(span.begin))
-            .bind(4, static_cast<long long>(span.end)).bind(5, content.substr(span.begin, span.end - span.begin));
-        if (!find.step()) return make_error("stale", "The stored excerpt no longer matches the passage.");
-        result.evidence_id = find.col_int(0);
-        auto attach = db_->prepare("INSERT OR IGNORE INTO knowledge_support_evidence(support_id,evidence_id) VALUES(?1,?2)");
-        attach.bind(1, support_id).bind(2, result.evidence_id);
-        if (auto attached = attach.run(); !attached) return attached;
-        const auto current = knowledge_generation();
+        const auto evidence = bind_span(*db_, fact, span);
+        if (!evidence) return evidence.error();
+        result.evidence_id = *evidence;
+        const auto current = generation_of(*db_);
         if (!current) return make_error("sqlite", "Could not read the knowledge snapshot.");
         result.generation = *current;
         return {};
@@ -928,56 +1020,17 @@ ORDER BY s.id,e.id LIMIT 1)sql");
     return result;
 }
 
-namespace {
-bool active_exact_evidence(Database& db, long long fact, long long evidence_id) {
-    auto evidence = db.prepare("SELECT 1 FROM knowledge_support_sets s "
-                               "JOIN knowledge_support_evidence se ON se.support_id=s.id "
-                               "JOIN knowledge_evidence e ON e.id=se.evidence_id "
-                               "JOIN knowledge_revisions v ON v.id=e.revision_id "
-                               "JOIN chunks c ON c.id=e.chunk_id AND c.item_id=v.item_id "
-                               "WHERE s.fact_id=?1 AND s.state IN ('current','unverified') AND v.current=1 "
-                               "AND e.id=?2 AND e.precision='exact' AND "
-                               "CAST(e.excerpt AS BLOB)=substr(CAST(c.text AS BLOB),e.byte_start+1,e.byte_end-e.byte_start)");
-    evidence.bind(1, fact).bind(2, evidence_id);
-    return evidence.step();
-}
-}  // namespace
-
 Result<long long> KgStore::record_conflict(long long left_fact, long long right_fact, long long left_evidence,
                                            long long right_evidence, const std::string& explanation, long long expected_generation) {
     const std::lock_guard lock(db_->mutex());
     if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge review is not available yet.");
-    if (left_fact <= 0 || right_fact <= 0 || left_fact == right_fact || trim(explanation).empty() || explanation.size() > 512)
-        return make_error("invalid", "A possible inconsistency needs two facts and an explanation.");
-    if (left_fact > right_fact) {
-        std::swap(left_fact, right_fact);
-        std::swap(left_evidence, right_evidence);
-    }
     long long id = 0;
     auto status = db_->transaction([&]() -> Status {
-        const auto generation = knowledge_generation();
+        const auto generation = generation_of(*db_);
         if (!generation || *generation != expected_generation) return make_error("stale", "Knowledge changed during consistency analysis.");
-        if (!active_exact_evidence(*db_, left_fact, left_evidence) || !active_exact_evidence(*db_, right_fact, right_evidence))
-            return make_error("invalid", "Both facts need current, exact supporting excerpts.");
-        auto upsert = db_->prepare(R"sql(
-INSERT INTO knowledge_conflicts(left_fact,right_fact,left_evidence,right_evidence,explanation,state)
- VALUES(?1,?2,?3,?4,?5,'open')
- ON CONFLICT(left_fact,right_fact) DO UPDATE SET
- state=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence OR state='needs_recheck'
-            THEN 'open' ELSE state END,
- decision=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence OR state='needs_recheck'
-               THEN '' ELSE decision END,
- decision_reason=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence OR state='needs_recheck'
-                      THEN '' ELSE decision_reason END,
- explanation=CASE WHEN left_evidence<>excluded.left_evidence OR right_evidence<>excluded.right_evidence
-                        OR state IN ('open','needs_recheck') THEN excluded.explanation ELSE explanation END,
- left_evidence=excluded.left_evidence,right_evidence=excluded.right_evidence)sql");
-        upsert.bind(1, left_fact).bind(2, right_fact).bind(3, left_evidence).bind(4, right_evidence).bind(5, explanation);
-        if (auto result = upsert.run(); !result) return result;
-        auto find = db_->prepare("SELECT id FROM knowledge_conflicts WHERE left_fact=?1 AND right_fact=?2");
-        find.bind(1, left_fact).bind(2, right_fact);
-        if (!find.step()) return make_error("storage", "The review item could not be found.");
-        id = find.col_int(0);
+        const auto recorded = write_conflict(*db_, left_fact, right_fact, left_evidence, right_evidence, explanation);
+        if (!recorded) return recorded.error();
+        id = *recorded;
         return {};
     });
     if (!status) return status.error();

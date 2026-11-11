@@ -433,3 +433,7 @@ Categorization and consistency checking SHALL share policy.knowledge.extraction_
 #### Scenario: Analysis budget exhausted
 - **WHEN** the extraction budget is exhausted during consistency checking
 - **THEN** unfinished checks remain visibly queued, manual review and full-text search work, and progress resumes without duplicating completed work
+
+#### Scenario: Knowledge changes before analysis results are saved
+- **WHEN** a policy change, an exclusion or a new revision of an analyzed Source happens between a category or consistency analysis and the saving of its proposals
+- **THEN** the client saves none of that analysis's category assignments, excerpts or possible inconsistencies, and the affected facts are left as they were until analysis runs again on the changed knowledge

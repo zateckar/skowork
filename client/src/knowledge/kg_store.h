@@ -12,6 +12,7 @@
 #include "knowledge/reconcile.h"
 #include "storage/database.h"
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -199,6 +200,12 @@ public:
                                                          long long expected_generation);
     Result<long long> record_conflict(long long left_fact, long long right_fact, long long left_evidence,
                                       long long right_evidence, const std::string& explanation, long long expected_generation);
+    // Saves one analysis's validated proposals in a single transaction, or none of them: the graph generation must
+    // still be the one the analysis read, `still_permitted` (the caller's current policy for the analyzed Sources and
+    // the analysis kind) is asked under the store lock, and every excerpt is bound to a current support in the current
+    // revision. Automatic categories never replace manual or rejected decisions.
+    Status apply_analysis(const AnalysisProposals& proposals, long long expected_generation,
+                          const std::function<bool()>& still_permitted = {});
     Status decide_conflict(long long conflict_id, const std::string& decision, const std::string& reason,
                            long long now, long long expected_generation);
     Status reopen_conflict(long long conflict_id, long long expected_generation);
