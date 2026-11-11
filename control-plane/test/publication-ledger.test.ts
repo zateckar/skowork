@@ -5,13 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, type Db } from '../src/db.ts';
 import { ApiError } from '../src/http.ts';
-import { commitPublicationRevision, publicationLedgerSql, type PublicationLedgerRequest } from '../src/knowledge/publication-ledger.ts';
+import { commitPublicationRevision, type PublicationLedgerRequest } from '../src/knowledge/publication-ledger.ts';
 
 describe('publication revision ledger', () => {
   let db: Db;
   beforeEach(() => {
     db = openDb(':memory:');
-    db.exec(publicationLedgerSql);
     db.exec('CREATE TABLE test_public_content (issuer TEXT, subject TEXT, publication_id TEXT, entry_id TEXT, text TEXT)');
   });
   afterEach(() => db.close());
@@ -97,7 +96,6 @@ describe('publication revision ledger', () => {
     let second: Db | undefined;
     try {
       first = openDb(path);
-      first.exec(publicationLedgerSql);
       const original = request();
       commitPublicationRevision(first, original, () => {}, () => {});
       second = openDb(path);

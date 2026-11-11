@@ -1,22 +1,10 @@
-// Revision and removal fencing primitive. Not installed or exposed until the publication
-// service also supplies current authorization, quotas and transactional content cleanup.
+// Revision and removal fencing for publications (design D9). The publication service supplies current authorization,
+// quotas and transactional content cleanup through the callbacks of commitPublicationRevision.
 import { createHash } from 'node:crypto';
 import { type Db, tx } from '../db.ts';
 import { ApiError } from '../http.ts';
 
-export const publicationLedgerSql = `
-  CREATE TABLE knowledge_publication_ledger (
-    issuer TEXT NOT NULL, subject TEXT NOT NULL, publication_id TEXT NOT NULL,
-    revision INTEGER NOT NULL CHECK (revision >= 1), admin_blocked INTEGER NOT NULL CHECK (admin_blocked IN (0, 1)),
-    PRIMARY KEY (issuer, subject, publication_id)
-  );
-  CREATE TABLE knowledge_publication_operations (
-    issuer TEXT NOT NULL, subject TEXT NOT NULL, publication_id TEXT NOT NULL, operation_id TEXT NOT NULL,
-    request_hash TEXT NOT NULL, revision INTEGER NOT NULL,
-    PRIMARY KEY (issuer, subject, publication_id, operation_id),
-    FOREIGN KEY (issuer, subject, publication_id) REFERENCES knowledge_publication_ledger (issuer, subject, publication_id)
-  );
-`;
+export { publicationLedgerSql } from './publication-schema.ts';
 
 export type PublicationAction = 'publish' | 'withdraw' | 'admin-remove' | 'admin-resolve';
 export interface PublicationLedgerRequest {
@@ -39,6 +27,11 @@ export interface PublicationLedgerResult {
 const invalidId = /[^A-Za-z0-9._:-]/;
 const validId = (value: string) => value.length > 0 && value.length <= 200 && !invalidId.test(value);
 function conflict(message: string): never { throw new ApiError(409, 'CONFLICT', message); }
+
+/** The opaque, stable key readers and administrators use for a publication; it does not reveal the owner's identity. */
+export function publicationKey(issuer: string, subject: string, publicationId: string): string {
+  return createHash('sha256').update(JSON.stringify([issuer, subject, publicationId]), 'utf8').digest('base64url').slice(0, 32);
+}
 
 /**
  * Both callbacks run synchronously inside the same write transaction. authorize must recheck
@@ -72,9 +65,9 @@ export function commitPublicationRevision(
     if (current >= Number.MAX_SAFE_INTEGER) return conflict('The publication revision limit was reached.');
     const next = current + 1;
     const nextBlocked = req.action === 'admin-remove' || (blocked && req.action !== 'admin-resolve');
-    db.prepare(`INSERT INTO knowledge_publication_ledger (issuer, subject, publication_id, revision, admin_blocked)
-      VALUES (?, ?, ?, ?, ?) ON CONFLICT (issuer, subject, publication_id)
-      DO UPDATE SET revision = excluded.revision, admin_blocked = excluded.admin_blocked`).run(...key, next, nextBlocked ? 1 : 0);
+    db.prepare(`INSERT INTO knowledge_publication_ledger (issuer, subject, publication_id, revision, admin_blocked, public_key)
+      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (issuer, subject, publication_id)
+      DO UPDATE SET revision = excluded.revision, admin_blocked = excluded.admin_blocked`).run(...key, next, nextBlocked ? 1 : 0, publicationKey(...key));
     apply(next);
     db.prepare(`INSERT INTO knowledge_publication_operations (issuer, subject, publication_id, operation_id, request_hash, revision)
       VALUES (?, ?, ?, ?, ?, ?)`).run(...key, req.operationId, digest, next);

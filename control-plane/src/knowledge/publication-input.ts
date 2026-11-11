@@ -30,6 +30,11 @@ function record(value: unknown, keys: readonly string[]): Record<string, unknown
   return obj;
 }
 
+/** A real list: no holes, which map and every would silently skip. */
+function dense(value: unknown): value is unknown[] {
+  return Array.isArray(value) && Object.keys(value).length === value.length;
+}
+
 function wellFormed(value: string): boolean {
   for (let i = 0; i < value.length; ++i) {
     const c = value.charCodeAt(i);
@@ -64,8 +69,8 @@ export function parsePublicationInput(value: unknown, maxBytes: number): Publica
   if (!Number.isSafeInteger(obj.expected_revision) || (obj.expected_revision as number) < 0) return invalid();
   const groups = obj.groups;
   const entries = obj.entries;
-  if (!Array.isArray(groups) || groups.length < 1 || groups.length > 100 ||
-      !Array.isArray(entries) || entries.length < 1 || entries.length > 500) return invalid();
+  if (!dense(groups) || groups.length < 1 || groups.length > 100 ||
+      !dense(entries) || entries.length < 1 || entries.length > 500) return invalid();
   const parsedGroups = groups.map(label);
   if (new Set(parsedGroups).size !== parsedGroups.length) return invalid();
   const usedIds = new Set<string>();
@@ -82,9 +87,9 @@ export function parsePublicationInput(value: unknown, maxBytes: number): Publica
     const entryId = id(entry.id);
     if (usedIds.has(entryId)) return invalid();
     usedIds.add(entryId);
-    if (!Array.isArray(entry.source_kinds) || entry.source_kinds.length < 1 || entry.source_kinds.length > KINDS.size ||
+    if (!dense(entry.source_kinds) || entry.source_kinds.length < 1 || entry.source_kinds.length > KINDS.size ||
         !entry.source_kinds.every((kind: unknown) => typeof kind === 'string' && KINDS.has(kind)) ||
-        new Set(entry.source_kinds).size !== entry.source_kinds.length || !Array.isArray(entry.evidence)) return invalid();
+        new Set(entry.source_kinds).size !== entry.source_kinds.length || !dense(entry.evidence)) return invalid();
     evidenceCount += entry.evidence.length;
     if (evidenceCount > 2000) return invalid();
     const evidence = entry.evidence.map((value: unknown) => {

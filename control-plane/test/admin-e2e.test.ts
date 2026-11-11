@@ -414,6 +414,53 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     assert.deepEqual(b.errors, []);
   });
 
+  test('improve-skowork-and-knowledge-control 10.4 publications: inspect the exact revision, remove with a reason, resolve', async () => {
+    h.cfg.teamKnowledge.publications = true;
+    try {
+      const kim = await h.token('kim');
+      const published = await h.call('PUT', '/api/v1/knowledge/publications/palette', kim, {
+        expected_revision: 0, operation_id: 'e2e-1', title: 'Palette decisions', groups: ['design'],
+        entries: [{ id: 'colours', text: 'The 2027 palette is moss green and lunar grey.', source_kinds: ['notes'], evidence: [{ id: 'ev-1', title: 'Design review notes', text: 'Agreed: moss green, lunar grey.' }] }],
+      }, { 'skowork-publication-version': '1' });
+      assert.equal(published.status, 200, JSON.stringify(published.body));
+      const key = published.body.publication as string;
+      // Only platform-admins reach the publication administration, through the console or its API.
+      assert.equal((await h.call('GET', '/api/v1/admin/knowledge/publications', await h.token('auditor1'))).status, 403);
+
+      await signInAs('admin1');
+      await open('knowledge');
+      assert.match(await b.text(`publication-${key}`), /Palette decisions[\s\S]*kim · revision 1 · 1 entries[\s\S]*design[\s\S]*published/);
+      await b.click(`publication-inspect-${key}`);
+      assert.match(await b.text('publication-entry-colours'), /moss green and lunar grey[\s\S]*From notes[\s\S]*Design review notes[\s\S]*Agreed: moss green/);
+      // The dialog takes the keyboard focus, and Escape closes it.
+      assert.equal(await b.eval<boolean>(`!!document.activeElement?.closest('[data-testid="publication-dialog"]')`), true);
+      for (const type of ['keyDown', 'keyUp']) await b.send('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+      await b.waitFor(`!document.querySelector('[data-testid="publication-dialog"]')`);
+
+      await b.click(`publication-remove-open-${key}`);
+      assert.match(await b.text('confirm-text'), /Published by kim to design/);
+      await b.fill('confirm-reason', 'names an unreleased product');
+      await b.click('confirm-submit');
+      await b.waitFor(`document.querySelector('[data-testid="publication-${key}"]')?.innerText.includes('removed')`);
+      const own = (await h.call('GET', '/api/v1/knowledge/publications', kim)).body.publications.find((p: any) => p.publication === key);
+      assert.equal(own.state, 'removed');
+      assert.equal(own.removal.reason, 'names an unreleased product');
+      await b.click(`publication-inspect-${key}`);
+      assert.match(await b.text('publication-removal'), /Removed by admin1 .*: names an unreleased product/);
+      await b.click('publication-cancel');
+      await b.click(`publication-resolve-${key}`);
+      await b.click('confirm-submit');
+      await b.waitFor(`document.querySelector('[data-testid="publication-${key}"]')?.innerText.includes('withdrawn')`);
+      assert.equal((await h.call('GET', '/api/v1/knowledge/publications', kim)).body.publications.find((p: any) => p.publication === key).state, 'withdrawn');
+      const rec = (h.cp.audit.query({ action: 'knowledge.publication.admin-remove' }) as any[])[0];
+      assert.equal(rec.reason, 'names an unreleased product');
+      assert.doesNotMatch(JSON.stringify(rec.details), /moss green/);
+      assert.deepEqual(b.errors, []);
+    } finally {
+      h.cfg.teamKnowledge.publications = false;
+    }
+  });
+
   test('add-skills 5.3 skill review queue: scan results, diff, approve and sign, reject with a comment, import, revoke', async () => {
     // alice may publish to org through the policy of her Group.
     await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'alice', workbench_group: 'authors' });

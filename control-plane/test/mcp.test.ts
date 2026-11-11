@@ -327,7 +327,12 @@ test('migration: stored audience-token entries become user-token without an audi
     db.exec('ALTER TABLE llm_usage DROP COLUMN fallback');
     // add-api-connectors: the tables of its migration run again too (they are created by it).
     db.exec('DROP TABLE api_connector_tokens; DROP TABLE api_connector_secrets; DROP TABLE api_documents; DROP TABLE api_operations;');
-    db.prepare('UPDATE schema_version SET version = version - 6').run();
+    // Team knowledge publications: its tables are created by its migration as well.
+    db.exec(`DROP TABLE knowledge_publication_removals; DROP TABLE knowledge_publication_owners; DROP TABLE knowledge_publication_chunks_fts;
+      DROP TABLE knowledge_publication_chunks; DROP TABLE knowledge_publication_evidence; DROP TABLE knowledge_publication_entries;
+      DROP TABLE knowledge_publication_groups; DROP TABLE knowledge_publication_content; DROP TABLE knowledge_publication_operations;
+      DROP TABLE knowledge_publication_ledger;`);
+    db.prepare('UPDATE schema_version SET version = version - 7').run();
     db.close();
     db = openDb(path);
     const migrated = JSON.parse((db.prepare("SELECT entry FROM mcp_servers WHERE id = 'jira-corp'").get() as { entry: string }).entry);

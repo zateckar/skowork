@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb, type Db } from '../src/db.ts';
 import { parsePublicationInput } from '../src/knowledge/publication-input.ts';
-import { commitPublicationRevision, publicationLedgerSql, type PublicationLedgerRequest } from '../src/knowledge/publication-ledger.ts';
-import { publicationChunks, publicationContentSql, removePublicationContent, removePublicationEntry, replacePublicationContent } from '../src/knowledge/publication-content.ts';
+import { commitPublicationRevision, type PublicationLedgerRequest } from '../src/knowledge/publication-ledger.ts';
+import { publicationChunks, removePublicationContent, removePublicationEntry, replacePublicationContent } from '../src/knowledge/publication-content.ts';
 
 describe('publication content transaction', () => {
   let db: Db;
@@ -18,7 +18,7 @@ describe('publication content transaction', () => {
       { id: 'entry2', text: 'Second fact', source_kinds: ['notes'], evidence: [{ id: 'evidence2', title: 'Note', text: 'Second excerpt' }] },
     ],
   }, 20_000);
-  beforeEach(() => { db = openDb(':memory:'); db.exec(publicationLedgerSql); db.exec(publicationContentSql); });
+  beforeEach(() => { db = openDb(':memory:'); });
   afterEach(() => db.close());
   const run = (req: PublicationLedgerRequest, apply: () => void) => commitPublicationRevision(db, req, () => {}, apply);
   const count = (table: string) => Number((db.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n);

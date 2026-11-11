@@ -15,6 +15,7 @@ import { Gateway, gatewayRoutes } from './gateway/gateway.ts';
 import { llmAdminRoutes } from './gateway/admin.ts';
 import { Messaging, messagingRoutes } from './messaging/messaging.ts';
 import { TeamKnowledge, teamKnowledgeAdminRoutes, teamKnowledgeRoutes } from './knowledge/team.ts';
+import { TeamPublications, publicationAdminRoutes, publicationRoutes } from './knowledge/publications.ts';
 import { PolicyService } from './policy/service.ts';
 import { policyAdminRoutes, policyRoutes } from './policy/routes.ts';
 import { McpCatalog } from './mcp/catalog.ts';
@@ -44,6 +45,7 @@ export interface ControlPlane {
   tasks: TaskDispatch;
   audit: Audit;
   team: TeamKnowledge;
+  publications: TeamPublications;
   messaging: Messaging;
   /** Whether the admin console build was found and is served at /admin/. */
   consoleBuilt: boolean;
@@ -68,6 +70,12 @@ export function createControlPlane(
     const v = policy.compileFor(u.groups, u.userName).flat.get('knowledge.sharing.groups');
     return Array.isArray(v) ? v.map(String) : [];
   }, (u) => identity.groupsFor(u.userName, u.idpRoles));
+  const publications = new TeamPublications(cfg, db, audit, {
+    embed: (u, input) => gateway.embedFor(u, input),
+    groupsFor: (userName, idpRoles) => identity.groupsFor(userName, idpRoles),
+    policyFor: (groups, userName) => policy.compileFor(groups, userName).flat,
+  });
+  team.setPublicationPassages(async (u, q, limit) => (publications.enabled ? publications.passages(u, q, limit) : []));
   const messaging = new Messaging(cfg, db, audit, push, (u) => (policy.compileFor(u.groups, u.userName).flat.get('messaging.mode') === 'off' ? 'off' : 'on'));
   gateway.connections.setUseSource(() => [
     ...policy.modelUses(),
@@ -136,7 +144,7 @@ export function createControlPlane(
   app.use('/api/v1/connectors', user);
   app.use('/api/v1/telemetry', user);
   app.use('/api/v1/skills', user);
-  app.use('/api/v1/knowledge', user, teamKnowledgeRoutes(team));
+  app.use('/api/v1/knowledge', user, publicationRoutes(publications), teamKnowledgeRoutes(team));
   app.use('/api/v1/messaging', user, messagingRoutes(messaging));
   app.use('/llm/v1', user);
 
@@ -170,7 +178,7 @@ export function createControlPlane(
   app.use('/api/v1/admin/policy', requireView('policy'), policyAdminRoutes(policy, identity, audit, catalog));
   app.use('/api/v1/admin/telemetry', telemetryAdminRoutes(telemetry));
   app.use('/api/v1/admin/llm', requireRole('platform-admin'), llmAdminRoutes(gateway.connections));
-  app.use('/api/v1/admin/knowledge', requireRole('platform-admin'), teamKnowledgeAdminRoutes(team));
+  app.use('/api/v1/admin/knowledge', requireRole('platform-admin'), publicationAdminRoutes(publications), teamKnowledgeAdminRoutes(team));
   app.get('/api/v1/admin/messaging/counts', requireView('dashboards'), (_req, res) => void res.json(messaging.counts()));
   app.use('/api/v1/admin/mcp', requireRole('platform-admin'), mcpAdminRoutes(catalog, cfg.mcpCatalog.maxPackageBytes));
   app.use('/api/v1/admin/connectors', requireRole('platform-admin'), connectorAdminRoutes(apiConnectors, cfg.apiConnectors.maxDocumentBytes));
@@ -220,7 +228,7 @@ export function createControlPlane(
   void identity.warmUp(log);
 
   return {
-    server, db, identity, push, fleet, gateway, policy, catalog, telemetry, skills, tasks, audit, team, messaging, consoleBuilt,
+    server, db, identity, push, fleet, gateway, policy, catalog, telemetry, skills, tasks, audit, team, publications, messaging, consoleBuilt,
     async listen(port = cfg.port, host = cfg.host) {
       const hosts = host.split(',').map((h) => h.trim()).filter(Boolean);
       let bound = port;

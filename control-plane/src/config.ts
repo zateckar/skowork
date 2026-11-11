@@ -53,7 +53,14 @@ export interface Config {
   /** control-plane/user-messaging (add-user-messaging): retention in days and the largest message. */
   messaging: { retentionDays: number; maxMessageBytes: number };
   /** control-plane/team-knowledge (add-knowledge-sharing D2). */
-  teamKnowledge: { maxItemBytes: number; quotaBytes: number };
+  teamKnowledge: {
+    maxItemBytes: number;
+    quotaBytes: number;
+    /** Versioned publications (design D9): off until an operator enables them; capabilities advertise nothing while off. */
+    publications: boolean;
+    /** The Group that stands for the whole company in the publication audience choice, when one is configured. */
+    companyGroup: string | null;
+  };
   /** control-plane/skill-registry (add-skills design D6). */
   skills: {
     maxPackageBytes: number;
@@ -206,7 +213,10 @@ export function loadConfig(e: NodeJS.ProcessEnv = process.env): Config {
       allowLoopbackHttp: env !== 'production' && (e.WORKBENCH_API_ALLOW_LOOPBACK_HTTP === '1' || e.WORKBENCH_API_ALLOW_LOOPBACK_HTTP === 'true'),
     },
     messaging: { retentionDays: num(e.WORKBENCH_MESSAGE_RETENTION_DAYS, 90), maxMessageBytes: 8192 },
-    teamKnowledge: { maxItemBytes: num(e.WORKBENCH_TEAM_ITEM_MAX_BYTES, 2 * 1024 * 1024), quotaBytes: num(e.WORKBENCH_TEAM_QUOTA_BYTES, 200 * 1024 * 1024) },
+    teamKnowledge: { maxItemBytes: num(e.WORKBENCH_TEAM_ITEM_MAX_BYTES, 2 * 1024 * 1024), quotaBytes: num(e.WORKBENCH_TEAM_QUOTA_BYTES, 200 * 1024 * 1024),
+      publications: e.WORKBENCH_KNOWLEDGE_PUBLICATIONS === '1' || e.WORKBENCH_KNOWLEDGE_PUBLICATIONS === 'true',
+      companyGroup: e.WORKBENCH_KNOWLEDGE_COMPANY_GROUP?.trim() || null,
+    },
     skills: {
       maxPackageBytes: num(e.WORKBENCH_SKILLS_MAX_PACKAGE_BYTES, 5 * 1024 * 1024),
       maxEntries: 200,

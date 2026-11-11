@@ -2,6 +2,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { publicationSchemaSql } from './knowledge/publication-schema.ts';
 
 export type Db = DatabaseSync;
 
@@ -526,6 +527,8 @@ const migrations: string[] = [
     PRIMARY KEY (connector_id, user_name)
   );
   `,
+  // Team knowledge publications (improve-skowork-and-knowledge-control design D9).
+  publicationSchemaSql,
 ];
 
 export function openDb(path: string): Db {

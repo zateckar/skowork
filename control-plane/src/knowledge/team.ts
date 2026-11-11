@@ -21,6 +21,10 @@ const ITEM_ID = /^[A-Za-z0-9._:-]{1,200}$/;
 export type Embedder = (user: User, input: string[]) => Promise<{ model: string; vectors: number[][] } | null>;
 export type SharingPolicy = (user: User) => string[];
 export type CurrentGroups = (user: User) => string[];
+export type PublicationPassages = (user: User, q: string, limit: number) => Promise<{
+  publication: string; owner: string; groups: string[]; revision: number; title: string; updated_at: string;
+  entry_id: string; chunk: number; text: string; score: number; evidence: { id: string; title: string; text: string }[];
+}[]>;
 
 interface ItemRow {
   id: number;
@@ -86,6 +90,7 @@ export class TeamKnowledge {
   readonly #embed: Embedder;
   readonly #sharing: SharingPolicy;
   readonly #currentGroups: CurrentGroups;
+  #publicationPassages: PublicationPassages | null = null;
 
   constructor(cfg: Config, db: Db, audit: Audit, embed: Embedder, sharing: SharingPolicy, currentGroups: CurrentGroups) {
     this.#cfg = cfg;
@@ -282,14 +287,33 @@ export class TeamKnowledge {
     return out;
   }
 
-  /** Team Knowledge Search: passages of items shared with the caller's Groups, full text and vectors fused. */
+  /** Publication passages for the same caller and query, merged into item search for clients without publication support. */
+  setPublicationPassages(fn: PublicationPassages) {
+    this.#publicationPassages = fn;
+  }
+
+  /**
+   * Team Knowledge Search: passages of items shared with the caller's Groups, full text and vectors fused, together
+   * with authorized publication passages in the item passage shape, each naming its publication and revision.
+   */
   async search(user: User, body: Record<string, unknown>) {
     const q = typeof body.query === 'string' ? body.query.trim().slice(0, 2000) : '';
     if (!q) throw new ApiError(400, 'INVALID_REQUEST', 'query is required.');
     const limit = Math.min(50, Math.max(1, Number.isInteger(body.limit) ? (body.limit as number) : 10));
+    const items = await this.#itemPassages(user, q, limit);
+    if (!this.#publicationPassages) return { passages: items };
+    const published = (await this.#publicationPassages(user, q, limit)).map((p) => ({
+      item_id: `publication:${p.publication}:${p.entry_id}`, title: p.title, owner: p.owner, groups: p.groups, kind: 'notes' as const,
+      updated_at: p.updated_at, chunk: p.chunk, text: p.text, score: p.score,
+      publication: { key: p.publication, revision: p.revision, entry_id: p.entry_id, evidence: p.evidence },
+    }));
+    return { passages: [...items, ...published].sort((a, b) => b.score - a.score).slice(0, limit) };
+  }
+
+  async #itemPassages(user: User, q: string, limit: number) {
     this.permitted(user); // refresh the caller's own snapshot
     const visible = this.#visible(user);
-    if (!visible.size) return { passages: [] };
+    if (!visible.size) return [];
     const ids = [...visible.keys()];
     const inList = ids.join(',');
     const ranks: Map<number, number>[] = [];
@@ -335,7 +359,7 @@ export class TeamKnowledge {
       });
       if (passages.length >= limit) break;
     }
-    return { passages };
+    return passages;
   }
 
   // ---- administration ------------------------------------------------------------------------------------------
@@ -375,8 +399,6 @@ const body = (req: Request) => (req.body && typeof req.body === 'object' ? (req.
 /** Client side, for signed-in users: /api/v1/knowledge. */
 export function teamKnowledgeRoutes(t: TeamKnowledge): Router {
   const r = Router();
-  // Internal publication prototypes are not yet safe to expose as a supported API.
-  r.get('/capabilities', wrap(() => ({ publication_read_versions: [], publication_mutation_versions: [] })));
   r.get('/items', wrap((req) => t.mine(req.user!)));
   r.put('/items/:id', wrap((req) => t.publish(req.user!, String(req.params.id), body(req))));
   r.delete('/items/:id', wrap((req) => t.unshare(req.user!, String(req.params.id))));

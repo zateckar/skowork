@@ -94,6 +94,30 @@
       "default": "on"
     },
     {
+      "path": "knowledge.categorization",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "knowledge.consistency",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
       "path": "knowledge.directory_enrichment",
       "owner": "client/knowledge-graph",
       "type": {
@@ -175,6 +199,28 @@
         ]
       },
       "default": "on"
+    },
+    {
+      "path": "knowledge.sharing.derived_sources",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "enum",
+          "values": [
+            "threads",
+            "files",
+            "mail",
+            "calendar",
+            "meetings",
+            "notes"
+          ]
+        }
+      },
+      "default": [
+        "files",
+        "notes"
+      ]
     },
     {
       "path": "knowledge.sharing.groups",
@@ -1346,6 +1392,28 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "categorization": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "x-owner": "client/knowledge-graph",
+            "x-merge": "scalar",
+            "default": "on",
+            "x-guardrail": "max-level"
+          },
+          "consistency": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "x-owner": "client/knowledge-graph",
+            "x-merge": "scalar",
+            "default": "on",
+            "x-guardrail": "max-level"
+          },
           "directory_enrichment": {
             "type": "string",
             "enum": [
@@ -1425,6 +1493,27 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
+              "derived_sources": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "threads",
+                    "files",
+                    "mail",
+                    "calendar",
+                    "meetings",
+                    "notes"
+                  ]
+                },
+                "x-owner": "client/knowledge-graph",
+                "x-merge": "union",
+                "default": [
+                  "files",
+                  "notes"
+                ],
+                "x-guardrail": "restrict"
+              },
               "groups": {
                 "type": "array",
                 "items": {

@@ -1,53 +1,9 @@
 // Current public content only. These operations must be called from the ledger's
-// transaction, after current authorization and quota have been checked. This schema
-// is not installed or served until search, withdrawal and compatibility are wired.
+// transaction, after current authorization and quota have been checked (design D9).
 import type { Db } from '../db.ts';
 import type { PublicationInput } from './publication-input.ts';
 
-export const publicationContentSql = `
-  CREATE TABLE knowledge_publication_content (
-    issuer TEXT NOT NULL, subject TEXT NOT NULL, publication_id TEXT NOT NULL, title TEXT NOT NULL,
-    PRIMARY KEY (issuer, subject, publication_id),
-    FOREIGN KEY (issuer, subject, publication_id) REFERENCES knowledge_publication_ledger (issuer, subject, publication_id) ON DELETE CASCADE
-  );
-  CREATE TABLE knowledge_publication_groups (
-    issuer TEXT NOT NULL, subject TEXT NOT NULL, publication_id TEXT NOT NULL,
-    position INTEGER NOT NULL, group_name TEXT NOT NULL,
-    PRIMARY KEY (issuer, subject, publication_id, group_name),
-    UNIQUE (issuer, subject, publication_id, position),
-    FOREIGN KEY (issuer, subject, publication_id) REFERENCES knowledge_publication_content (issuer, subject, publication_id) ON DELETE CASCADE
-  );
-  CREATE TABLE knowledge_publication_entries (
-    issuer TEXT NOT NULL, subject TEXT NOT NULL, publication_id TEXT NOT NULL,
-    entry_id TEXT NOT NULL, position INTEGER NOT NULL, text TEXT NOT NULL, source_kinds TEXT NOT NULL,
-    PRIMARY KEY (issuer, subject, publication_id, entry_id),
-    UNIQUE (issuer, subject, publication_id, position),
-    FOREIGN KEY (issuer, subject, publication_id) REFERENCES knowledge_publication_content (issuer, subject, publication_id) ON DELETE CASCADE
-  );
-  CREATE TABLE knowledge_publication_evidence (
-    issuer TEXT NOT NULL, subject TEXT NOT NULL, publication_id TEXT NOT NULL,
-    entry_id TEXT NOT NULL, evidence_id TEXT NOT NULL, position INTEGER NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL,
-    PRIMARY KEY (issuer, subject, publication_id, evidence_id),
-    UNIQUE (issuer, subject, publication_id, entry_id, position),
-    FOREIGN KEY (issuer, subject, publication_id, entry_id)
-      REFERENCES knowledge_publication_entries (issuer, subject, publication_id, entry_id) ON DELETE CASCADE
-  );
-  CREATE TABLE knowledge_publication_chunks (
-    id INTEGER PRIMARY KEY,
-    issuer TEXT NOT NULL, subject TEXT NOT NULL, publication_id TEXT NOT NULL, entry_id TEXT NOT NULL,
-    position INTEGER NOT NULL, text TEXT NOT NULL, vector BLOB,
-    UNIQUE (issuer, subject, publication_id, entry_id, position),
-    FOREIGN KEY (issuer, subject, publication_id, entry_id)
-      REFERENCES knowledge_publication_entries (issuer, subject, publication_id, entry_id) ON DELETE CASCADE
-  );
-  CREATE VIRTUAL TABLE knowledge_publication_chunks_fts USING fts5(text, content='knowledge_publication_chunks', content_rowid='id');
-  CREATE TRIGGER knowledge_publication_chunks_ai AFTER INSERT ON knowledge_publication_chunks BEGIN
-    INSERT INTO knowledge_publication_chunks_fts (rowid, text) VALUES (new.id, new.text);
-  END;
-  CREATE TRIGGER knowledge_publication_chunks_ad AFTER DELETE ON knowledge_publication_chunks BEGIN
-    INSERT INTO knowledge_publication_chunks_fts (knowledge_publication_chunks_fts, rowid, text) VALUES ('delete', old.id, old.text);
-  END;
-`;
+export { publicationContentSql } from './publication-schema.ts';
 
 export interface PublicationOwnerKey { issuer: string; subject: string; publicationId: string }
 const keyOf = (key: PublicationOwnerKey) => [key.issuer, key.subject, key.publicationId] as const;

@@ -107,4 +107,69 @@ describe('publication input', () => {
       rejects(value);
     }
   });
+
+  it('holds its invariants for generated envelopes and random mutations', () => {
+    // Seeded, so a failure is reproducible; the seed and case number are in the assertion message.
+    let seed = 0x5eed1234;
+    const rnd = () => ((seed = (Math.imul(seed ^ (seed >>> 15), 0x2c1b3c6d) + 0x6d2b79f5) >>> 0) / 2 ** 32);
+    const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)]!;
+    const KINDS = ['threads', 'files', 'mail', 'calendar', 'meetings', 'notes'];
+    const ID_CHARS = 'abcXYZ019._:-';
+    const TEXT = ['a', 'Ž', ' ', '😀', '\n', '"', '/', 'C:\\'];
+    // Mostly unique ids; an occasional short random one may collide, which the parser must refuse.
+    let serial = 0;
+    const id = () => Array.from({ length: 1 + Math.floor(rnd() * 6) }, () => pick([...ID_CHARS])).join('') + (rnd() < 0.95 ? `-${++serial}` : '');
+    const text = (n = 12) => Array.from({ length: Math.floor(rnd() * n) }, () => pick(TEXT)).join('');
+    const scalars: unknown[] = [null, true, 0, -1, 1.5, 2 ** 53, '', 'x', [], {}, '\ud800', ' ', 'a'.repeat(301)];
+    const envelope = () => ({
+      expected_revision: Math.floor(rnd() * 5), operation_id: id(), title: `T${text()}`,
+      groups: Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => `g${id()}`),
+      entries: Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => ({
+        id: id(), text: `e${text(40)}`, source_kinds: [...new Set(Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => pick(KINDS)))],
+        evidence: Array.from({ length: Math.floor(rnd() * 3) }, () => ({ id: id(), title: `s${text()}`, text: `x${text()}` })),
+      })),
+    });
+    // Every container in the envelope, so a mutation can land at any depth.
+    const containers = (v: any): any[] => (v && typeof v === 'object' ? [v, ...Object.values(v).flatMap(containers)] : []);
+    const wellFormed = (s: string) => !/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(s);
+    let accepted = 0;
+    for (let i = 0; i < 3000; i++) {
+      const value: any = envelope();
+      const mutations = Math.floor(rnd() * 3);
+      for (let m = 0; m < mutations; m++) {
+        const target = pick(containers(value));
+        const keys = Object.keys(target);
+        const choice = rnd();
+        if (choice < 0.3 && keys.length) delete target[pick(keys)];
+        else if (choice < 0.5 && !Array.isArray(target)) target[`private_${id()}`] = structuredClone(pick(scalars));
+        else if (keys.length) target[pick(keys)] = structuredClone(pick(scalars));
+      }
+      let parsed: ReturnType<typeof parsePublicationInput>;
+      try {
+        parsed = parsePublicationInput(value, 4_000);
+      } catch (err) {
+        assert.ok(err instanceof ApiError && (err.status === 400 || err.status === 413), `case ${i}: ${String(err)}`);
+        continue;
+      }
+      accepted++;
+      // An accepted envelope is canonical: re-parsing it is the identity, and nothing outside the schema survives.
+      assert.deepEqual(parsePublicationInput(parsed, 4_000), parsed, `case ${i}`);
+      assert.deepEqual(Object.keys(parsed).sort(), ['entries', 'expected_revision', 'groups', 'operation_id', 'title'], `case ${i}`);
+      const ids = new Set<string>();
+      for (const e of parsed.entries) {
+        assert.deepEqual(Object.keys(e).sort(), ['evidence', 'id', 'source_kinds', 'text'], `case ${i}`);
+        assert.ok(e.source_kinds.length > 0 && e.source_kinds.every((k) => KINDS.includes(k)), `case ${i}`);
+        for (const x of [e, ...e.evidence]) {
+          assert.match(x.id, /^[A-Za-z0-9._:-]{1,200}$/, `case ${i}`);
+          assert.ok(!ids.has(x.id), `case ${i}: duplicate id`);
+          ids.add(x.id);
+        }
+      }
+      assert.ok(JSON.stringify(parsed).length > 0 && [parsed.title, ...parsed.groups, ...parsed.entries.flatMap((e) => [e.text, ...e.evidence.flatMap((x) => [x.title, x.text])])]
+        .every((s) => typeof s === 'string' && s.trim() !== '' && wellFormed(s)), `case ${i}: string invariant`);
+      assert.ok(Buffer.byteLength(JSON.stringify(parsed), 'utf8') <= 4_000, `case ${i}: size`);
+    }
+    // The generator must exercise both outcomes, or the invariants above prove nothing.
+    assert.ok(accepted > 300 && accepted < 2700, `accepted ${accepted} of 3000`);
+  });
 });
