@@ -1755,6 +1755,33 @@ static json citation_json(KnowledgeService& svc, const FactCitation& c) {
     return j;
 }
 
+// The fact reader (Evidence For Every Fact; task 10.1): the fact, its knowledge state, its categories and every excerpt
+// the user may read, current and retained, each with its item and revision, and its unresolved reviews. A fact that
+// lost its support stays readable through its retained excerpts; one none of whose excerpts may be read is not found.
+Result<json> KnowledgeService::fact_detail(long long fact_id) {
+    const auto all = store_->fact_state(fact_id, true);
+    if (!all) return make_error("not_found", "This knowledge is no longer available.");
+    json citations = json::array();
+    for (const auto& c : all->citations)
+        if (json j = citation_json(*this, c); !j.is_null()) citations.push_back(std::move(j));
+    if (citations.empty()) return make_error("not_found", "This knowledge is no longer available.");
+    const auto current = store_->fact_state(fact_id, false);
+    json out = fact_row_json(all->fact);
+    out["state"] = current ? current->state : all->state;  // history: superseded, rejected or unsupported
+    out["categories"] = category_names(current ? current->categories : all->categories);
+    out["citations"] = std::move(citations);
+    json disputes = json::array();
+    if (current)
+        for (const auto& d : current->disputes) {
+            json other = d.other_citation ? citation_json(*this, *d.other_citation) : json(nullptr);
+            if (other.is_null()) continue;
+            disputes.push_back({{"review_id", d.conflict_id}, {"kind", d.kind}, {"state", d.state}, {"explanation", d.explanation},
+                                {"other", fact_row_json(d.other)}, {"other_citation", std::move(other)}});
+        }
+    out["disputes"] = std::move(disputes);
+    return out;
+}
+
 // ---- Review (Possible Inconsistency Review, User Resolution Of Inconsistencies) -----------------------------------------
 
 namespace {

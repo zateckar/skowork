@@ -3,6 +3,9 @@
 // through the system Open dialog, a folder through the folder picker, a new note), Source tabs with counts, a list pane
 // with two-line rows or the search results, and a reader with the open item, its actions, a More menu and collapsed
 // Details, the note editor, or Manage imports. Sharing asks first, showing the title, size and the Groups to choose from.
+// The workspace (task 10.1): the sections Sources, Knowledge, Review and Sharing; readers for a fact with its evidence,
+// an entity, a review with its decisions and a change report; a jump bar in the item reader; and Back through the
+// readers opened from one another.
 #include "base/strings.h"
 #include "platform/win.h"
 #include "shell/shell.h"
@@ -107,7 +110,7 @@ public:
         list->visible = !narrow_ || !open;
         reader->visible = !narrow_ || open;
         splitter->visible = !narrow_;
-        if (view_.back_) view_.back_->visible = narrow_;
+        if (view_.back_) view_.back_->visible = narrow_ || !view_.history_.empty();
         if (narrow_) {
             tree.place(list->visible ? *list : *reader, in);
             return true;
@@ -155,6 +158,12 @@ KnowledgeView::KnowledgeView(Shell& shell) : Node("knowledge-view"), shell_(shel
     add_->width = Sizing::fit;
     add_->help = shell_.t("knowledge.add_menu");
     add_->on_click = [this] { show_add_menu(); };
+
+    // Sections (task 10.1): Sources with their tabs, Knowledge, Review and Sharing.
+    sections_ = row_box(*this, "knowledge-sections");
+    sections_->role = ui::Role::group;
+    sections_->name = shell_.t("knowledge.sections");
+    sections_->gap = 4;
 
     messages_ = emplace<Node>("knowledge-messages");
     messages_->gap = 4;
@@ -211,7 +220,12 @@ void KnowledgeView::changed() {
         save_as_note_ = on;
         rebuild();
     });
+    if (section_ != "sources") load_section();
     if (reader_mode_ == Reader::item && item_.is_object()) open_item(jint(item_, "id"), selected_);
+    else if (reader_mode_ == Reader::fact) open_fact(detail_id_);
+    else if (reader_mode_ == Reader::entity) open_entity(detail_id_);
+    else if (reader_mode_ == Reader::review) open_review(detail_id_);
+    else if (reader_mode_ == Reader::change) open_change(detail_id_);
 }
 
 ui::Label* KnowledgeView::text(Node& parent, const std::u16string& s, Paint color, const std::string& id) {
@@ -307,6 +321,7 @@ void KnowledgeView::open_item(long long id, const std::string& key) {
     }
     reader_mode_ = Reader::item;
     selected_ = key;
+    load_item_changes(id);
     const size_t request = ++item_request_;
     std::weak_ptr<int> alive = alive_;
     shell_.call("knowledge.item", {{"id", id}}, [this, alive, id, request](Result<json> r) {
@@ -393,8 +408,18 @@ void KnowledgeView::open_origin(const json& origin) {
 }
 
 void KnowledgeView::close_reader() {
+    if (!history_.empty()) {
+        // Back to the reader this one was opened from; the keyboard stays on Back while there is more to go back to.
+        const Place p = std::move(history_.back());
+        history_.pop_back();
+        restore(p);
+        if (!split_->narrow() && history_.empty()) focus("knowledge-reader");
+        return;
+    }
     reader_mode_ = Reader::empty;
     item_ = nullptr;
+    detail_ = nullptr;
+    cited_ = nullptr;
     rebuild();
     // Back on a narrow window: the keyboard returns to the row that was open.
     if (ui::Tree* t = Node::tree()) {
@@ -575,6 +600,7 @@ void KnowledgeView::rebuild() {
                 break;
             }
     rebuild_messages();
+    rebuild_sections();
     rebuild_tabs();
     rebuild_list();
     rebuild_reader();
@@ -610,6 +636,7 @@ void KnowledgeView::rebuild_messages() {
 
 void KnowledgeView::rebuild_tabs() {
     tabs_->clear_children();
+    tabs_->visible = section_ == "sources";
     for (const char* t : kTabs) {
         const std::string tab = t;
         std::u16string label = shell_.t("knowledge.tab." + tab);
@@ -665,7 +692,11 @@ void KnowledgeView::rebuild_list() {
             const long long id = jint(p, "item_id");
             const std::string key = std::to_string(id);
             std::function<void()> open;
-            if (id) open = [this, id, key] { open_item(id, key); };
+            if (id) open = [this, id, key] {
+                history_.clear();
+                cited_ = nullptr;
+                open_item(id, key);
+            };
             auto* row = list_->add(std::make_unique<Row>(u, "knowledge-result-" + std::to_string(n), label,
                                                          id && reader_mode_ == Reader::item && selected_ == key, std::move(open)));
             row->emplace<ui::Label>(u, title, TextStyle::body_strong, Paint::text, false)->role = ui::Role::none;
@@ -680,10 +711,17 @@ void KnowledgeView::rebuild_list() {
         return;
     }
 
+    if (section_ != "sources") {
+        list_head_->visible = false;
+        build_section_list();
+        return;
+    }
+
     // The rows of the Source tab (D4), with Manage imports above the documents (D6).
     list_->name = shell_.t("knowledge.items");
     if (tab_ == "files") {
         auto* m = button(*list_head_, "knowledge-manage-imports", shell_.t("knowledge.manage_imports"), [this] {
+            history_.clear();
             reader_mode_ = Reader::imports;
             selected_.clear();
             rebuild();
@@ -713,6 +751,8 @@ void KnowledgeView::rebuild_list() {
         if (unverified) accessible += u" · " + shell_.t("knowledge.state_unverified");
         auto* row = list_->add(std::make_unique<Row>(u, "knowledge-row-" + key, accessible, selected_ == key && reader_mode_ != Reader::empty,
                                                      [this, id, note_id, key] {
+                                                         history_.clear();
+                                                         cited_ = nullptr;
                                                          if (id) open_item(id, key);
                                                          else open_note(note_id);
                                                      }));
@@ -739,7 +779,7 @@ void KnowledgeView::rebuild_reader() {
     auto* back = reader_->emplace<ui::Button>(u, "knowledge-back", shell_.t("knowledge.back"), ui::Button::Kind::subtle, ui::icon::back);
     back->width = Sizing::fit;
     back->on_click = [this] { close_reader(); };
-    back->visible = split_->narrow();
+    back->visible = split_->narrow() || !history_.empty();
     back_ = back;
     switch (reader_mode_) {
     case Reader::empty:
@@ -750,6 +790,24 @@ void KnowledgeView::rebuild_reader() {
     case Reader::item:
         if (item_.is_object()) build_item(*reader_);
         else text(*reader_, shell_.t("common.loading"), Paint::text_secondary);
+        break;
+    case Reader::fact:
+    case Reader::entity:
+    case Reader::review:
+    case Reader::change:
+        if (!detail_.is_object()) {
+            text(*reader_, shell_.t("common.loading"), Paint::text_secondary, "knowledge-detail-loading");
+        } else if (jbool(detail_, "unavailable")) {
+            text(*reader_, shell_.t("knowledge.unavailable"), Paint::text_secondary, "knowledge-detail-unavailable");
+        } else if (reader_mode_ == Reader::fact) {
+            build_fact(*reader_);
+        } else if (reader_mode_ == Reader::entity) {
+            build_entity(*reader_);
+        } else if (reader_mode_ == Reader::review) {
+            build_review(*reader_);
+        } else {
+            build_change(*reader_);
+        }
         break;
     }
 }
@@ -898,6 +956,16 @@ void KnowledgeView::build_item(Node& parent) {
                             TextStyle::caption, Paint::text_secondary, true, "knowledge-item-meta");
     if (jbool(item_, "pending"))
         box->emplace<ui::Label>(u, shell_.t("knowledge.pending"), TextStyle::caption, Paint::text_secondary, true, "knowledge-item-pending");
+    // Opened from a citation: the cited excerpt first, with the revision it was cited from.
+    if (cited_.is_object() && jint(cited_, "item_id") == id) {
+        auto* ex = box->add(std::make_unique<ui::Card>(u, "knowledge-item-excerpt", shell_.t("knowledge.cited_excerpt")));
+        Node& eb = static_cast<ui::Card*>(ex)->body();
+        const long long rev = jint(cited_, "revision"), cur = jint(cited_, "current_revision");
+        eb.emplace<ui::Label>(u, shell_.t(rev == cur ? "knowledge.revision_current" : "knowledge.revision_earlier",
+                                          {{"revision", u16(std::to_string(rev))}}),
+                              TextStyle::caption, Paint::text_secondary, true, "knowledge-item-excerpt-revision");
+        text(eb, u16(jstr(cited_, "excerpt")), Paint::text, "knowledge-item-excerpt-text");
+    }
     if (jstr(item_, "freshness") == "paused")
         text(*box, shell_.t("knowledge.file_indexing_paused"), Paint::warning, "knowledge-file-indexing-paused");
     else if (jstr(item_, "freshness") == "uncertain")
@@ -951,6 +1019,7 @@ void KnowledgeView::build_item(Node& parent) {
     more_ = actions->emplace<ui::IconButton>(u, "knowledge-item-more", ui::icon::more, shell_.t("knowledge.more"));
     more_->on_click = [this] { show_more_menu(); };
     more_->enabled = !busy_;
+    build_item_jumps(*box);
 
     // Sharing in one line.
     std::u16string line;
@@ -978,11 +1047,14 @@ void KnowledgeView::build_item(Node& parent) {
 
     // Show extracted knowledge before the potentially long source text; it remains collapsible.
     build_details(*box, id);
+    build_item_changes(*box, id);
 
     // The indexed text.
     std::string body = jstr(item_, "text");
     if (body.size() > 8000) body = utf8_truncate(body, 8000) + "…";
     auto* t = box->emplace<ui::Box>("knowledge-item-body", Paint::none, 0, Paint::none);
+    t->role = ui::Role::group;
+    t->name = shell_.t("knowledge.goto_content");
     t->padding = ui::Insets::xy(0, 8);
     t->emplace<ui::Label>(u, u16(body), TextStyle::body, Paint::text, true, "knowledge-item-text");
 
@@ -1037,6 +1109,14 @@ void KnowledgeView::build_details(Node& parent, long long id) {
             act("knowledge.fact.delete", {{"kind", kind}, {"id", fid}}, [this, id](const json&) { open_item(id, selected_); });
         }, ui::Button::Kind::subtle);
         d->name = shell_.t("knowledge.delete_named", {{"name", ftext}});
+        if (const long long fact_id = jint(f, "fact_id")) {
+            auto* ev = button(*line, "knowledge-fact-evidence-" + key, shell_.t("knowledge.evidence"), [this, fact_id] {
+                push_place();
+                open_fact(fact_id);
+            }, ui::Button::Kind::subtle);
+            ev->name = shell_.t("knowledge.evidence_named", {{"name", ftext}});
+            ev->enabled = true;
+        }
         if (const std::string passage = jstr(f, "source_passage"); !passage.empty()) {
             auto* source = facts->add(std::make_unique<ui::Card>(u, "knowledge-fact-source-" + key,
                                                                  shell_.t("knowledge.source_passage"), true, false));
@@ -1068,7 +1148,592 @@ void KnowledgeView::build_details(Node& parent, long long id) {
                                   });
         }, ui::Button::Kind::subtle);
         rb->name = shell_.t("knowledge.rename_named", {{"name", ename}});
+        auto* ob = button(*line, "knowledge-entity-open-" + sid, shell_.t("knowledge.open"), [this, eid] {
+            push_place();
+            open_entity(eid);
+        }, ui::Button::Kind::subtle);
+        ob->name = shell_.t("knowledge.open_named", {{"name", ename}});
+        ob->enabled = true;
     }
+}
+
+
+// ---- the workspace (task 10.1) -------------------------------------------------------------------------------------
+
+namespace {
+
+const char* const kSections[] = {"sources", "knowledge", "review", "sharing"};
+
+std::u16string relation_text(const json& r) {
+    if (const std::string t = jstr(r, "text"); !t.empty()) return u16(t);
+    return u16(jstr(r, "subject") + " " + jstr(r, "predicate") + " " + jstr(r, "object"));
+}
+
+}  // namespace
+
+void KnowledgeView::focus(const std::string& automation_id) {
+    ui::Tree* t = Node::tree();
+    if (!t) return;
+    std::function<Node*(Node&)> find = [&](Node& n) -> Node* {
+        if (n.automation_id() == automation_id && n.visible) return &n;
+        for (const auto& c : n.children())
+            if (Node* f = find(*c)) return f;
+        return nullptr;
+    };
+    Node* n = find(*this);
+    if (!n) return;
+    t->scroll_into_view(*n);
+    t->set_focus(n);
+}
+
+void KnowledgeView::set_section(const std::string& section) {
+    if (section == section_ && !results_.is_object()) return;
+    ++search_request_;
+    results_ = nullptr;
+    shown_query_.clear();
+    section_ = section;
+    load_section();
+    rebuild();
+}
+
+void KnowledgeView::load_section() {
+    std::weak_ptr<int> alive = alive_;
+    const std::string section = section_;
+    const size_t request = ++section_request_;
+    const auto done = [this, alive, section, request](json* into) {
+        return [this, alive, section, request, into](Result<json> r) {
+            if (!alive.lock() || section != section_ || request != section_request_) return;
+            if (r) {
+                *into = *r;
+            } else {
+                error_ = u16(r.error().message);
+                if (!into->is_object()) *into = json::object();
+            }
+            rebuild();
+        };
+    };
+    if (section == "knowledge") shell_.call("knowledge.entities", {{"query", ""}, {"limit", 200}}, done(&entities_));
+    else if (section == "review") shell_.call("knowledge.reviews", {{"limit", 200}}, done(&reviews_));
+    else if (section == "sharing") load_sharing();
+}
+
+void KnowledgeView::rebuild_sections() {
+    sections_->clear_children();
+    for (const char* s : kSections) {
+        const std::string section = s;
+        const bool on = section == section_ && !results_.is_object();
+        std::u16string label = shell_.t("knowledge.section." + section);
+        auto* b = button(*sections_, "knowledge-section-" + section, label, [this, section] { set_section(section); },
+                         on ? ui::Button::Kind::standard : ui::Button::Kind::subtle);
+        b->name = on ? shell_.t("knowledge.tab_selected", {{"name", label}}) : label;
+        b->enabled = true;
+    }
+}
+
+void KnowledgeView::build_section_list() {
+    ui::Ui& u = shell_.ui();
+    const auto loading = [&] { text(*list_, shell_.t("common.loading"), Paint::text_secondary); };
+    const auto top = [this] {
+        history_.clear();
+        cited_ = nullptr;
+    };
+    if (section_ == "knowledge") {
+        list_->name = shell_.t("knowledge.section.knowledge");
+        const json* list = jobj(entities_, "entities");
+        if (!list || !list->is_array()) return loading();
+        if (list->empty()) text(*list_, shell_.t("knowledge.no_entities_yet"), Paint::text_secondary, "knowledge-no-entities-list");
+        for (const auto& e : *list) {
+            const long long eid = jint(e, "id");
+            const std::string key = "e" + std::to_string(eid);
+            const std::u16string ename = u16(jstr(e, "name")), type = u16(jstr(e, "type"));
+            auto* row = list_->add(std::make_unique<Row>(u, "knowledge-entities-row-" + std::to_string(eid), ename + u" (" + type + u")",
+                                                         reader_mode_ == Reader::entity && selected_ == key, [this, eid, key, top] {
+                                                             top();
+                                                             selected_ = key;
+                                                             open_entity(eid);
+                                                         }));
+            row->emplace<ui::Label>(u, ename, TextStyle::body, Paint::text, false)->role = ui::Role::none;
+            row->emplace<ui::Label>(u, type, TextStyle::caption, Paint::text_secondary, false)->role = ui::Role::none;
+        }
+        return;
+    }
+    if (section_ == "review") {
+        list_->name = shell_.t("knowledge.section.review");
+        const json* list = jobj(reviews_, "items");
+        if (!list || !list->is_array()) return loading();
+        if (const json* c = jobj(reviews_, "consistency"); c && !jbool(*c, "active"))
+            text(*list_, shell_.t("knowledge.consistency_off"), Paint::text_secondary, "knowledge-consistency-off");
+        else if (c && jint(*c, "pending") > 0)
+            text(*list_, shell_.t("knowledge.consistency_pending", {{"n", u16(std::to_string(jint(*c, "pending")))}}), Paint::text_secondary,
+                 "knowledge-consistency-pending");
+        if (list->empty()) text(*list_, shell_.t("knowledge.no_reviews"), Paint::text_secondary, "knowledge-no-reviews");
+        for (const auto& r : *list) {
+            const long long rid = jint(r, "review_id");
+            const std::string key = "r" + std::to_string(rid);
+            const std::u16string title = relation_text(r["left"]) + u" ↔ " + relation_text(r["right"]);
+            const std::u16string state = shell_.t("knowledge.review_state." + jstr(r, "state"));
+            auto* row = list_->add(std::make_unique<Row>(u, "knowledge-review-row-" + std::to_string(rid), title + u" · " + state,
+                                                         reader_mode_ == Reader::review && selected_ == key, [this, rid, key, top] {
+                                                             top();
+                                                             selected_ = key;
+                                                             open_review(rid);
+                                                         }));
+            row->emplace<ui::Label>(u, title, TextStyle::body, Paint::text, true)->role = ui::Role::none;
+            row->emplace<ui::Label>(u, state, TextStyle::caption, Paint::text_secondary, false)->role = ui::Role::none;
+        }
+        return;
+    }
+    // Sharing: the shared items, each opening its item, and the shared folders.
+    list_->name = shell_.t("knowledge.section.sharing");
+    if (!sharing_.is_object()) return loading();
+    const json items = sharing_.value("items", json::array()), rules = sharing_.value("rules", json::array());
+    if (items.empty() && rules.empty()) text(*list_, shell_.t("knowledge.nothing_shared"), Paint::text_secondary, "knowledge-nothing-shared");
+    for (const auto& it : items) {
+        const long long id = jint(it, "item_id");
+        const std::string key = std::to_string(id);
+        const std::u16string title = u16(jstr(it, "title"));
+        const std::string state = jstr(it, "state");
+        std::u16string meta = shell_.t("knowledge.shared_with", {{"groups", joined(it.value("groups", json::array()))}});
+        if (state != "shared") meta += u" · " + shell_.t("knowledge.share_state." + state);
+        std::function<void()> open;
+        if (id) open = [this, id, key, top] {
+            top();
+            open_item(id, key);
+        };
+        auto* row = list_->add(std::make_unique<Row>(u, "knowledge-shared-row-" + (id ? key : jstr(it, "ext_id")), title + u" · " + meta,
+                                                     id && reader_mode_ == Reader::item && selected_ == key, std::move(open)));
+        row->emplace<ui::Label>(u, title, TextStyle::body, Paint::text, false)->role = ui::Role::none;
+        row->emplace<ui::Label>(u, meta, TextStyle::caption, Paint::text_secondary, true)->role = ui::Role::none;
+    }
+    int n = 0;
+    for (const auto& r : rules) {
+        const std::string folder = jstr(r, "folder");
+        const std::u16string meta = shell_.t("knowledge.folder_shared", {{"groups", joined(r.value("groups", json::array()))}});
+        auto* row = list_->add(std::make_unique<Row>(u, "knowledge-shared-folder-" + std::to_string(n++), leaf(folder) + u" · " + meta, false,
+                                                     std::function<void()>()));
+        row->emplace<ui::Label>(u, leaf(folder), TextStyle::body, Paint::text, false)->role = ui::Role::none;
+        row->emplace<ui::Label>(u, meta, TextStyle::caption, Paint::text_secondary, true)->role = ui::Role::none;
+    }
+}
+
+void KnowledgeView::push_place() {
+    if (reader_mode_ == Reader::empty || reader_mode_ == Reader::editor || reader_mode_ == Reader::imports) return;
+    Place p;
+    p.mode = reader_mode_;
+    p.id = reader_mode_ == Reader::item ? jint(item_, "id") : detail_id_;
+    p.selected = selected_;
+    p.cited = reader_mode_ == Reader::item ? cited_ : json(nullptr);
+    if (!p.id) return;
+    history_.push_back(std::move(p));
+    if (history_.size() > 50) history_.erase(history_.begin());
+}
+
+void KnowledgeView::restore(const Place& p) {
+    selected_ = p.selected;
+    switch (p.mode) {
+    case Reader::item:
+        cited_ = p.cited;
+        open_item(p.id, p.selected);
+        break;
+    case Reader::fact: open_fact(p.id); break;
+    case Reader::entity: open_entity(p.id); break;
+    case Reader::review: open_review(p.id); break;
+    case Reader::change: open_change(p.id); break;
+    default: rebuild(); break;
+    }
+}
+
+void KnowledgeView::load_detail(const std::string& method, const json& params, Reader mode, long long id) {
+    if (reader_mode_ != mode || detail_id_ != id) {
+        detail_ = nullptr;
+        review_history_ = nullptr;
+    }
+    reader_mode_ = mode;
+    detail_id_ = id;
+    item_ = nullptr;
+    const size_t request = ++detail_request_;
+    std::weak_ptr<int> alive = alive_;
+    shell_.call(method, params, [this, alive, mode, id, request](Result<json> r) {
+        if (!alive.lock() || reader_mode_ != mode || detail_id_ != id || request != detail_request_) return;
+        if (!r) {
+            detail_ = json{{"unavailable", true}};
+        } else if (mode == Reader::review) {
+            // There is no single review call: the review is found among the reviews shown, with their generation.
+            detail_ = json{{"unavailable", true}};
+            for (const auto& x : r->value("items", json::array()))
+                if (jint(x, "review_id") == id) {
+                    detail_ = x;
+                    detail_["generation"] = (*r)["generation"];
+                }
+        } else {
+            detail_ = *r;
+        }
+        rebuild();
+    });
+    rebuild();
+}
+
+void KnowledgeView::open_fact(long long fact_id) { load_detail("knowledge.fact", {{"id", fact_id}}, Reader::fact, fact_id); }
+void KnowledgeView::open_entity(long long entity_id) { load_detail("knowledge.entity", {{"id", entity_id}}, Reader::entity, entity_id); }
+void KnowledgeView::open_review(long long review_id) { load_detail("knowledge.reviews", {{"limit", 500}}, Reader::review, review_id); }
+void KnowledgeView::open_change(long long report_id) {
+    load_detail("knowledge.change", {{"id", report_id}, {"limit", 200}}, Reader::change, report_id);
+}
+
+void KnowledgeView::open_cited(const json& citation) {
+    const long long id = jint(citation, "item_id");
+    if (!id) return;
+    push_place();
+    cited_ = citation;
+    open_item(id, selected_);
+}
+
+void KnowledgeView::load_item_changes(long long item_id) {
+    if (item_changes_of_ != item_id) item_changes_ = nullptr;
+    item_changes_of_ = item_id;
+    const size_t request = ++changes_request_;
+    std::weak_ptr<int> alive = alive_;
+    shell_.call("knowledge.changes", {{"item_id", item_id}, {"limit", 20}}, [this, alive, item_id, request](Result<json> r) {
+        if (!alive.lock() || item_changes_of_ != item_id || request != changes_request_) return;
+        item_changes_ = r ? *r : json{{"items", json::array()}};
+        rebuild();
+    });
+}
+
+void KnowledgeView::build_item_jumps(Node& parent) {
+    auto* bar = row_box(parent, "knowledge-item-goto");
+    bar->role = ui::Role::group;
+    bar->name = shell_.t("knowledge.goto");
+    bar->gap = 4;
+    const std::pair<const char*, const char*> jumps[] = {{"content", "knowledge-item-body"},
+                                                         {"knowledge", "knowledge-item-details"},
+                                                         {"changes", "knowledge-item-changes"},
+                                                         {"sharing", "knowledge-item-sharing"}};
+    for (const auto& [jump, target] : jumps) {
+        const std::string to = target;
+        auto* b = button(*bar, std::string("knowledge-item-goto-") + jump, shell_.t(std::string("knowledge.goto_") + jump), [this, to] { focus(to); },
+                         ui::Button::Kind::subtle);
+        b->role = ui::Role::link;
+        b->enabled = true;
+    }
+}
+
+// The item's revisions with what each changed (Source change reports); each opens its report.
+void KnowledgeView::build_item_changes(Node& parent, long long id) {
+    ui::Ui& u = shell_.ui();
+    const json* list = item_changes_of_ == id ? jobj(item_changes_, "items") : nullptr;
+    const long long n = list && list->is_array() ? static_cast<long long>(list->size()) : 0;
+    auto* card = parent.add(std::make_unique<ui::Card>(u, "knowledge-item-changes",
+                                                       list ? shell_.t("knowledge.changes_title", {{"count", shell_.count("knowledge.revision_count", n)}})
+                                                            : shell_.t("knowledge.changes"),
+                                                       true, true));
+    Node& b = static_cast<ui::Card*>(card)->body();
+    auto* rows = b.emplace<Node>("knowledge-item-change-list");
+    rows->role = ui::Role::list;
+    rows->name = shell_.t("knowledge.changes");
+    rows->gap = 2;
+    if (!list || !list->is_array()) {
+        text(*rows, shell_.t("common.loading"), Paint::text_secondary);
+        return;
+    }
+    if (list->empty()) text(*rows, shell_.t("knowledge.no_changes"), Paint::text_secondary, "knowledge-no-changes");
+    for (const auto& r : *list) {
+        const long long rid = jint(r, "id");
+        const json p = r.value("passages", json::object()), f = r.value("facts", json::object());
+        std::u16string label = shell_.t("knowledge.change_row", {{"revision", u16(std::to_string(jint(r, "revision")))},
+                                                                 {"added", u16(std::to_string(jint(p, "added")))},
+                                                                 {"removed", u16(std::to_string(jint(p, "removed")))}});
+        label += u" · " + (jbool(f, "counted") ? shell_.t("knowledge.change_lost", {{"n", u16(std::to_string(jint(f, "lost_support")))}})
+                                               : shell_.t("knowledge.change_counting"));
+        auto* row = button(*rows, "knowledge-change-row-" + std::to_string(rid), label, [this, rid] {
+            push_place();
+            open_change(rid);
+        }, ui::Button::Kind::subtle);
+        row->role = ui::Role::link;
+        row->enabled = true;
+    }
+}
+
+// One excerpt: its item and revision, the text, and Open, which shows it in its item.
+void KnowledgeView::build_citation(Node& parent, const json& c, const std::string& id) {
+    ui::Ui& u = shell_.ui();
+    auto* box = parent.emplace<ui::Box>("knowledge-citation-" + id, Paint::none, 0, Paint::border);
+    box->role = ui::Role::group;
+    box->padding = ui::Insets::xy(10, 8);
+    box->gap = 4;
+    const std::u16string title = u16(jstr(c, "title"));
+    box->name = title;
+    const long long rev = jint(c, "revision"), cur = jint(c, "current_revision");
+    std::u16string meta = shell_.t("knowledge.tab." + jstr(c, "source")) + u" · " +
+                          shell_.t(rev == cur ? "knowledge.revision_current" : "knowledge.revision_earlier", {{"revision", u16(std::to_string(rev))}});
+    if (const std::string s = jstr(c, "support"); !s.empty()) meta += u" · " + shell_.t("knowledge.support." + s);
+    box->emplace<ui::Label>(u, title, TextStyle::body_strong, Paint::text, true)->role = ui::Role::none;
+    box->emplace<ui::Label>(u, meta, TextStyle::caption, Paint::text_secondary, true)->role = ui::Role::none;
+    text(*box, u16(jstr(c, "excerpt")), Paint::text, "knowledge-citation-excerpt-" + id);
+    auto* open = button(*box, "knowledge-citation-open-" + id, shell_.t("knowledge.open_in_item"), [this, c] { open_cited(c); },
+                        ui::Button::Kind::subtle);
+    open->name = shell_.t("knowledge.open_named", {{"name", title}});
+    open->enabled = true;
+}
+
+void KnowledgeView::build_fact(Node& parent) {
+    ui::Ui& u = shell_.ui();
+    auto* box = parent.emplace<Node>("knowledge-fact-reader");
+    box->role = ui::Role::group;
+    box->gap = 8;
+    const std::u16string title = relation_text(detail_);
+    box->name = title;
+    box->emplace<ui::Label>(u, title, TextStyle::subtitle, Paint::text, true, "knowledge-fact-title")->role = ui::Role::heading;
+    const std::string state = jstr(detail_, "state");
+    box->emplace<ui::Label>(u, shell_.t("knowledge.fact_state." + state), TextStyle::caption,
+                            state == "current" ? Paint::text_secondary : Paint::warning, true, "knowledge-fact-state");
+    const std::string from = jstr(detail_, "valid_from"), to = jstr(detail_, "valid_to");
+    if (!from.empty() || !to.empty())
+        box->emplace<ui::Label>(u, shell_.t("knowledge.valid", {{"from", from.empty() ? u"…" : day(from)}, {"to", to.empty() ? u"…" : day(to)}}),
+                                TextStyle::caption, Paint::text_secondary, true, "knowledge-fact-valid");
+    if (const json cats = detail_.value("categories", json::array()); !cats.empty())
+        box->emplace<ui::Label>(u, shell_.t("knowledge.categories_line", {{"names", joined(cats)}}), TextStyle::caption, Paint::text_secondary, true,
+                                "knowledge-fact-categories");
+
+    box->emplace<ui::Label>(u, shell_.t("knowledge.evidence"), TextStyle::body_strong)->role = ui::Role::heading;
+    auto* cl = box->emplace<Node>("knowledge-fact-citations");
+    cl->role = ui::Role::list;
+    cl->name = shell_.t("knowledge.evidence");
+    cl->gap = 6;
+    int n = 0;
+    for (const auto& c : detail_.value("citations", json::array())) build_citation(*cl, c, std::to_string(n++));
+
+    const json disputes = detail_.value("disputes", json::array());
+    if (disputes.empty()) return;
+    box->emplace<ui::Label>(u, shell_.t("knowledge.disputes"), TextStyle::body_strong)->role = ui::Role::heading;
+    auto* dl = box->emplace<Node>("knowledge-fact-disputes");
+    dl->role = ui::Role::list;
+    dl->name = shell_.t("knowledge.disputes");
+    dl->gap = 2;
+    for (const auto& d : disputes) {
+        const long long rid = jint(d, "review_id");
+        auto* b = button(*dl, "knowledge-fact-dispute-" + std::to_string(rid),
+                         shell_.t("knowledge.dispute_row", {{"other", relation_text(d["other"])},
+                                                            {"state", shell_.t("knowledge.review_state." + jstr(d, "state"))}}),
+                         [this, rid] {
+                             push_place();
+                             open_review(rid);
+                         }, ui::Button::Kind::subtle);
+        b->role = ui::Role::link;
+        b->enabled = true;
+    }
+}
+
+void KnowledgeView::build_entity(Node& parent) {
+    ui::Ui& u = shell_.ui();
+    auto* box = parent.emplace<Node>("knowledge-entity-reader");
+    box->role = ui::Role::group;
+    box->gap = 8;
+    const std::u16string ename = u16(jstr(detail_, "name"));
+    box->name = ename;
+    box->emplace<ui::Label>(u, ename, TextStyle::subtitle, Paint::text, true, "knowledge-entity-title")->role = ui::Role::heading;
+    std::u16string meta = u16(jstr(detail_, "type"));
+    for (const char* k : {"title", "department", "email"})
+        if (const std::string v = jstr(detail_, k); !v.empty()) meta += u" · " + u16(v);
+    box->emplace<ui::Label>(u, meta, TextStyle::caption, Paint::text_secondary, true, "knowledge-entity-meta");
+
+    box->emplace<ui::Label>(u, shell_.t("knowledge.facts"), TextStyle::body_strong)->role = ui::Role::heading;
+    auto* fl = box->emplace<Node>("knowledge-entity-facts");
+    fl->role = ui::Role::list;
+    fl->name = shell_.t("knowledge.facts");
+    fl->gap = 2;
+    const json rels = detail_.value("relations", json::array()), facts = detail_.value("facts", json::array());
+    if (rels.empty() && facts.empty()) text(*fl, shell_.t("knowledge.no_facts"), Paint::text_secondary, "knowledge-entity-no-facts");
+    for (const auto& r : rels) {
+        const long long fid = jint(r, "fact_id");
+        std::u16string label = relation_text(r);
+        if (jstr(r, "state") == "disputed") label += u" · " + shell_.t("knowledge.fact_state.disputed");
+        if (!fid) {
+            text(*fl, label, Paint::text);
+            continue;
+        }
+        auto* b = button(*fl, "knowledge-entity-fact-" + std::to_string(fid), label, [this, fid] {
+            push_place();
+            open_fact(fid);
+        }, ui::Button::Kind::subtle);
+        b->role = ui::Role::link;
+        b->enabled = true;
+    }
+    for (const auto& f : facts)
+        text(*fl, shell_.t("knowledge.fact_user", {{"text", u16(jstr(f, "text"))}}), Paint::text, "knowledge-entity-user-fact-" + std::to_string(jint(f, "id")));
+}
+
+void KnowledgeView::build_review(Node& parent) {
+    ui::Ui& u = shell_.ui();
+    const long long rid = jint(detail_, "review_id");
+    const std::string state = jstr(detail_, "state");
+    auto* box = parent.emplace<Node>("knowledge-review-reader");
+    box->role = ui::Role::group;
+    box->name = shell_.t("knowledge.review_title");
+    box->gap = 8;
+    box->emplace<ui::Label>(u, shell_.t("knowledge.review_title"), TextStyle::subtitle, Paint::text, true, "knowledge-review-title")->role =
+        ui::Role::heading;
+    std::u16string status = shell_.t("knowledge.review_state." + state);
+    if (const std::string d = jstr(detail_, "decision"); !d.empty()) {
+        status += u" · " + shell_.t("knowledge.decision." + d);
+        if (const std::string why = jstr(detail_, "reason"); !why.empty()) status += u" · " + u16(why);
+    }
+    box->emplace<ui::Label>(u, status, TextStyle::caption, Paint::text_secondary, true, "knowledge-review-state");
+    if (const std::string e = jstr(detail_, "explanation"); !e.empty()) text(*box, u16(e), Paint::text, "knowledge-review-explanation");
+
+    for (const char* side : {"left", "right"}) {
+        const json s = detail_.value(side, json::object());
+        auto* sb = box->emplace<Node>(std::string("knowledge-review-") + side);
+        sb->role = ui::Role::group;
+        sb->name = shell_.t(std::string("knowledge.review_") + side);
+        sb->gap = 4;
+        sb->emplace<ui::Label>(u, sb->name, TextStyle::body_strong)->role = ui::Role::heading;
+        text(*sb, relation_text(s), Paint::text, std::string("knowledge-review-fact-") + side);
+        if (const json* c = jobj(s, "citation")) build_citation(*sb, *c, side);
+        const long long fid = jint(s, "fact_id");
+        auto* ob = button(*sb, std::string("knowledge-review-open-") + side, shell_.t("knowledge.open_fact"), [this, fid] {
+            push_place();
+            open_fact(fid);
+        }, ui::Button::Kind::subtle);
+        ob->name = shell_.t("knowledge.open_named", {{"name", relation_text(s)}});
+    }
+
+    auto* actions = row_box(*box, "knowledge-review-actions");
+    actions->gap = 6;
+    if (state == "needs_recheck") {
+        text(*box, shell_.t("knowledge.review_rechecking"), Paint::text_secondary, "knowledge-review-rechecking");
+    } else {
+        if (state == "open" || state == "deferred")
+            for (const char* d : {"keep_both", "prefer_left", "prefer_right", "defer"}) {
+                const std::string decision = d;
+                if (state == "deferred" && decision == "defer") continue;
+                std::string id = decision;
+                std::replace(id.begin(), id.end(), '_', '-');
+                button(*actions, "knowledge-review-" + id, shell_.t("knowledge.decision." + decision) + u"…",
+                       [this, rid, decision] { ask_decision(rid, decision); }, ui::Button::Kind::standard);
+            }
+        if (state == "resolved" || state == "deferred") {
+            const long long generation = jint(detail_, "generation");
+            button(*actions, "knowledge-review-reopen", shell_.t("knowledge.reopen"), [this, rid, generation] {
+                act("knowledge.review.reopen", {{"id", rid}, {"generation", generation}}, [this, rid](const json&) {
+                    shell_.announce(shell_.t("knowledge.reopened"));
+                    open_review(rid);
+                    if (section_ == "review") load_section();
+                });
+            });
+        }
+    }
+    button(*actions, "knowledge-review-history", shell_.t("knowledge.review_history"), [this, rid] {
+        act("knowledge.review.history", {{"id", rid}}, [this](const json& r) { review_history_ = r; });
+    }, ui::Button::Kind::subtle);
+    if (review_history_.is_object() && jint(review_history_, "review_id") == rid) {
+        auto* hl = box->emplace<Node>("knowledge-review-history-list");
+        hl->role = ui::Role::list;
+        hl->name = shell_.t("knowledge.review_history");
+        hl->gap = 2;
+        const json ds = review_history_.value("decisions", json::array());
+        if (ds.empty()) text(*hl, shell_.t("knowledge.no_decisions"), Paint::text_secondary, "knowledge-review-no-decisions");
+        int n = 0;
+        for (const auto& d : ds) {
+            std::u16string line = shell_.t("knowledge.decision." + jstr(d, "decision"));
+            if (const std::string why = jstr(d, "reason"); !why.empty()) line += u" · " + u16(why);
+            text(*hl, line, Paint::text_secondary, "knowledge-review-decision-" + std::to_string(n++));
+        }
+    }
+}
+
+// Deciding asks for the reason; preferring one side needs one (User Resolution Of Inconsistencies).
+void KnowledgeView::ask_decision(long long review_id, const std::string& decision) {
+    const long long generation = jint(detail_, "generation");
+    const bool required = decision == "prefer_left" || decision == "prefer_right";
+    auto d = std::make_unique<ui::Dialog>(shell_.ui(), "knowledge-decide", shell_.t("knowledge.decision." + decision));
+    d->body().emplace<ui::Label>(shell_.ui(), shell_.t("knowledge.decide_body." + decision), TextStyle::body, Paint::text, true, "knowledge-decide-body");
+    ui::TextField::Options o;
+    o.placeholder = shell_.t(required ? "knowledge.reason_required" : "knowledge.reason_optional");
+    auto* reason = d->body().emplace<ui::TextField>(shell_.ui(), "knowledge-decide-reason", shell_.t("knowledge.reason"), o);
+    auto* missing = d->body().emplace<ui::Label>(shell_.ui(), u"", TextStyle::caption, Paint::error, true, "knowledge-decide-missing");
+    ui::Dialog* dp = d.get();
+    d->add_button("knowledge-decide-cancel", shell_.t("knowledge.cancel"), ui::Button::Kind::standard, [dp] { dp->close(); });
+    auto commit = [this, dp, reason, missing, required, review_id, decision, generation] {
+        const std::string why = ui::to_utf8(reason->text());
+        if (required && blank(reason->text())) {
+            missing->set_text(shell_.t("knowledge.reason_missing"));
+            shell_.announce(shell_.t("knowledge.reason_missing"));
+            return;
+        }
+        dp->close();
+        act("knowledge.review.decide", {{"id", review_id}, {"decision", decision}, {"reason", why}, {"generation", generation}},
+            [this, review_id](const json&) {
+                shell_.announce(shell_.t("knowledge.decided"));
+                open_review(review_id);
+                if (section_ == "review") load_section();
+            });
+    };
+    // Enter in the reason decides, as the default button would; Escape cancels (the dialog).
+    reason->on_key_down = [commit](const ui::KeyEvent& e) {
+        if (e.key != ui::kKeyEnter || e.shift || e.ctrl || e.alt) return false;
+        commit();
+        return true;
+    };
+    d->add_button("knowledge-decide-ok", shell_.t("knowledge.decide"), ui::Button::Kind::primary, commit);
+    shell_.window().modal().show(std::move(d));
+    shell_.window().render();
+    if (ui::Tree* t = reason->tree()) t->set_focus(reason);
+}
+
+void KnowledgeView::build_change(Node& parent) {
+    ui::Ui& u = shell_.ui();
+    auto* box = parent.emplace<Node>("knowledge-change-reader");
+    box->role = ui::Role::group;
+    box->gap = 8;
+    const std::u16string title = shell_.t("knowledge.change_title", {{"title", u16(jstr(detail_, "title"))},
+                                                                     {"revision", u16(std::to_string(jint(detail_, "revision")))}});
+    box->name = title;
+    box->emplace<ui::Label>(u, title, TextStyle::subtitle, Paint::text, true, "knowledge-change-title")->role = ui::Role::heading;
+    const json p = detail_.value("passages", json::object()), f = detail_.value("facts", json::object());
+    text(*box, shell_.t("knowledge.change_passages", {{"added", u16(std::to_string(jint(p, "added")))},
+                                                      {"kept", u16(std::to_string(jint(p, "kept")))},
+                                                      {"redated", u16(std::to_string(jint(p, "redated")))},
+                                                      {"rechecked", u16(std::to_string(jint(p, "rechecked")))},
+                                                      {"removed", u16(std::to_string(jint(p, "removed")))}}),
+         Paint::text, "knowledge-change-passages");
+    text(*box, jbool(f, "counted") ? shell_.t("knowledge.change_facts", {{"unsupported", u16(std::to_string(jint(f, "unsupported")))},
+                                                                         {"weakened", u16(std::to_string(jint(f, "weakened")))}})
+                                   : shell_.t("knowledge.change_counting"),
+         Paint::text, "knowledge-change-facts");
+    if (!detail_.value("pending", json::array()).empty())
+        text(*box, shell_.t("knowledge.change_pending"), Paint::text_secondary, "knowledge-change-pending");
+    if (const long long item = jint(detail_, "item_id")) {
+        auto* b = button(*box, "knowledge-change-open-item", shell_.t("knowledge.open_item"), [this, item] {
+            push_place();
+            cited_ = nullptr;
+            open_item(item, selected_);
+        }, ui::Button::Kind::subtle);
+        b->role = ui::Role::link;
+        b->enabled = true;
+    }
+    auto* fl = box->emplace<Node>("knowledge-change-facts-list");
+    fl->role = ui::Role::list;
+    fl->name = shell_.t("knowledge.facts");
+    fl->gap = 2;
+    const json entries = detail_.value("entries", json::array());
+    for (const auto& e : entries) {
+        const long long fid = jint(e, "fact_id");
+        const std::string id = "knowledge-change-fact-" + std::to_string(fid);
+        const std::u16string effect = shell_.t("knowledge.effect." + jstr(e, "effect"));
+        if (jbool(e, "withheld")) {
+            text(*fl, shell_.t("knowledge.withheld") + u" · " + effect, Paint::text_secondary, id);
+            continue;
+        }
+        auto* b = button(*fl, id, relation_text(e.value("fact", json::object())) + u" · " + effect, [this, fid] {
+            push_place();
+            open_fact(fid);
+        }, ui::Button::Kind::subtle);
+        b->role = ui::Role::link;
+        b->enabled = true;
+    }
+    if (const long long listed = jint(detail_, "listed"); listed > static_cast<long long>(entries.size()))
+        text(*box, shell_.t("knowledge.change_more", {{"n", u16(std::to_string(listed))}}), Paint::text_secondary, "knowledge-change-more");
 }
 
 }  // namespace wb::shell

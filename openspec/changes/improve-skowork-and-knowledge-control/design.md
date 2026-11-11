@@ -519,6 +519,39 @@ Add speech to the Policy bundle top-level glossary and also reconcile the alread
     - The longest waits of other writers during a 10,000-passage switch are near or above the 200 ms target on this machine today; 7.7's numbers were measured on a less loaded session.
     - A report does not list facts that new findings will support after extraction, and cannot say whether a re-extracted passage will restore a lost support.
     - The native change report view is part of 10.1.
+- **Knowledge workspace, first part of 10.1, 2026-11-11:**
+  - **Sections:** a section bar (Sources, Knowledge, Review, Sharing) sits above the Source tabs, which show only in Sources. A search shows its results in place of any section's list. The lists are:
+    - Knowledge: entities;
+    - Review: the possible inconsistencies of `knowledge.reviews`, with the consistency state;
+    - Sharing: the explicitly shared items, each opening its item, and the shared folders.
+  - **Readers:** besides the item, the note editor and Manage imports, the reader shows:
+    - a fact, through the new `knowledge.fact`: its state (current, disputed, or for history superseded, rejected or unsupported), validity, categories, every excerpt the user may read now (current and retained, each with its item and revision) and its unresolved reviews. A fact none of whose excerpts may be read is not found;
+    - an entity, with its facts;
+    - a review, with both sides and their excerpts, the decisions, Reopen and the earlier decisions;
+    - a change report, with the facts that lost support (withheld when they may not be read).
+    
+    The item reader gains a jump bar (Content, Knowledge, Changes, Sharing) that moves the keyboard to that part, Evidence on each fact, Open on each entity, the item's revisions in Changes, and the cited excerpt when it was opened from a citation. The item's content stays on one page, so nothing is hidden behind a tab.
+  - **Back:** a reader opened from another one remembers it. Back returns through them, and is shown on a wide window while there is something to return to. A row opens afresh. On a narrow window the last Back returns to the list with the keyboard on the row.
+  - **Deciding:** each decision asks for its reason in a dialog. Preferring one side needs one, as the store requires. Enter in the reason decides and Escape cancels. The decision carries the generation the review was read at.
+  - **Tests:** `ShellKnowledge.WorkspaceTraversesEvidenceRevisionsAndReviews` uses the real service and a temporary data folder. It covers:
+    - item → fact → excerpt in its item, then Back through both;
+    - a retained excerpt from an earlier revision;
+    - a revision's change report and its fact;
+    - a review decided by keyboard, after Escape and after a missing reason;
+    - the review's history, and a rejected side's state;
+    - the entity list;
+    - a narrow window where Back returns through the fact to the row;
+    - UI Automation checks on the fact reader and the entity reader.
+    
+    The Knowledge golden image now shows the section bar. 764 win, 70 UI and 7 analysis tests pass on the debug build.
+  - **Not done yet (rest of 10.1):**
+    - D5's Knowledge list of categories, Uncategorized and facts, with a paginated read. Entities stand in for now.
+    - Review's changed evidence and suggested categories, and its filter by reason.
+    - Paginated reads for the entity and review lists, which read at most 200 now, and paging through more than 20 revisions.
+    - Restoring scroll position on Back.
+    - Keyboard checks of the other dialogs (share, confirm, rename, edit).
+    
+    Publications in Sharing are 10.2 and 10.3.
 - **Progress audit and triage, 2026-11-09:** code was compared with every task. Tasks were split or added where code and specification disagree (2.4, 4.5, 5.6, 6.6), where a prerequisite was implicit (7.5, 7.6, 7.7, 8.5, 9.5), and narrowed where two tasks claimed the same evidence (1.4, 5.5, 6.5). Publication code in the control plane is unmounted library code with unit tests; no publication route, schema installation or policy key exists. The earlier note that multi-pass summarization is not enabled is superseded by the multi-pass note above. tasks.md carries the per-task status and the delivery order.
 - Final immutable speech artifact URL/mirror and manifest digest, verified package sizes, proxy behavior and actual language-fixture timing.
 - Actual configured model ids and context metadata, token-count strategy supported by those models, and measured compaction coverage/latency.

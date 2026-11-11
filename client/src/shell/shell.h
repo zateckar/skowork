@@ -610,7 +610,10 @@ private:
 // The skeleton is built once, so the search field and the list's scroll position survive updates. The host does the
 // work (knowledge.search, .browse, .item, .status, .document.*, .folder.*, .note.*, .fact.*, .entity.rename,
 // .item.forget, .exclusion.add, .sharing, .share, .unshare, .share_folder, .unshare_folder). The page pane keeps it
-// across rebuilds.
+// across rebuilds. Sections (task 10.1): Sources (the Source tabs), Knowledge (entities), Review (possible
+// inconsistencies) and Sharing (shared items and folders), each with its list; the reader also shows a fact with its
+// evidence, an entity, a review with its decisions and a change report. A reader opened from another one (a fact from
+// an item, its excerpt's item from the fact) keeps the way back: Back returns through them to the list.
 class KnowledgeView : public ui::Node {
 public:
     explicit KnowledgeView(Shell& shell);
@@ -620,7 +623,14 @@ public:
 
 private:
     class Split;
-    enum class Reader { empty, item, editor, imports };
+    enum class Reader { empty, item, editor, imports, fact, entity, review, change };
+    // A reader to return to with Back.
+    struct Place {
+        Reader mode = Reader::empty;
+        long long id = 0;
+        std::string selected;
+        json cited;
+    };
 
     void rebuild();
     void rebuild_messages();
@@ -634,7 +644,30 @@ private:
     void open_draft(const json& draft);  // Save as note: the editor with {title, text, origin}; nothing is stored yet
     void save_mail_as_note(long long item_id);
     void open_origin(const json& origin);  // the mail item or the Chat a note was saved from
-    void close_reader();                // Back on a narrow window
+    void close_reader();                // Back: the previous reader, or the list on a narrow window
+    // Workspace sections and readers (task 10.1).
+    void set_section(const std::string& section);
+    void load_section();
+    void rebuild_sections();
+    void build_section_list();
+    void push_place();                         // before a reader opened from the current one
+    void restore(const Place& p);
+    void open_fact(long long fact_id);
+    void open_entity(long long entity_id);
+    void open_review(long long review_id);
+    void open_change(long long report_id);
+    void open_cited(const json& citation);     // the item of an excerpt, with the excerpt shown
+    void load_detail(const std::string& method, const json& params, Reader mode, long long id);
+    void load_item_changes(long long item_id);
+    void ask_decision(long long review_id, const std::string& decision);
+    void build_fact(ui::Node& parent);
+    void build_entity(ui::Node& parent);
+    void build_review(ui::Node& parent);
+    void build_change(ui::Node& parent);
+    void build_item_jumps(ui::Node& parent);
+    void build_item_changes(ui::Node& parent, long long id);
+    void build_citation(ui::Node& parent, const json& c, const std::string& id);
+    void focus(const std::string& automation_id);
     void search();
     void clear_search();
     void show_add_menu();
@@ -663,6 +696,7 @@ private:
     ui::TextField* search_ = nullptr;
     ui::Button* add_ = nullptr;
     ui::Node* messages_ = nullptr;   // sharing off, notice, error
+    ui::Node* sections_ = nullptr;   // Sources, Knowledge, Review, Sharing
     ui::Node* tabs_ = nullptr;       // the Source tabs with counts
     Split* split_ = nullptr;
     ui::Node* list_pane_ = nullptr;
@@ -673,6 +707,17 @@ private:
     ui::Button* more_ = nullptr;     // the open item's More button
 
     std::string tab_ = "files";  // the Source tab
+    std::string section_ = "sources";
+    json entities_ = nullptr;      // knowledge.entities (Knowledge)
+    json reviews_ = nullptr;       // knowledge.reviews (Review)
+    json detail_ = nullptr;        // the open fact, entity, review or change report
+    long long detail_id_ = 0;
+    json item_changes_ = nullptr;  // knowledge.changes of the open item
+    long long item_changes_of_ = 0;
+    json cited_ = nullptr;         // the excerpt the open item was opened at
+    json review_history_ = nullptr;
+    std::vector<Place> history_;   // readers to return to
+    size_t detail_request_ = 0, section_request_ = 0, changes_request_ = 0;
     std::u16string query_, shown_query_, note_title_, note_text_;
     json results_ = nullptr;   // knowledge.search
     json items_ = nullptr;     // knowledge.browse of the tab

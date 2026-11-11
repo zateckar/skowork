@@ -5659,3 +5659,240 @@ TEST(ShellPages, ConnectorsShowApiStatesAndTakeAPersonalTokenOnce) {
     w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
     EXPECT_TRUE(problems.empty()) << problems.front();
 }
+
+// improve-skowork-and-knowledge-control 10.1: the Knowledge workspace with the real service. Sections; an item's fact
+// opens with its evidence, an excerpt opens back in its item, and Back returns through them; an item's revisions show
+// what each changed; a possible inconsistency is decided from its review with the keyboard (Escape cancels, Enter
+// decides, a reason is required to prefer one side); on a narrow window Back keeps the keyboard on the row.
+TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
+    struct Dir {
+        ~Dir() {
+            std::error_code ec;
+            std::filesystem::remove_all(path, ec);
+        }
+        std::filesystem::path path = std::filesystem::temp_directory_path() / L"workbench-test" / wb::widen(wb::random_urlsafe(6));
+    } dir;
+    const auto docs = dir.path / L"docs";
+    std::filesystem::create_directories(docs);
+    const auto write = [](const std::filesystem::path& p, const std::string& text) {
+        std::ofstream out(p, std::ios::binary | std::ios::trunc);
+        out << text;
+    };
+    write(docs / L"approved.txt", "The approved Phoenix deadline is June.");
+    write(docs / L"draft.txt", "Draft: the Phoenix deadline is July.");
+    write(docs / L"notes.txt", "Notes: the Phoenix deadline is June.");
+    auto root = DataRoot::open(dir.path / L"data");
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto k = keys.get_or_create("kg.db");
+    ASSERT_TRUE(k);
+    MigrationOutcome o;
+    auto db = knowledge::open_kg_database(root->file("kg.db"), *k, o);
+    ASSERT_TRUE(db);
+    std::atomic<ShellThread*> window{nullptr};
+    knowledge::KnowledgeEnv e;
+    e.clock = &system_clock();
+    e.policy = [](const std::string& key) -> std::optional<json> {
+        if (key == "knowledge.extraction") return json("off");
+        return std::nullopt;
+    };
+    e.index = [](const std::string& m, const json& p) { return knowledge::index_request(m, p); };
+    e.embed = [](const std::vector<std::string>&, const model::RequestContext&) -> model::ModelResult<model::EmbedResult> {
+        model::ModelFailure fail;
+        fail.code = model::code::timeout;
+        fail.message = "offline";
+        return fail;
+    };
+    e.read_permitted = [](const std::string&) { return true; };
+    e.changed = [&window] {
+        if (ShellThread* w = window.load()) w->post([w] { w->main().emit("knowledge.changed", json::object()); });
+    };
+    knowledge::KnowledgeService svc(std::move(e), std::make_unique<knowledge::KgStore>(std::move(*db)));
+    auto& store = svc.store();
+    const auto path = [&](const wchar_t* name) { return wb::narrow((docs / name).wstring()); };
+    for (const wchar_t* name : {L"approved.txt", L"draft.txt", L"notes.txt"}) {
+        ASSERT_TRUE(svc.add_document(path(name)));
+        svc.run_until_idle();
+    }
+    const auto approved = store.item("files", path(L"approved.txt")), draft = store.item("files", path(L"draft.txt")),
+               notes = store.item("files", path(L"notes.txt"));
+    ASSERT_TRUE(approved && draft && notes);
+    const auto approved_chunk = store.chunks_of_item(approved->id).at(0), draft_chunk = store.chunks_of_item(draft->id).at(0),
+               notes_chunk = store.chunks_of_item(notes->id).at(0);
+    const long long phoenix = store.resolve_entity("Project", "Phoenix", "", 1);
+    const long long june = store.resolve_entity("Date", "June", "", 1), july = store.resolve_entity("Date", "July", "", 1);
+    const long long june_relation = store.add_relation(phoenix, "deadline", june, 0.9, "", "", approved_chunk.id);
+    const long long july_relation = store.add_relation(phoenix, "deadline", july, 0.9, "", "", draft_chunk.id);
+    ASSERT_TRUE(store.add_relation(phoenix, "deadline", june, 0.9, "", "", notes_chunk.id));
+    ASSERT_TRUE(june_relation && july_relation);
+    const auto june_fact = store.fact_of_relation(*store.relation(june_relation));
+    const auto july_fact = store.fact_of_relation(*store.relation(july_relation));
+    ASSERT_TRUE(june_fact && july_fact);
+    const auto span = [](const knowledge::ChunkRow& c, const std::string& word) {
+        const auto at = c.text.find(word);
+        return knowledge::AnalysisSpan{c.id, at, at + word.size()};
+    };
+    auto generation = store.knowledge_generation();
+    ASSERT_TRUE(generation);
+    const auto june_excerpt = store.bind_analysis_evidence(*june_fact, span(approved_chunk, "June"), *generation);
+    ASSERT_TRUE(june_excerpt) << june_excerpt.error().message;
+    const auto july_excerpt = store.bind_analysis_evidence(*july_fact, span(draft_chunk, "July"), june_excerpt->generation);
+    ASSERT_TRUE(july_excerpt) << july_excerpt.error().message;
+    const auto review = store.record_conflict(*june_fact, *july_fact, june_excerpt->evidence_id, july_excerpt->evidence_id,
+                                              "Two deadlines for the same milestone", july_excerpt->generation);
+    ASSERT_TRUE(review) << review.error().message;
+    // A revision of the notes takes one of June's two supports.
+    write(docs / L"notes.txt", "The canteen opens at noon.");
+    svc.sweep_now();
+    svc.run_until_idle();
+    const std::string approved_row = "knowledge-row-" + std::to_string(approved->id);
+    const std::string fact_button = "knowledge-fact-evidence-relation-" + std::to_string(june_relation);
+
+    Fixture f;
+    register_knowledge_rpc(f.rpc, [&svc] { return &svc; }, nullptr);
+    const auto focused = [](ShellThread& w) {
+        std::string id;
+        w.run([&] {
+            const ui::Node* n = w.main().window()->tree().focused();
+            id = n ? n->automation_id() : "";
+        });
+        return id;
+    };
+    const auto label = [](ShellThread& w, const std::string& id) {
+        std::u16string out;
+        w.with(id, [&](ui::Node& n) {
+            out = n.name;
+            return true;
+        });
+        return out;
+    };
+    const auto back_visible = [](ShellThread& w) { return w.with("knowledge-back", [](ui::Node& n) { return n.visible; }); };
+    std::vector<std::string> problems;
+    {
+        ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+        f.attach(w);
+        window = &w;
+        w.run([&] { w.main().open("#/knowledge"); });
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-section-review") && w.exists(approved_row); }));
+        EXPECT_NE(label(w, "knowledge-section-sources").find(u"(selected)"), std::u16string::npos);
+
+        // Item → fact with its evidence → an excerpt in its item; Back returns through them.
+        ASSERT_TRUE(w.invoke(approved_row));
+        ASSERT_TRUE(w.until([&] { return w.exists(fact_button); }));
+        EXPECT_FALSE(back_visible(w));
+        ASSERT_TRUE(w.invoke("knowledge-item-goto-changes"));
+        EXPECT_EQ(focused(w), "knowledge-item-changes");
+        ASSERT_TRUE(w.invoke(fact_button));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-reader") && w.exists("knowledge-citation-0"); }));
+        EXPECT_EQ(label(w, "knowledge-fact-state"), u"Disputed");
+        // Every excerpt the user may read: the current ones and the one retained from the notes' earlier revision.
+        int approved_citation = -1;
+        bool retained = false;
+        for (int n = 0; w.exists("knowledge-citation-" + std::to_string(n)); ++n) {
+            const std::u16string excerpt = label(w, "knowledge-citation-excerpt-" + std::to_string(n));
+            if (excerpt == u"The approved Phoenix deadline is June.") approved_citation = n;
+            if (excerpt == u"Notes: the Phoenix deadline is June.") retained = true;
+        }
+        ASSERT_GE(approved_citation, 0);
+        EXPECT_TRUE(retained);
+        EXPECT_TRUE(w.exists("knowledge-fact-dispute-" + std::to_string(*review)));
+        EXPECT_TRUE(back_visible(w));
+        w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
+        EXPECT_TRUE(problems.empty()) << problems.front();
+        ASSERT_TRUE(w.invoke("knowledge-citation-open-" + std::to_string(approved_citation)));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-excerpt-text"); }));
+        EXPECT_EQ(label(w, "knowledge-item-title"), u"approved.txt");
+        EXPECT_EQ(label(w, "knowledge-item-excerpt-text"), u"The approved Phoenix deadline is June.");
+        ASSERT_TRUE(w.invoke("knowledge-back"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-reader"); }));
+        ASSERT_TRUE(w.invoke("knowledge-back"));
+        ASSERT_TRUE(w.until([&] { return w.exists(fact_button); }));
+        EXPECT_FALSE(w.exists("knowledge-item-excerpt"));
+        EXPECT_FALSE(back_visible(w));
+
+        // The notes' revision: its change report names the fact that lost a support.
+        ASSERT_TRUE(w.invoke("knowledge-row-" + std::to_string(notes->id)));
+        std::string change_row;
+        ASSERT_TRUE(w.until([&] {
+            return w.with("knowledge-item-change-list", [&](ui::Node& n) {
+                for (const auto& c : n.children())
+                    if (c->automation_id().rfind("knowledge-change-row-", 0) == 0) change_row = c->automation_id();
+                return !change_row.empty();
+            });
+        }));
+        EXPECT_NE(label(w, change_row).find(u"Revision 2"), std::u16string::npos) << ui::to_utf8(label(w, change_row));
+        ASSERT_TRUE(w.invoke(change_row));
+        const std::string changed_fact = "knowledge-change-fact-" + std::to_string(*june_fact);
+        ASSERT_TRUE(w.until([&] { return w.exists(changed_fact); }));
+        EXPECT_NE(label(w, changed_fact).find(u"lost some support"), std::u16string::npos) << ui::to_utf8(label(w, changed_fact));
+        ASSERT_TRUE(w.invoke(changed_fact));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-reader"); }));
+        ASSERT_TRUE(w.invoke("knowledge-back"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-change-reader"); }));
+
+        // Review: the possible inconsistency from its section; Escape cancels, preferring needs a reason, Enter decides.
+        const std::string review_row = "knowledge-review-row-" + std::to_string(*review);
+        ASSERT_TRUE(w.invoke("knowledge-section-review"));
+        ASSERT_TRUE(w.until([&] { return w.exists(review_row); }));
+        EXPECT_FALSE(w.with("knowledge-tabs", [](ui::Node& n) { return n.visible; }));
+        ASSERT_TRUE(w.invoke(review_row));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-review-prefer-left"); }));
+        EXPECT_FALSE(back_visible(w));  // a row opens afresh
+        EXPECT_EQ(label(w, "knowledge-citation-excerpt-left"), u"June");
+        ASSERT_TRUE(w.invoke("knowledge-review-prefer-left"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-decide-reason"); }));
+        EXPECT_EQ(focused(w), "knowledge-decide-reason");
+        w.key(ui::kKeyEscape);
+        ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-decide"); }));
+        EXPECT_EQ(store.conflict(*review)->state, "open");
+        ASSERT_TRUE(w.invoke("knowledge-review-prefer-left"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-decide-reason"); }));
+        EXPECT_TRUE(w.field_key("knowledge-decide-reason", ui::kKeyEnter));  // no reason yet
+        ASSERT_TRUE(w.until([&] { return label(w, "knowledge-decide-missing") == u"Enter a reason."; }));
+        EXPECT_EQ(store.conflict(*review)->state, "open");
+        w.type("knowledge-decide-reason", u"Approved plan");
+        EXPECT_EQ(focused(w), "knowledge-decide-reason");
+        EXPECT_TRUE(w.field_key("knowledge-decide-reason", ui::kKeyEnter));
+        ASSERT_TRUE(w.until([&] { return store.conflict(*review)->state == "resolved"; }));
+        EXPECT_EQ(store.conflict(*review)->decision_reason, "Approved plan");
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-review-reopen"); }));
+        ASSERT_TRUE(w.invoke("knowledge-review-history"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-review-decision-0"); }));
+        // From the review to a side's fact and back.
+        ASSERT_TRUE(w.invoke("knowledge-review-open-right"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-reader"); }));
+        EXPECT_EQ(label(w, "knowledge-fact-state"), u"Rejected");
+        ASSERT_TRUE(w.invoke("knowledge-back"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-review-reader"); }));
+
+        // Knowledge: the entity and its facts.
+        ASSERT_TRUE(w.invoke("knowledge-section-knowledge"));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-entities-row-" + std::to_string(phoenix)); }));
+        ASSERT_TRUE(w.invoke("knowledge-entities-row-" + std::to_string(phoenix)));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-entity-fact-" + std::to_string(*june_fact)); }));
+        w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
+        EXPECT_TRUE(problems.empty()) << problems.front();
+        window = nullptr;
+    }
+
+    // A narrow window shows one pane: Back goes through the nested readers, then to the list with the row focused.
+    {
+        ShellThread w(f.rpc, 800, [&f] { return f.now(); });
+        f.attach(w);
+        window = &w;
+        w.run([&] { w.main().open("#/knowledge"); });
+        ASSERT_TRUE(w.until([&] { return w.exists(approved_row); }));
+        ASSERT_TRUE(w.invoke(approved_row));
+        ASSERT_TRUE(w.until([&] { return w.exists(fact_button); }));
+        ASSERT_TRUE(w.invoke(fact_button));
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-reader"); }));
+        EXPECT_FALSE(w.with("knowledge-list-pane", [](ui::Node& n) { return n.visible; }));
+        ASSERT_TRUE(w.invoke("knowledge-back"));
+        ASSERT_TRUE(w.until([&] { return w.exists(fact_button); }));
+        ASSERT_TRUE(w.invoke("knowledge-back"));
+        ASSERT_TRUE(w.until([&] { return w.with("knowledge-list-pane", [](ui::Node& n) { return n.visible; }); }));
+        EXPECT_EQ(focused(w), approved_row);
+        window = nullptr;
+    }
+}

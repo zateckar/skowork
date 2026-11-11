@@ -202,6 +202,9 @@ public:
     // The fact's assignments: [{category_id, name, decision, reason, excerpt?}]; an automatic one says why with the
     // excerpt it cites while that passage is permitted. not_found when the fact is not current, permitted knowledge.
     Result<json> fact_categories(long long fact_id);
+    // The fact reader: {fact_id, text, subject, predicate, object, dates, state, categories, citations, disputes}; the
+    // citations include retained excerpts, so a fact that lost its support is still explained.
+    Result<json> fact_detail(long long fact_id);
 
     // ---- Review (Possible Inconsistency Review, User Resolution Of Inconsistencies) ----
     // {generation, consistency {policy, active, pending}, items: [{review_id, kind, state, explanation, decision,
