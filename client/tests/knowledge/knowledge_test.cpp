@@ -8,6 +8,7 @@
 #include "knowledge/kg_store.h"
 #include "knowledge/knowledge_service.h"
 #include "mail/mail_service.h"
+#include "storage/withdrawal_outbox.h"
 #include "support/dev_endpoints.h"
 #include "support/graph_mock.h"
 #include "support/runtime_harness.h"
@@ -17,6 +18,7 @@
 #include <windows.h>
 #include <psapi.h>
 
+#include <chrono>
 #include <fstream>
 #include <map>
 #include <set>
@@ -273,6 +275,7 @@ struct Kg {
         e.deferred = [this] { return deferred.load(); };
         if (team) e.team = [this](const std::string& m, const std::string& p, const json& b) { return team(m, p, b); };
         if (pending_withdrawal) e.pending_item_withdrawal = [this](const std::string& id) { return pending_withdrawal(id); };
+        if (retry_withdrawals) e.retry_withdrawals = [this](const std::function<Status(const std::string&)>& remove) { retry_withdrawals(remove); };
         e.background = background;
         svc = std::make_unique<KnowledgeService>(std::move(e), std::make_unique<KgStore>(std::move(*db)));
     }
@@ -333,6 +336,7 @@ struct Kg {
     // control-plane/team-knowledge (add-knowledge-sharing); set it, then make() again.
     std::function<Result<json>(const std::string&, const std::string&, const json&)> team;
     std::function<Result<bool>(const std::string&)> pending_withdrawal;
+    std::function<void(const std::function<Status(const std::string&)>&)> retry_withdrawals;
     std::unique_ptr<KnowledgeService> svc;
 };
 
@@ -2763,6 +2767,7 @@ struct FakeTeam {
     std::vector<std::string> permitted = {"engineering"};
     size_t max_bytes = 2'000'000;
     std::map<std::string, json> items;  // item_id -> the published body
+    std::set<std::string> proven_absent;  // missing ids the server confirms absent for this subject
     std::vector<std::tuple<std::string, std::string, json>> calls;
     json passages = json::array();  // what search answers
 
@@ -2785,7 +2790,8 @@ struct FakeTeam {
             return json{{"item_id", path.substr(prefix.size())}, {"owner", "jan"}, {"groups", body["groups"]}};
         }
         if (method == "DELETE" && path.rfind(prefix, 0) == 0) {
-            if (!items.erase(path.substr(prefix.size()))) return make_error("NOT_FOUND", "no such item");
+            const std::string id = path.substr(prefix.size());
+            if (!items.erase(id)) return proven_absent.count(id) ? make_error("ABSENT", "no such item") : make_error("NOT_FOUND", "no such item");
             return json{{"ok", true}};
         }
         if (method == "POST" && path == "api/v1/knowledge/search") return json{{"passages", passages}};
@@ -2944,6 +2950,82 @@ TEST(KnowledgeSharing, DeleteAllDoesNotTreatLegacyOwnerNotFoundAsProofOfRemoval)
     EXPECT_EQ(pending->state, "unsharing");
     kg.svc->sync_sharing(true);
     EXPECT_TRUE(kg.svc->store().share("notes", std::to_string(*note)));
+}
+
+TEST(KnowledgeSharing, OfflineDeleteAllHandsPendingRemovalsToTheSameAccountAfterSignIn) {
+    FakeTeam team;
+    std::filesystem::path outbox_file;
+    std::vector<std::string> ids;
+    {
+        Kg kg({{"knowledge.extraction", "off"}, {"knowledge.sharing.groups", {"engineering"}}});
+        with_team(kg, team);
+        std::vector<long long> notes;
+        for (const char* text : {"First shared note.", "Second shared note.", "Third shared note."}) {
+            const auto note = kg.svc->save_note(0, text, text);
+            ASSERT_TRUE(note);
+            notes.push_back(*note);
+        }
+        kg.idle();
+        for (const auto note : notes) {
+            const auto item = kg.svc->store().item("notes", std::to_string(note));
+            ASSERT_TRUE(item);
+            ASSERT_TRUE(kg.svc->share_item(item->id, {"engineering"}));
+        }
+        for (const auto& [id, body] : team.items) ids.push_back(id);
+        ASSERT_EQ(ids.size(), 3u);
+        // Delete all while offline: nothing is confirmed, local content is untouched until the wipe.
+        team.offline = true;
+        auto pending = kg.svc->withdraw_for_delete_all();
+        ASSERT_TRUE(pending);
+        std::sort(pending->begin(), pending->end());
+        EXPECT_EQ(*pending, ids);
+        for (const auto note : notes) EXPECT_TRUE(kg.svc->store().note(note));
+        // A frozen profile does not upload.
+        EXPECT_EQ(team.count("PUT"), 3);
+        // The outbox outlives the erased profile (here: the test's temporary profile directory).
+        outbox_file = std::filesystem::temp_directory_path() /
+                      ("wb-outbox-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".dpapi");
+        const WithdrawalOutbox outbox(outbox_file);
+        ASSERT_FALSE(outbox.stage_wipe("issuer", "endpoint", "", *pending));  // not signed in: refused, nothing erased
+        ASSERT_TRUE(outbox.stage_wipe("issuer", "endpoint", "alice", *pending));
+        ASSERT_TRUE(outbox.finish_interrupted_wipe([&] {
+            kg.svc.reset();  // the wipe: the knowledge store is gone
+            return Status{};
+        }));
+    }
+    // First run after the wipe: an empty profile with the retained records.
+    const WithdrawalOutbox outbox(outbox_file);
+    std::string signed_in = "bob";
+    Kg fresh({{"knowledge.extraction", "off"}});
+    fresh.retry_withdrawals = [&](const std::function<Status(const std::string&)>& remove) {
+        ASSERT_TRUE(outbox.retry_items("issuer", "endpoint", signed_in, remove));
+    };
+    with_team(fresh, team);
+    team.offline = false;
+    const auto deletes = team.count("DELETE");
+    fresh.svc->sync_sharing(true);
+    EXPECT_EQ(team.count("DELETE"), deletes) << "another account must not send the removals";
+    ASSERT_TRUE(outbox.load());
+    EXPECT_EQ(outbox.load()->entries.size(), 3u);
+    // The same account signs in. One item is gone without proof (a legacy share elsewhere), one is proven absent.
+    team.items.erase(ids[0]);
+    team.items.erase(ids[1]);
+    team.proven_absent.insert(ids[1]);
+    signed_in = "alice";
+    fresh.svc->sync_sharing(true);
+    EXPECT_EQ(team.count("DELETE"), deletes + 3);
+    EXPECT_TRUE(team.items.empty());
+    auto left = outbox.load();
+    ASSERT_TRUE(left);
+    ASSERT_EQ(left->entries.size(), 1u);
+    EXPECT_EQ(left->entries[0].remote_id, ids[0]);
+    team.proven_absent.insert(ids[0]);
+    fresh.svc->sync_sharing(true);
+    left = outbox.load();
+    ASSERT_TRUE(left);
+    EXPECT_TRUE(left->entries.empty());
+    EXPECT_EQ(team.count("PUT"), 3) << "nothing deleted is uploaded again";
+    std::filesystem::remove(outbox_file);
 }
 
 TEST(KnowledgeSharing, EarlierInferredRemovalRetainsIdentityWhenNoteIsForgotten) {

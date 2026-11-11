@@ -30,6 +30,14 @@ When local content is forgotten before its remote withdrawal is acknowledged, th
 - **WHEN** a user deletes all data while offline with published knowledge still present on the server
 - **THEN** the local text and derived content are deleted, the first-run view reports pending remote removal, and reconnecting and signing in as the same user permits withdrawal without restoring the deleted knowledge
 
+#### Scenario: Another account signs in after Delete all
+- **WHEN** pending removals were recorded for one issuer, control plane and subject, and a different account signs in
+- **THEN** the client does not send those removals with that account and keeps the records and the first-run notice
+
+#### Scenario: Removal not confirmed
+- **WHEN** a retried removal is answered only with not found without confirmed absence for the bound subject
+- **THEN** the client keeps that record for a later retry and still completes the other records
+
 #### Scenario: Withdrawal records cannot be preserved
 - **WHEN** Delete all cannot durably preserve the identities needed for pending remote withdrawal
 - **THEN** it reports the failure and does not erase the only remaining withdrawal records or sign the user out

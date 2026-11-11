@@ -569,14 +569,27 @@ void App::register_rpc() {
     });
     rpc.add("storage.delete_everything", RpcExposure::ui, [this](const json& p) -> Result<json> {
         if (!jbool(p, "confirm")) return make_error("confirmation_required", "confirm must be true");
+        if (!root) return make_error("storage", storage_error);
+        std::vector<std::string> pending;
         if (knowledge_svc) {
-            if (auto s = knowledge_svc->prepare_delete_all(); !s) return s.error();
-        } else if (root) {
+            auto ids = knowledge_svc->withdraw_for_delete_all();
+            if (!ids) return ids.error();
+            pending = std::move(*ids);
+        } else {
             std::error_code ec;
             const bool has_knowledge = std::filesystem::exists(root->file("kg.db"), ec);
             if (ec || has_knowledge)
                 return make_error("unavailable", "Knowledge could not be checked for shared items. Try again after knowledge is available.");
         }
+        // The durable wipe intent and the removals still pending, bound to this account, are written before sign-out
+        // and outside the stores being erased (client/local-storage Pending Shared Data Removal).
+        const std::string subject = tokens ? tokens->subject() : std::string{};
+        if (auto s = WithdrawalOutbox(root->file("withdrawals.dpapi")).stage_wipe(cfg.idp_issuer, cfg.control_plane_url, subject, pending); !s) {
+            if (knowledge_svc) knowledge_svc->cancel_delete_all();
+            log::warn(kLog, "delete everything: pending removals could not be recorded: " + s.error().message);
+            return make_error("remote_pending", "Pending removal of shared knowledge could not be recorded. Nothing has been deleted and you are still signed in.");
+        }
+        pending_remote_removals = static_cast<int>(pending.size());
         if (tokens) (void)tokens->sign_out();
         wipe_on_exit = true;
         quit();
@@ -1558,6 +1571,20 @@ void App::start_knowledge() {
         if (!root || !tokens) return make_error("unavailable", "Cannot check pending shared-data removal.");
         return WithdrawalOutbox(root->file("withdrawals.dpapi")).has_item(cfg.idp_issuer, cfg.control_plane_url,
                                                                            tokens->subject(), remote_id);
+    };
+    ke.retry_withdrawals = [this](const std::function<Status(const std::string&)>& remove) {
+        if (!root || !tokens || pending_remote_removals.load() == 0) return;
+        const std::string subject = tokens->subject();
+        if (subject.empty()) return;  // removals wait for a sign-in; only the bound account may send them
+        const WithdrawalOutbox outbox(root->file("withdrawals.dpapi"));
+        const auto result = outbox.retry_items(cfg.idp_issuer, cfg.control_plane_url, subject, remove);
+        if (!result) {
+            log::warn(kLog, "pending shared-data removal: " + result.error().message);
+            return;
+        }
+        if (result->completed) log::info(kLog, "pending shared-data removal: " + std::to_string(result->completed) + " confirmed");
+        // The status poll shows the new count; the first-run notice ends with the last record.
+        if (const auto state = outbox.load()) pending_remote_removals = static_cast<int>(state->entries.size());
     };
     knowledge_svc = std::make_unique<knowledge::KnowledgeService>(std::move(ke), std::make_unique<knowledge::KgStore>(std::move(*db)));
     for (auto& t : knowledge_svc->tools())
@@ -2541,7 +2568,9 @@ void App::shutdown() {
     if (wipe_on_exit && root) {
         log::info(kLog, "delete everything: wiping the data root");
         log::shutdown();
-        if (Status s = root->wipe(); !s) ::OutputDebugStringA(("SkoWork wipe failed: " + s.error().message).c_str());
+        // Clears the wipe intent only after the wipe succeeded; otherwise the next start completes it first.
+        if (Status s = WithdrawalOutbox(root->file("withdrawals.dpapi")).finish_interrupted_wipe([this] { return root->wipe(); }); !s)
+            ::OutputDebugStringA(("SkoWork wipe failed: " + s.error().message).c_str());
     } else {
         log::info(kLog, "stopped");
         log::shutdown();

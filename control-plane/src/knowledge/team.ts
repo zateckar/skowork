@@ -38,7 +38,13 @@ interface ItemRow {
   embed_model: string | null;
   created_at: string;
   updated_at: string;
+  owner_issuer: string | null; // NULL: a legacy share, keyed only by its historical username
+  owner_subject: string | null;
 }
+
+/** The caller's subject-bound shares and their legacy shares under the current username. */
+const OWNED = '((owner_issuer = ? AND owner_subject = ?) OR (owner_subject IS NULL AND owner = ?))';
+const ownedArgs = (user: User) => [user.issuer, user.subject, user.userName];
 
 /** Paragraph-aware windows of about CHUNK_CHARS with an overlap, like the client's document chunker. */
 export function chunkText(text: string): string[] {
@@ -117,10 +123,16 @@ export class TeamKnowledge {
     const permitted = [...out].sort();
     this.#db
       .prepare(
-        `INSERT INTO team_owners (user_name, groups, permitted, updated_at) VALUES (?, ?, ?, ?)
-         ON CONFLICT (user_name) DO UPDATE SET groups = excluded.groups, permitted = excluded.permitted, updated_at = excluded.updated_at`,
+        `INSERT INTO team_owners (user_name, groups, permitted, updated_at, issuer, subject) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (user_name) DO UPDATE SET groups = excluded.groups, permitted = excluded.permitted, updated_at = excluded.updated_at,
+           issuer = excluded.issuer, subject = excluded.subject`,
       )
-      .run(user.userName, JSON.stringify([...member].sort()), JSON.stringify(permitted), nowIso());
+      .run(user.userName, JSON.stringify([...member].sort()), JSON.stringify(permitted), nowIso(), user.issuer, user.subject);
+    // A subject-bound share follows its owner's current username. A share whose id the new name already holds keeps the
+    // former name, and stays hidden while that name's snapshot belongs to another subject.
+    this.#db
+      .prepare('UPDATE OR IGNORE team_items SET owner = ? WHERE owner_issuer = ? AND owner_subject = ? AND owner <> ?')
+      .run(user.userName, user.issuer, user.subject, user.userName);
     return permitted;
   }
 
@@ -136,8 +148,25 @@ export class TeamKnowledge {
     return { ...user, groups: this.#currentGroups(user) };
   }
 
-  #item(owner: string, itemId: string): ItemRow | undefined {
-    return this.#db.prepare('SELECT * FROM team_items WHERE owner = ? AND item_id = ?').get(owner, itemId) as ItemRow | undefined;
+  /** The caller's subject-bound share with this id. */
+  #owned(user: User, itemId: string): ItemRow | undefined {
+    return this.#db.prepare('SELECT * FROM team_items WHERE owner_issuer = ? AND owner_subject = ? AND item_id = ?')
+      .get(user.issuer, user.subject, itemId) as ItemRow | undefined;
+  }
+
+  /** A legacy share with this id under the caller's current username: not proof that it was the caller's. */
+  #legacy(user: User, itemId: string): ItemRow | undefined {
+    return this.#db.prepare('SELECT * FROM team_items WHERE owner_subject IS NULL AND owner = ? AND item_id = ?')
+      .get(user.userName, itemId) as ItemRow | undefined;
+  }
+
+  #usage(user: User, except: number[]): number {
+    const rows = this.#db.prepare(`SELECT id, size FROM team_items WHERE ${OWNED}`).all(...ownedArgs(user)) as { id: number; size: number }[];
+    return rows.filter((r) => !except.includes(Number(r.id))).reduce((s, r) => s + Number(r.size), 0);
+  }
+
+  #state(row: ItemRow | undefined): string {
+    return row ? JSON.stringify([row, this.#groupsOf(row.id)]) : '';
   }
 
   #groupsOf(id: number): string[] {
@@ -162,10 +191,15 @@ export class TeamKnowledge {
       throw new ApiError(403, 'GROUP_NOT_PERMITTED', `You cannot share with ${refused.join(', ')}: you are not a member, or policy.knowledge.sharing.groups does not permit it.`, { groups: refused });
     }
     const ownerSnapshot = this.#db.prepare('SELECT groups, permitted FROM team_owners WHERE user_name = ?').get(user.userName) as { groups: string; permitted: string };
-    const before = this.#item(user.userName, itemId);
-    const beforeState = before ? JSON.stringify([before, this.#groupsOf(before.id)]) : '';
-    const others = (this.#db.prepare('SELECT COALESCE(SUM(size), 0) AS s FROM team_items WHERE owner = ? AND item_id != ?').get(user.userName, itemId) as { s: number }).s;
-    if (Number(others) + size > limits.quotaBytes) throw new ApiError(413, 'QUOTA_EXCEEDED', 'Your shared knowledge is at its size limit. Unshare items first.');
+    const before = this.#owned(user, itemId);
+    // A legacy share of this username and id is replaced, not adopted: its content is removed with the new write.
+    const legacy = before ? undefined : this.#legacy(user, itemId);
+    const beforeState = this.#state(before);
+    const legacyState = this.#state(legacy);
+    const taken = () => !before && !legacy && this.#db.prepare('SELECT 1 FROM team_items WHERE owner = ? AND item_id = ?').get(user.userName, itemId);
+    if (taken()) throw new ApiError(409, 'CONFLICT', 'Another account still holds a shared item with this id under your username.');
+    const replaced = [before?.id, legacy?.id].filter((x): x is number => x !== undefined).map(Number);
+    if (this.#usage(user, replaced) + size > limits.quotaBytes) throw new ApiError(413, 'QUOTA_EXCEEDED', 'Your shared knowledge is at its size limit. Unshare items first.');
 
     const target = [...new Set(groups as string[])].sort();
     const serverHash = createHash('sha256').update(text, 'utf8').digest('hex');
@@ -201,22 +235,22 @@ export class TeamKnowledge {
     const id = tx(this.#db, () => {
       // Nothing yields between the refresh and this transaction. Check the item and
       // quota again because other requests may have committed while embedding.
-      const current = this.#item(user.userName, itemId);
-      if (before ? !current || current.id !== before.id || JSON.stringify([current, this.#groupsOf(current.id)]) !== beforeState : !!current)
+      if (this.#state(this.#owned(user, itemId)) !== beforeState || this.#state(before ? undefined : this.#legacy(user, itemId)) !== legacyState || taken())
         throw new ApiError(409, 'CONFLICT', 'The shared item changed while it was being prepared. Refresh and try again.');
-      const currentOthers = (this.#db.prepare('SELECT COALESCE(SUM(size), 0) AS s FROM team_items WHERE owner = ? AND item_id != ?')
-        .get(user.userName, itemId) as { s: number }).s;
-      if (Number(currentOthers) + size > limits.quotaBytes)
+      if (this.#usage(user, replaced) + size > limits.quotaBytes)
         throw new ApiError(413, 'QUOTA_EXCEEDED', 'Your shared knowledge is at its size limit. Unshare items first.');
+      if (legacy) this.#deleteRow(legacy.id);
       let rowId: number;
       if (before) {
         rowId = before.id;
-        this.#db.prepare('UPDATE team_items SET title = ?, kind = ?, content_hash = ?, server_content_hash = ?, size = ?, updated_at = ? WHERE id = ?').run(title.trim(), kind, hash, serverHash, size, now, rowId);
+        this.#db.prepare('UPDATE team_items SET title = ?, kind = ?, content_hash = ?, server_content_hash = ?, size = ?, updated_at = ? WHERE id = ?')
+          .run(title.trim(), kind, hash, serverHash, size, now, rowId);
       } else {
         rowId = Number(
           this.#db
-            .prepare('INSERT INTO team_items (owner, item_id, title, kind, content_hash, server_content_hash, size, embed_model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)')
-            .run(user.userName, itemId, title.trim(), kind, hash, serverHash, size, now, now).lastInsertRowid,
+            .prepare(`INSERT INTO team_items (owner, item_id, title, kind, content_hash, server_content_hash, size, embed_model, created_at, updated_at, owner_issuer, owner_subject)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`)
+            .run(user.userName, itemId, title.trim(), kind, hash, serverHash, size, now, now, user.issuer, user.subject).lastInsertRowid,
         );
       }
       if (!sameText) {
@@ -229,7 +263,7 @@ export class TeamKnowledge {
       for (const g of target) this.#db.prepare('INSERT INTO team_item_groups (item, grp) VALUES (?, ?)').run(rowId, g);
       return rowId;
     });
-    this.#record(user, 'knowledge.publish', { item_id: itemId, title: title.trim(), kind, size, groups: target, replaced: Boolean(before), text_changed: !sameText });
+    this.#record(user, 'knowledge.publish', { item_id: itemId, title: title.trim(), kind, size, groups: target, replaced: Boolean(before), replaced_legacy: Boolean(legacy), text_changed: !sameText });
     return this.#view(this.#db.prepare('SELECT * FROM team_items WHERE id = ?').get(id) as unknown as ItemRow);
   }
 
@@ -238,30 +272,41 @@ export class TeamKnowledge {
     return {
       item_id: r.item_id, title: r.title, kind: r.kind, owner: r.owner, size: r.size, content_hash: r.content_hash, groups: this.#groupsOf(r.id),
       chunks: Number(chunks), embedded: r.embed_model !== null, created_at: r.created_at, updated_at: r.updated_at,
+      ownership: r.owner_subject === null ? 'legacy' : 'subject',
     };
   }
 
   /** The caller's own shared items: what the client shows as shared (an item an admin removed is missing here). */
   mine(user: User) {
     const permitted = this.permitted(user);
-    const items = this.#db.prepare('SELECT * FROM team_items WHERE owner = ? ORDER BY updated_at DESC').all(user.userName) as unknown as ItemRow[];
+    const items = this.#db.prepare(`SELECT * FROM team_items WHERE ${OWNED} ORDER BY updated_at DESC`).all(...ownedArgs(user)) as unknown as ItemRow[];
     return { permitted_groups: permitted, items: items.map((r) => this.#view(r)) };
   }
 
+  /**
+   * Withdrawal of the caller's share. Not found is `ABSENT` only when no share could be the caller's: none of this subject
+   * and no legacy share with this id under any username, since a legacy share may predate a username change.
+   */
   unshare(user: User, itemId: string) {
-    const r = this.#item(user.userName, itemId);
-    if (!r) throw new ApiError(404, 'NOT_FOUND', 'You have no shared item with this id.');
+    const r = this.#owned(user, itemId) ?? this.#legacy(user, itemId);
+    if (!r) {
+      const legacyElsewhere = this.#db.prepare('SELECT 1 FROM team_items WHERE owner_subject IS NULL AND item_id = ?').get(itemId);
+      throw new ApiError(404, legacyElsewhere ? 'NOT_FOUND' : 'ABSENT', 'You have no shared item with this id.');
+    }
     const groups = this.#groupsOf(r.id);
     this.#delete(r.id);
-    this.#record(user, 'knowledge.unshare', { item_id: itemId, title: r.title, groups });
-    return { unshared: itemId };
+    const ownership = r.owner_subject === null ? 'legacy' : 'subject';
+    this.#record(user, 'knowledge.unshare', { item_id: itemId, title: r.title, groups, ownership });
+    return { unshared: itemId, ownership };
+  }
+
+  #deleteRow(id: number) {
+    this.#db.prepare('DELETE FROM team_chunks WHERE item = ?').run(id);
+    this.#db.prepare('DELETE FROM team_items WHERE id = ?').run(id);
   }
 
   #delete(id: number) {
-    tx(this.#db, () => {
-      this.#db.prepare('DELETE FROM team_chunks WHERE item = ?').run(id);
-      this.#db.prepare('DELETE FROM team_items WHERE id = ?').run(id);
-    });
+    tx(this.#db, () => this.#deleteRow(id));
   }
 
   /**
@@ -275,6 +320,7 @@ export class TeamKnowledge {
         `SELECT g.item, g.grp, o.groups AS og, o.permitted AS op FROM team_item_groups g
          JOIN team_items i ON i.id = g.item
          JOIN team_owners o ON o.user_name = i.owner
+           AND (i.owner_subject IS NULL OR (o.issuer = i.owner_issuer AND o.subject = i.owner_subject))
          WHERE NOT EXISTS (SELECT 1 FROM deny_list d WHERE d.kind = 'user' AND lower(d.value) = lower(i.owner))`,
       )
       .all() as { item: number; grp: string; og: string; op: string }[];

@@ -330,4 +330,55 @@ describe('team knowledge', () => {
     assert.equal(rec.details.title, 'Doc doc-1');
     assert.deepEqual((await h.call('GET', '/api/v1/knowledge/items', tok.alice!)).body.items, []);
   });
+
+  it('item shares are owned by issuer and subject; legacy shares are replaced, never adopted, and absence is proven only without them', async () => {
+    const member = (u: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: u, workbench_group: 'engineering' });
+    for (const u of ['erin', 'erin2', 'frank']) await member(u);
+    const erin = await h.token('erin', { sub: 'subject-erin' });
+    const put = (token: string, id: string, text: string) =>
+      h.call('PUT', `/api/v1/knowledge/items/${id}`, token, { title: `Doc ${id}`, kind: 'files', text, content_hash: hash(text), groups: ['engineering'] });
+    const shared = await put(erin, 'own-1', 'Turbine maintenance window moves to the second week of May.');
+    assert.equal(shared.status, 200, JSON.stringify(shared.body));
+    assert.equal(shared.body.ownership, 'subject');
+    assert.equal((await search('alice', 'turbine maintenance window'))[0]?.owner, 'erin');
+
+    // Another subject now signs in with the former username: it neither sees, governs nor removes erin's share.
+    const other = await h.token('erin', { sub: 'subject-other' });
+    assert.deepEqual((await h.call('GET', '/api/v1/knowledge/items', other)).body.items, []);
+    const refused = await h.call('DELETE', '/api/v1/knowledge/items/own-1', other);
+    assert.equal(refused.status, 404);
+    assert.equal(refused.body.error.code, 'ABSENT');
+    assert.equal((h.cp.db.prepare("SELECT COUNT(*) AS n FROM team_items WHERE item_id = 'own-1'").get() as any).n, 1);
+    assert.ok(!(await search('alice', 'turbine maintenance window')).some((p) => p.item_id === 'own-1'), 'another subject\'s snapshot must not apply');
+
+    // The same issuer and subject returns with a new username and withdraws the share.
+    const renamed = await h.token('erin2', { sub: 'subject-erin' });
+    const mine = (await h.call('GET', '/api/v1/knowledge/items', renamed)).body.items;
+    assert.deepEqual(mine.map((i: any) => [i.item_id, i.owner, i.ownership]), [['own-1', 'erin2', 'subject']]);
+    assert.equal((await search('alice', 'turbine maintenance window'))[0]?.owner, 'erin2');
+    const removed = await h.call('DELETE', '/api/v1/knowledge/items/own-1', renamed);
+    assert.equal(removed.status, 200);
+    assert.equal(removed.body.ownership, 'subject');
+    const again = await h.call('DELETE', '/api/v1/knowledge/items/own-1', renamed);
+    assert.equal(again.body.error.code, 'ABSENT');
+
+    // A legacy share has only its historical username.
+    const frank = await h.token('frank');
+    assert.equal((await put(frank, 'legacy-1', 'Legacy note about the paint line conveyor.')).status, 200);
+    h.cp.db.prepare("UPDATE team_items SET owner_issuer = NULL, owner_subject = NULL WHERE item_id = 'legacy-1'").run();
+    const gina = await h.token('gina', { sub: 'subject-gina' });
+    const ambiguous = await h.call('DELETE', '/api/v1/knowledge/items/legacy-1', gina);
+    assert.equal(ambiguous.status, 404);
+    assert.equal(ambiguous.body.error.code, 'NOT_FOUND', 'a legacy share elsewhere must not prove absence');
+    assert.equal((await h.call('GET', '/api/v1/knowledge/items', frank)).body.items[0].ownership, 'legacy');
+    const replaced = await put(frank, 'legacy-1', 'Updated note about the paint line conveyor.');
+    assert.equal(replaced.status, 200);
+    assert.equal(replaced.body.ownership, 'subject');
+    const rows = h.cp.db.prepare("SELECT owner_subject FROM team_items WHERE item_id = 'legacy-1'").all() as any[];
+    assert.deepEqual(rows.map((r) => r.owner_subject), ['sub-frank']);
+    assert.equal((h.cp.db.prepare("SELECT COUNT(*) AS n FROM team_chunks_fts WHERE team_chunks_fts MATCH 'legacy'").get() as any).n, 0, 'the legacy text is removed');
+    const audit = (h.cp.audit.query({ action: 'knowledge.publish' }) as any[]).find((r) => r.details.item_id === 'legacy-1' && r.details.replaced_legacy);
+    assert.ok(audit, 'replacing a legacy share is audited');
+    assert.equal((await h.call('DELETE', '/api/v1/knowledge/items/legacy-1', frank)).status, 200);
+  });
 });

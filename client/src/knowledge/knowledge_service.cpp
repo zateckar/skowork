@@ -1932,6 +1932,34 @@ json KnowledgeService::entity_profile(long long id, const KnowledgeFilter& filte
     return profile;
 }
 
+namespace {
+// Removed now, or proven absent for this issuer and subject (control-plane/team-knowledge Shared Item Ownership). A plain
+// not found does not prove it: a legacy share keyed by a former username may still hold the item.
+bool withdrawal_confirmed(const Result<json>& response) { return response || response.error().code == "ABSENT"; }
+}  // namespace
+
+Result<std::vector<std::string>> KnowledgeService::withdraw_for_delete_all() {
+    auto ids = freeze_for_delete_all();
+    if (!ids) return ids.error();
+    const std::lock_guard lock(share_mx_);
+    std::vector<std::string> pending;
+    for (const auto& row : store_->shares()) {
+        if (row.state == "removed" || row.state == "withdrawn") continue;
+        std::string id = row.remote_id;
+        if (id.empty() && shareable_source(row.source) && !row.ext_id.empty())
+            id = "k-" + content_hash(row.source + ":" + row.ext_id);
+        if (env_.team && withdrawal_confirmed(env_.team("DELETE", "api/v1/knowledge/items/" + id, nullptr))) {
+            if (auto result = store_->mark_share_removed(row.source, row.ext_id); !result) {
+                deleting_all_ = false;
+                return result.error();
+            }
+            continue;
+        }
+        if (std::find(pending.begin(), pending.end(), id) == pending.end()) pending.push_back(std::move(id));
+    }
+    return pending;
+}
+
 Result<std::vector<std::string>> KnowledgeService::freeze_for_delete_all() {
     const std::lock_guard lock(share_mx_);
     deleting_all_ = true;
@@ -1967,8 +1995,8 @@ Status KnowledgeService::prepare_delete_all() {
             id = "k-" + content_hash(row.source + ":" + row.ext_id);
         const auto response = env_.team && !id.empty() ? env_.team("DELETE", "api/v1/knowledge/items/" + id, nullptr) :
             Result<json>(make_error("offline", "The control plane is not available."));
-        // A 404 does not prove absence for the original account: legacy shares are keyed by mutable usernames.
-        if (!response) {
+        // A plain 404 does not prove absence for the original account: legacy shares are keyed by mutable usernames.
+        if (!withdrawal_confirmed(response)) {
             deleting_all_ = false;
             return make_error("remote_pending", "Shared knowledge could not be removed. Reconnect and try Delete all again; your local data has not been deleted.");
         }
@@ -2607,8 +2635,9 @@ Status KnowledgeService::publish(ShareRow row, const ItemRow& item) {
 bool KnowledgeService::unpublish(const ShareRow& row) {
     if (!env_.team || row.remote_id.empty()) return false;
     auto r = env_.team("DELETE", "api/v1/knowledge/items/" + row.remote_id, nullptr);
-    // Legacy item ownership is keyed by username. A 404 under this username does not prove the original owner's item is gone.
-    return static_cast<bool>(r);
+    // Legacy item ownership is keyed by username. A plain 404 under this username does not prove the original owner's
+    // item is gone; only a removal or a confirmed absence for this subject does.
+    return withdrawal_confirmed(r);
 }
 
 Status KnowledgeService::share_item(long long item_id, const std::vector<std::string>& groups_in) {
@@ -2758,6 +2787,13 @@ void KnowledgeService::sync_sharing(bool list) {
         }
     }
     if (!env_.team) return;
+    // Removals Delete all left pending, for this account only; independent of the sharing policy.
+    if (env_.retry_withdrawals)
+        env_.retry_withdrawals([this](const std::string& remote_id) -> Status {
+            auto response = env_.team("DELETE", "api/v1/knowledge/items/" + remote_id, nullptr);
+            if (withdrawal_confirmed(response)) return {};
+            return response.error();
+        });
     // Nothing shared and sharing off: no request at all.
     if (!enabled && store_->shares().empty()) return;
     bool changed = false;
@@ -2796,7 +2832,7 @@ void KnowledgeService::sync_sharing(bool list) {
                 std::string id = row.remote_id;
                 if (id.empty() && shareable_source(row.source) && !row.ext_id.empty())
                     id = "k-" + content_hash(row.source + ":" + row.ext_id);
-                if (!id.empty() && env_.team("DELETE", "api/v1/knowledge/items/" + id, nullptr)) {
+                if (!id.empty() && withdrawal_confirmed(env_.team("DELETE", "api/v1/knowledge/items/" + id, nullptr))) {
                     if (auto result = store_->mark_share_removed(row.source, row.ext_id); result) changed = true;
                 }
                 continue;

@@ -332,7 +332,11 @@ test('migration: stored audience-token entries become user-token without an audi
       DROP TABLE knowledge_publication_chunks; DROP TABLE knowledge_publication_evidence; DROP TABLE knowledge_publication_entries;
       DROP TABLE knowledge_publication_groups; DROP TABLE knowledge_publication_content; DROP TABLE knowledge_publication_operations;
       DROP TABLE knowledge_publication_ledger;`);
-    db.prepare('UPDATE schema_version SET version = version - 7').run();
+    // Shared Item Ownership: its columns and indexes.
+    db.exec(`DROP INDEX team_items_subject; DROP INDEX team_items_item;
+      ALTER TABLE team_items DROP COLUMN owner_issuer; ALTER TABLE team_items DROP COLUMN owner_subject;
+      ALTER TABLE team_owners DROP COLUMN issuer; ALTER TABLE team_owners DROP COLUMN subject;`);
+    db.prepare('UPDATE schema_version SET version = version - 8').run();
     db.close();
     db = openDb(path);
     const migrated = JSON.parse((db.prepare("SELECT entry FROM mcp_servers WHERE id = 'jira-corp'").get() as { entry: string }).entry);

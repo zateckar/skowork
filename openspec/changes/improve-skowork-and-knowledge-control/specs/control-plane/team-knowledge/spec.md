@@ -46,6 +46,21 @@ Publication ownership SHALL use the authenticated identity-provider issuer and s
 - **WHEN** a legacy item has only a historical username and the service cannot prove its original issuer and subject
 - **THEN** it does not claim that the item is absent for a subject-bound withdrawal or attach it to a new subject based only on that username
 
+### Requirement: Shared Item Ownership
+A new or replaced existing item share SHALL be owned by the uploader's issuer and stable subject. Replacing a legacy share of the same username and item id removes the legacy content in the same transaction rather than attributing it. Withdrawal reports confirmed absence only when neither a share of that subject nor any legacy share with that item id exists; otherwise it reports not found without proving absence.
+
+#### Scenario: Owner withdraws after a username change
+- **WHEN** the owner of a subject-bound item share signs in with a new username and withdraws the item
+- **THEN** the item is removed, and while the owner was away, a different subject using the former username could neither see the owner's Group snapshot applied nor remove the item
+
+#### Scenario: Absence confirmed for a subject
+- **WHEN** a subject withdraws an item id that no subject-bound or legacy share holds
+- **THEN** the service reports confirmed absence, so a pending client withdrawal for that subject can be completed
+
+#### Scenario: Legacy share under another username
+- **WHEN** a legacy share with the requested item id exists only under a different username
+- **THEN** the service reports not found without confirming absence and does not remove that share
+
 ### Requirement: Company Sharing Destination
 The service SHALL optionally designate an existing Group as Company through administrator-controlled server configuration, default unset. The designation is a display alias, not an authorization bypass. The destination is offered only when ordinary membership and policy.knowledge.sharing.groups permit publication to that Group.
 

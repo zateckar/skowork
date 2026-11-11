@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <fstream>
 #include <limits>
+#include <set>
 
 namespace wb {
 namespace {
@@ -177,27 +178,53 @@ Result<bool> WithdrawalOutbox::has_item(const std::string& issuer, const std::st
     });
 }
 
-Result<size_t> WithdrawalOutbox::retry_items(const std::string& issuer, const std::string& endpoint, const std::string& subject,
-                                            const std::function<Status(const std::string&)>& remove) const {
+Status WithdrawalOutbox::stage_wipe(const std::string& issuer, const std::string& endpoint, const std::string& subject,
+                                   const std::vector<std::string>& item_ids) const {
+    const OutboxLock lock(file_);
+    if (!lock) return make_error("outbox", "Cannot lock pending remote removals.");
+    auto state = load_unlocked();
+    if (!state) return state.error();
+    for (const auto& id : item_ids) {
+        WithdrawalIdentity entry{issuer, endpoint, subject, "item", id, 0};
+        if (!valid(entry)) return make_error("outbox", "Pending shared-data removal needs the signed-in account and a valid item identity.");
+        const bool known = std::any_of(state->entries.begin(), state->entries.end(), [&](const WithdrawalIdentity& e) {
+            return e.kind == entry.kind && e.issuer == issuer && e.endpoint == endpoint && e.subject == subject && e.remote_id == id;
+        });
+        if (!known) state->entries.push_back(std::move(entry));
+    }
+    state->wipe_pending = true;
+    // Windows mutexes are recursive for the owning thread; save rechecks the revision while this lock is held.
+    return save(*state);
+}
+
+Result<WithdrawalRetry> WithdrawalOutbox::retry_items(const std::string& issuer, const std::string& endpoint, const std::string& subject,
+                                                     const std::function<Status(const std::string&)>& remove) const {
     if (issuer.empty() || endpoint.empty() || subject.empty() || !remove)
         return make_error("outbox", "A signed-in account is required for remote removal.");
-    size_t completed = 0;
-    while (completed < 50) {
+    WithdrawalRetry out;
+    std::set<std::string> unconfirmed;
+    while (out.completed + out.failed < 50) {
         auto state = load();
         if (!state) return state.error();
         if (state->wipe_pending) return make_error("outbox", "Local deletion must finish before remote removal resumes.");
         const auto it = std::find_if(state->entries.begin(), state->entries.end(), [&](const WithdrawalIdentity& entry) {
-            return entry.kind == "item" && entry.issuer == issuer && entry.endpoint == endpoint && entry.subject == subject;
+            return entry.kind == "item" && entry.issuer == issuer && entry.endpoint == endpoint && entry.subject == subject &&
+                   !unconfirmed.count(entry.remote_id);
         });
         if (it == state->entries.end()) break;
         const size_t index = static_cast<size_t>(it - state->entries.begin());
-        if (auto result = remove(it->remote_id); !result) return result.error();
+        if (auto result = remove(it->remote_id); !result) {
+            // Offline, refused or not proven absent: keep the record and try the others.
+            unconfirmed.insert(it->remote_id);
+            ++out.failed;
+            continue;
+        }
         state->entries.erase(state->entries.begin() + static_cast<std::ptrdiff_t>(index));
         // If another writer changed the outbox during the request, keep the record and retry the idempotent removal.
         if (auto result = save(*state); !result) return result.error();
-        ++completed;
+        ++out.completed;
     }
-    return completed;
+    return out;
 }
 
 }  // namespace wb

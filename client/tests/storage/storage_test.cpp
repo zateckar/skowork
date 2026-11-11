@@ -303,12 +303,14 @@ TEST(WithdrawalOutbox, RetriesOnlyForTheBoundAccountAndKeepsConcurrentChanges) {
     EXPECT_FALSE(*bob_pending);
     auto wrong = box.retry_items("issuer", "other-endpoint", "alice", [&](const std::string&) { ++calls; return Status{}; });
     ASSERT_TRUE(wrong);
-    EXPECT_EQ(*wrong, 0u);
+    EXPECT_EQ(wrong->completed + wrong->failed, 0u);
     EXPECT_EQ(calls, 0);
     const auto offline = box.retry_items("issuer", "endpoint", "alice", [&](const std::string&) {
         return Status(make_error("offline", "offline"));
     });
-    EXPECT_FALSE(offline);
+    ASSERT_TRUE(offline);
+    EXPECT_EQ(offline->completed, 0u);
+    EXPECT_EQ(offline->failed, 1u);
     ASSERT_TRUE(box.load());
     EXPECT_EQ(box.load()->entries.size(), 2u);
     const auto raced = box.retry_items("issuer", "endpoint", "alice", [&](const std::string&) {
@@ -327,11 +329,55 @@ TEST(WithdrawalOutbox, RetriesOnlyForTheBoundAccountAndKeepsConcurrentChanges) {
         return Status{};
     });
     ASSERT_TRUE(sent);
-    EXPECT_EQ(*sent, 2u);
+    EXPECT_EQ(sent->completed, 2u);
     const auto remaining = box.load();
     ASSERT_TRUE(remaining);
     ASSERT_EQ(remaining->entries.size(), 1u);
     EXPECT_EQ(remaining->entries[0].subject, "bob");
+}
+
+TEST(WithdrawalOutbox, DeleteAllStagesBoundRemovalsAndKeepsUnconfirmedOnes) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    WithdrawalOutbox box(root->file("withdrawals.dpapi"));
+    // Without a signed-in account the identities cannot be bound: nothing is written, no wipe intent.
+    EXPECT_FALSE(box.stage_wipe("issuer", "endpoint", "", {"k-one"}));
+    EXPECT_FALSE(std::filesystem::exists(root->file("withdrawals.dpapi")));
+    EXPECT_FALSE(box.stage_wipe("issuer", "endpoint", "alice", {"k-one", "not a remote id"}));
+    EXPECT_FALSE(std::filesystem::exists(root->file("withdrawals.dpapi")));
+    ASSERT_TRUE(box.save({false, {{"issuer", "endpoint", "alice", "item", "k-one", 0}}}));
+    ASSERT_TRUE(box.stage_wipe("issuer", "endpoint", "alice", {"k-one", "k-two", "k-three"}));
+    auto staged = box.load();
+    ASSERT_TRUE(staged);
+    EXPECT_TRUE(staged->wipe_pending);
+    ASSERT_EQ(staged->entries.size(), 3u);  // the earlier record is not duplicated
+    for (const auto& e : staged->entries) {
+        EXPECT_EQ(e.issuer, "issuer");
+        EXPECT_EQ(e.endpoint, "endpoint");
+        EXPECT_EQ(e.subject, "alice");
+    }
+    // Retry waits for the local deletion; the wipe preserves the outbox and clears the intent.
+    std::ofstream(root->file("app.db")) << "private content";
+    EXPECT_FALSE(box.retry_items("issuer", "endpoint", "alice", [](const std::string&) { return Status{}; }));
+    ASSERT_TRUE(box.finish_interrupted_wipe([&] { return root->wipe(); }));
+    EXPECT_FALSE(std::filesystem::exists(root->file("app.db")));
+    // Only "k-two" is confirmed; the others stay for a later retry.
+    std::vector<std::string> sent;
+    const auto retry = box.retry_items("issuer", "endpoint", "alice", [&](const std::string& id) {
+        sent.push_back(id);
+        return id == "k-two" ? Status{} : Status(make_error("NOT_FOUND", "not proven absent"));
+    });
+    ASSERT_TRUE(retry);
+    EXPECT_EQ(retry->completed, 1u);
+    EXPECT_EQ(retry->failed, 2u);
+    EXPECT_EQ(sent.size(), 3u);
+    const auto left = box.load();
+    ASSERT_TRUE(left);
+    EXPECT_FALSE(left->wipe_pending);
+    ASSERT_EQ(left->entries.size(), 2u);
+    EXPECT_EQ(left->entries[0].remote_id, "k-one");
+    EXPECT_EQ(left->entries[1].remote_id, "k-three");
 }
 
 TEST(DataRoot, RefusesARootBoundToAnotherUser) {

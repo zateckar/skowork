@@ -289,7 +289,8 @@ export class TeamPublications {
     if (refused.length)
       throw new ApiError(403, 'GROUP_NOT_PERMITTED', 'You cannot publish to one or more of these Groups: you are not a member, or policy.knowledge.sharing.groups does not permit it.', { groups: refused });
     requirePermittedPublicationSources(input, authority.kinds);
-    const items = (this.#db.prepare('SELECT COALESCE(SUM(size), 0) AS s FROM team_items WHERE owner = ?').get(user.userName) as { s: number }).s;
+    const items = (this.#db.prepare(`SELECT COALESCE(SUM(size), 0) AS s FROM team_items
+      WHERE (owner_issuer = ? AND owner_subject = ?) OR (owner_subject IS NULL AND owner = ?)`).get(user.issuer, user.subject, user.userName) as { s: number }).s;
     const others = (this.#db.prepare('SELECT COALESCE(SUM(size), 0) AS s FROM knowledge_publication_content WHERE issuer = ? AND subject = ? AND publication_id <> ?')
       .get(user.issuer, user.subject, publicationId) as { s: number }).s;
     if (Number(items) + Number(others) + size > this.#cfg.teamKnowledge.quotaBytes)

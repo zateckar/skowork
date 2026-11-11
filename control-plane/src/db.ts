@@ -529,6 +529,17 @@ const migrations: string[] = [
   `,
   // Team knowledge publications (improve-skowork-and-knowledge-control design D9).
   publicationSchemaSql,
+  // Shared Item Ownership (improve-skowork-and-knowledge-control task 7.3): new and replaced item shares are owned by the
+  // uploader's issuer and stable subject; rows without a subject stay legacy, keyed by their historical username. The
+  // owner snapshot records whose snapshot it is, so a reassigned username cannot govern another subject's items.
+  `
+  ALTER TABLE team_items ADD COLUMN owner_issuer TEXT;
+  ALTER TABLE team_items ADD COLUMN owner_subject TEXT;
+  CREATE INDEX team_items_subject ON team_items(owner_issuer, owner_subject, item_id);
+  CREATE INDEX team_items_item ON team_items(item_id);
+  ALTER TABLE team_owners ADD COLUMN issuer TEXT;
+  ALTER TABLE team_owners ADD COLUMN subject TEXT;
+  `,
 ];
 
 export function openDb(path: string): Db {

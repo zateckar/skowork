@@ -84,6 +84,9 @@ struct KnowledgeEnv {
     std::function<Result<json>(const std::string& method, const std::string& path, const json& body)> team;
     // Refuse to re-upload an item while an earlier withdrawal for this account is pending.
     std::function<Result<bool>(const std::string& remote_id)> pending_item_withdrawal;
+    // Sends the item removals Delete all left pending for the signed-in account (client/local-storage Pending Shared
+    // Data Removal), using `remove`, which succeeds only when the server confirms the removal or the item's absence.
+    std::function<void(const std::function<Status(const std::string& remote_id)>& remove)> retry_withdrawals;
     bool background = true;         // tests drive step() themselves
     long long sweep_interval_ms = 60'000;  // files rescan and reconciliation
 };
@@ -210,6 +213,9 @@ public:
     // Stops new item uploads and withdraws existing shares before a whole-profile wipe.
     Status prepare_delete_all();
     Result<std::vector<std::string>> freeze_for_delete_all();
+    // Whole-profile Delete all: freezes uploads, removes what the server confirms now, and returns the remote ids
+    // whose removal is still pending (offline, or not proven absent) for the caller to stage in the outbox.
+    Result<std::vector<std::string>> withdraw_for_delete_all();
     void cancel_delete_all();
 
     // ---- Knowledge view (add-knowledge-sharing) ----
