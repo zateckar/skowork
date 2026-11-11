@@ -62,7 +62,7 @@ export type DispatchTarget = { kind: 'user'; userName: string; groups: string[] 
 
 /** Enabled MCP catalog entries for a set of Groups (control-plane/mcp-catalog); the stamp changes with any entry. */
 export interface CatalogSource {
-  entriesFor(groups: string[]): unknown[];
+  entriesFor(groups: string[], userName: string | null): unknown[];
 }
 
 /** Rollout bucket: the first four bytes of the SHA-256 of the lower-case UPN, modulo 100 (design D12). */
@@ -446,7 +446,7 @@ export class PolicyService {
 
   compileFor(groups: string[], userName: string | null, opts: { drafts?: boolean; override?: { scope: string; row: VersionRow | null } } = {}): Compiled & { versions: Record<string, number> } {
     const inp = this.#inputs(groups, userName, opts);
-    const c = compile(this.registry, { groups: inp.groups, guardrail: inp.guardrail, mcpServers: this.#catalog.entriesFor(groups) });
+    const c = compile(this.registry, { groups: inp.groups, guardrail: inp.guardrail, mcpServers: this.#catalog.entriesFor(groups, userName) });
     return { ...c, versions: inp.versions };
   }
 

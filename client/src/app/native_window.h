@@ -11,15 +11,16 @@ namespace wb {
 
 class NativeAppWindow final : public AppWindow {
 public:
-    NativeAppWindow(RpcRegistry& rpc, ThreadPool& pool)
+    // ui_pool runs the window's requests; background_pool runs the window's own background work (desktop-host design D5).
+    NativeAppWindow(RpcRegistry& rpc, ThreadPool& ui_pool, ThreadPool& background_pool)
         : link_(
               [&rpc](const std::string& method) -> shell::AsyncLink::Handler {
                   const RpcRegistry::Handler* h = rpc.find(method, false);
                   return h ? *h : shell::AsyncLink::Handler{};
               },
-              [&pool](std::function<void()> f) { pool.post(std::move(f)); },
+              [&ui_pool](std::function<void()> f) { ui_pool.post(std::move(f)); },
               [](std::function<void()> f) { MainThread::post(std::move(f)); }),
-          main_(link_, options(pool)) {}
+          main_(link_, options(background_pool)) {}
 
     void open(const std::string& route = {}) override { main_.open(route); }
     void close() override { main_.close(); }

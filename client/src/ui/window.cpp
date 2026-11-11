@@ -286,11 +286,7 @@ bool Window::dispatch_key(const KeyEvent& e) {
     hide_tooltip();
     bool handled = tree_.key(e) || (on_key && on_key(e));
     // Ctrl+C copies the selected message text (improve-desktop-look D5); text fields copy their own selection.
-    if (!handled && e.ctrl && !e.alt && !e.shift && e.key == kKeyC && ui_->selection)
-        if (const std::u16string text = ui_->selection->selected_text(); !text.empty()) {
-            copy_text(text);
-            handled = true;
-        }
+    if (!handled && copy_message_selection(*ui_, e)) handled = true;
     if (handled) render();
     return handled;
 }

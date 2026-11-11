@@ -1,10 +1,16 @@
 // LLM connections (control-plane/admin-console LLM Connection Administration): the OpenAI-compatible upstreams of
 // control-plane/llm-gateway as records with their status; each opens to its discovered models. Adding and editing a
-// connection, and the capabilities of a model, happen in dialogs. Credentials are write-only
-// (redesign-admin-console-records D3).
+// connection, and the capabilities, reasoning effort and fallback of a model, happen in dialogs. Credentials are
+// write-only (redesign-admin-console-records D3). A refused effort or fallback is shown next to its field
+// (control-plane/admin-console Model Fallback And Effort Administration).
 import { Fragment, useState } from 'react';
-import { api } from '../auth.ts';
+import { ApiError, api } from '../auth.ts';
 import { ask, Dialog, Field, notify, Records, time, useDialog, useLoad } from '../ui.tsx';
+
+/** The reasoning efforts of control-plane/llm-gateway Reasoning Effort Setting. */
+const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+/** The fallback wait of a model without a stored one. */
+const FALLBACK_AFTER_DEFAULT_S = 60;
 
 interface Model {
   id: string;
@@ -17,15 +23,20 @@ interface Model {
   dimension?: number;
   last_seen: string | null;
   missing: boolean;
+  reasoning_effort: string | null;
+  fallback_model: string | null;
+  fallback_after_s: number | null;
+  /** The models whose fallback this model is, as `connection/id`. */
+  fallback_of: string[];
 }
 
 interface Connection {
   id: number;
   name: string;
   base_url: string;
+  enabled: boolean;
   credential_set: boolean;
   credential_hint: string;
-  enabled: boolean;
   max_concurrent: number;
   position: number;
   status: string;
@@ -34,21 +45,35 @@ interface Connection {
   models: Model[];
 }
 
+interface EffortFailure { model: string; reasoning_effort: string; reason: string }
 interface Use { scope: string; role: string; model: string }
+/** A refused value of the model editor: the field it belongs to and the gateway's reason. */
+interface Refusal { field: string; message: string; nonce: number }
 
 const BASE = '/api/v1/admin/llm/connections';
 const caps = (m: Model) => [m.tools && 'tools', m.images && 'images', m.reasoning && 'reasoning'].filter(Boolean).join(', ') || '—';
+
+/** The chat models a fallback may name: listed by an enabled connection, and without a fallback of their own. */
+function fallbackChoices(connections: Connection[], self: Connection, model: Model) {
+  return connections
+    .filter((c) => c.enabled)
+    .flatMap((c) => c.models.filter((m) => m.kind === 'chat' && !m.missing && m.fallback_model === null).map((m) => ({ value: `${c.name}/${m.id}`, id: m.id, connection: c.name })))
+    .filter((o) => !(o.connection === self.name && o.id === model.id));
+}
 
 export function Connections() {
   const list = useLoad<{ connections: Connection[]; key_available: boolean }>(BASE);
   const [open, setOpen] = useState<number | null>(null);
   const [edit, openEdit, closeEdit] = useDialog<Connection | 'new'>();
   const [model, openModel, closeModel] = useDialog<{ c: Connection; m: Model }>();
+  const [refusal, setRefusal] = useState<Refusal | null>(null);
 
   const test = async (c: Connection) => {
-    const r = await api<Connection>('POST', `${BASE}/${c.id}/test`);
+    const r = await api<Connection & { effort_failures?: EffortFailure[] }>('POST', `${BASE}/${c.id}/test`);
     list.reload();
-    notify(r.status === 'ok' ? `${c.name} answers and lists ${r.models.length} models.` : `Tested ${c.name}: ${r.status}${r.status_detail ? `, ${r.status_detail}` : ''}.`, 'connections-note');
+    const base = r.status === 'ok' ? `${c.name} answers and lists ${r.models.length} models.` : `Tested ${c.name}: ${r.status}${r.status_detail ? `, ${r.status_detail}` : ''}.`;
+    const stale = r.effort_failures ?? [];
+    notify(stale.length ? `${base} ${stale.map((f) => `${f.model} refuses reasoning effort ${f.reasoning_effort} (${f.reason})`).join('; ')}.` : base, 'connections-note');
   };
   const toggle = async (c: Connection) => {
     if (c.enabled && (await ask({ title: `Disable ${c.name}?`, body: <p>Requests for its models go to other connections that offer them, or fail.</p>, action: 'Disable' })) === null) return;
@@ -73,6 +98,14 @@ export function Connections() {
     await api('DELETE', `${BASE}/${c.id}${uses.length ? '?confirm=true' : ''}`);
     list.reload();
     notify(`Deleted ${c.name}.`, 'connections-note');
+  };
+  const openModelEditor = (x: { c: Connection; m: Model }) => {
+    setRefusal(null);
+    openModel(x);
+  };
+  const closeModelEditor = () => {
+    setRefusal(null);
+    closeModel();
   };
 
   return (
@@ -117,14 +150,19 @@ export function Connections() {
                 <td colSpan={6}>
                   {c.models.length === 0 ? <p className="empty">No models listed yet. Use Test to ask the server.</p> : (
                     <table>
-                      <thead><tr><th>Model</th><th>Kind</th><th>Context window</th><th>Max output</th><th>Capabilities</th><th /></tr></thead>
+                      <thead><tr><th>Model</th><th>Kind</th><th>Context window</th><th>Max output</th><th>Capabilities</th><th>Reasoning effort</th><th>Fallback</th><th /></tr></thead>
                       <tbody>
                         {c.models.map((m) => (
                           <tr key={m.id} data-testid={`model-${c.name}-${m.id}`}>
                             <td><code>{m.id}</code>{m.missing && <small><span className="state failing" title="No longer listed by the connection">missing</span></small>}</td>
                             <td>{m.kind}{m.dimension ? <small>{m.dimension} dimensions</small> : null}</td>
                             <td>{m.context_window || '—'}</td><td>{m.max_output_tokens ?? '—'}</td><td>{caps(m)}</td>
-                            <td className="acts"><button className="link" data-testid={`model-${c.name}-${m.id}-edit`} onClick={() => openModel({ c, m })}>Edit</button></td>
+                            <td data-testid={`model-${c.name}-${m.id}-effort`}>{m.kind === 'chat' ? (m.reasoning_effort ?? <span className="muted">model default</span>) : '—'}</td>
+                            <td data-testid={`model-${c.name}-${m.id}-fallback`}>
+                              {m.kind === 'chat' && m.fallback_model ? <><code>{m.fallback_model}</code><small>after {m.fallback_after_s ?? FALLBACK_AFTER_DEFAULT_S} s</small></> : <span className="muted">none</span>}
+                              {m.fallback_of.length > 0 && <small>fallback of {m.fallback_of.join(', ')}</small>}
+                            </td>
+                            <td className="acts"><button className="link" data-testid={`model-${c.name}-${m.id}-edit`} onClick={() => openModelEditor({ c, m })}>Edit</button></td>
                           </tr>
                         ))}
                       </tbody>
@@ -172,33 +210,78 @@ export function Connections() {
         </Dialog>
       )}
 
-      {model && (
-        <Dialog id={`model-${model.c.name}-${model.m.id}-form`} title={`Capabilities of ${model.m.id}`} submit="Save" onClose={closeModel} noteId={`conn-detail-note-${model.c.name}`}
-          intro={<p>What the gateway tells clients about this model of {model.c.name}. The server does not report these itself.</p>}
-          onSubmit={async (f) => {
-            const n = (v: string | undefined) => (v ? Number(v) : null);
-            await api('PUT', `${BASE}/${model.c.id}/models/${encodeURIComponent(model.m.id)}`, {
-              kind: f.kind, context_window: Number(f.context_window || 0), max_output_tokens: n(f.max_output_tokens), dimension: n(f.dimension),
-              tools: f.tools === 'on', images: f.images === 'on', reasoning: f.reasoning === 'on',
-            });
-            list.reload();
-            return `Saved ${model.m.id}.`;
-          }}>
-          <div className="two">
-            <Field label="Kind">
-              <select name="kind" defaultValue={model.m.kind}><option>chat</option><option>embed</option><option>rerank</option><option>image</option></select>
-            </Field>
-            <Field label="Context window (tokens)"><input name="context_window" type="number" min={0} defaultValue={model.m.context_window} /></Field>
-            <Field label="Max output (tokens)"><input name="max_output_tokens" type="number" min={1} defaultValue={model.m.max_output_tokens ?? ''} /></Field>
-            <Field label="Embedding dimension"><input name="dimension" type="number" min={1} defaultValue={model.m.dimension ?? ''} /></Field>
-          </div>
-          <div className="actions">
-            <label className="check"><input name="tools" type="checkbox" defaultChecked={model.m.tools} /> Calls tools</label>
-            <label className="check"><input name="images" type="checkbox" defaultChecked={model.m.images} /> Reads images</label>
-            <label className="check"><input name="reasoning" type="checkbox" defaultChecked={model.m.reasoning} /> Reasons</label>
-          </div>
-        </Dialog>
-      )}
+      {model && (() => {
+        const { c, m } = model;
+        const refused = (field: string) => (refusal?.field === field ? <span className="err" role="alert" data-testid={`model-refused-${field}`}>{refusal.message}</span> : null);
+        const choices = fallbackChoices(list.data?.connections ?? [], c, m);
+        const stored = m.fallback_model;
+        const storedChoice = stored ? choices.find((o) => o.value === stored) ?? choices.find((o) => o.id === stored) : undefined;
+        const selected = storedChoice?.value ?? stored ?? '';
+        // A model that another model falls back to cannot have a fallback itself (control-plane/llm-gateway Fallback Model Setting).
+        const blocked = m.fallback_of.length > 0;
+        return (
+          <Dialog id={`model-${c.name}-${m.id}-form`} title={`Settings of ${m.id}`} submit="Save" onClose={closeModelEditor} noteId={`conn-detail-note-${c.name}`}
+            intro={<p>What the gateway tells clients about this model of {c.name}, and how it reasons and falls back. The server does not report these itself.</p>}
+            onSubmit={async (f) => {
+              try {
+                await api('PUT', `${BASE}/${c.id}/models/${encodeURIComponent(m.id)}`, {
+                  kind: f.kind, context_window: Number(f.context_window || 0), max_output_tokens: f.max_output_tokens ? Number(f.max_output_tokens) : null,
+                  dimension: f.dimension ? Number(f.dimension) : null,
+                  tools: f.tools === 'on', images: f.images === 'on', reasoning: f.reasoning === 'on',
+                  reasoning_effort: f.reasoning_effort || null,
+                  // Not sent while the picker is blocked: the gateway keeps the stored value, which is empty for such a model.
+                  ...(f.fallback_model === undefined ? {} : { fallback_model: f.fallback_model || null }),
+                  fallback_after_s: f.fallback_after_s ? Number(f.fallback_after_s) : null,
+                });
+              } catch (err) {
+                if (err instanceof ApiError && typeof err.details.field === 'string') {
+                  setRefusal({ field: err.details.field, message: err.message, nonce: (refusal?.nonce ?? 0) + 1 });
+                  throw new Error('Not saved. The value marked above was refused, and the stored value is unchanged.');
+                }
+                throw err;
+              }
+              list.reload();
+              return `Saved ${m.id}.`;
+            }}>
+            <div className="two">
+              <Field label="Kind">
+                <select name="kind" defaultValue={m.kind}><option>chat</option><option>embed</option><option>rerank</option><option>image</option></select>
+              </Field>
+              <Field label="Context window (tokens)"><input name="context_window" type="number" min={0} defaultValue={m.context_window} /></Field>
+              <Field label="Max output (tokens)"><input name="max_output_tokens" type="number" min={1} defaultValue={m.max_output_tokens ?? ''} /></Field>
+              <Field label="Embedding dimension"><input name="dimension" type="number" min={1} defaultValue={m.dimension ?? ''} /></Field>
+            </div>
+            <div className="actions">
+              <label className="check"><input name="tools" type="checkbox" defaultChecked={m.tools} /> Calls tools</label>
+              <label className="check"><input name="images" type="checkbox" defaultChecked={m.images} /> Reads images</label>
+              <label className="check"><input name="reasoning" type="checkbox" defaultChecked={m.reasoning} /> Reasons</label>
+            </div>
+            <div className="two">
+              <Field key={`effort-${refusal?.nonce ?? 0}`} label="Reasoning effort"
+                help={refused('reasoning_effort') ?? 'Model default sends nothing. A value is checked with the model when saved.'}>
+                <select name="reasoning_effort" defaultValue={m.reasoning_effort ?? ''}>
+                  <option value="">Model default</option>
+                  {EFFORTS.map((e) => <option key={e} value={e}>{e}</option>)}
+                </select>
+              </Field>
+              <Field key={`fallback-${refusal?.nonce ?? 0}`} label="Fallback model"
+                help={refused('fallback_model') ?? (blocked ? `${m.id} is the fallback of ${m.fallback_of.join(', ')}, so it cannot have one.` : 'Used when this model does not answer before the wait below. Chat models only.')}>
+                <select name={blocked ? undefined : 'fallback_model'} disabled={blocked} defaultValue={selected}>
+                  <option value="">No fallback</option>
+                  {choices.map((o) => <option key={o.value} value={o.value}>{o.id} ({o.connection})</option>)}
+                  {stored && !storedChoice && <option value={stored}>{stored} (not offered now)</option>}
+                </select>
+              </Field>
+            </div>
+            <div className="two">
+              <Field key={`wait-${refusal?.nonce ?? 0}`} label="Fallback wait (seconds)"
+                help={refused('fallback_after_s') ?? '5 to 600. Empty means 60 seconds.'}>
+                <input name="fallback_after_s" type="number" min={5} max={600} placeholder={String(FALLBACK_AFTER_DEFAULT_S)} defaultValue={m.fallback_after_s ?? ''} />
+              </Field>
+            </div>
+          </Dialog>
+        );
+      })()}
     </>
   );
 }

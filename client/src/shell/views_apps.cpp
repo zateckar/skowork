@@ -54,7 +54,7 @@ void PagePane::open_app(const std::string& id, const std::u16string& title) {
         }
         // MCP Bridge: the user confirms the app's MCP tools before its pages can call them.
         auto d = std::make_unique<ui::Dialog>(shell_.ui(), "apps-confirm-dialog", shell_.t("apps.confirm_title"));
-        d->body().emplace<ui::Label>(shell_.ui(), shell_.t("apps.confirm_body", {{"name", title}, {"tools", join(r.value("mcp_tools", json::array()))}}));
+        d->body().emplace<ui::Label>(shell_.ui(), shell_.t("apps.confirm_connectors_body", {{"name", title}, {"tools", join(r.value("mcp_tools", json::array()))}}));
         ui::Dialog* dp = d.get();
         d->add_button("apps-confirm-cancel", shell_.t("settings.cancel"), ui::Button::Kind::standard, [dp] { dp->close(); });
         d->add_button("apps-confirm-allow", shell_.t("apps.allow"), ui::Button::Kind::primary, [this, dp, id, title] {

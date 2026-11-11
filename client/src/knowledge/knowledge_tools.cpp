@@ -6,6 +6,8 @@
 #include "knowledge/knowledge_service.h"
 
 #include <algorithm>
+#include <map>
+#include <mutex>
 #include <set>
 
 namespace wb::knowledge {
@@ -42,9 +44,38 @@ ToolOutput untrusted(json body, const std::string& what) {
 
 const json kEntityRef = {{"type", "string"}, {"description", "The entity's name, email address or id from an earlier knowledge result"}};
 
+// The highest passage number a stored knowledge.search result body gives; 0 when it has none.
+int highest_number(const std::string& body) {
+    const json j = json::parse(body, nullptr, false);
+    const json* results = j.is_object() ? jobj(j, "results") : nullptr;
+    if (!results || !results->is_array()) return 0;
+    int high = 0;
+    for (const json& r : *results)
+        if (r.is_object()) high = std::max(high, static_cast<int>(jint(r, "n")));
+    return high;
+}
+
 class Tools {
 public:
     explicit Tools(KnowledgeService& svc) : svc_(svc) {}
+
+    // The number of the first passage of a search that returns `count` passages. Numbers are unique within a Run
+    // (client/knowledge-graph Citation Numbers Per Run): a later search continues them. The last number of a Run is
+    // kept here; after a restart it is read from the results the Run stored.
+    int reserve_numbers(const runtime::ToolContext& ctx, int count) {
+        if (ctx.run_id.empty()) return 1;
+        const std::lock_guard lock(numbers_mx_);
+        auto it = last_number_.find(ctx.run_id);
+        if (it == last_number_.end()) {
+            int last = 0;
+            if (ctx.stored_results)
+                for (const std::string& body : ctx.stored_results("knowledge.search")) last = std::max(last, highest_number(body));
+            it = last_number_.emplace(ctx.run_id, last).first;
+        }
+        const int first = it->second + 1;
+        it->second += count;
+        return first;
+    }
 
     // An entity by id ("#12" or 12) or by name.
     std::optional<EntityRow> find(const json& a) {
@@ -76,7 +107,7 @@ public:
         if (ctx.control) o.cancel = ctx.control->http_token();
         const auto r = svc_.search(q, o);
         json results = json::array();
-        int n = 0;
+        int n = reserve_numbers(ctx, static_cast<int>(r.passages.size())) - 1;
         for (const auto& p : r.passages) {
             json x = {{"n", ++n}, {"source", p.source}, {"title", p.title}, {"ref", p.ref}, {"passage", p.text}};
             if (p.source == "team") {
@@ -246,6 +277,8 @@ public:
 
 private:
     KnowledgeService& svc_;
+    std::mutex numbers_mx_;
+    std::map<std::string, int> last_number_;  // run id -> the last passage number given to the Run
 };
 
 }  // namespace

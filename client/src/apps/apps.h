@@ -27,6 +27,7 @@
 
 namespace wb::sandbox {
 class Sandbox;
+class SandboxedProcess;
 }
 
 namespace wb::apps {
@@ -162,9 +163,11 @@ public:
 
 private:
     struct Running;
+    struct Starting;  // a start in progress (client/local-apps Folder Access During App Start)
     std::filesystem::path folder_of(const std::string& id) const;
     Result<AppInfo> info_locked(const std::string& id);
     Status start_locked(std::unique_lock<std::mutex>& lock, const std::string& id);
+    std::shared_ptr<Running> start_process(const std::string& id, std::unique_ptr<sandbox::SandboxedProcess> proc);
     void stop_locked(const std::string& id, const std::string& why);
     void reap_locked();
     json state_locked();
@@ -176,7 +179,8 @@ private:
     AppsEnv env_;
     std::mutex mx_;
     std::map<std::string, std::shared_ptr<Running>> running_;
-    std::mutex log_mx_;                                         // logs_ (the reader threads append without mx_)
+    std::map<std::string, std::shared_ptr<Starting>> starting_;  // waited for without mx_ (see start_locked)
+    std::mutex log_mx_;                                        // logs_ (the reader threads append without mx_)
     std::map<std::string, std::string> logs_;                   // app id -> log (the last log_bytes)
     std::map<std::string, std::set<std::string>> grants_;       // run id -> app ids
     long long next_stream_ = 1;

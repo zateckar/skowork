@@ -546,17 +546,32 @@ Status AppManager::start(const std::string& id) {
     return start_locked(lock, id);
 }
 
+// A start in progress. Its waiters hold the manager lock only while they wait on cv, so they get the one result.
+struct AppManager::Starting {
+    std::condition_variable cv;
+    bool done = false;
+    Status result;
+};
+
+// Starts the app and returns with the manager lock held. The server's ready signal is waited for without the lock
+// (client/local-apps Folder Access During App Start): folder access, app creation and app changes never wait for a start.
+// A request for an app that is starting waits for that start and gets its result, so only one process is started.
 Status AppManager::start_locked(std::unique_lock<std::mutex>& lock, const std::string& id) {
     reap_locked();
-    if (const auto r = running_.find(id); r != running_.end()) return {};
+    if (running_.count(id)) return {};
+    if (const auto s = starting_.find(id); s != starting_.end()) {
+        const auto pending = s->second;
+        pending->cv.wait(lock, [&] { return pending->done; });
+        return pending->result;
+    }
     if (const auto why = unavailable()) return make_error("unavailable", *why);
     auto a = info_locked(id);
     if (!a) return a.error();
     if (!a->problem.empty()) return make_error(starts_with(a->problem, "Local apps cannot use packages") ? "dependencies" : "manifest", a->problem);
     if (a->needs_confirmation)
         return make_error("confirmation_needed", "The user has not confirmed the MCP tools this app uses.");
-    // At most max_running apps: the least recently used one stops.
-    while (running_.size() >= env_.max_running) {
+    // At most max_running apps, the starts in progress included: the least recently used one stops.
+    while (!running_.empty() && running_.size() + starting_.size() >= env_.max_running) {
         auto lru = std::min_element(running_.begin(), running_.end(),
                                     [](const auto& x, const auto& y) { return x.second->last_request < y.second->last_request; });
         const std::string oldest = lru->first;  // a copy: stop_locked erases the entry that holds the key
@@ -580,12 +595,54 @@ Status AppManager::start_locked(std::unique_lock<std::mutex>& lock, const std::s
     spec.env = {{"WORKBENCH_APP_PIPE", kPipe}, {"NODE_OPTIONS", ""}};
     spec.run_id = "app:" + id;
     spec.tool = "app:" + id;
-    auto p = env_.sandbox->start(spec);
-    if (!p) return make_error("start", "the app could not be started: " + p.error().message);
+    const auto pending = std::make_shared<Starting>();
+    starting_[id] = pending;
+    lock.unlock();
 
+    std::shared_ptr<Running> r;
+    Status result;
+    auto p = env_.sandbox->start(spec);
+    if (!p) {
+        result = make_error("start", "the app could not be started: " + p.error().message);
+    } else {
+        r = start_process(id, std::move(*p));
+        bool ok = false;
+        {
+            std::unique_lock l(r->mx);
+            ok = r->cv.wait_for(l, env_.start_timeout, [&] { return r->ready || r->ended; }) && r->ready;
+        }
+        if (!ok) {
+            r.reset();  // terminates and joins
+            const std::string tail = logs(id, 2000);
+            result = make_error("start", "The app did not start its server. It must call "
+                                         "http.createServer(...).listen(process.env.WORKBENCH_APP_PIPE). Log:\n" + tail);
+        }
+    }
+
+    lock.lock();
+    starting_.erase(id);
+    if (r) {
+        running_[id] = r;
+        json s = state_locked();
+        s[id]["last_used"] = now();
+        save_state_locked(s);
+        log::info(kLog, "started " + id);
+    }
+    pending->done = true;
+    pending->result = result;
+    pending->cv.notify_all();
+    lock.unlock();
+    if (r) notify();
+    lock.lock();
+    return result;
+}
+
+// The process of a started app, with its reader thread: frames from the app become log lines, ready signals and the
+// data of the connections.
+std::shared_ptr<AppManager::Running> AppManager::start_process(const std::string& id, std::unique_ptr<sandbox::SandboxedProcess> proc) {
     auto r = std::make_shared<Running>();
     r->id = id;
-    r->proc = std::move(*p);
+    r->proc = std::move(proc);
     r->last_request = now();
     append_log(id, "[" + iso8601_utc_now() + "] started\n");
     Running* raw = r.get();
@@ -637,27 +694,7 @@ Status AppManager::start_locked(std::unique_lock<std::mutex>& lock, const std::s
             if (auto s = w.lock()) s->finish();
         notify();
     });
-
-    bool ok = false;
-    {
-        std::unique_lock l(r->mx);
-        ok = r->cv.wait_for(l, env_.start_timeout, [&] { return r->ready || r->ended; }) && r->ready;
-    }
-    if (!ok) {
-        r.reset();  // terminates and joins
-        const std::string tail = logs(id, 2000);
-        return make_error("start", "The app did not start its server. It must call "
-                                   "http.createServer(...).listen(process.env.WORKBENCH_APP_PIPE). Log:\n" + tail);
-    }
-    running_[id] = r;
-    json s = state_locked();
-    s[id]["last_used"] = now();
-    save_state_locked(s);
-    log::info(kLog, "started " + id);
-    lock.unlock();
-    notify();
-    lock.lock();
-    return {};
+    return r;
 }
 
 void AppManager::stop_locked(const std::string& id, const std::string& why) {
@@ -689,7 +726,12 @@ Status AppManager::stop(const std::string& id) {
 
 Status AppManager::remove(const std::string& id) {
     {
-        const std::lock_guard lock(mx_);
+        std::unique_lock lock(mx_);
+        // A start in progress ends first, so the app is not left running after its folder is gone.
+        if (const auto s = starting_.find(id); s != starting_.end()) {
+            const auto pending = s->second;
+            pending->cv.wait(lock, [&] { return pending->done; });
+        }
         auto a = info_locked(id);
         if (!a) return a.error();
         stop_locked(id, "deleted");

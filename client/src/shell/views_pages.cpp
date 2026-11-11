@@ -30,7 +30,7 @@ struct Section {
 };
 const Section kSections[] = {
     {"general", "settings.general.title", false},       {"notifications", "settings.notifications.title", false},
-    {"files", "settings.files.title", false},            {"connections", "settings.connections.title", false},
+    {"files", "settings.files.title", false},            {"connections", "settings.connectors.title", false},
     {"mail", "settings.mail.title", false},             {"skills", "settings.skills.title", false},
     {"automations", "settings.automations.title", false}, {"knowledge", "settings.knowledge.title", false},
     {"meetings", "settings.meetings.title", false},      {"privacy", "settings.privacy.title", false},
@@ -208,6 +208,7 @@ void PagePane::load() {
         load_skills(false);
         load_automations();
         load_mail();
+        load_connectors();
         load_knowledge();
         load_meetings();
         load_policy();
@@ -392,6 +393,10 @@ void PagePane::build_status() {
         row(*id, "status-identity-user", shell_.t("status.identity.user"), u16(u));
     if (as == "signed_in" && jint(auth, "access_token_expires_at") > 0)
         row(*id, "status-identity-token", shell_.t("status.identity.token_until"), shell_.clock(jint(auth, "access_token_expires_at")));
+    // Offline sign-in (client/identity Offline Token Type): shown when on, as active or not available.
+    if (const std::string off = jstr(auth, "offline_sign_in"); off == "active" || off == "not_available")
+        row(*id, "status-identity-offline", shell_.t("status.identity.offline"), shell_.t("status.identity.offline." + off),
+            off == "active" ? Paint::text : Paint::warning);
     if (const std::string e = jstr(auth, "last_error"); !e.empty())
         row(*id, "status-identity-error", shell_.t("status.identity.last_error"), u16(e));
     if (as == "sign_in_required") {
@@ -636,15 +641,18 @@ void PagePane::build_settings() {
 }
 
 void PagePane::build_connections(Node& c) {
-    text(c, shell_.t("settings.connections.body"), Paint::text_secondary);
+    text(c, shell_.t("settings.connectors.body"), Paint::text_secondary);
     const json& s = shell_.status();
     const json* mcp = s.contains("mcp") && s["mcp"].is_array() ? &s["mcp"] : nullptr;
+    const json* listing = connectors_.is_object() ? jobj(connectors_, "connectors") : nullptr;
+    const bool api_listed = listing && listing->is_array() &&
+                            std::any_of(listing->begin(), listing->end(), [](const json& x) { return jstr(x, "kind") == "api"; });
     if (!mcp || mcp->empty()) {
-        text(c, shell_.t("settings.connections.empty"), Paint::text_secondary, "settings-connections-empty");
+        if (!api_listed) text(c, shell_.t("settings.connectors.empty"), Paint::text_secondary, "settings-connections-empty");
     } else {
         auto* list = c.emplace<Node>("settings-servers");
         list->role = ui::Role::list;
-        list->name = shell_.t("settings.connections.title");
+        list->name = shell_.t("settings.connectors.title");
         list->gap = 8;
         for (const json& srv : *mcp) {
             const std::string id = jstr(srv, "id");
@@ -652,9 +660,9 @@ void PagePane::build_connections(Node& c) {
             auto* item = list->emplace<Node>("server-" + id);
             item->role = ui::Role::list_item;
             item->gap = 2;
-            const std::string sk = "settings.connections.states." + state;
+            const std::string sk = "settings.connectors.states." + state;
             const std::u16string st = shell_.ui().strings.has(sk) ? shell_.t(sk) : u16(state);
-            const std::u16string where = shell_.t(jstr(srv, "kind") == "local" ? "settings.connections.local" : "settings.connections.remote");
+            const std::u16string where = shell_.t(jstr(srv, "kind") == "local" ? "settings.connectors.local" : "settings.connectors.remote");
             item->name = u16(jstr(srv, "name")) + u", " + where + u", " + st;
             auto* head = item->emplace<Node>();
             head->axis = ui::Axis::row;
@@ -669,20 +677,22 @@ void PagePane::build_connections(Node& c) {
                                      Paint::text)
                 ->role = ui::Role::none;
             item->emplace<ui::Label>(shell_.ui(),
-                                     shell_.t("settings.connections.tools", {{"usable", u16(std::to_string(jint(srv, "usable_tools")))},
+                                     shell_.t("settings.connectors.tools", {{"usable", u16(std::to_string(jint(srv, "usable_tools")))},
                                                                              {"total", u16(std::to_string(jint(srv, "tools")))}}),
                                      TextStyle::caption, Paint::text_secondary)
                 ->role = ui::Role::none;
             if (const std::string w = jstr(srv, "warning"); !w.empty())
-                item->emplace<ui::Label>(shell_.ui(), shell_.t("settings.connections.warning") + u": " + u16(w), TextStyle::caption)->role = ui::Role::none;
+                item->emplace<ui::Label>(shell_.ui(), shell_.t("settings.connectors.warning") + u": " + u16(w), TextStyle::caption)->role = ui::Role::none;
             if (const std::string e = jstr(srv, "error"); !e.empty())
-                item->emplace<ui::Label>(shell_.ui(), shell_.t("settings.connections.problem") + u": " + u16(e), TextStyle::caption)->role = ui::Role::none;
+                item->emplace<ui::Label>(shell_.ui(), shell_.t("settings.connectors.problem") + u": " + u16(e), TextStyle::caption)->role = ui::Role::none;
         }
     }
+    // The API connectors (client/api-connectors): their state, tools and personal access tokens.
+    build_api_connectors(c);
     // The agent browser (client/browser-use Chrome Policy Compatibility).
     if (const json* b = jobj(s, "browser")) {
         const std::string state = jstr(*b, "state");
-        const std::string sk = "settings.connections.browser.states." + state;
+        const std::string sk = "settings.connectors.browser.states." + state;
         const std::u16string st = shell_.ui().strings.has(sk) ? shell_.t(sk) : u16(state);
         auto* item = c.emplace<Node>("settings-browser");
         item->role = ui::Role::group;
@@ -690,20 +700,20 @@ void PagePane::build_connections(Node& c) {
         std::u16string detail;
         const std::u16string version = u16(jstr(*b, "version"));
         if (state == "available")
-            detail = jbool(*b, "running") ? shell_.t(jbool(*b, "headless") ? "settings.connections.browser.detail_headless"
-                                                                           : "settings.connections.browser.detail_running",
+            detail = jbool(*b, "running") ? shell_.t(jbool(*b, "headless") ? "settings.connectors.browser.detail_headless"
+                                                                           : "settings.connectors.browser.detail_running",
                                                      {{"version", version}})
-                                          : shell_.t("settings.connections.browser.detail_idle", {{"version", version}});
+                                          : shell_.t("settings.connectors.browser.detail_idle", {{"version", version}});
         else if (state == "blocked")
-            detail = shell_.t("settings.connections.problem") + u": " +
-                     shell_.t("settings.connections.browser.blocked", {{"policy", u16(jstr(*b, "policy"))}});
+            detail = shell_.t("settings.connectors.problem") + u": " +
+                     shell_.t("settings.connectors.browser.blocked", {{"policy", u16(jstr(*b, "policy"))}});
         else if (const std::string r = jstr(*b, "reason"); !r.empty())
-            detail = shell_.t("settings.connections.problem") + u": " + u16(r);
-        item->name = shell_.t("settings.connections.browser.name") + u", " + st;
+            detail = shell_.t("settings.connectors.problem") + u": " + u16(r);
+        item->name = shell_.t("settings.connectors.browser.name") + u", " + st;
         auto* head = item->emplace<Node>();
         head->axis = ui::Axis::row;
         head->gap = 8;
-        head->emplace<ui::Label>(shell_.ui(), shell_.t("settings.connections.browser.name"), TextStyle::body_strong, Paint::text, false)->role =
+        head->emplace<ui::Label>(shell_.ui(), shell_.t("settings.connectors.browser.name"), TextStyle::body_strong, Paint::text, false)->role =
             ui::Role::none;
         head->emplace<ui::Badge>(shell_.ui(), st, state == "available" ? Paint::info_background : state == "blocked" ? Paint::error_background : Paint::warning_background,
                                  Paint::text)

@@ -1,13 +1,16 @@
 // Skill authoring (client/skills Skill Authoring, Save Thread As Skill, Skill Publishing; add-skills tasks 4.1, 4.2,
 // 4.4, design D10): SKILL.md in two parts, private Skills and their files on disk, the package zip, and drafts from
 // sample Threads whose names, email addresses and paths become parameters.
+#include "skills/agent_save.h"
 #include "skills/authoring.h"
 #include "skills/catalog.h"
 
 #include <gtest/gtest.h>
 
 #include <fstream>
+#include <map>
 #include <random>
+#include <set>
 
 using namespace wb;
 using namespace wb::skills;
@@ -208,4 +211,279 @@ TEST(SkillAuthoring, DraftFromSampleThreadsParameterisesNamesEmailsAndPaths) {
     // An unreadable answer is an error.
     EXPECT_EQ(draft_skill(t, [](const std::string&, const std::string&) -> Result<std::string> { return std::string("sorry"); }).error().code,
               "draft_failed");
+}
+
+// ---- skills.save: the agent's save of a private Skill (add-agent-created-skills tasks 2.1, 2.2, 2.4, 2.9) ------------
+
+namespace {
+
+// A save environment on a temporary folder, with a provenance ledger and a set of other-tier Skills.
+struct AgentEnv {
+    TempDir dir;
+    std::set<std::string> ledger;               // names the agent created
+    std::map<std::string, std::string> tiers;   // usable Skills of other tiers by name
+    int reloads = 0;
+    AgentSkillEnv env() {
+        AgentSkillEnv e;
+        e.private_dir = dir.path / "private";
+        e.previous_dir = dir.path / "previous";
+        e.other_tier = [this](const std::string& n) -> std::optional<std::string> {
+            const auto it = tiers.find(n);
+            if (it == tiers.end()) return std::nullopt;
+            return it->second;
+        };
+        e.created_by_agent = [this](const std::string& n) { return ledger.count(n) > 0; };
+        e.record = [this](const std::string& n, const std::string&, bool) { ledger.insert(n); };
+        e.user_names = [] { return std::vector<std::string>{"Anna Novakova"}; };
+        e.reload = [this] { ++reloads; };
+        return e;
+    }
+};
+
+json agent_args(const std::string& name, const std::string& version = "1.0.0", bool update = false,
+                const std::string& instructions = "Collect the notes and summarise them.\n") {
+    return json{{"name", name}, {"description", "Writes the weekly report"}, {"instructions", instructions},
+                {"version", version}, {"update", update}};
+}
+
+// Parses, checks and writes one save, the way the tool does.
+Result<json> run_save(const AgentSkillEnv& env, const json& args) {
+    auto a = parse_agent_args(args);
+    if (!a) return a.error();
+    auto p = prepare_agent_save(env, *a);
+    if (!p) return p.error();
+    return commit_agent_save(env, *p, "thread-1");
+}
+
+Error refusal(const AgentSkillEnv& env, const json& args) {
+    auto r = run_save(env, args);
+    EXPECT_FALSE(r);
+    return r ? Error{} : r.error();
+}
+
+}  // namespace
+
+TEST(AgentSkillSave, CreatesAPrivateSkillWithoutAPath) {
+    AgentEnv t;
+    const auto env = t.env();
+    auto r = run_save(env, agent_args("weekly-report"));
+    ASSERT_TRUE(r) << r.error().message;
+    EXPECT_EQ((*r)["status"], "created");
+    EXPECT_EQ((*r)["tier"], "private");
+    const auto folder = env.private_dir / "weekly-report";
+    ASSERT_TRUE(fs::exists(folder / "SKILL.md"));
+    EXPECT_TRUE(t.ledger.count("weekly-report") > 0);
+    EXPECT_EQ(t.reloads, 1);
+    auto parsed = parse_skill_md(read(folder / "SKILL.md"), false);
+    ASSERT_TRUE(std::holds_alternative<Parsed>(parsed));
+    EXPECT_EQ(std::get<Parsed>(parsed).manifest.name, "weekly-report");
+    EXPECT_EQ(std::get<Parsed>(parsed).manifest.version, "1.0.0");
+}
+
+TEST(AgentSkillSave, RefusesAnyLocationArgument) {
+    for (const char* key : {"path", "folder", "directory"}) {
+        json j = agent_args("weekly-report");
+        j[key] = "C:\\Users\\x";
+        EXPECT_FALSE(parse_agent_args(j)) << key;
+    }
+}
+
+TEST(AgentSkillSave, InvalidFrontmatterNamesTheField) {
+    AgentEnv t;
+    const auto env = t.env();
+    const auto bad_name = refusal(env, agent_args("Weekly Report"));
+    EXPECT_EQ(bad_name.code, "invalid");
+    EXPECT_NE(bad_name.message.find("name"), std::string::npos);
+    json no_description = agent_args("weekly-report");
+    no_description["description"] = "";
+    EXPECT_NE(refusal(env, no_description).message.find("description"), std::string::npos);
+    EXPECT_FALSE(fs::exists(env.private_dir / "weekly-report"));
+}
+
+TEST(AgentSkillSave, SecretInInstructionsIsRefusedWithoutTheValue) {
+    AgentEnv t;
+    const auto env = t.env();
+    const std::string key = "sk-proj-AbC123dEf456GhI789jKl012";
+    const auto err = refusal(env, agent_args("weekly-report", "1.0.0", false, "Call the API with api_key: " + key + "\n"));
+    EXPECT_EQ(err.code, "secret");
+    EXPECT_NE(err.message.find("instructions"), std::string::npos);
+    EXPECT_EQ(err.message.find(key), std::string::npos);
+    EXPECT_FALSE(fs::exists(env.private_dir / "weekly-report"));
+}
+
+TEST(AgentSkillSave, SecretRulesAcceptPlainProse) {
+    EXPECT_FALSE(has_secret("Ask the user for the password reset steps."));
+    EXPECT_FALSE(has_secret("Read the token name from the config and use {{api_key}} as a placeholder."));
+    EXPECT_FALSE(has_secret("Summarise the notes in 40 short lines of plain Markdown text for the team."));
+    EXPECT_TRUE(has_secret("password = hunter2hunter2"));
+    EXPECT_TRUE(has_secret("-----BEGIN RSA PRIVATE KEY-----"));
+    EXPECT_TRUE(has_secret("AKIAIOSFODNN7EXAMPLE1 is the key"));
+}
+
+TEST(AgentSkillSave, BinaryFileIsRefused) {
+    AgentEnv t;
+    const auto env = t.env();
+    json j = agent_args("weekly-report");
+    j["files"] = json::array({{{"path", "assets/logo.bin"}, {"content", std::string("PNG\0\x01\x02", 6)}}});
+    EXPECT_EQ(refusal(env, j).code, "binary");
+    EXPECT_FALSE(fs::exists(env.private_dir / "weekly-report"));
+}
+
+TEST(AgentSkillSave, UnsafeFilePathIsRefused) {
+    AgentEnv t;
+    const auto env = t.env();
+    for (const char* path : {"../escape.md", "SKILL.md", "other/notes.md", "scripts/../../x.md", "C:\\x.md"}) {
+        json j = agent_args("weekly-report");
+        j["files"] = json::array({{{"path", path}, {"content", "text"}}});
+        EXPECT_EQ(refusal(env, j).code, "unsafe_path") << path;
+    }
+    EXPECT_FALSE(fs::exists(env.private_dir / "weekly-report"));
+}
+
+TEST(AgentSkillSave, TextFilesUnderTheResourceFoldersAreWritten) {
+    AgentEnv t;
+    const auto env = t.env();
+    json j = agent_args("weekly-report");
+    j["files"] = json::array({{{"path", "references/template.md"}, {"content", "# Template\n"}},
+                              {{"path", "scripts/run.ps1"}, {"content", "Write-Output 1\n"}}});
+    ASSERT_TRUE(run_save(env, j));
+    const auto files = list_files(env.private_dir / "weekly-report");
+    ASSERT_EQ(files.size(), 2u);
+    EXPECT_EQ(files[0].path, "references/template.md");
+    EXPECT_EQ(read(env.private_dir / "weekly-report" / "references" / "template.md"), "# Template\n");
+}
+
+TEST(AgentSkillSave, FileLimitsAreTheEditorsPackageLimits) {
+    AgentEnv t;
+    const auto env = t.env();
+    json j = agent_args("weekly-report");
+    const std::string big(21u * 1024u * 1024u, 'a');  // above the 20 MB unpacked limit
+    j["files"] = json::array({{{"path", "assets/big.txt"}, {"content", big}}});
+    EXPECT_EQ(refusal(env, j).code, "too_large");
+    json many = agent_args("many-files");
+    many["files"] = json::array();
+    for (int i = 0; i < 200; ++i) many["files"].push_back({{"path", "assets/f" + std::to_string(i) + ".txt"}, {"content", "x"}});
+    EXPECT_EQ(refusal(env, many).code, "too_large");
+}
+
+TEST(AgentSkillSave, NameInUseByAnotherTierIsRefusedNamingTheTier) {
+    AgentEnv t;
+    t.tiers["weekly-report"] = "org";
+    const auto env = t.env();
+    const auto err = refusal(env, agent_args("weekly-report"));
+    EXPECT_EQ(err.code, "name_in_use");
+    EXPECT_NE(err.message.find("org"), std::string::npos);
+    EXPECT_FALSE(fs::exists(env.private_dir / "weekly-report"));
+}
+
+TEST(AgentSkillSave, UsersOwnSkillIsNeverReplaced) {
+    AgentEnv t;
+    const auto env = t.env();
+    write(env.private_dir / "weekly-report" / "SKILL.md", "---\nname: weekly-report\ndescription: Mine\nversion: 1.0.0\n---\n\nMy own text.\n");
+    const std::string before = read(env.private_dir / "weekly-report" / "SKILL.md");
+    EXPECT_EQ(refusal(env, agent_args("weekly-report", "2.0.0", true)).code, "name_in_use");
+    EXPECT_EQ(read(env.private_dir / "weekly-report" / "SKILL.md"), before);
+    EXPECT_FALSE(fs::exists(env.previous_dir / "weekly-report"));
+}
+
+TEST(AgentSkillSave, ExistingAgentSkillNeedsUpdateAndAHigherVersion) {
+    AgentEnv t;
+    const auto env = t.env();
+    ASSERT_TRUE(run_save(env, agent_args("weekly-report", "1.0.0")));
+    EXPECT_EQ(refusal(env, agent_args("weekly-report", "1.1.0", false)).code, "exists");
+    EXPECT_EQ(refusal(env, agent_args("weekly-report", "1.0.0", true)).code, "version");
+    EXPECT_EQ(refusal(env, agent_args("weekly-report", "0.9.0", true)).code, "version");
+    auto ok = run_save(env, agent_args("weekly-report", "1.1.0", true));
+    ASSERT_TRUE(ok) << ok.error().message;
+    EXPECT_EQ((*ok)["status"], "updated");
+}
+
+TEST(AgentSkillSave, UpdateKeepsTheReplacedVersionAndOnlyTheLatest) {
+    AgentEnv t;
+    const auto env = t.env();
+    json v1 = agent_args("weekly-report", "1.0.0", false, "First text.\n");
+    v1["files"] = json::array({{{"path", "references/a.md"}, {"content", "old file\n"}}});
+    ASSERT_TRUE(run_save(env, v1));
+    ASSERT_TRUE(run_save(env, agent_args("weekly-report", "1.1.0", true, "Second text.\n")));
+    const auto kept = env.previous_dir / "weekly-report";
+    EXPECT_NE(read(kept / "SKILL.md").find("First text."), std::string::npos);
+    EXPECT_TRUE(fs::exists(kept / "references" / "a.md"));  // the replaced files are kept too
+    EXPECT_TRUE(has_previous(env, "weekly-report"));
+    // The update removed the replaced resource files from the current version.
+    EXPECT_FALSE(fs::exists(env.private_dir / "weekly-report" / "references" / "a.md"));
+
+    ASSERT_TRUE(run_save(env, agent_args("weekly-report", "1.2.0", true, "Third text.\n")));
+    EXPECT_NE(read(kept / "SKILL.md").find("Second text."), std::string::npos);
+    EXPECT_EQ(read(kept / "SKILL.md").find("First text."), std::string::npos);
+}
+
+TEST(AgentSkillSave, RestoreSwapsCurrentAndKeptVersions) {
+    AgentEnv t;
+    const auto env = t.env();
+    ASSERT_TRUE(run_save(env, agent_args("weekly-report", "1.0.0", false, "First text.\n")));
+    ASSERT_TRUE(run_save(env, agent_args("weekly-report", "1.1.0", true, "Second text.\n")));
+    ASSERT_TRUE(restore_previous(env, "weekly-report"));
+    EXPECT_NE(read(env.private_dir / "weekly-report" / "SKILL.md").find("First text."), std::string::npos);
+    EXPECT_NE(read(env.previous_dir / "weekly-report" / "SKILL.md").find("Second text."), std::string::npos);
+    ASSERT_TRUE(restore_previous(env, "weekly-report"));  // and back again
+    EXPECT_NE(read(env.private_dir / "weekly-report" / "SKILL.md").find("Second text."), std::string::npos);
+    EXPECT_FALSE(restore_previous(env, "no-such-skill"));
+}
+
+TEST(AgentSkillSave, DeletingTheKeptVersionRemovesIt) {
+    AgentEnv t;
+    const auto env = t.env();
+    ASSERT_TRUE(run_save(env, agent_args("weekly-report", "1.0.0")));
+    ASSERT_TRUE(run_save(env, agent_args("weekly-report", "1.1.0", true)));
+    ASSERT_TRUE(has_previous(env, "weekly-report"));
+    ASSERT_TRUE(forget_previous(env, "weekly-report"));
+    EXPECT_FALSE(has_previous(env, "weekly-report"));
+}
+
+TEST(AgentSkillSave, ApprovalPreviewListsFindingsFilesAndChanges) {
+    AgentEnv t;
+    const auto env = t.env();
+    ASSERT_TRUE(run_save(env, agent_args("weekly-report", "1.0.0", false, "Send to anna@example.com.\n")));
+    json j = agent_args("weekly-report", "1.1.0", true, "Send to anna@example.com.\nSave under C:\\Users\\anna\\out.\n");
+    j["files"] = json::array({{{"path", "scripts/run.ps1"}, {"content", "Write-Output 1\n"}}});
+    auto a = parse_agent_args(j);
+    ASSERT_TRUE(a);
+    auto p = prepare_agent_save(env, *a);
+    ASSERT_TRUE(p) << p.error().message;
+    const json preview = agent_save_preview(*p);
+    EXPECT_EQ(preview["instructions"], j["instructions"]);
+    EXPECT_EQ(preview["files"][0]["path"], "scripts/run.ps1");
+    EXPECT_TRUE(preview["update"].get<bool>());
+    std::set<std::string> kinds;
+    for (const auto& f : preview["findings"]) kinds.insert(f["kind"].get<std::string>() + ":" + f["original"].get<std::string>());
+    EXPECT_TRUE(kinds.count("email:anna@example.com") > 0);
+    bool path_found = false;
+    for (const auto& f : preview["findings"]) path_found = path_found || f["kind"] == "path";
+    EXPECT_TRUE(path_found);
+    bool added = false, removed = false;
+    for (const auto& line : preview["changes"]) {
+        const std::string s = line.get<std::string>();
+        added = added || s == "+ Save under C:\\Users\\anna\\out.";
+        removed = removed || s == "- version: \"1.0.0\"";
+    }
+    EXPECT_TRUE(added);
+    EXPECT_TRUE(removed);
+}
+
+TEST(AgentSkillSave, PersonalDataIsFoundNotReplaced) {
+    AgentEnv t;
+    const auto env = t.env();
+    auto a = parse_agent_args(agent_args("weekly-report", "1.0.0", false, "Report from Anna Novakova to ops@example.com.\n"));
+    ASSERT_TRUE(a);
+    auto p = prepare_agent_save(env, *a);
+    ASSERT_TRUE(p);
+    EXPECT_FALSE(p->findings.empty());
+    ASSERT_TRUE(commit_agent_save(env, *p, "thread-1"));
+    EXPECT_NE(read(env.private_dir / "weekly-report" / "SKILL.md").find("ops@example.com"), std::string::npos);
+}
+
+TEST(AgentSkillSave, ChangedLinesAreMarkedAgainstTheOldText) {
+    const auto lines = changed_lines("a\nb\nc\n", "a\nB\nc\nd\n");
+    const std::vector<std::string> expected = {"- b", "+ B", "+ d"};
+    EXPECT_EQ(lines, expected);
 }

@@ -82,6 +82,18 @@
       "default": []
     },
     {
+      "path": "identity.offline_sign_in",
+      "owner": "client/identity",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
       "path": "knowledge.directory_enrichment",
       "owner": "client/knowledge-graph",
       "type": {
@@ -1310,6 +1322,23 @@
             "x-owner": "client/policy-enforcement",
             "x-merge": "union",
             "default": []
+          }
+        }
+      },
+      "identity": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "offline_sign_in": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "x-owner": "client/identity",
+            "x-merge": "scalar",
+            "default": "on",
+            "x-guardrail": "max-level"
           }
         }
       },

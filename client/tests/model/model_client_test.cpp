@@ -335,6 +335,57 @@ TEST(ModelRetries, TimeoutIsRetried) {
     EXPECT_EQ(rig.gateway.request_count(), 2U);
 }
 
+// fix-long-thread-model-calls D3: a TIMEOUT means the gateway already waited its full limit; one retry only.
+TEST(ModelRetries, RepeatedTimeoutFailsAfterTwoAttempts) {
+    Rig rig;
+    rig.gateway.push(transport_error("timeout"));
+    auto r = rig.client->chat(simple_request(), {});
+    ASSERT_FALSE(r.ok());
+    EXPECT_EQ(r.failure().code, code::timeout);
+    EXPECT_EQ(rig.gateway.request_count(), 2U);
+}
+
+TEST(ModelRetries, TimeoutErrorEventInsideAKeepAliveStreamIsRetriedOnce) {
+    Rig rig;
+    rig.gateway.push(streamed({": keep-alive\n\n", ": keep-alive\n\n",
+                               sse({{"error", {{"code", "TIMEOUT"}, {"message", "no first token"}, {"reason", "first byte"}}}})}));
+    auto r = rig.client->chat(simple_request(), {});
+    ASSERT_FALSE(r.ok());
+    EXPECT_EQ(r.failure().code, code::timeout);
+    EXPECT_FALSE(r.failure().partial_output);
+    EXPECT_EQ(rig.gateway.request_count(), 2U);
+}
+
+TEST(ModelStreaming, KeepAliveCommentsBeforeTheFirstTokenCarryNoContent) {
+    Rig rig;
+    std::vector<std::string> chunks = {": keep-alive\n\n", ": keep-alive\n\n"};
+    for (auto& c : text_stream({"hel", "lo"})) chunks.push_back(c);
+    rig.gateway.push(streamed(chunks));
+    std::string seen;
+    ChatSink sink;
+    sink.on_text = [&](std::string_view t) { seen += t; };
+    auto r = rig.client->chat(simple_request(), sink);
+    ASSERT_TRUE(r.ok()) << r.failure().message;
+    EXPECT_EQ(r->text, "hello");
+    EXPECT_EQ(seen, "hello");
+}
+
+TEST(ModelTimeouts, PolicyValuesApplyToTheNextRequest) {
+    std::chrono::milliseconds idle{0};
+    Rig rig([&](ModelClientConfig& c) {
+        c.idle_timeout_now = [&] { return idle; };
+        c.connect_timeout_now = [] { return std::chrono::milliseconds(5'000); };
+    });
+    rig.gateway.push(streamed(text_stream({"a"})));
+    ASSERT_TRUE(rig.client->chat(simple_request(), {}).ok());
+    idle = std::chrono::milliseconds(120'000);  // the administrator raised policy.llm.timeouts.idle_seconds
+    ASSERT_TRUE(rig.client->chat(simple_request(), {}).ok());
+    ASSERT_EQ(rig.gateway.requests.size(), 2U);
+    EXPECT_EQ(rig.gateway.requests[0].idle_timeout, std::chrono::milliseconds(60'000));  // unset: the default
+    EXPECT_EQ(rig.gateway.requests[1].idle_timeout, std::chrono::milliseconds(120'000));
+    EXPECT_EQ(rig.gateway.requests[1].connect_timeout, std::chrono::milliseconds(5'000));
+}
+
 TEST(ModelRetries, InvalidRequestIsNotRetried) {
     Rig rig;
     rig.gateway.push(error_response(400, "INVALID_REQUEST"));

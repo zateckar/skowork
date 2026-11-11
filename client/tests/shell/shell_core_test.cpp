@@ -195,6 +195,42 @@ TEST(ShellFeed, ApprovalCardAndEditedArguments) {
     EXPECT_EQ(items[1].args, json({{"to", "c@d.cz"}}));
 }
 
+// fix-tool-waits 2.1: the Approval of an interrupted subagent is a card right after the call that started it.
+TEST(ShellFeed, ChildRunApprovalIsACardUnderTheCallThatStartedTheSubagent) {
+    FeedSnapshot snap = snapshot({run("run_p", "interrupted")});
+    snap.runs[0].events = {
+        {1, "", "message", {{"role", "user"}, {"content", "Send it"}}},
+        {2, "", "tool_call", {{"call_id", "c1"}, {"tool", "delegate"}, {"args", json::object()}, {"decision", "allow"}}},
+        {3, "", "subagent", {{"call_id", "c1"}, {"child_run_id", "run_c"}, {"task", "send the note"}}},
+        {4, "", "tool_call", {{"call_id", "c2"}, {"tool", "find_tools"}, {"args", json::object()}, {"decision", "allow"}}},
+    };
+    RunInfo child = run("run_c", "interrupted");
+    child.parent_run_id = "run_p";
+    snap.subagents = {child};
+    ActionItem a;
+    a.id = "act_c";
+    a.thread_id = T;
+    a.run_id = "run_c";
+    a.kind = "approval";
+    a.call_id = "m1";
+    a.payload = {{"tool", "mail.send"}, {"args", {{"to", "a@b.cz"}}}, {"risk", "external"}, {"rationale", "asked"}};
+    a.created_at = "2026-10-23T10:00:05Z";
+    snap.actions = {a};
+    const auto items = build_feed(snap);
+    EXPECT_EQ(summary(items), (V{"user:Send it", "tool:delegate:pending", "action:approval:open", "tool:find_tools:pending"}));
+    EXPECT_EQ(items[2].run_id, "run_c");
+    EXPECT_EQ(items[2].action.id, "act_c");
+
+    // Answered: the card leaves the feed, as the Run resumes.
+    snap.actions[0].resolved_at = "2026-10-23T10:01:00Z";
+    EXPECT_EQ(summary(build_feed(snap)), (V{"user:Send it", "tool:delegate:pending", "tool:find_tools:pending"}));
+
+    // A subagent whose call is not in the feed: the card is still drawn, at the end.
+    snap.actions[0].resolved_at.clear();
+    snap.runs[0].events.erase(snap.runs[0].events.begin() + 2);
+    EXPECT_EQ(summary(build_feed(snap)), (V{"user:Send it", "tool:delegate:pending", "tool:find_tools:pending", "action:approval:open"}));
+}
+
 TEST(ShellFeed, StandaloneActionItemsFollowTheConversation) {
     FeedSnapshot snap = snapshot({});
     ActionItem a;
@@ -548,7 +584,7 @@ TEST(ShellFormat, PercentSnippetsAndAboutText) {
     EXPECT_EQ(snippet_parts("no marks [[open"), (P{{"no marks [[open", false}}));
     EXPECT_TRUE(snippet_parts("").empty());
     EXPECT_EQ(about_text({{"version", "1.2.3"}, {"channel", "stable"}, {"commit", "abc"}, {"pid", 42}}),
-              "Workbench 1.2.3\nChannel: stable\nCommit: abc\nProcess ID: 42");
+              "SkoWork 1.2.3\nChannel: stable\nCommit: abc\nProcess ID: 42");
 }
 
 TEST(ShellFormat, SizesDurationsAndRelativeTimes) {
@@ -597,4 +633,253 @@ TEST(Routes, AutomationPages) {
     EXPECT_EQ(edit->hash, "#/automations/edit/trg_A-1");
     EXPECT_FALSE(parse_route("#/automations"));
     EXPECT_FALSE(parse_route("#/automations/bad id"));
+}
+
+// ==== fix-feed-live-updates: Live Feed Updates (design D2) and Cited Sources In The Feed (design D7) ==================
+
+namespace {
+std::vector<std::string> answers(const std::vector<FeedItem>& items) {
+    std::vector<std::string> out;
+    for (const FeedItem& i : items)
+        if (i.type == ItemType::assistant) out.push_back(i.text);
+    return out;
+}
+
+// A knowledge.search result body with passages n = 1..count, each from its own file.
+std::string search_body(int count) {
+    json results = json::array();
+    for (int n = 1; n <= count; ++n)
+        results.push_back({{"n", n}, {"source", "files"}, {"title", "Doc " + std::to_string(n)}, {"ref", "files://doc" + std::to_string(n)},
+                           {"date", "2026-10-01T00:00:00Z"}});
+    return json({{"results", results}}).dump();
+}
+}  // namespace
+
+TEST(ShellFeedLive, StoredAnswerAfterAReasoningGapShowsOnce) {
+    Recorder ev{"run_1"};
+    FeedSnapshot snap = snapshot({run("run_1", "running")});
+    LiveText live;
+    EXPECT_EQ(apply_live_event(snap, live, ev("message", {{"role", "user"}, {"content", "hi"}})), Apply::ok);  // seq 1
+    EXPECT_EQ(apply_live_event(snap, live, ev("text.delta", {{"text", "Hel"}}, false)), Apply::ok);
+    EXPECT_EQ(apply_live_event(snap, live, ev("text.delta", {{"text", "lo"}}, false)), Apply::ok);
+    ev("reasoning", {{"text", "x"}});  // stored as seq 2, but this older feed never received it
+    const LiveRunEvent answer = ev("message", {{"role", "assistant"}, {"content", "Hello"}});  // seq 3
+    EXPECT_EQ(apply_live_event(snap, live, answer), Apply::refetch);
+    // The refetched snapshot holds the reasoning and the answer; the streamed copy is gone.
+    FeedSnapshot reloaded = snapshot({run("run_1", "running")});
+    reloaded.runs[0].events = {{1, "", "message", {{"role", "user"}, {"content", "hi"}}},
+                               {2, "", "reasoning", {{"text", "x"}}},
+                               {3, "", "message", {{"role", "assistant"}, {"content", "Hello"}}}};
+    settle_live(reloaded, live);
+    EXPECT_EQ(summary(build_feed(reloaded, live)), (V{"user:hi", "reasoning:x", "assistant:Hello", "working"}));
+    EXPECT_EQ(answers(build_feed(reloaded, live)), (std::vector<std::string>{"Hello"}));
+}
+
+TEST(ShellFeedLive, SnapshotTakenAfterStreamingShowsTheAnswerOnce) {
+    Recorder ev{"run_1"};
+    FeedSnapshot snap = snapshot({run("run_1", "running")});
+    LiveText live;
+    apply_live_event(snap, live, ev("message", {{"role", "user"}, {"content", "hi"}}));  // seq 1
+    apply_live_event(snap, live, ev("text.delta", {{"text", "Hello"}}, false));
+    // A snapshot loaded while the text streamed already holds the stored answer (seq 2).
+    FeedSnapshot loaded = snapshot({run("run_1", "running")});
+    loaded.runs[0].events = {{1, "", "message", {{"role", "user"}, {"content", "hi"}}},
+                             {2, "", "message", {{"role", "assistant"}, {"content", "Hello"}}}};
+    EXPECT_EQ(summary(build_feed(loaded, live)), (V{"user:hi", "assistant:Hello", "working"}));
+    settle_live(loaded, live);
+    EXPECT_TRUE(live.text.empty());
+    EXPECT_EQ(summary(build_feed(loaded, live)), (V{"user:hi", "assistant:Hello", "working"}));
+}
+
+TEST(ShellFeedLive, AnEarlierAnswerDoesNotRemoveTextThatStreamsLater) {
+    Recorder ev{"run_1"};
+    FeedSnapshot snap = snapshot({run("run_1", "running")});
+    LiveText live;
+    apply_live_event(snap, live, ev("message", {{"role", "user"}, {"content", "hi"}}));  // seq 1
+    apply_live_event(snap, live, ev("text.delta", {{"text", "Let me look."}}, false));
+    apply_live_event(snap, live, ev("message", {{"role", "assistant"}, {"content", "Let me look."}}));  // seq 2
+    apply_live_event(snap, live, ev("text.delta", {{"text", "Done"}}, false));  // the next model call streams
+    EXPECT_EQ(summary(build_feed(snap, live)), (V{"user:hi", "assistant:Let me look.", "assistant*:Done"}));
+    // The same after a snapshot that holds the earlier answer.
+    FeedSnapshot loaded = snapshot({run("run_1", "running")});
+    loaded.runs[0].events = {{1, "", "message", {{"role", "user"}, {"content", "hi"}}},
+                             {2, "", "message", {{"role", "assistant"}, {"content", "Let me look."}}}};
+    settle_live(loaded, live);
+    EXPECT_EQ(summary(build_feed(loaded, live)), (V{"user:hi", "assistant:Let me look.", "assistant*:Done"}));
+}
+
+TEST(ShellFeedSources, OnlyPassagesTheAnswerCitesAreListedInNumberOrder) {
+    Recorder ev{"run_1"};
+    FeedSnapshot snap = snapshot({run("run_1", "running")});
+    LiveText live;
+    replay(snap, live,
+           {ev("message", {{"role", "user"}, {"content", "find"}}),
+            ev("tool_call", {{"call_id", "c1"}, {"tool", "knowledge.search"}, {"args", {{"query", "doc"}}}, {"rationale", ""},
+                             {"risk", "read"}, {"decision", "allow"}, {"reason", ""}}),
+            ev("tool_result", {{"call_id", "c1"}, {"tool", "knowledge.search"}, {"ok", true}, {"content", search_body(8)}}),
+            ev("message", {{"role", "assistant"}, {"content", "The plan is in Doc 5 [5] and the budget in Doc 2 [2]."}})});
+    const auto items = build_feed(snap, live);
+    const FeedItem* answer = nullptr;
+    for (const FeedItem& i : items)
+        if (i.type == ItemType::assistant) answer = &i;
+    ASSERT_NE(answer, nullptr);
+    ASSERT_EQ(answer->sources.size(), 2u);
+    EXPECT_EQ(answer->sources[0].n, 2);
+    EXPECT_EQ(answer->sources[0].title, "Doc 2");
+    EXPECT_EQ(answer->sources[1].n, 5);
+    EXPECT_EQ(answer->sources[1].ref, "files://doc5");
+}
+
+TEST(ShellFeedSources, AnswersWithoutUsableMarkersListNothing) {
+    std::map<long long, Citation> cited;
+    for (long long n = 1; n <= 8; ++n) cited[n] = {n, "Doc", "files://d", "files", ""};
+    EXPECT_TRUE(cited_in_text("No citations in this answer.", cited).empty());
+    EXPECT_TRUE(cited_in_text("Unknown passage [9] and [0].", cited).size() == 0u);
+    EXPECT_TRUE(cited_in_text("A code span `[2]` is not a citation.", cited).empty());
+    EXPECT_TRUE(cited_in_text("``[2] inside double ticks``", cited).empty());
+    EXPECT_TRUE(cited_in_text("```\n[3]\n```\nAfter the block.", cited).empty());
+    const auto marked = cited_in_text("Sentence [2]. Another [2] and [7]. Code `[4]` and [4].", cited);
+    ASSERT_EQ(marked.size(), 3u);
+    EXPECT_EQ(marked[0].n, 2);
+    EXPECT_EQ(marked[1].n, 4);
+    EXPECT_EQ(marked[2].n, 7);
+}
+
+// Live Feed Updates: a stream of 2,000 deltas in 20 seconds repaints at most 30 times in any second, and the stored events
+// are folded once (design D3, D4).
+TEST(ShellFeedLive, StreamRepaintsAtMostThirtyTimesAndNeverRefoldsStoredEvents) {
+    FeedSnapshot snap = snapshot({run("run_1", "running")});
+    for (long long seq = 1; seq <= 50; ++seq)
+        snap.runs[0].events.push_back({seq, "", "message", {{"role", "user"}, {"content", "message " + std::to_string(seq)}}});
+    Recorder ev{"run_1"};
+    LiveText live;
+    FeedFold fold;
+    fold.build(snap, live);
+    EXPECT_EQ(fold.folded_events(), 50u);
+    RepaintLimit limit;
+    std::vector<long long> repaints;
+    long long t = 0;
+    for (int i = 0; i < 2000; ++i, t += 10) {
+        apply_live_event(snap, live, ev("text.delta", {{"text", "w "}}, false));
+        if (limit.request(t) || limit.take_due(t)) {
+            repaints.push_back(t);
+            const auto items = fold.build(snap, live);
+            ASSERT_FALSE(items.empty());
+        }
+    }
+    EXPECT_EQ(fold.folded_events(), 50u);  // the stored events were not folded again
+    ASSERT_FALSE(repaints.empty());
+    EXPECT_LE(repaints.size(), 600u);
+    for (const long long start : repaints) {
+        size_t in_second = 0;
+        for (const long long other : repaints)
+            if (other >= start && other < start + 1000) ++in_second;
+        EXPECT_LE(in_second, 30u) << "repaints from " << start << " ms";
+    }
+    // The text reached the end of the stream: 2,000 words of "w ".
+    ASSERT_EQ(live.text["run_1"].size(), 4000u);
+}
+
+TEST(ShellFeedLive, RepaintLimitWaitsForTheIntervalAndTakesTheDueRepaint) {
+    RepaintLimit limit(34);
+    EXPECT_TRUE(limit.request(1000));   // first change: at once
+    EXPECT_FALSE(limit.request(1010));  // inside the interval: pending
+    EXPECT_TRUE(limit.pending());
+    EXPECT_EQ(limit.due_at(), 1034);
+    EXPECT_FALSE(limit.take_due(1030));
+    EXPECT_TRUE(limit.take_due(1034));
+    EXPECT_FALSE(limit.pending());
+    EXPECT_FALSE(limit.take_due(1100));  // nothing pending
+    EXPECT_TRUE(limit.request(1100));
+}
+
+// A repaint waiting for its interval has one timer. When the timer fires before the due time (the window clock and the
+// wall clock differ), the repaint stays pending and the timer is armed again; the repaint then runs at its due time.
+// Without the re-arm the last delta of a stream was never repainted (ShellFeed.StreamingDeltasKeepEarlierItems).
+TEST(ShellFeedLive, AnEarlyRepaintTimerRearmsForThePendingRepaint) {
+    long long clock = 0;
+    RepaintLimit limit(34);
+    std::map<uintptr_t, std::pair<long long, std::function<void()>>> timers;  // id -> (due, closure)
+    uintptr_t next = 1;
+    int repaints = 0;
+    RepaintTimer timer(
+        limit,
+        [&](unsigned ms, std::function<void()> fn) {
+            timers[next] = {clock + ms, std::move(fn)};
+            return next++;
+        },
+        [&](uintptr_t id) { timers.erase(id); }, [&] { return clock; }, [&] { ++repaints; });
+
+    timer.streamed_change();  // the first change repaints at once
+    EXPECT_EQ(repaints, 1);
+    EXPECT_TRUE(timers.empty());
+    clock = 10;
+    timer.streamed_change();  // inside the interval: one timer for the due time 34
+    EXPECT_EQ(repaints, 1);
+    ASSERT_EQ(timers.size(), 1u);
+    EXPECT_EQ(timers.begin()->second.first, 34);
+    timer.streamed_change();  // a further delta does not add a second timer
+    EXPECT_EQ(timers.size(), 1u);
+
+    // The timer fires 1 ms early: nothing is repainted, and the timer is armed for the rest of the interval.
+    clock = 33;
+    auto early = timers.begin()->second.second;
+    timers.clear();
+    early();
+    EXPECT_EQ(repaints, 1);
+    ASSERT_EQ(timers.size(), 1u);
+    EXPECT_EQ(timers.begin()->second.first, 34);
+
+    clock = 34;  // the due time: the pending repaint runs
+    auto due = timers.begin()->second.second;
+    timers.clear();
+    due();
+    EXPECT_EQ(repaints, 2);
+    EXPECT_TRUE(timers.empty());
+    EXPECT_FALSE(limit.pending());
+
+    // A stored change repaints at once and takes the waiting timer with it.
+    clock = 40;
+    timer.streamed_change();
+    ASSERT_EQ(timers.size(), 1u);
+    timer.stored_change();
+    EXPECT_TRUE(timers.empty());
+    EXPECT_EQ(repaints, 3);
+}
+
+// A stored event of a later model call does not change the fold of the stored events before it (fold cache, design D4).
+TEST(ShellFeedLive, FoldCacheFoldsOnlyAppendedEvents) {
+    FeedSnapshot snap = snapshot({run("run_1", "running")});
+    snap.runs[0].events.push_back({1, "", "message", {{"role", "user"}, {"content", "one"}}});
+    FeedFold fold;
+    EXPECT_EQ(summary(fold.build(snap, {})), (V{"user:one", "working"}));
+    snap.runs[0].events.push_back({2, "", "message", {{"role", "user"}, {"content", "two"}}});
+    EXPECT_EQ(summary(fold.build(snap, {})), (V{"user:one", "user:two", "working"}));
+    EXPECT_EQ(fold.folded_events(), 2u);
+    // A rebuilt log (not a prefix of the cached one) is folded again.
+    snap.runs[0].events = {{7, "", "message", {{"role", "user"}, {"content", "other"}}}};
+    EXPECT_EQ(summary(fold.build(snap, {})), (V{"user:other", "working"}));
+}
+
+// add-agent-created-skills 2.8: the saved Skill's entry carries the link to its Publish dialog; a refused save has none.
+TEST(ShellFeed, SavedSkillEntryLinksToItsPublishDialogAndARefusalHasNoLink) {
+    Recorder ev{"run_3"};
+    FeedSnapshot snap = snapshot({run("run_3", "running")});
+    LiveText live;
+    replay(snap, live,
+           {ev("tool_call", {{"call_id", "s1"}, {"tool", "skills.save"}, {"risk", "write-local"}, {"decision", "allow"},
+                             {"args", {{"name", "weekly-report"}, {"description", "d"}, {"instructions", "i"}}}}),
+            ev("tool_result", {{"call_id", "s1"}, {"tool", "skills.save"}, {"ok", true}, {"content", "Saved the Skill"}}),
+            ev("tool_call", {{"call_id", "s2"}, {"tool", "skills.save"}, {"risk", "write-local"}, {"decision", "allow"},
+                             {"args", {{"name", "Bad Name"}, {"description", "d"}, {"instructions", "i"}}}}),
+            ev("tool_result", {{"call_id", "s2"}, {"tool", "skills.save"}, {"ok", false}, {"content", "refused"}})});
+    const auto items = build_feed(snap, live);
+    std::vector<const FeedItem*> tools;
+    for (const FeedItem& i : items)
+        if (i.type == ItemType::tool) tools.push_back(&i);
+    ASSERT_EQ(tools.size(), 2u);
+    ASSERT_TRUE(tools[0]->result.has_value());
+    EXPECT_EQ(tools[0]->result->publish_route, "#/skills/edit/weekly-report");
+    ASSERT_TRUE(tools[1]->result.has_value());
+    EXPECT_TRUE(tools[1]->result->publish_route.empty());
 }

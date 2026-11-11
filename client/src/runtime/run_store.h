@@ -26,6 +26,7 @@ struct ContextMessage {
 // every message from the compaction boundary on.
 struct ThreadContext {
     std::string summary;
+    std::string summary_nonce;  // the boundary token kept with the summary's record; empty for records before it existed
     std::vector<ContextMessage> messages;
     long long compaction_revision = 0;  // id of the latest checkpoint, even if its boundary is invalid
 };
@@ -41,6 +42,7 @@ struct CompactionRecord {
     json carried = json::array();    // message events, each with run_id and seq
     int messages_compacted = 0;
     long long tokens_before = 0, tokens_after = 0;
+    std::string nonce;  // wraps the summary in every request until the next compaction (Stable Prompt Prefix)
 };
 
 struct AttachmentInfo {
@@ -87,6 +89,9 @@ public:
     // Moves a Run to `to` if the state machine allows it from its current state; otherwise fails with code
     // "illegal_transition" and changes nothing. Appends the "state" event and returns its sequence number.
     Result<long long> transition(const std::string& run_id, RunState to, const std::string& reason = {});
+    // Run Retry: moves a failed Run back to queued (the only way out of failed). Each of `unfinished` (call id, Tool
+    // id) gets a failure result first, so a call that may have partly run is not executed again.
+    Result<long long> reopen_failed(const std::string& run_id, const std::vector<std::pair<std::string, std::string>>& unfinished);
 
     // Startup recovery: Runs left running become failed ("interrupted by shutdown"), and so do queued subagent Runs (their
     // parent was running); other queued Runs and interrupted Runs stay.
@@ -134,6 +139,8 @@ public:
     Result<long long> add_compaction(const CompactionRecord& record, const ThreadContext& expected, const std::string& except_run,
                                      const std::function<bool()>& cancelled = {});
     [[nodiscard]] std::vector<CompactionRecord> compactions(const std::string& thread_id);
+    // Gives a record written before boundary tokens were kept its token, once. Returns the token now stored.
+    std::string ensure_compaction_nonce(long long id, const std::string& candidate);
 
     // ---- Thread attachments (Large Tool Results) ----
     Result<std::string> add_attachment(const std::string& thread_id, const std::string& run_id, const std::string& call_id,

@@ -315,10 +315,19 @@ test('migration: stored audience-token entries become user-token without an audi
     db.prepare("INSERT INTO mcp_servers (id, entry, enabled, discovery_status, updated_by, updated_at) VALUES ('jira-corp', ?, 1, 'ok', 'admin1', 'now')").run(JSON.stringify(entry));
     db.prepare("INSERT INTO service_signing_keys (kid, purpose, state, private_jwk, public_jwk, created_at) VALUES ('k', 'mcp-token', 'current', '{}', '{}', 'now')").run();
     // Back to before the use-idp-tokens-for-mcp migration; the later migrations (skill self_approved, team item
-    // server_content_hash) run again too.
+    // server_content_hash, usage ttft_ms and cached_tokens, model effort and fallback columns) run again too.
     db.exec('ALTER TABLE skill_versions DROP COLUMN self_approved');
     db.exec('ALTER TABLE team_items DROP COLUMN server_content_hash');
-    db.prepare('UPDATE schema_version SET version = version - 3').run();
+    db.exec('ALTER TABLE llm_usage DROP COLUMN ttft_ms');
+    db.exec('ALTER TABLE llm_usage DROP COLUMN cached_tokens');
+    db.exec('ALTER TABLE llm_models DROP COLUMN reasoning_effort');
+    db.exec('ALTER TABLE llm_models DROP COLUMN fallback_model');
+    db.exec('ALTER TABLE llm_models DROP COLUMN fallback_after_s');
+    db.exec('ALTER TABLE llm_usage DROP COLUMN answered_by');
+    db.exec('ALTER TABLE llm_usage DROP COLUMN fallback');
+    // add-api-connectors: the tables of its migration run again too (they are created by it).
+    db.exec('DROP TABLE api_connector_tokens; DROP TABLE api_connector_secrets; DROP TABLE api_documents; DROP TABLE api_operations;');
+    db.prepare('UPDATE schema_version SET version = version - 6').run();
     db.close();
     db = openDb(path);
     const migrated = JSON.parse((db.prepare("SELECT entry FROM mcp_servers WHERE id = 'jira-corp'").get() as { entry: string }).entry);

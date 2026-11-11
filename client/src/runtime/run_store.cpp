@@ -276,6 +276,37 @@ Result<long long> RunStore::transition(const std::string& run_id, RunState to, c
     return seq;
 }
 
+Result<long long> RunStore::reopen_failed(const std::string& run_id, const std::vector<std::pair<std::string, std::string>>& unfinished) {
+    const std::lock_guard lock(db_.mutex());
+    long long seq = 0;
+    const auto status = db_.transaction([&]() -> Status {
+        auto cur = run(run_id);
+        if (!cur) return make_error("not_found", "no such Run");
+        if (cur->state != RunState::failed) return make_error("not_failed", "only a failed Run can be retried");
+        // A call that may have partly run gets a result instead of a second execution (Run Retry).
+        for (const auto& [call_id, tool] : unfinished) {
+            auto r = append_event_locked(run_id, "tool_result",
+                                         {{"call_id", call_id}, {"tool", tool}, {"ok", false},
+                                          {"content", "The call did not complete before the Run failed; it was not executed again."},
+                                          {"provenance", {{"source_kind", "runtime"}, {"trusted", true}, {"at", now()}}}});
+            if (!r) return r.error();
+        }
+        const std::string at = now();
+        // failed -> queued is allowed only here (Run Lifecycle States). The Run keeps its place in the Thread.
+        auto st = db_.prepare("UPDATE runs SET state='queued', reason='retry', ended_at='' WHERE id=?1");
+        st.bind(1, run_id);
+        if (auto s = st.run(); !s) return s;
+        auto e = append_event_locked(run_id, "state", {{"state", "queued"}, {"reason", "retry"}});
+        if (!e) return e.error();
+        seq = *e;
+        auto up = db_.prepare("UPDATE threads SET updated_at=?2 WHERE id=?1");
+        up.bind(1, cur->thread_id).bind(2, at);
+        return up.run();
+    });
+    if (!status) return status.error();
+    return seq;
+}
+
 Result<RecoveryReport> RunStore::recover() {
     const std::lock_guard lock(db_.mutex());
     RecoveryReport report;
@@ -507,6 +538,8 @@ model::ChatMessage message_from_event(const json& p) {
     model::ChatMessage m;
     m.role = jstr(p, "role");
     m.content = jstr(p, "content");
+    // Run Context: a Run's starting message carries the time it was written, always as the same first line.
+    if (const std::string line = jstr(p, "time_line"); !line.empty() && m.role == "user") m.content = line + "\n" + m.content;
     m.tool_call_id = jstr(p, "tool_call_id");
     if (const json* calls = jobj(p, "tool_calls"); calls && calls->is_array())
         for (const auto& c : *calls) m.tool_calls.push_back({jstr(c, "id"), jstr(c, "tool"), jstr(c, "arguments", "{}")});
@@ -578,6 +611,7 @@ ThreadContext RunStore::context(const std::string& thread_id, const std::string&
         return ctx;
     }
     ctx.summary = last.summary;
+    ctx.summary_nonce = last.nonce;
     if (last.carried.is_array())
         for (const auto& c : last.carried)
             ctx.messages.push_back({message_from_event(c), jstr(c, "run_id"), jint(c, "seq"), true});
@@ -617,9 +651,9 @@ Result<long long> RunStore::add_compaction(const CompactionRecord& c, const Thre
         if (cancelled && cancelled()) return make_error("cancelled", "compaction was cancelled");
         auto st = db_.prepare(
             "INSERT INTO thread_compactions(thread_id,at,kind,run_id,summary,boundary_run,boundary_seq,carried,messages_compacted,"
-            "tokens_before,tokens_after) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)");
+            "tokens_before,tokens_after,nonce) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)");
         st.bind(1, c.thread_id).bind(2, now()).bind(3, c.kind).bind(4, c.run_id).bind(5, c.summary).bind(6, c.boundary_run);
-        st.bind(7, c.boundary_seq).bind(8, c.carried.dump()).bind(9, c.messages_compacted).bind(10, c.tokens_before).bind(11, c.tokens_after);
+        st.bind(7, c.boundary_seq).bind(8, c.carried.dump()).bind(9, c.messages_compacted).bind(10, c.tokens_before).bind(11, c.tokens_after).bind(12, c.nonce);
         if (auto s = st.run(); !s) return s;
         // Returning an error rolls the insertion back if cancellation arrived while the record was written.
         if (cancelled && cancelled()) return make_error("cancelled", "compaction was cancelled");
@@ -634,7 +668,7 @@ std::vector<CompactionRecord> RunStore::compactions(const std::string& thread_id
     const std::lock_guard lock(db_.mutex());
     std::vector<CompactionRecord> out;
     auto st = db_.prepare(
-        "SELECT id,thread_id,at,kind,run_id,summary,boundary_run,boundary_seq,carried,messages_compacted,tokens_before,tokens_after "
+        "SELECT id,thread_id,at,kind,run_id,summary,boundary_run,boundary_seq,carried,messages_compacted,tokens_before,tokens_after,nonce "
         "FROM thread_compactions WHERE thread_id=?1 ORDER BY id");
     st.bind(1, thread_id);
     while (st.step()) {
@@ -652,9 +686,20 @@ std::vector<CompactionRecord> RunStore::compactions(const std::string& thread_id
         c.messages_compacted = static_cast<int>(st.col_int(9));
         c.tokens_before = st.col_int(10);
         c.tokens_after = st.col_int(11);
+        c.nonce = st.col_text(12);
         out.push_back(std::move(c));
     }
     return out;
+}
+
+std::string RunStore::ensure_compaction_nonce(long long id, const std::string& candidate) {
+    const std::lock_guard lock(db_.mutex());
+    auto up = db_.prepare("UPDATE thread_compactions SET nonce=?2 WHERE id=?1 AND nonce=''");
+    up.bind(1, id).bind(2, candidate);
+    (void)up.run();
+    auto st = db_.prepare("SELECT nonce FROM thread_compactions WHERE id=?1");
+    st.bind(1, id);
+    return st.step() ? st.col_text(0) : candidate;
 }
 
 // ---- Thread attachments ------------------------------------------------------------------------------------------------

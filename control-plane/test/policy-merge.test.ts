@@ -210,6 +210,28 @@ const cases: Case[] = [
     expect: (c) => assert.equal(c.errors.length, 0),
   },
   {
+    name: 'identity.offline_sign_in: a guardrail off wins over a Group on (add-offline-sign-in 3.2)',
+    groups: [doc('sales', 20, { identity: { offline_sign_in: 'on' } })],
+    guardrail: { identity: { offline_sign_in: 'off' } },
+    expect: (c) => {
+      assert.equal(c.flat.get('identity.offline_sign_in'), 'off');
+      assert.equal(c.src['identity.offline_sign_in'], 'guardrail');
+      assert.equal(c.conflicts.length, 1);
+    },
+  },
+  {
+    name: 'identity.offline_sign_in: a guardrail on does not turn a Group off back on',
+    groups: [doc('sales', 20, { identity: { offline_sign_in: 'off' } })],
+    guardrail: { identity: { offline_sign_in: 'on' } },
+    expect: (c) => assert.equal(c.flat.get('identity.offline_sign_in'), 'off'),
+  },
+  {
+    name: 'identity.offline_sign_in: unset means on (default), a guardrail off applies to everyone',
+    groups: [],
+    guardrail: { identity: { offline_sign_in: 'off' } },
+    expect: (c) => assert.equal(c.flat.get('identity.offline_sign_in'), 'off'),
+  },
+  {
     name: 'mcp-catalog entries are included with their source',
     groups: [],
     mcp: [{ id: 'jira-corp', version: '1.2.0', hash: 'sha256:abc', tools: { 'jira.search': 'read' } }],
@@ -246,6 +268,14 @@ test('validation: invalid values and unknown keys are rejected with the field (I
   assert.equal(reg.validate({ mcp: { servers: [] } }).errors[0]!.path, 'mcp.servers');
   assert.equal(reg.validate({ tools: { rules: { 'mail.send': 'sometimes' } } }).errors.length, 1);
   assert.equal(reg.validate({ tools: { risk: { exotic: 'allow' } } }).errors.length, 1);
+});
+
+test('validation: policy.identity.offline_sign_in takes on or off and nothing else (add-offline-sign-in 3.2)', () => {
+  assert.deepEqual(reg.validate({ identity: { offline_sign_in: 'off' } }).errors, []);
+  assert.deepEqual(reg.validate({ identity: { offline_sign_in: 'on' } }, { guardrail: true }).errors, []);
+  assert.equal(reg.validate({ identity: { offline_sign_in: 'maybe' } }).errors.length, 1);
+  assert.equal(reg.key('identity.offline_sign_in')?.owner, 'client/identity');
+  assert.equal(reg.key('identity.offline_sign_in')?.default, 'on');
 });
 
 test('validation: a guardrail key without a guardrail meaning is rejected (Guardrail key without meaning)', () => {

@@ -39,6 +39,20 @@ const char* to_string(AuthState s) {
     return "?";
 }
 
+const char* to_string(OfflineStatus s) {
+    switch (s) {
+    case OfflineStatus::off: return "off";
+    case OfflineStatus::active: return "active";
+    case OfflineStatus::not_available: return "not_available";
+    }
+    return "?";
+}
+
+bool is_offline_token(const std::string& refresh_token) {
+    const auto jwt = parse_jwt(refresh_token);
+    return jwt && jstr(jwt->payload, "typ") == "Offline";
+}
+
 Status SystemBrowserLauncher::open(const std::string& url) {
     const auto r = reinterpret_cast<INT_PTR>(
         ::ShellExecuteW(nullptr, L"open", widen(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL));
@@ -161,6 +175,11 @@ void TokenManager::enter_sign_in_required(const std::string& reason, bool delete
 
 void TokenManager::start() {
     if (store_.secret(kRefreshSecret)) {
+        {
+            // A stored offline token is ended before any refresh when the policy is off (client/identity Offline Sign-In Policy).
+            const std::lock_guard lock(refresh_mx_);
+            if (end_offline_session_if_disabled()) return;
+        }
         set_state(AuthState::signed_in);
         const std::lock_guard lock(refresh_mx_);
         if (Status s = refresh_locked(); !s) {
@@ -185,7 +204,10 @@ Status TokenManager::begin_sign_in() {
         return ep.error();
     }
     PkceAttempt attempt = make_pkce_attempt(clock_.unix_seconds());
-    const std::string url = build_authorize_url(ep->authorization, cfg_, attempt, user_principal());
+    // Offline Sign-In Request: offline_access is added only while the policy allows it (design D2).
+    IdentityConfig request_cfg = cfg_;
+    if (offline_on_) request_cfg.scope += " offline_access";
+    const std::string url = build_authorize_url(ep->authorization, request_cfg, attempt, user_principal());
     if (LoopbackListener::is_loopback_redirect(cfg_.redirect_uri)) {
         // One listener per pending sign-in: a second click replaces it (and its port) with a fresh one.
         close_listener();
@@ -337,6 +359,8 @@ Status TokenManager::store_tokens(const json& body, bool /*from_code*/, const st
     // Rotation: store the new refresh token before the new access token is used (client/identity).
     if (const std::string refresh = jstr(body, "refresh_token"); !refresh.empty()) {
         if (Status s = store_.set_secret(kRefreshSecret, refresh); !s) return s;
+        if (offline_on_ && !is_offline_token(refresh))
+            log::info(kLog, "offline sign-in not available: the identity provider issued a normal refresh token");
     }
     const long long expiry = clock_.unix_seconds() + expires_in;
     std::vector<std::function<void(const std::string&, long long)>> observers;
@@ -431,6 +455,45 @@ void TokenManager::drop_access_token() {
     const std::lock_guard lock(mx_);
     access_token_.clear();
     access_expiry_ = 0;
+}
+
+Status TokenManager::revoke_refresh_token(const std::string& token) {
+    auto ep = oidc_.endpoints();
+    if (!ep) return ep.error();
+    if (ep->revocation.empty()) return make_error("revoke", "the identity provider publishes no revocation endpoint");
+    HttpRequest req;
+    req.method = "POST";
+    req.url = ep->revocation;
+    req.headers = {{"Content-Type", "application/x-www-form-urlencoded"}};
+    req.body = form_encode({{"token", token}, {"token_type_hint", "refresh_token"}, {"client_id", cfg_.client_id}});
+    auto resp = http().send(req);
+    if (!resp) return resp.error();
+    if (resp->status != 200) return make_error("revoke", "revocation HTTP " + std::to_string(resp->status));
+    return {};
+}
+
+bool TokenManager::end_offline_session_if_disabled() {
+    if (offline_on_) return false;
+    const auto refresh = store_.secret(kRefreshSecret);
+    if (!refresh || !is_offline_token(*refresh)) return false;
+    // Revoke at the identity provider, then delete locally even when that fails (design D5, client/identity).
+    if (Status s = revoke_refresh_token(*refresh); !s) security_event("offline_revoke_failed", s.error().message);
+    enter_sign_in_required("offline sign-in is turned off by policy; sign in again", true);
+    return true;
+}
+
+void TokenManager::set_offline_sign_in(bool on) {
+    offline_on_ = on;
+    if (on) return;
+    const std::lock_guard refresh_lock(refresh_mx_);
+    end_offline_session_if_disabled();
+}
+
+OfflineStatus TokenManager::offline_sign_in_status() const {
+    if (!offline_on_) return OfflineStatus::off;
+    const auto refresh = store_.secret(kRefreshSecret);
+    if (!refresh) return OfflineStatus::off;
+    return is_offline_token(*refresh) ? OfflineStatus::active : OfflineStatus::not_available;
 }
 
 Status TokenManager::sign_out() {

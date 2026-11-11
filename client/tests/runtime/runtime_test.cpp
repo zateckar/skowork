@@ -2,6 +2,7 @@
 // find_tools, Questions and approvals, idempotent resume, the message queue and cancellation, untrusted-data
 // delimiters, large tool results, compaction and subagents, and the red-team pass of add-policy-and-sandbox (5.2). The
 // model is scripted; nothing here needs a network.
+#include "app/skill_save_tool.h"
 #include "support/runtime_harness.h"
 #include <sstream>
 
@@ -870,9 +871,35 @@ TEST(RuntimeFindTools, PerTurnSchemaStaysWithinTheTokenBudget) {
     for (const auto& r : reqs) most = std::max(most, estimate_tool_tokens(r.tools));
     EXPECT_LE(most, 4000u);
     EXPECT_GT(most, 1500u);  // the budget was actually used
-    // Once the budget is full, find_tools says so instead of loading.
+    // Once the budget is full, the earliest-loaded tools make room (Lazy Tool Loading, fix-long-thread-model-calls).
     const auto last = env.tool_content(id, "c11");
-    EXPECT_NE(last.find("not loaded"), std::string::npos);
+    EXPECT_NE(last.find("to make room"), std::string::npos) << last;
+    EXPECT_NE(last.find("bulk.tool"), std::string::npos);
+    // The requests stayed within the budget, and the newest loads are offered last.
+    const auto& final_tools = reqs.back().tools;
+    ASSERT_FALSE(final_tools.empty());
+    bool unloaded_once = false;
+    for (const auto& e : env.rt->events(id)) unloaded_once = unloaded_once || e.kind == "tools_unloaded";
+    EXPECT_TRUE(unloaded_once);
+}
+
+TEST(RuntimeFindTools, AToolLargerThanTheWholeBudgetIsNotLoadedAndNothingIsUnloaded) {
+    Env env;
+    env.add_tool(make_tool(env, "calendar.list", Risk::read, "List calendar events"));
+    ToolDef huge = make_tool(env, "giant.report", Risk::read, "Giant report tool");
+    huge.parameters = json::parse(R"({"type":"object","properties":{"a":{"type":"string","description":")" + std::string(40000, 'x') + R"("}}})");
+    env.add_tool(std::move(huge));
+    env.start();
+    env.model.push_calls({{"c1", "find_tools", {{"query", "calendar events"}}}});
+    env.model.push_calls({{"c2", "find_tools", {{"query", "giant report"}}}});
+    env.model.push_text("ok");
+    const auto id = env.run(env.thread(), "go");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    EXPECT_NE(env.tool_content(id, "c2").find("not loaded"), std::string::npos);
+    std::vector<std::string> offered;
+    for (const auto& t : env.model.requests().back().tools) offered.push_back(t.id);
+    EXPECT_NE(std::find(offered.begin(), offered.end(), "calendar.list"), offered.end());
+    EXPECT_EQ(std::find(offered.begin(), offered.end(), "giant.report"), offered.end());
 }
 
 TEST(RuntimeFindTools, IndexRanksByNameAndDescription) {
@@ -2433,6 +2460,94 @@ TEST(RuntimeSubagents, CancellingTheParentWhileTheSubagentRunsCancelsBoth) {
     EXPECT_EQ(children_of(env, thread, id).at(0).state, RunState::cancelled);
 }
 
+// ==== fix-tool-waits 1.1-1.3: child Run waits ========================================================================
+
+TEST(RuntimeSubagents, ChildRunApprovalExpiresAfterThirtyMinutes) {
+    Env env;
+    env.add_tool(mail_tool(env));
+    env.policy->approvals.insert("mail.send");
+    std::atomic<int> child_requests{0};
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (!is_subagent(req)) return std::nullopt;
+        if (child_requests++ == 0)
+            return model::ModelResult<model::ChatResponse>(calls_response({{"m1", "mail.send", {{"to", "x@y.cz"}, {"rationale", "asked"}}}}));
+        return model::ModelResult<model::ChatResponse>(text_response("continued after the expiry"));
+    });
+    env.start();
+    env.model.push_calls({{"c1", "delegate", {{"task", "send the note"}, {"tools", json::array({"mail.send"})}}}});
+    env.model.push_text("parent done");
+    const auto thread = env.thread();
+    const auto id = env.run(thread, "send it");
+    ASSERT_TRUE(env.wait(id, RunState::interrupted));
+    const auto child = children_of(env, thread, id).at(0).id;
+    env.clock.advance(29min);
+    EXPECT_EQ(env.rt->expire_child_waits(), 0u);
+    EXPECT_EQ(env.rec(child).state, RunState::interrupted);
+    env.clock.advance(2min);
+    EXPECT_EQ(env.rt->expire_child_waits(), 1u);
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    EXPECT_EQ(env.rec(child).state, RunState::succeeded);
+    EXPECT_EQ(env.tool_content(child, "m1"), "The user did not answer in time, so the action did not run.");
+    EXPECT_EQ(env.calls.count("mail.send"), 0);
+    EXPECT_TRUE(env.rt->pending_actions(thread).empty());
+    bool logged = false;
+    for (const auto& e : env.events.of("activity"))
+        if (e.run_id == child && jstr(e.data, "text").find("expired") != std::string::npos) logged = true;
+    EXPECT_TRUE(logged);
+    EXPECT_EQ(env.rt->expire_child_waits(), 0u);  // nothing is left to expire
+}
+
+TEST(RuntimeSubagents, ChildRunQuestionEndsAtSixtyMinutesWithTheFailureAsTheCallResult) {
+    Env env;
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (!is_subagent(req)) return std::nullopt;
+        return model::ModelResult<model::ChatResponse>(calls_response({{"q1", "ask_user", {{"question", "Still there?"}}}}));
+    });
+    env.start();
+    env.model.push_calls({{"c1", "delegate", {{"task", "ask and wait"}}}});
+    env.model.push_text("parent done");
+    const auto thread = env.thread();
+    const auto id = env.run(thread, "go");
+    ASSERT_TRUE(env.wait(id, RunState::interrupted));
+    const auto child = children_of(env, thread, id).at(0).id;
+    env.clock.advance(59min);
+    EXPECT_EQ(env.rt->expire_child_waits(), 0u);
+    EXPECT_EQ(env.rec(child).state, RunState::interrupted);
+    env.clock.advance(2min);
+    EXPECT_GT(env.rt->expire_child_waits(), 0u);
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    EXPECT_EQ(env.rec(child).state, RunState::failed);
+    EXPECT_EQ(env.rec(child).reason, "subagent time limit reached");
+    EXPECT_TRUE(env.rt->pending_actions(thread).empty());
+    EXPECT_NE(env.tool_content(id, "c1").find("subagent time limit reached"), std::string::npos);
+    EXPECT_EQ(env.tool_content(id, "c1").rfind("The subagent failed", 0), 0u);
+    EXPECT_EQ(env.rec(id).state, RunState::succeeded);
+}
+
+TEST(RuntimeSubagents, ChildRunOfAnUnattendedRunKeepsItsApprovalOpen) {
+    Env env;
+    env.add_tool(mail_tool(env));
+    env.policy->approvals.insert("mail.send");
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (!is_subagent(req)) return std::nullopt;
+        return model::ModelResult<model::ChatResponse>(calls_response({{"m1", "mail.send", {{"to", "x@y.cz"}, {"rationale", "asked"}}}}));
+    });
+    env.start();
+    env.model.push_calls({{"c1", "delegate", {{"task", "send the note"}, {"tools", json::array({"mail.send"})}}}});
+    const auto thread = env.thread();
+    const auto id = env.run(thread, "send it unattended", true);
+    ASSERT_TRUE(env.wait(id, RunState::interrupted));
+    const auto child = children_of(env, thread, id).at(0).id;
+    env.clock.advance(120min);
+    EXPECT_EQ(env.rt->expire_child_waits(), 0u);
+    EXPECT_EQ(env.rec(child).state, RunState::interrupted);
+    const auto items = env.rt->pending_actions(thread);
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_EQ(items[0].run_id, child);
+    EXPECT_TRUE(items[0].open());
+    EXPECT_EQ(env.calls.count("mail.send"), 0);
+}
+
 // ==== add-skills 2.3, 3.1, 3.2, 6.2: Skills run as tool-scoped subagents ============================================
 
 // A runtime config with one Skill, "weekly-report", whose manifest the test shapes.
@@ -2729,12 +2844,224 @@ TEST(RunContext, FormatsDateTimeZoneUserAndFolders) {
     c.documents = "C:/Users/jana/Documents";
     c.downloads = "C:/Users/jana/Downloads";
     const std::string text = format_run_context(c);
-    EXPECT_NE(text.find("Thursday 22 October 2026, 09:05 (2026-10-22), UTC+02:00 (Central Europe Standard Time)"), std::string::npos) << text;
+    EXPECT_NE(text.find("Time zone: UTC+02:00 (Central Europe Standard Time)"), std::string::npos) << text;
     EXPECT_NE(text.find("User: jana.novakova"), std::string::npos);
     EXPECT_NE(text.find("Documents: C:/Users/jana/Documents"), std::string::npos);
     EXPECT_EQ(text.find("Desktop"), std::string::npos);  // unknown folders are left out
+    // The system prompt part holds nothing that changes per Run (Stable Prompt Prefix).
+    EXPECT_EQ(text.find("09:05"), std::string::npos);
+    EXPECT_EQ(text.find("2026"), std::string::npos);
+    EXPECT_EQ(format_run_time(c), "Current time: Thursday 22 October 2026, 09:05 (2026-10-22), UTC+02:00");
     c.utc_offset_minutes = -330;
     EXPECT_NE(format_run_context(c).find("UTC-05:30"), std::string::npos);
+    EXPECT_NE(format_run_time(c).find("UTC-05:30"), std::string::npos);
+}
+
+// ==== fix-long-thread-model-calls: Stable Prompt Prefix, Thread-wide tools, Run Retry =================================
+
+namespace {
+RuntimeConfig clocked_config(std::atomic<int>& minute) {
+    RuntimeConfig cfg;
+    cfg.run_context = [] { return std::string("Context of this Run:\n- User: jana"); };
+    cfg.run_time_line = [&minute] { return "Current time: Tuesday 10 November 2026, 10:" + std::to_string(10 + minute++); };
+    return cfg;
+}
+
+bool same_messages(const model::ChatMessage& a, const model::ChatMessage& b) {
+    if (a.role != b.role || a.content != b.content || a.tool_call_id != b.tool_call_id || a.tool_calls.size() != b.tool_calls.size())
+        return false;
+    for (size_t i = 0; i < a.tool_calls.size(); ++i)
+        if (a.tool_calls[i].id != b.tool_calls[i].id || a.tool_calls[i].tool != b.tool_calls[i].tool ||
+            a.tool_calls[i].arguments != b.tool_calls[i].arguments)
+            return false;
+    return true;
+}
+
+std::vector<std::string> offered_ids(const model::ChatRequest& r) {
+    std::vector<std::string> out;
+    for (const auto& t : r.tools) out.push_back(t.id);
+    return out;
+}
+}  // namespace
+
+TEST(StablePromptPrefix, NextTurnExtendsThePreviousRequestByteForByte) {
+    std::atomic<int> minute{0};
+    Env env(clocked_config(minute));
+    ToolDef t = make_tool(env, "notes.read", Risk::read);
+    t.core = true;
+    env.add_tool(t);
+    env.start();
+    // The model writes its arguments with its own key order and spacing.
+    model::ChatResponse call = calls_response({{"c1", "notes.read", {{"path", "a"}, {"rationale", "r"}}}});
+    call.tool_calls[0].raw_arguments = R"({"rationale": "r",  "path": "a"})";
+    env.model.push_response(call);
+    env.model.push_text("first answer");
+    env.model.push_text("second answer");
+    const auto thread = env.thread();
+    const auto r1 = env.run(thread, "first");
+    ASSERT_TRUE(env.wait(r1, RunState::succeeded));
+    const auto r2 = env.run(thread, "second");
+    ASSERT_TRUE(env.wait(r2, RunState::succeeded));
+    const auto reqs = env.model.requests();
+    ASSERT_EQ(reqs.size(), 3u);
+    const auto& prev = reqs[1];  // the first Run's last request
+    const auto& next = reqs[2];  // the second Run's first request
+    ASSERT_GT(next.messages.size(), prev.messages.size());
+    for (size_t i = 0; i < prev.messages.size(); ++i) EXPECT_TRUE(same_messages(prev.messages[i], next.messages[i])) << "message " << i;
+    EXPECT_EQ(offered_ids(prev), offered_ids(next));
+    // Each Run's starting message carries its own time; the earlier one keeps its time in later Turns.
+    EXPECT_EQ(next.messages[1].content, "Current time: Tuesday 10 November 2026, 10:10\nfirst");
+    EXPECT_EQ(next.messages.back().content, "Current time: Tuesday 10 November 2026, 10:11\nsecond");
+    EXPECT_EQ(next.messages[0].content.find("10:1"), std::string::npos);  // no time in the system prompt
+    // The tool call is resent exactly as the model wrote it.
+    EXPECT_EQ(next.messages[2].tool_calls.at(0).arguments, R"({"rationale": "r",  "path": "a"})");
+    // The feed still shows what the user typed.
+    bool plain = false;
+    for (const auto& e : env.rt->events(r2))
+        if (e.kind == "message" && jstr(e.payload, "role") == "user") plain = jstr(e.payload, "content") == "second";
+    EXPECT_TRUE(plain);
+}
+
+TEST(StablePromptPrefix, CompactedThreadKeepsTheSummaryBoundaryToken) {
+    RuntimeConfig cfg;
+    cfg.compaction_keep_messages = 2;
+    Env env(cfg);
+    model::RoleInfo small;
+    small.role = model::Role::small;
+    small.context_window = 32768;
+    env.model.set_role_info(small);
+    env.start();
+    const auto thread = env.thread();
+    for (int i = 0; i < 3; ++i) {
+        env.model.push_text("answer " + std::to_string(i));
+        const auto id = env.run(thread, "question " + std::to_string(i));
+        ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    }
+    env.model.push_text("summary of the start");
+    ASSERT_TRUE(env.rt->compact_thread(thread));
+    env.model.push_text("a");
+    env.model.push_text("b");
+    const auto a = env.run(thread, "next");
+    ASSERT_TRUE(env.wait(a, RunState::succeeded));
+    const auto b = env.run(thread, "after");
+    ASSERT_TRUE(env.wait(b, RunState::succeeded));
+    const auto reqs = env.model.requests();
+    ASSERT_GE(reqs.size(), 2u);
+    const auto& s1 = reqs[reqs.size() - 2].messages.at(0).content;
+    const auto& s2 = reqs.back().messages.at(0).content;
+    EXPECT_NE(s1.find("summary of the start"), std::string::npos);
+    EXPECT_EQ(s1, s2);
+}
+
+TEST(LazyToolLoading, NextRunKeepsTheThreadsLoadedToolsInLoadOrder) {
+    Env env;
+    env.add_tool(make_tool(env, "calendar.list", Risk::read, "List calendar events in a date range"));
+    env.add_tool(make_tool(env, "archive.search", Risk::read, "Search the document archive"));
+    env.start();
+    env.model.push_calls({{"c1", "find_tools", {{"query", "calendar events"}}}});
+    env.model.push_calls({{"c2", "find_tools", {{"query", "document archive"}}}});
+    env.model.push_text("ok");
+    env.model.push_text("again");
+    const auto thread = env.thread();
+    const auto r1 = env.run(thread, "plan my week");
+    ASSERT_TRUE(env.wait(r1, RunState::succeeded));
+    const auto r2 = env.run(thread, "and next week?");
+    ASSERT_TRUE(env.wait(r2, RunState::succeeded));
+    const auto reqs = env.model.requests();
+    ASSERT_EQ(reqs.size(), 4u);
+    const auto last_of_first = offered_ids(reqs[2]);
+    EXPECT_EQ(last_of_first, offered_ids(reqs[3]));
+    // Loaded tools follow the core set in load order (calendar first although "archive" sorts before it).
+    const auto cal = std::find(last_of_first.begin(), last_of_first.end(), "calendar.list");
+    const auto arc = std::find(last_of_first.begin(), last_of_first.end(), "archive.search");
+    ASSERT_NE(cal, last_of_first.end());
+    ASSERT_NE(arc, last_of_first.end());
+    EXPECT_LT(cal, arc);
+    EXPECT_EQ(arc + 1, last_of_first.end());
+}
+
+TEST(LazyToolLoading, AToolPolicyNoLongerPermitsIsDropped) {
+    Env env;
+    env.add_tool(make_tool(env, "calendar.list", Risk::read, "List calendar events"));
+    env.start();
+    env.model.push_calls({{"c1", "find_tools", {{"query", "calendar events"}}}});
+    env.model.push_text("ok");
+    env.model.push_text("again");
+    const auto thread = env.thread();
+    const auto r1 = env.run(thread, "a");
+    ASSERT_TRUE(env.wait(r1, RunState::succeeded));
+    env.policy->denied.insert("calendar.list");
+    const auto r2 = env.run(thread, "b");
+    ASSERT_TRUE(env.wait(r2, RunState::succeeded));
+    const auto ids = offered_ids(env.model.requests().back());
+    EXPECT_EQ(std::find(ids.begin(), ids.end(), "calendar.list"), ids.end());
+}
+
+TEST(RunRetry, ContinuesTheFailedRunWithOneUserMessage) {
+    Env env;
+    ToolDef t = make_tool(env, "notes.read", Risk::read);
+    t.core = true;
+    env.add_tool(t);
+    env.start();
+    env.model.push_calls({{"c1", "notes.read", json::object()}});
+    env.model.push_failure(failure(model::code::timeout));
+    const auto thread = env.thread();
+    const auto id = env.run(thread, "summarize my notes");
+    ASSERT_TRUE(env.wait(id, RunState::failed));
+    env.model.push_text("done");
+    auto retried = env.rt->retry_run(thread);
+    ASSERT_TRUE(retried) << retried.error().message;
+    EXPECT_EQ(*retried, id);
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    EXPECT_EQ(env.calls.count("notes.read"), 1);  // the completed call is not repeated
+    const auto last = env.model.requests().back();
+    int users = 0;
+    bool result = false;
+    for (const auto& m : last.messages) {
+        users += m.role == "user" ? 1 : 0;
+        result = result || (m.role == "tool" && m.tool_call_id == "c1");
+    }
+    EXPECT_EQ(users, 1);
+    EXPECT_TRUE(result);
+    EXPECT_EQ(env.rt->runs(thread).size(), 1u);
+}
+
+TEST(RunRetry, OnlyAFailedLatestRunIsRetried) {
+    Env env;
+    env.start();
+    env.model.push_failure(failure(model::code::timeout));
+    env.model.push_text("fine");
+    const auto thread = env.thread();
+    const auto failed = env.run(thread, "one");
+    ASSERT_TRUE(env.wait(failed, RunState::failed));
+    const auto ok = env.run(thread, "two");
+    ASSERT_TRUE(env.wait(ok, RunState::succeeded));
+    auto r = env.rt->retry_run(thread);
+    ASSERT_FALSE(r);
+    EXPECT_EQ(r.error().code, "not_failed");
+}
+
+TEST(RunRetry, AStartedCallWithoutAResultIsNotExecutedAgain) {
+    Env env;
+    ToolDef t = make_tool(env, "notes.write", Risk::read);
+    t.core = true;
+    env.add_tool(t);
+    env.start();
+    env.model.push_failure(failure(model::code::timeout));
+    const auto thread = env.thread();
+    const auto id = env.run(thread, "write it");
+    ASSERT_TRUE(env.wait(id, RunState::failed));
+    // As if the client stopped while the call was executing: decided, no result.
+    model::ChatMessage assistant;
+    assistant.role = "assistant";
+    assistant.tool_calls.push_back({"c9", "notes.write", "{}"});
+    ASSERT_TRUE(env.rt->store().append_event(id, "message", message_to_event(assistant)));
+    ASSERT_TRUE(env.rt->store().append_event(id, "tool_call", {{"call_id", "c9"}, {"tool", "notes.write"}, {"decision", "allow"}}));
+    env.model.push_text("noted");
+    ASSERT_TRUE(env.rt->retry_run(thread));
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    EXPECT_EQ(env.calls.count("notes.write"), 0);
+    EXPECT_NE(env.tool_content(id, "c9").find("did not complete"), std::string::npos);
 }
 
 TEST(RunContext, CollectsRealFolders) {
@@ -3241,4 +3568,231 @@ TEST(ToolRegistryTest, WithdrawnDefinitionsStayValidForCallsInFlight) {
     EXPECT_EQ(reg.find("mcp:s/a"), nullptr);
     EXPECT_EQ(reg.size(), 0u);
     EXPECT_EQ(in_flight->id, "mcp:s/a");
+}
+
+// ==== fix-feed-live-updates: Run Event Stream, Knowledge Citation Markers =========================================
+
+// Reasoning is stored and sent live through the same path as messages, so a listener sees no gap (design D1).
+TEST(RunEventStream, ReasoningThenAnswerArriveLiveWithConsecutiveSequenceNumbers) {
+    Env env;
+    env.start();
+    model::ChatResponse r = text_response("the answer");
+    r.reasoning = "thinking first";
+    env.model.push_response(r);
+    const auto id = env.run(env.thread(), "question");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    long long reasoning_seq = 0, answer_seq = 0;
+    for (const auto& e : env.events.all()) {
+        if (e.run_id != id) continue;
+        if (e.kind == "reasoning") reasoning_seq = e.seq;
+        if (e.kind == "message" && jstr(e.data, "role") == "assistant") answer_seq = e.seq;
+    }
+    ASSERT_GT(reasoning_seq, 0);
+    EXPECT_EQ(answer_seq, reasoning_seq + 1);
+    // The live sequence numbers are the stored ones.
+    bool stored_reasoning = false;
+    for (const auto& e : env.rt->events(id))
+        if (e.kind == "reasoning") {
+            stored_reasoning = true;
+            EXPECT_EQ(e.seq, reasoning_seq);
+            EXPECT_EQ(jstr(e.payload, "text"), "thinking first");
+        }
+    EXPECT_TRUE(stored_reasoning);
+}
+
+// The stable system prompt tells the agent how to cite passages, identically in every Turn (design D7).
+TEST(KnowledgeCitationMarkers, SystemPromptAsksForBracketedNumbersInEveryTurn) {
+    Env env;
+    env.start();
+    env.model.push_text("first");
+    env.model.push_text("second");
+    const auto thread = env.thread();
+    ASSERT_TRUE(env.wait(env.run(thread, "one"), RunState::succeeded));
+    ASSERT_TRUE(env.wait(env.run(thread, "two"), RunState::succeeded));
+    const auto reqs = env.model.requests();
+    ASSERT_EQ(reqs.size(), 2u);
+    const std::string sentence = "write that passage's number in square brackets after the sentence it supports, such as [2]";
+    for (const auto& req : reqs) {
+        ASSERT_FALSE(req.messages.empty());
+        EXPECT_NE(req.messages[0].content.find(sentence), std::string::npos);
+        EXPECT_NE(req.messages[0].content.find("Do not write the number of a passage you did not use"), std::string::npos);
+    }
+    EXPECT_EQ(reqs[0].messages[0].content, reqs[1].messages[0].content);
+}
+
+// ==== add-agent-created-skills 2.5, 2.6, 2.7: the offer rules, availability and the stable prompt ============================
+
+// skills.save as the runtime sees it: write-local and offered only in attended top-level Runs.
+ToolDef skill_save_stub(Env& env) {
+    ToolDef t = make_tool(env, "skills.save", Risk::write_local, "Save a Skill you drafted as one of the user's private Skills");
+    t.attended_only = true;
+    return t;
+}
+
+TEST(RuntimeSkillSave, OfferedOnlyInAttendedTopLevelRuns) {
+    Env env;
+    env.add_tool(skill_save_stub(env));
+    env.policy->denied.clear();
+    env.start();
+    env.model.push_calls({{"c1", "find_tools", {{"query", "create a skill"}}}});
+    env.model.push_text("found it");
+    const auto thread = env.thread();
+    const auto id = env.run(thread, "make me a skill");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    EXPECT_NE(env.tool_content(id, "c1").find("skills.save"), std::string::npos);
+    const auto reqs = env.model.requests();
+    ASSERT_GE(reqs.size(), 2u);
+    EXPECT_FALSE(tool_ids(reqs[0]).count("skills.save"));  // not loaded before find_tools
+    EXPECT_TRUE(tool_ids(reqs[1]).count("skills.save"));   // loaded by find_tools for the rest of the Run
+
+    // An Unattended run does not find the tool, and a call to it fails without running.
+    env.model.push_calls({{"u1", "find_tools", {{"query", "create a skill"}}}});
+    env.model.push_calls({{"u2", "skills.save", {{"name", "weekly-report"}, {"description", "d"}, {"instructions", "i"}}}});
+    env.model.push_text("done");
+    const auto unattended = env.run(thread, "scheduled", true);
+    ASSERT_TRUE(env.wait(unattended, RunState::succeeded));
+    EXPECT_EQ(env.tool_content(unattended, "u1").find("skills.save"), std::string::npos);
+    EXPECT_NE(env.tool_content(unattended, "u2").find("available only in attended Runs"), std::string::npos);
+    EXPECT_EQ(env.calls.count("skills.save"), 0);
+}
+
+TEST(RuntimeSkillSave, SubagentsNeverGetTheTool) {
+    Env env;
+    env.add_tool(skill_save_stub(env));
+    env.policy->denied.clear();
+    std::mutex mx;
+    std::vector<std::string> child_tools;
+    int step = 0;
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (!is_subagent(req)) return std::nullopt;
+        const std::lock_guard lock(mx);
+        if (step++ == 0) {
+            for (const auto& t : req.tools) child_tools.push_back(t.id);
+            return model::ModelResult<model::ChatResponse>(calls_response(
+                {{"s1", "skills.save", {{"name", "weekly-report"}, {"description", "d"}, {"instructions", "i"}}}}));
+        }
+        return model::ModelResult<model::ChatResponse>(text_response("done"));
+    });
+    env.start();
+    env.model.push_calls({{"c1", "delegate", {{"task", "save it"}, {"tools", json::array({"skills.save"})}}}});
+    env.model.push_text("ok");
+    const auto thread = env.thread();
+    const auto id = env.run(thread, "delegate it");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    {
+        const std::lock_guard lock(mx);
+        EXPECT_EQ(std::count(child_tools.begin(), child_tools.end(), std::string("skills.save")), 0);
+    }
+    EXPECT_EQ(env.calls.count("skills.save"), 0);
+}
+
+TEST(RuntimeSkillSave, AttendedRunsShareTheSentenceByteForByteAndUnattendedRunsDoNotHaveIt) {
+    Env env;
+    env.start();
+    env.model.push_text("one");
+    env.model.push_text("two");
+    env.model.push_text("three");
+    const auto thread = env.thread();
+    ASSERT_TRUE(env.wait(env.run(thread, "first"), RunState::succeeded));
+    ASSERT_TRUE(env.wait(env.run(thread, "second"), RunState::succeeded));
+    ASSERT_TRUE(env.wait(env.run(thread, "scheduled", true), RunState::succeeded));
+    const auto reqs = env.model.requests();
+    ASSERT_GE(reqs.size(), 3u);
+    const std::string sentence = "A Skill needs no file path.";
+    EXPECT_EQ(reqs[0].messages[0].content, reqs[1].messages[0].content);
+    EXPECT_NE(reqs[0].messages[0].content.find(sentence), std::string::npos);
+    EXPECT_NE(reqs[1].messages[0].content.find(sentence), std::string::npos);
+    EXPECT_EQ(reqs[2].messages[0].content.find(sentence), std::string::npos);
+}
+
+TEST(RuntimeSkillSave, SavedSkillIsListedFromTheNextRunAndAnExplicitNameWorksAtOnce) {
+    std::mutex mx;
+    std::vector<SkillInfo> listed;  // what the catalogue holds now
+    RuntimeConfig cfg;
+    cfg.skills = [&](const std::string&) {
+        const std::lock_guard lock(mx);
+        return listed;
+    };
+    cfg.resolve_skill = [&](const std::string&, const std::string& name) -> Result<SkillRun> {
+        const std::lock_guard lock(mx);
+        for (const auto& s : listed) {
+            if (s.name != name) continue;
+            SkillRun r;
+            r.manifest.name = name;
+            r.manifest.description = s.description;
+            r.manifest.version = "1.0.0";
+            r.instructions = "Weekly steps.";
+            r.tier = "private";
+            r.folder = "C:/skills/" + name;
+            return r;
+        }
+        return make_error("not_found", "no usable Skill is named " + name);
+    };
+    Env env(cfg);
+    std::string child_system;
+    int main_calls = 0;
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (is_subagent(req)) {
+            const std::lock_guard lock(mx);
+            child_system = req.messages[0].content;
+            return model::ModelResult<model::ChatResponse>(text_response("report"));
+        }
+        // The Skill is saved while the first Run is executing (the Run's first model call happens after its list was read).
+        if (main_calls++ == 0) {
+            const std::lock_guard lock(mx);
+            listed.push_back({"weekly-report", "Writes the weekly status report"});
+        }
+        return std::nullopt;
+    });
+    env.start();
+    env.model.push_calls({{"c1", "find_tools", {{"query", "anything"}}}});
+    env.model.push_text("first done");
+    const auto thread_a = env.thread();
+    ASSERT_TRUE(env.wait(env.run(thread_a, "save it"), RunState::succeeded));
+    const auto first_reqs = env.model.requests();
+    ASSERT_GE(first_reqs.size(), 2u);
+    EXPECT_EQ(first_reqs[1].messages[0].content.find("- weekly-report:"), std::string::npos);  // the running Run keeps its list
+
+    env.model.push_text("second done");
+    const auto thread_b = env.thread();
+    ASSERT_TRUE(env.wait(env.run(thread_b, "use it"), RunState::succeeded));
+    const auto all = env.model.requests();
+    EXPECT_NE(all.back().messages[0].content.find("- weekly-report: Writes the weekly status report"), std::string::npos);
+
+    // An explicit /name typed after the save runs the new Skill at once.
+    env.model.push_text("third done");
+    const auto thread_c = env.thread();
+    ASSERT_TRUE(env.wait(env.run(thread_c, "/weekly-report week 43"), RunState::succeeded));
+    const std::lock_guard lock(mx);
+    EXPECT_NE(child_system.find("Weekly steps."), std::string::npos);
+}
+
+TEST(RuntimeSkillSave, ToolDeclaresWriteLocalAndAttendedOnlyWithItsPrecheckAndPreview) {
+    const auto t = skill_save_tool([] { return skills::AgentSkillEnv{}; });
+    EXPECT_EQ(t.id, "skills.save");
+    ASSERT_TRUE(t.risk.has_value());
+    EXPECT_EQ(*t.risk, Risk::write_local);
+    EXPECT_TRUE(t.attended_only);
+    EXPECT_TRUE(static_cast<bool>(t.precheck));
+    EXPECT_TRUE(static_cast<bool>(t.approval_preview));
+    EXPECT_TRUE(t.parameters["properties"].contains("name"));
+    EXPECT_FALSE(t.parameters["properties"].contains("path"));  // no location argument (design D1)
+}
+
+TEST(RuntimeSkillSave, OfferedToolSetHasNoSharingTool) {
+    // Asked to share a Skill, the agent finds no tool that shares: skills.save is the only Skill tool (design D11).
+    Env env;
+    env.add_tool(skill_save_stub(env));
+    env.policy->denied.clear();
+    env.start();
+    env.model.push_calls({{"c1", "find_tools", {{"query", "share a skill with a colleague"}}}});
+    env.model.push_text("I can offer to share it in the Publish dialog.");
+    const auto id = env.run(env.thread(), "share it with Anna");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    const auto reqs = env.model.requests();
+    ASSERT_GE(reqs.size(), 2u);
+    for (const auto& tool : tool_ids(reqs[1])) {
+        EXPECT_EQ(tool.find("share"), std::string::npos) << tool;
+        EXPECT_EQ(tool.find("publish"), std::string::npos) << tool;
+    }
 }

@@ -27,11 +27,19 @@ std::u16string format_at(Shell& s, const std::string& iso) {
     return s.moment(*ms);
 }
 
+// The sources an answer lists, as part of its signature: a change to them rebuilds the answer's element.
+std::string sources_signature(const std::vector<Citation>& sources) {
+    std::string s;
+    for (const Citation& c : sources) s += "|" + std::to_string(c.n) + c.title + c.ref;
+    return s;
+}
+
 std::string signature(const FeedItem& it) {
     std::string s = std::to_string(static_cast<int>(it.type)) + "|";
     switch (it.type) {
     case ItemType::user: return s + it.text;
-    case ItemType::assistant: return s + (it.streaming ? "live" : it.text);  // live text is updated in place
+    case ItemType::assistant:  // live text is updated in place
+        return s + (it.streaming ? "live" : it.text) + sources_signature(it.sources);
     case ItemType::reasoning: return s + (it.streaming ? "live" : it.text);
     case ItemType::details: return s + it.text;
     case ItemType::tool:
@@ -74,12 +82,18 @@ std::string mcp_server(const std::string& tool) {
     return tool.substr(4, slash == std::string::npos ? std::string::npos : slash - 4);
 }
 
-bool produced_something(const FeedItem& it) {
+// A tool result that stays visible with work details hidden: an image it stored (its sources are listed under the
+// answer that cites them, Cited Sources In The Feed).
+bool produced_image(const FeedItem& it) {
     if (!it.result) return false;
-    if (!it.result->citations.empty()) return true;
     for (const FileRef& f : it.result->files)
         if (f.image()) return true;
     return false;
+}
+
+// A tool result with something to show under its card: an image or the passages it found.
+bool produced_something(const FeedItem& it) {
+    return produced_image(it) || (it.result && (!it.result->citations.empty() || !it.result->publish_route.empty()));
 }
 
 // The header of a message (improve-desktop-look D6): an avatar, who, when, and at the end the icon buttons Copy and,
@@ -483,8 +497,8 @@ std::vector<FeedItem> FeedView::visible(std::vector<FeedItem> items) const {
         const std::string run = it.run_id;  // it is moved below
         const bool open = details_.contains(run);
         if (!open && is_work(it)) {
-            if (it.type == ItemType::tool && produced_something(it)) {
-                it.compact = true;  // the images and citations stay, the card goes
+            if (it.type == ItemType::tool && produced_image(it)) {
+                it.compact = true;  // the images stay, the card goes
                 out.push_back(std::move(it));
             } else if (it.type == ItemType::reasoning && it.streaming) {  // the status line stands in for the trace
                 FeedItem w;
@@ -513,27 +527,40 @@ std::vector<FeedItem> FeedView::visible(std::vector<FeedItem> items) const {
 
 void FeedView::update() {
     const auto& snap = shell_.feed();
-    std::vector<FeedItem> items = visible(snap ? build_feed(*snap, shell_.live()) : std::vector<FeedItem>{});
-    // Keep the unchanged prefix; streaming text updates in place.
-    size_t keep = 0;
-    while (keep < items.size() && keep < slots_.size() && slots_[keep].key == items[keep].key &&
-           slots_[keep].sig == signature(items[keep])) {
-        const FeedItem& it = items[keep];
-        Slot& slot = slots_[keep];
-        if (it.streaming && slot.markdown) slot.markdown->set_markdown(it.text);
-        if (it.streaming && slot.text && ui::to_utf8(slot.text->text()) != it.text) slot.text->set_text(ui::to_utf16(it.text));
-        ++keep;
-    }
-    while (children().size() > keep) remove(children().back().get());
-    slots_.resize(keep);
-    for (size_t i = keep; i < items.size(); ++i) {
+    std::vector<FeedItem> items = visible(snap ? shell_.fold().build(*snap, shell_.live()) : std::vector<FeedItem>{});
+    // Keyed reconciliation (Live Feed Updates): an element is kept while its key and content signature stay the same,
+    // wherever it sits. A change rebuilds only its own item, so other messages keep their text layout, selection and
+    // reading position. Streaming text updates in place.
+    std::map<std::string, size_t> old_index;
+    for (size_t i = 0; i < slots_.size(); ++i) old_index[slots_[i].key] = i;
+    std::vector<std::unique_ptr<Node>> old_nodes;
+    old_nodes.reserve(children().size());
+    while (!children().empty()) old_nodes.push_back(remove(children().back().get()));
+    std::reverse(old_nodes.begin(), old_nodes.end());
+    std::vector<Slot> next;
+    next.reserve(items.size());
+    rebuilt_ = 0;
+    for (const FeedItem& it : items) {
+        const std::string sig = signature(it);
+        const auto found = old_index.find(it.key);
+        if (found != old_index.end() && found->second < old_nodes.size() && old_nodes[found->second] &&
+            slots_[found->second].sig == sig) {
+            Slot slot = slots_[found->second];
+            if (it.streaming && slot.markdown) slot.markdown->set_markdown(it.text);
+            if (it.streaming && slot.text && ui::to_utf8(slot.text->text()) != it.text) slot.text->set_text(ui::to_utf16(it.text));
+            add(std::move(old_nodes[found->second]));
+            next.push_back(std::move(slot));
+            continue;
+        }
         Slot slot;
-        slot.key = items[i].key;
-        slot.sig = signature(items[i]);
-        add(build(items[i], slot));
-        slots_.push_back(slot);
+        slot.key = it.key;
+        slot.sig = sig;
+        add(build(it, slot));
+        next.push_back(std::move(slot));
+        ++rebuilt_;
+        ++rebuilt_total_;
     }
-    rebuilt_ = items.size() - keep;
+    slots_ = std::move(next);
     relayout();
     invalidate();
     jump();
@@ -597,15 +624,51 @@ void FeedView::jump() {
     });
 }
 
-// Images a tool call stored, and the sources knowledge.search cited, under its card (or alone with details hidden).
-void FeedView::add_outputs(Node& out, const FeedItem& it) {
+// The sources of one answer or tool result: a numbered list of links that open each passage (Cited Sources In The Feed).
+void FeedView::add_citations(Node& wrap, const std::vector<Citation>& citations, const std::string& key, const char* list_prefix,
+                             const char* item_prefix) {
     ui::Ui& u = shell_.ui();
+    auto* list = wrap.emplace<Node>(id_of(list_prefix, key));
+    list->role = ui::Role::list;
+    list->name = shell_.t("feed.citations");
+    list->gap = 2;
+    list->padding.left = 16;
+    for (size_t i = 0; i < citations.size(); ++i) {
+        const Citation& c = citations[i];
+        const std::string source_key = "settings.knowledge.source." + c.source;
+        std::u16string label = u"[" + ui::to_utf16(std::to_string(c.n ? c.n : static_cast<long long>(i) + 1)) + u"] " +
+                               ui::to_utf16(c.title.empty() ? c.ref : c.title);
+        if (shell_.ui().strings.has(source_key)) label += u" · " + shell_.t(source_key);
+        if (c.date.size() >= 10) label += u" · " + ui::to_utf16(c.date.substr(0, 10));
+        auto* link = list->emplace<ui::Button>(u, id_of(item_prefix, key) + "-" + std::to_string(i), label, ui::Button::Kind::subtle);
+        link->width = Sizing::fit;
+        link->role = ui::Role::link;
+        link->name = shell_.t("feed.open_citation", {{"name", label}});
+        const std::string ref = c.ref;
+        ui::Ui* up = &u;
+        link->on_click = [this, up, ref] {
+            if (ref.starts_with("workbench://thread/")) {
+                shell_.navigate(thread_hash(ref.substr(sizeof("workbench://thread/") - 1)));
+            } else if (ref.starts_with("https://") || ref.starts_with("http://")) {
+                if (up->open_link) up->open_link(ui::to_utf16(ref));  // asks first, shows the URL
+            } else {
+                // A file of the files Source: the host opens it only if it is an indexed item.
+                shell_.call("knowledge.open", {{"ref", ref}}, [this](Result<json> r) {
+                    if (!r) shell_.announce(shell_.t("feed.citation_unavailable", {{"reason", ui::to_utf16(r.error().message)}}));
+                });
+            }
+        };
+    }
+}
+
+// Images a tool call stored, and with `citations` the passages knowledge.search returned, under its card (or alone with
+// details hidden, where only the images stay).
+void FeedView::add_outputs(Node& out, const FeedItem& it, bool citations) {
     Node* wrap = &out;
     std::vector<const FileRef*> images;
     if (it.result)
         for (const FileRef& f : it.result->files)
             if (f.image()) images.push_back(&f);
-    const std::vector<Citation> citations = it.result ? it.result->citations : std::vector<Citation>{};
     if (!images.empty()) {
         auto* list = wrap->emplace<Node>(id_of("tool-images-", it.key));
         list->gap = 10;
@@ -614,38 +677,15 @@ void FeedView::add_outputs(Node& out, const FeedItem& it) {
             list->emplace<FeedImage>(shell_, thread_, *images[i], id_of("tool-image-", it.key) + "-" + std::to_string(i),
                                      images.size() > 1 ? static_cast<int>(i) + 1 : 0);
     }
-    if (!citations.empty()) {
-        auto* list = wrap->emplace<Node>(id_of("tool-citations-", it.key));
-        list->role = ui::Role::list;
-        list->name = shell_.t("feed.citations");
-        list->gap = 2;
-        list->padding.left = 16;
-        for (size_t i = 0; i < citations.size(); ++i) {
-            const Citation& c = citations[i];
-            const std::string source_key = "settings.knowledge.source." + c.source;
-            std::u16string label = u"[" + ui::to_utf16(std::to_string(c.n ? c.n : static_cast<long long>(i) + 1)) + u"] " +
-                                   ui::to_utf16(c.title.empty() ? c.ref : c.title);
-            if (shell_.ui().strings.has(source_key)) label += u" · " + shell_.t(source_key);
-            if (c.date.size() >= 10) label += u" · " + ui::to_utf16(c.date.substr(0, 10));
-            auto* link = list->emplace<ui::Button>(u, id_of("tool-citation-", it.key) + "-" + std::to_string(i), label, ui::Button::Kind::subtle);
-            link->width = Sizing::fit;
-            link->role = ui::Role::link;
-            link->name = shell_.t("feed.open_citation", {{"name", label}});
-            const std::string ref = c.ref;
-            ui::Ui* up = &u;
-            link->on_click = [this, up, ref] {
-                if (ref.starts_with("workbench://thread/")) {
-                    shell_.navigate(thread_hash(ref.substr(sizeof("workbench://thread/") - 1)));
-                } else if (ref.starts_with("https://") || ref.starts_with("http://")) {
-                    if (up->open_link) up->open_link(ui::to_utf16(ref));  // asks first, shows the URL
-                } else {
-                    // A file of the files Source: the host opens it only if it is an indexed item.
-                    shell_.call("knowledge.open", {{"ref", ref}}, [this](Result<json> r) {
-                        if (!r) shell_.announce(shell_.t("feed.citation_unavailable", {{"reason", ui::to_utf16(r.error().message)}}));
-                    });
-                }
-            };
-        }
+    if (citations && it.result && !it.result->citations.empty())
+        add_citations(*wrap, it.result->citations, it.key, "tool-citations-", "tool-citation-");
+    // A saved Skill is named in the Thread with a link to its Publish dialog; the user shares there (design D11).
+    if (it.result && !it.result->publish_route.empty()) {
+        auto* link = wrap->emplace<ui::Button>(shell_.ui(), id_of("tool-publish-", it.key), shell_.t("feed.skill_publish"), ui::Button::Kind::subtle);
+        link->width = Sizing::fit;
+        link->role = ui::Role::link;
+        const std::string route = it.result->publish_route;
+        link->on_click = [this, route] { shell_.navigate(route); };
     }
 }
 
@@ -673,6 +713,7 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
         message_header(shell_, *msg, it);
         slot.markdown = msg->emplace<ui::MarkdownView>(u, shell_.t("feed.agent"), id_of("md-", it.key));
         slot.markdown->set_markdown(it.text);
+        if (!it.sources.empty()) add_citations(*msg, it.sources, it.key, "msg-sources-", "msg-source-");
         return msg;
     }
     case ItemType::reasoning: {
@@ -689,10 +730,10 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
     }
     case ItemType::tool: {
         const std::string key = it.key;
-        if (it.compact) {  // work details hidden: only what the call produced
+        if (it.compact) {  // work details hidden: only the images the call stored
             auto wrap = std::make_unique<Node>(id_of("tool-item-", it.key));
             wrap->gap = 8;
-            add_outputs(*wrap, it);
+            add_outputs(*wrap, it, false);
             return wrap;
         }
         auto card = std::make_unique<ui::Card>(u, id_of("tool-", it.key), shell_.t("feed.tool.label", {{"tool", ui::to_utf16(it.tool)}}),
@@ -731,7 +772,7 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
         auto wrap = std::make_unique<Node>(id_of("tool-item-", it.key));
         wrap->gap = 8;
         wrap->add(std::move(card));
-        add_outputs(*wrap, it);
+        add_outputs(*wrap, it, true);
         return wrap;
     }
     case ItemType::action:

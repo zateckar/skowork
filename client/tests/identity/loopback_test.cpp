@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <random>
+#include <thread>
 
 using namespace wb;
 using namespace std::chrono_literals;
@@ -96,7 +97,10 @@ TEST(LoopbackListener, DeliversTheRedirectOnceAndStopsListening) {
     EXPECT_LT(std::chrono::steady_clock::now() - t0, 2s);
     EXPECT_EQ(rx.uri, base + "/auth/callback?code=abc&state=xyz");
 
-    // The listener is closed: nothing accepts on the port any more.
+    // The listener is closed: nothing accepts on the port any more. It closes on its own thread right after
+    // answering the browser and delivering the redirect, so wait briefly for that instead of racing it.
+    const auto close_by = std::chrono::steady_clock::now() + 2s;
+    while ((*l)->listening() && std::chrono::steady_clock::now() < close_by) std::this_thread::sleep_for(5ms);
     EXPECT_FALSE((*l)->listening());
     EXPECT_FALSE(get("http://127.0.0.1:" + std::to_string(port) + "/auth/callback?code=again"));
 }

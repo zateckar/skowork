@@ -924,8 +924,7 @@ bool KnowledgeService::extract_step() {
     const auto batch = store_->extract_batch(isolate_extraction_ ? 1 : kExtractBatch, deferred);
     if (batch.empty()) return false;
     model::ChatRequest req;
-    req.role = model::Role::small;
-    req.stream = false;
+    req.role = model::Role::small;  // streamed, like every chat request (client/model-access Streaming Responses)
     req.temperature = 0.0;
     req.max_tokens = 2048;
     req.feature = "knowledge.extract";

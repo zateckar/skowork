@@ -710,3 +710,37 @@ TEST(InboxFeed, SnapshotHoldsRunsEventsActionsAndQueuedMessagesSubagentsSeparate
     const json transcript = call(rpc, "runs.transcript", {{"run_id", r}});
     EXPECT_EQ(transcript["state"], "interrupted");
 }
+
+// fix-tool-waits 2.2: threads.feed loads the events of an interrupted subagent, and no other subagent's events.
+TEST(InboxFeed, WaitingSubagentEventsAreLoadedOthersAreNot) {
+    Inbox in;
+    in.env.start();
+    RpcRegistry rpc;
+    in.svc->register_rpc(rpc, false);
+    const auto t = in.env.thread();
+    in.env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (req.messages.empty() || req.messages[0].content.rfind("You are a subagent", 0) != 0) return std::nullopt;
+        // The first subagent asks; the second answers at once.
+        if (req.messages.back().content == "ask") return model::ModelResult<model::ChatResponse>(calls_response({{"q1", "ask_user", {{"question", "Which?"}}}}));
+        return model::ModelResult<model::ChatResponse>(text_response("done"));
+    });
+    in.env.model.push_calls({{"c1", "delegate", {{"task", "ask"}}}, {"c2", "delegate", {{"task", "quick"}}}});
+    in.env.model.push_text("parent done");
+    const auto r = in.env.run(t, "two things");
+    ASSERT_TRUE(in.env.wait(r, RunState::interrupted));
+    ASSERT_TRUE(in.env.wait_for([&] { return in.env.rt->executing_runs() == 0u; }));
+    const json feed = call(rpc, "threads.feed", {{"thread_id", t}});
+    ASSERT_EQ(feed["subagents"].size(), 2u);
+    int waiting = 0, finished = 0;
+    for (const auto& c : feed["subagents"]) {
+        if (c["state"] == "interrupted") {
+            ++waiting;
+            EXPECT_FALSE(c["events"].empty());
+        } else {
+            ++finished;
+            EXPECT_FALSE(c.contains("events"));
+        }
+    }
+    EXPECT_EQ(waiting, 1);
+    EXPECT_EQ(finished, 1);
+}

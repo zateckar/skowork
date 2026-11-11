@@ -24,12 +24,17 @@ struct ModelClientConfig {
     std::function<std::string()> gateway_url;
     std::function<std::string()> installation_id;  // X-Workbench-Installation, optional
 
-    // policy.llm.timeouts (defaults 10 s and 60 s).
+    // policy.llm.timeouts (defaults 10 s and 60 s). When set, the providers are asked before every request, so a
+    // changed policy applies to the next request (Request Timeouts); a non-positive answer keeps the fixed value.
     std::chrono::milliseconds connect_timeout{10'000};
     std::chrono::milliseconds idle_timeout{60'000};
+    std::function<std::chrono::milliseconds()> connect_timeout_now;
+    std::function<std::chrono::milliseconds()> idle_timeout_now;
 
-    // Retries With Backoff: up to 3 retries, jittered exponential backoff, honouring the gateway's retry delay.
+    // Retries With Backoff: up to 3 retries for RATE_LIMIT and MODEL_UNAVAILABLE, one for TIMEOUT (a TIMEOUT means
+    // the gateway already waited its full first-byte or idle limit; fix-long-thread-model-calls D3).
     int max_retries = 3;
+    int max_timeout_retries = 1;
     std::chrono::milliseconds backoff_initial{500};
     std::chrono::milliseconds backoff_cap{8'000};
     int max_retry_wait_s = 60;  // a longer retry delay is not waited for: the failure is returned

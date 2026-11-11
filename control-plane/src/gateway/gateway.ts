@@ -3,7 +3,7 @@
 // accounting and the usage audit. Nothing about the upstream (address, key, error text) reaches the client.
 import { Router, type Request, type Response } from 'express';
 import type { Config, ModelCapability } from '../config.ts';
-import { type Backend, Connections } from './connections.ts';
+import { type Backend, Connections, FALLBACK_AFTER_DEFAULT_S } from './connections.ts';
 import type { Audit } from '../identity/audit.ts';
 import type { Db } from '../db.ts';
 import { nowIso } from '../db.ts';
@@ -38,15 +38,124 @@ interface Usage {
   completion: number;
   reasoning: number;
   total: number;
+  /** Prompt tokens the upstream served from its cache (usage.prompt_tokens_details.cached_tokens); null when not reported. */
+  cached: number | null;
 }
-const zero = (): Usage => ({ prompt: 0, completion: 0, reasoning: 0, total: 0 });
+const zero = (): Usage => ({ prompt: 0, completion: 0, reasoning: 0, total: 0, cached: null });
 function usageFrom(u: unknown): Usage {
   const o = (u ?? {}) as Record<string, unknown>;
   const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
   const details = (o.completion_tokens_details ?? {}) as Record<string, unknown>;
+  const promptDetails = (o.prompt_tokens_details ?? {}) as Record<string, unknown>;
   const prompt = n(o.prompt_tokens) || n(o.input_tokens);
   const completion = n(o.completion_tokens) || n(o.output_tokens);
-  return { prompt, completion, reasoning: n(details.reasoning_tokens), total: n(o.total_tokens) || prompt + completion };
+  const cached = typeof promptDetails.cached_tokens === 'number' && Number.isFinite(promptDetails.cached_tokens) ? promptDetails.cached_tokens : null;
+  return { prompt, completion, reasoning: n(details.reasoning_tokens), total: n(o.total_tokens) || prompt + completion, cached };
+}
+
+/** The outcome of one attempt on one backend: done (answered, or failed for good) or a failure that may fail over. */
+type AttemptResult =
+  | { done: true; usage: Usage; outcome: string; content?: unknown; error?: GatewayError; images?: number; ttft?: number }
+  | { done: false; error: GatewayError };
+type Done = Extract<AttemptResult, { done: true }>;
+
+/** A model route: the upstream model id and the enabled connections that offer it, in order. */
+type Route = { model: string; backends: Backend[] };
+
+/** One leg of a request: a route with its body and limits (add-model-fallback-and-effort D3). */
+interface Call {
+  path: string;
+  payload: string;
+  kind: Kind;
+  estimate: number;
+  capture: boolean;
+  out: EventStream | null;
+  res: Response;
+  /** Streamed: from the upstream request to the first byte. Non-streamed: to the response headers. */
+  firstByteMs: number;
+  /** Non-streamed: the limit of the whole attempt, headers and body. */
+  totalMs: number;
+  /** The client's abort. */
+  signal: AbortSignal;
+  /** A fallback leg: when no backend is healthy, it may still use one that is marked unhealthy (D3). */
+  rescue: boolean;
+}
+
+/** A leg's outcome: answered (or failed for good), or every attempt on its route failed before the first byte. */
+type LegResult = { done: true; result: Done } | { done: false; error: GatewayError };
+
+/** Waits for p, or rejects with the signal's reason when the signal aborts first (a body read can outlive its abort). */
+function raceAbort<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  let onAbort: () => void = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  return Promise.race([p, aborted]).finally(() => signal.removeEventListener('abort', onAbort));
+}
+
+/** Thrown into a streamed attempt when one of its own limits fires (fix-long-thread-model-calls D2). */
+class StreamLimit extends Error {
+  readonly limit: 'first-byte' | 'idle' | 'max';
+  constructor(limit: 'first-byte' | 'idle' | 'max') {
+    super(`stream ${limit} limit`);
+    this.limit = limit;
+  }
+}
+
+/**
+ * The SSE response of a streamed chat request (fix-long-thread-model-calls D1). The headers are sent when a backend has
+ * been acquired; a keep-alive comment follows whenever nothing was written for keepAliveMs. Comments are not upstream
+ * bytes, so they do not count against failover.
+ */
+class EventStream {
+  readonly #res: Response;
+  readonly #keepAliveMs: number;
+  #started = false;
+  #timer: NodeJS.Timeout | undefined;
+  constructor(res: Response, keepAliveMs: number) {
+    this.#res = res;
+    this.#keepAliveMs = keepAliveMs;
+  }
+  get started() {
+    return this.#started;
+  }
+  get closed() {
+    return this.#res.writableEnded || this.#res.destroyed;
+  }
+  start() {
+    this.#started = true;
+    this.#res.status(200);
+    this.#res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    this.#res.setHeader('Cache-Control', 'no-cache');
+    this.#res.setHeader('X-Accel-Buffering', 'no');
+    this.#res.flushHeaders();
+    this.#arm();
+  }
+  write(data: Buffer | string) {
+    if (this.closed) return;
+    this.#res.write(data);
+    this.#arm();
+  }
+  /** One error event, in the shape of the error body (sendError), then the end of the stream without [DONE]. */
+  error(code: string, message: string, extra: ErrorExtra) {
+    this.write(`data: ${JSON.stringify({ error: { code, message, ...extra } })}\n\n`);
+    this.end();
+  }
+  end() {
+    clearTimeout(this.#timer);
+    this.#timer = undefined;
+    if (!this.closed) this.#res.end();
+  }
+  #arm() {
+    clearTimeout(this.#timer);
+    this.#timer = setTimeout(() => {
+      if (this.closed) return;
+      this.#res.write(': keep-alive\n\n');
+      this.#arm();
+    }, this.#keepAliveMs);
+  }
 }
 
 // ---- backends -------------------------------------------------------------------------------------
@@ -77,6 +186,15 @@ export class BackendPool {
     const b = healthy.find((x) => x.maxConcurrent === 0 || x.inFlight < x.maxConcurrent) ?? null;
     if (b) b.inFlight++;
     return { backend: b, allBusy: !b && healthy.length > 0 };
+  }
+  /**
+   * A backend for a fallback when none is healthy (add-model-fallback-and-effort D3): a connection that the model's own
+   * failure marked unhealthy may still answer the fallback, since its other models share it.
+   */
+  acquireUnhealthy(tried: Set<Backend>, candidates: Backend[]): Backend | null {
+    const b = candidates.find((x) => !tried.has(x) && (x.maxConcurrent === 0 || x.inFlight < x.maxConcurrent)) ?? null;
+    if (b) b.inFlight++;
+    return b;
   }
   release(b: Backend) {
     b.inFlight = Math.max(0, b.inFlight - 1);
@@ -162,6 +280,19 @@ function estimateChatTokens(root: Record<string, unknown>, imageTokens: number):
 const estimateInputTokens = (root: Record<string, unknown>) =>
   Math.ceil(['input', 'query', 'documents'].reduce((n, k) => n + (root[k] === undefined ? 0 : JSON.stringify(root[k]).length), 0) / 4);
 
+/** Whether a chat request has tools to call (a non-empty tools array). */
+const hasTools = (root: Record<string, unknown>) => Array.isArray(root.tools) && root.tools.length > 0;
+/** Whether a chat request carries an image part (add-model-fallback-and-effort D3 fit check). */
+function hasImageParts(root: Record<string, unknown>): boolean {
+  return (Array.isArray(root.messages) ? root.messages : []).some((m) => {
+    const c = (m as Record<string, unknown>)?.content;
+    return Array.isArray(c) && (c as Record<string, unknown>[]).some((p) => p?.type === 'image_url' || p?.type === 'input_image');
+  });
+}
+
+/** The audit's fallback reason for the failure that made the gateway switch (D5). */
+const fallbackReason = (e: GatewayError): string => (e.code === 'TIMEOUT' ? 'timeout' : e.code === 'RATE_LIMIT' ? 'capacity' : 'unavailable');
+
 /** Scans an SSE stream for [DONE], finish reasons, usage and (at content level) the assembled content. */
 class SseScanner {
   sawDone = false;
@@ -214,6 +345,8 @@ export class Gateway {
   readonly pool: BackendPool;
   readonly #limiter = new RateLimiter();
   readonly #log: (m: string) => void;
+  /** Model reference -> the time until which its requests go straight to its fallback (D4). In memory, per process. */
+  readonly #cooldown = new Map<string, number>();
 
   constructor(cfg: Config, db: Db, audit: Audit, log: (m: string) => void) {
     this.#cfg = cfg;
@@ -268,21 +401,23 @@ export class Gateway {
     return Number(row.t);
   }
 
-  #record(user: User, req: Request, endpoint: string, role: string | null, upstream: string | null, usage: Usage, outcome: string, started: number, content: unknown, images = 0) {
+  #record(user: User, req: Request, endpoint: string, role: string | null, upstream: string | null, usage: Usage, outcome: string, started: number, content: unknown,
+    images = 0, ttft: number | null = null, answeredBy: string | null = null, fallback: string | null = null) {
     this.#insertUsage(user, req.header('x-workbench-installation')?.slice(0, 128) ?? null, req.header('x-workbench-run')?.slice(0, 128) ?? null,
-      endpoint, role, upstream, usage, outcome, started, content, images);
+      endpoint, role, upstream, usage, outcome, started, content, images, ttft, answeredBy, fallback);
   }
 
   #insertUsage(user: User, installation: string | null, run: string | null, endpoint: string, role: string | null, upstream: string | null, usage: Usage,
-    outcome: string, started: number, content: unknown, images = 0) {
+    outcome: string, started: number, content: unknown, images = 0, ttft: number | null = null, answeredBy: string | null = null, fallback: string | null = null) {
     this.#db
       .prepare(
         `INSERT INTO llm_usage (at, subject, user_name, installation_id, endpoint, role, upstream_model, bucket, prompt_tokens, completion_tokens,
-           reasoning_tokens, total_tokens, outcome, duration_ms, content, run_id, groups, images) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           reasoning_tokens, total_tokens, outcome, duration_ms, content, run_id, groups, images, ttft_ms, cached_tokens, answered_by, fallback)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(nowIso(), user.subject, user.userName, installation, endpoint, role, upstream,
         role ? bucketOf(role) : null, usage.prompt, usage.completion, usage.reasoning, usage.total, outcome, Date.now() - started,
-        content === undefined ? null : JSON.stringify(content), run, JSON.stringify(user.groups ?? []), images);
+        content === undefined ? null : JSON.stringify(content), run, JSON.stringify(user.groups ?? []), images, ttft, usage.cached, answeredBy, fallback);
   }
 
   /**
@@ -325,7 +460,7 @@ export class Gateway {
         let usage = j.usage ? usageFrom(j.usage) : zero();
         if (usage.total === 0) {
           const est = estimateInputTokens({ input });
-          usage = { prompt: est, completion: 0, reasoning: 0, total: est };
+          usage = { prompt: est, completion: 0, reasoning: 0, total: est, cached: null };
         }
         this.#insertUsage(user, null, null, 'embeddings', 'embed', upstream, usage, 'ok', started, undefined);
         return { model: upstream, vectors: data.map((d) => d.embedding!) };
@@ -362,6 +497,15 @@ export class Gateway {
     res.json({ object: 'list', data });
   }
 
+  /** The fallback of a model, when it fits the request: its route and its effort (D3). Null when it cannot take the request. */
+  #fallbackTo(ref: string, root: Record<string, unknown>, estimate: number): { ref: string; route: Route; effort: string | null } | null {
+    const route = this.connections.route(ref);
+    if (!route.backends.length) return null;
+    const cap = this.#capability(ref);
+    const fits = estimate <= cap.context_window && (!hasTools(root) || Boolean(cap.tools)) && (!hasImageParts(root) || Boolean(cap.images));
+    return fits ? { ref, route, effort: this.connections.settings(ref).reasoning_effort } : null;
+  }
+
   async handle(req: Request, res: Response, kind: Kind): Promise<void> {
     const user = req.user!;
     const started = Date.now();
@@ -371,14 +515,20 @@ export class Gateway {
     let outcome = 'ok';
     let content: unknown;
     let images = 0;
+    let ttft: number | null = null;
+    let answeredBy: string | null = null;
+    let fallback: string | null = null;
     let release: (() => void) | null = null;
+    let out: EventStream | null = null; // set for a streamed chat request once its checks have passed
     const abort = new AbortController();
     res.on('close', () => {
       if (!res.writableFinished) abort.abort();
     });
+    // Before the stream starts, a failure is an HTTP error. After it, the status is gone, so the failure is one error event.
     const fail = (e: GatewayError) => {
       outcome = 'rejected:' + e.code.toLowerCase();
-      if (!res.headersSent) sendError(res, e.status, e.code, e.message, e.extra);
+      if (out?.started) out.error(e.code, e.message, e.extra);
+      else if (!res.headersSent) sendError(res, e.status, e.code, e.message, e.extra);
     };
     try {
       const root = req.body as Record<string, unknown>;
@@ -430,97 +580,160 @@ export class Gateway {
 
       // The mapped id resolves to the enabled connections that offer it (Role Mapping To Connection Models).
       const route = this.connections.route(upstream);
-      if (!route.backends.length) {
+      // The model's settings (D1, D2) and its fallback, when the request fits the fallback (add-model-fallback-and-effort D3).
+      const msettings = kind === 'chat' ? this.connections.settings(upstream) : null;
+      const fb = msettings?.fallback_model ? this.#fallbackTo(msettings.fallback_model, root, estimate) : null;
+      if (!route.backends.length && !fb) {
         return fail(new GatewayError(503, 'MODEL_UNAVAILABLE', 'The model server is not available.', { reason: 'no enabled connection offers the model' }));
       }
       const stream = kind === 'chat' && root.stream === true;
+      if (stream) out = new EventStream(res, g.keepAliveMs);
       const capture = kind === 'chat' && g.telemetryLevel === 'content'; // never for embeddings or rerank
       const requestCopy = capture ? structuredClone(root) : undefined;
-      // An image request forwards only the prompt, count and size; at content level the audit keeps the prompt only.
-      const forwarded: Record<string, unknown> = imageRequest ? { model: route.model, ...imageRequest } : { ...root, model: route.model };
       if (imageRequest && g.telemetryLevel === 'content') content = { request: imageRequest };
-      if (stream) forwarded.stream_options = { ...((root.stream_options as object) ?? {}), include_usage: true };
-      const payload = JSON.stringify(forwarded);
       const path = kind === 'chat' ? 'chat/completions' : kind === 'images' ? 'images/generations' : kind;
+      const total = kind === 'images' ? g.imageTimeoutMs : g.requestTimeoutMs;
+      // A streamed request limits its first byte by the stream limit; a non-streamed one by its whole limit.
+      const normalFirst = stream ? g.firstTokenTimeoutMs : total;
+      // The body for a route: the routed model id, the effort (null removes it; undefined keeps the client's body) and,
+      // for a streamed request, the usage option. An image request forwards only its prompt, count and size.
+      const body = (model: string, effort: string | null | undefined) => {
+        const forwarded: Record<string, unknown> = imageRequest ? { model, ...imageRequest } : { ...root, model };
+        if (effort === null) delete forwarded.reasoning_effort;
+        else if (effort !== undefined) forwarded.reasoning_effort = effort;
+        if (stream) forwarded.stream_options = { ...((root.stream_options as object) ?? {}), include_usage: true };
+        return JSON.stringify(forwarded);
+      };
+      const call = (model: string, effort: string | null | undefined, firstByteMs: number, rescue = false): Call => ({
+        path, payload: body(model, effort), kind, estimate, capture, out, res, firstByteMs, totalMs: total, signal: abort.signal, rescue,
+      });
 
-      const tried = new Set<Backend>();
-      let lastError: GatewayError | null = null;
-      for (;;) {
-        const { backend, allBusy } = this.pool.acquire(tried, route.backends);
-        if (!backend) {
-          return fail(
-            lastError ??
-              (allBusy
-                ? new GatewayError(429, 'RATE_LIMIT', 'The model servers are at capacity.', { reason: 'rate', retry_after_s: 1 })
-                : new GatewayError(503, 'MODEL_UNAVAILABLE', 'No model server is available right now.', { reason: 'no healthy backend' })),
-          );
+      // The leg that answers: the model itself, or its fallback (D3) while it is cooling down (D4) or after it failed.
+      let leg: LegResult;
+      let servedBy = upstream;
+      if (fb && (this.#cooldown.get(upstream) ?? 0) > Date.now()) {
+        fallback = 'cooldown';
+        servedBy = fb.ref;
+        leg = await this.#leg(fb.route, call(fb.route.model, fb.effort ?? null, normalFirst, true));
+      } else if (fb) {
+        const afterMs = (msettings!.fallback_after_s ?? FALLBACK_AFTER_DEFAULT_S) * 1000;
+        leg = await this.#leg(route, call(route.model, msettings!.reasoning_effort ?? undefined, afterMs));
+        if (!leg.done) {
+          fallback = fallbackReason(leg.error);
+          servedBy = fb.ref;
+          this.#cooldown.set(upstream, Date.now() + g.fallbackCooldownMs);
+          this.#log(`${upstream} fell back to ${fb.ref} (${fallback})`);
+          leg = await this.#leg(fb.route, call(fb.route.model, fb.effort ?? null, normalFirst, true));
         }
-        tried.add(backend);
-        try {
-          const attempt = await this.#try(backend, path, payload, stream, kind, estimate, capture, res, abort.signal);
-          if (attempt.done) {
-            usage = attempt.usage;
-            outcome = attempt.outcome;
-            images = attempt.images ?? 0;
-            if (capture) content = { request: requestCopy, response: attempt.content };
-            if (attempt.error) fail(attempt.error);
-            return;
-          }
-          lastError = attempt.error;
-        } finally {
-          this.pool.release(backend);
-        }
+      } else {
+        leg = await this.#leg(route, call(route.model, msettings?.reasoning_effort ?? undefined, normalFirst));
       }
+
+      if (!leg.done) return fail(leg.error);
+      usage = leg.result.usage;
+      outcome = leg.result.outcome;
+      images = leg.result.images ?? 0;
+      ttft = leg.result.ttft ?? null;
+      answeredBy = kind === 'chat' ? servedBy : null;
+      if (capture) content = { request: requestCopy, response: leg.result.content };
+      if (leg.result.error) fail(leg.result.error);
     } catch (err) {
       if (abort.signal.aborted) {
         outcome = 'client-aborted';
         return;
       }
       this.#log(`gateway failure: ${(err as Error).name}`);
+      fail(new GatewayError(500, 'INTERNAL', 'The gateway could not process the request.'));
       outcome = 'error:internal';
-      if (!res.headersSent) sendError(res, 500, 'INTERNAL', 'The gateway could not process the request.');
-      else res.end();
     } finally {
       release?.();
-      this.#record(user, req, kind, role, upstream, usage, outcome, started, content, images);
+      out?.end();
+      this.#record(user, req, kind, role, upstream, usage, outcome, started, content, images, ttft, answeredBy, fallback);
     }
   }
 
-  async #try(
-    b: Backend, path: string, payload: string, stream: boolean, kind: Kind, estimate: number, capture: boolean, res: Response, clientAbort: AbortSignal,
-  ): Promise<{ done: true; usage: Usage; outcome: string; content?: unknown; error?: GatewayError; images?: number } | { done: false; error: GatewayError }> {
+  /**
+   * Tries the backends of one route in order, each once, until one answers or fails for good. Returns the failure of
+   * the last attempt when none is left (Backend Failover).
+   */
+  async #leg(route: Route, call: Call): Promise<LegResult> {
+    const tried = new Set<Backend>();
+    let lastError: GatewayError | null = null;
+    for (;;) {
+      const picked = this.pool.acquire(tried, route.backends);
+      const allBusy = picked.allBusy;
+      let backend = picked.backend;
+      if (!backend && call.rescue) backend = this.pool.acquireUnhealthy(tried, route.backends);
+      if (!backend) {
+        return {
+          done: false,
+          error:
+            lastError ??
+            (allBusy
+              ? new GatewayError(429, 'RATE_LIMIT', 'The model servers are at capacity.', { reason: 'rate', retry_after_s: 1 })
+              : new GatewayError(503, 'MODEL_UNAVAILABLE', 'No model server is available right now.', { reason: 'no healthy backend' })),
+        };
+      }
+      tried.add(backend);
+      // The stream starts as soon as a backend is held; failover to another backend stays possible until the first byte.
+      if (call.out && !call.out.started) call.out.start();
+      try {
+        const attempt = await this.#try(backend, call);
+        if (attempt.done) return { done: true, result: attempt };
+        lastError = attempt.error;
+      } finally {
+        this.pool.release(backend);
+      }
+    }
+  }
+
+  async #try(b: Backend, call: Call): Promise<AttemptResult> {
+    if (call.out) return this.#stream(b, call);
+    const { path, payload, kind, estimate, capture, res, signal: clientAbort } = call;
     const g = this.#cfg.gateway;
-    const headerTimeout = AbortSignal.timeout(kind === 'images' ? g.imageTimeoutMs : g.requestTimeoutMs);
-    let upstreamRes: globalThis.Response;
+    // The first limit covers the wait for the response headers; the whole attempt is still bounded by the total limit.
+    const ctl = new AbortController();
+    const signal = AbortSignal.any([clientAbort, ctl.signal]);
+    const limitFired = () => ctl.signal.aborted && ctl.signal.reason instanceof StreamLimit;
+    const t0 = Date.now();
+    let timer: NodeJS.Timeout | undefined = setTimeout(() => ctl.abort(new StreamLimit('first-byte')), call.firstByteMs);
     try {
-      // Only the gateway's own credential is sent; nothing of the client's request headers is forwarded.
-      upstreamRes = await fetch(b.endpoint(path), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${b.apiKey}`, accept: stream ? 'text/event-stream' : 'application/json' },
-        body: payload,
-        signal: AbortSignal.any([headerTimeout, clientAbort]),
-      });
-    } catch (err) {
-      if (clientAbort.aborted) throw err;
-      if (headerTimeout.aborted) return { done: false, error: timeoutErr() };
-      this.#log(`${b} unreachable: ${(err as Error).name}`);
-      this.pool.markUnhealthy(b);
-      return { done: false, error: unavailable() };
-    }
+      let upstreamRes: globalThis.Response;
+      try {
+        // Only the gateway's own credential is sent; nothing of the client's request headers is forwarded.
+        upstreamRes = await fetch(b.endpoint(path), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${b.apiKey}`, accept: 'application/json' },
+          body: payload,
+          signal,
+        });
+      } catch (err) {
+        if (clientAbort.aborted) throw err;
+        if (limitFired()) return { done: false, error: timeoutErr() };
+        this.#log(`${b} unreachable: ${(err as Error).name}`);
+        this.pool.markUnhealthy(b);
+        return { done: false, error: unavailable() };
+      }
+      // Prompt Cache Audit (D7): for a non-streamed request, the time to the response headers stands for the first byte.
+      const ttft = Date.now() - t0;
+      clearTimeout(timer);
+      timer = setTimeout(() => ctl.abort(new StreamLimit('max')), Math.max(1, call.totalMs - (Date.now() - t0)));
 
-    if (!upstreamRes.ok) {
-      const snippet = (await upstreamRes.text().catch(() => '')).slice(0, 8192);
-      const { error, retry } = this.#classify(b, upstreamRes, snippet);
-      if (retry) return { done: false, error };
-      return { done: true, usage: zero(), outcome: 'rejected:' + error.code.toLowerCase(), error };
-    }
+      if (!upstreamRes.ok) {
+        const snippet = (await upstreamRes.text().catch(() => '')).slice(0, 8192);
+        if (clientAbort.aborted) throw new Error('client aborted');
+        if (limitFired()) return { done: false, error: timeoutErr() };
+        const { error, retry } = this.#classify(b, upstreamRes, snippet);
+        if (retry) return { done: false, error };
+        return { done: true, usage: zero(), outcome: 'rejected:' + error.code.toLowerCase(), error };
+      }
 
-    if (!stream) {
       let text: string;
       try {
         text = await upstreamRes.text();
       } catch {
         if (clientAbort.aborted) throw new Error('client aborted');
+        if (limitFired()) return { done: false, error: timeoutErr() };
         return { done: false, error: unavailable() };
       }
       let json: Record<string, unknown> | null = null;
@@ -532,83 +745,131 @@ export class Gateway {
       let usage = json?.usage ? usageFrom(json.usage) : zero();
       if (kind === 'rerank' && usage.total === 0) {
         const billed = Number((json?.meta as { billed_units?: { input_tokens?: number } })?.billed_units?.input_tokens ?? 0);
-        usage = { prompt: billed, completion: 0, reasoning: 0, total: billed };
+        usage = { prompt: billed, completion: 0, reasoning: 0, total: billed, cached: null };
       }
       if (kind === 'images') {
         // The upstream reports zero tokens for images; the image budget counts the images returned.
         res.status(200).type('application/json').send(text);
-        return { done: true, usage: zero(), outcome: 'ok', images: Array.isArray(json?.data) ? json.data.length : 0 };
+        return { done: true, usage: zero(), outcome: 'ok', images: Array.isArray(json?.data) ? json.data.length : 0, ttft };
       }
-      if (usage.total === 0) usage = { prompt: estimate, completion: 0, reasoning: 0, total: estimate };
+      if (usage.total === 0) usage = { prompt: estimate, completion: 0, reasoning: 0, total: estimate, cached: null };
       if (kind === 'embeddings' && json && Array.isArray(json.data) && Array.isArray((json.data[0] as { embedding?: unknown[] })?.embedding)) {
         json.dimension = ((json.data[0] as { embedding: unknown[] }).embedding).length;
         text = JSON.stringify(json);
       }
       res.status(200).type('application/json').send(text);
       const content = capture ? (text.length <= g.maxAuditContentBytes ? json : text.slice(0, g.maxAuditContentBytes)) : undefined;
-      return { done: true, usage, outcome: 'ok', content };
+      return { done: true, usage, outcome: 'ok', content, ttft };
+    } finally {
+      clearTimeout(timer);
     }
+  }
 
-    // Streaming: wait for the first chunk before committing, so a backend that dies early can be replaced.
-    const reader = upstreamRes.body!.getReader();
-    const read = async () => {
-      let timer: NodeJS.Timeout | undefined;
+  /**
+   * One streamed attempt on a backend (fix-long-thread-model-calls D2). The headers are already out (EventStream), so
+   * the attempt can only fail over until its first byte. Its limits: the first byte (headers included) within the
+   * call's first-byte limit; then each chunk within streamIdleTimeoutMs and the whole stream within streamMaxMs. The
+   * request timeout does not apply here. A limit after the first byte cuts the stream; it is not an error event.
+   */
+  async #stream(b: Backend, call: Call): Promise<AttemptResult> {
+    const { path, payload, estimate, capture, signal: clientAbort } = call;
+    const out = call.out!;
+    const g = this.#cfg.gateway;
+    const ctl = new AbortController(); // aborted by this attempt's limits
+    const signal = AbortSignal.any([clientAbort, ctl.signal]);
+    const limitFired = () => ctl.signal.aborted && ctl.signal.reason instanceof StreamLimit;
+    let firstTimer: NodeJS.Timeout | undefined;
+    let idleTimer: NodeJS.Timeout | undefined;
+    let maxTimer: NodeJS.Timeout | undefined;
+    const t0 = Date.now();
+    firstTimer = setTimeout(() => ctl.abort(new StreamLimit('first-byte')), call.firstByteMs);
+    try {
+      let upstreamRes: globalThis.Response;
       try {
-        return await Promise.race([
-          reader.read(),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('stream idle timeout')), g.streamIdleTimeoutMs);
-          }),
-        ]);
-      } finally {
-        clearTimeout(timer);
+        // Only the gateway's own credential is sent; nothing of the client's request headers is forwarded.
+        upstreamRes = await fetch(b.endpoint(path), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${b.apiKey}`, accept: 'text/event-stream' },
+          body: payload,
+          signal,
+        });
+      } catch (err) {
+        if (clientAbort.aborted) throw err;
+        if (limitFired()) return { done: false, error: timeoutErr() };
+        this.#log(`${b} unreachable: ${(err as Error).name}`);
+        this.pool.markUnhealthy(b);
+        return { done: false, error: unavailable() };
       }
-    };
-    let first: ReadableStreamReadResult<Uint8Array>;
-    try {
-      first = await read();
-    } catch (err) {
-      if (clientAbort.aborted) throw err;
-      this.#log(`${b} failed before the first byte of a stream`);
-      return { done: false, error: (err as Error).message === 'stream idle timeout' ? timeoutErr() : unavailable() };
-    }
-    if (first.done || !first.value?.length) {
-      this.#log(`${b} closed a stream before the first byte`);
-      this.pool.markUnhealthy(b);
-      return { done: false, error: unavailable() };
-    }
 
-    res.status(200);
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders();
-    const scanner = new SseScanner(capture, g.maxAuditContentBytes);
-    let chunk: ReadableStreamReadResult<Uint8Array> = first;
-    let aborted = false;
-    try {
-      while (!chunk.done) {
-        const buf = Buffer.from(chunk.value);
-        scanner.feed(buf);
-        res.write(buf);
-        chunk = await read();
+      if (!upstreamRes.ok) {
+        const snippet = (await upstreamRes.text().catch(() => '')).slice(0, 8192);
+        if (clientAbort.aborted) throw new Error('client aborted');
+        if (limitFired()) return { done: false, error: timeoutErr() };
+        const { error, retry } = this.#classify(b, upstreamRes, snippet);
+        if (retry) return { done: false, error };
+        return { done: true, usage: zero(), outcome: 'rejected:' + error.code.toLowerCase(), error };
       }
-    } catch {
-      aborted = clientAbort.aborted;
-      if (!aborted) this.#log(`${b} cut a stream`);
-      await reader.cancel().catch(() => undefined);
+
+      const reader = upstreamRes.body!.getReader();
+      let first: ReadableStreamReadResult<Uint8Array>;
+      try {
+        first = await raceAbort(reader.read(), signal);
+      } catch (err) {
+        if (clientAbort.aborted) throw err;
+        if (limitFired()) return { done: false, error: timeoutErr() };
+        this.#log(`${b} failed before the first byte of a stream`);
+        return { done: false, error: unavailable() };
+      }
+      if (first.done || !first.value?.length) {
+        this.#log(`${b} closed a stream before the first byte`);
+        this.pool.markUnhealthy(b);
+        return { done: false, error: unavailable() };
+      }
+      // Prompt Cache Audit (D7): upstream request start to the first upstream byte.
+      const ttft = Date.now() - t0;
+      clearTimeout(firstTimer);
+      firstTimer = undefined;
+
+      // After the first byte: the whole stream is bounded by the maximum, and each gap by the idle limit.
+      maxTimer = setTimeout(() => ctl.abort(new StreamLimit('max')), g.streamMaxMs);
+      const armIdle = () => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => ctl.abort(new StreamLimit('idle')), g.streamIdleTimeoutMs);
+      };
+      armIdle();
+
+      const scanner = new SseScanner(capture, g.maxAuditContentBytes);
+      let chunk: ReadableStreamReadResult<Uint8Array> = first;
+      let aborted = false;
+      try {
+        while (!chunk.done) {
+          const buf = Buffer.from(chunk.value);
+          scanner.feed(buf);
+          out.write(buf);
+          armIdle();
+          chunk = await raceAbort(reader.read(), signal);
+        }
+      } catch {
+        aborted = clientAbort.aborted;
+        if (!aborted) this.#log(`${b} cut a stream${limitFired() ? ` (${(ctl.signal.reason as StreamLimit).limit} limit)` : ''}`);
+        await reader.cancel().catch(() => undefined);
+      }
+      // A stream without [DONE] or a finish reason was cut: the client sees it as truncated.
+      const complete = scanner.sawDone || scanner.sawFinish;
+      const approxOut = Math.floor(scanner.bytes / 16);
+      const usage = scanner.usage && scanner.usage.total > 0 ? scanner.usage : { prompt: estimate, completion: approxOut, reasoning: 0, total: estimate + approxOut, cached: null };
+      return {
+        done: true,
+        usage,
+        outcome: aborted ? 'client-aborted' : complete ? 'ok' : 'truncated',
+        content: capture ? { content: scanner.content, reasoning_content: scanner.reasoning || null } : undefined,
+        ttft,
+      };
+    } finally {
+      clearTimeout(firstTimer);
+      clearTimeout(idleTimer);
+      clearTimeout(maxTimer);
     }
-    res.end();
-    // A stream without [DONE] or a finish reason was cut: the client sees it as truncated.
-    const complete = scanner.sawDone || scanner.sawFinish;
-    const approxOut = Math.floor(scanner.bytes / 16);
-    const usage = scanner.usage && scanner.usage.total > 0 ? scanner.usage : { prompt: estimate, completion: approxOut, reasoning: 0, total: estimate + approxOut };
-    return {
-      done: true,
-      usage,
-      outcome: aborted ? 'client-aborted' : complete ? 'ok' : 'truncated',
-      content: capture ? { content: scanner.content, reasoning_content: scanner.reasoning || null } : undefined,
-    };
   }
 
   /** Maps an upstream error to the gateway's vocabulary without any upstream text. Returns whether to try another backend. */

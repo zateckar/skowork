@@ -65,6 +65,10 @@ private:
 // A message rendered from Markdown. A drag over its text selects it, across its blocks in document order (client/
 // work-inbox Message Text Selection, improve-desktop-look D5); the window copies the selection with Ctrl+C. One
 // selection exists per window: Ui::selection names the view that holds it.
+// Ctrl+C that no node handled copies the message selection; true when it did (design D8). A text field copies its own
+// selection before this is asked.
+bool copy_message_selection(Ui& ui, const KeyEvent& e);
+
 class MarkdownView : public Node {
 public:
     MarkdownView(Ui& ui, std::u16string name, std::string id = {});
@@ -75,10 +79,13 @@ public:
     const std::vector<Block>& blocks() const { return blocks_; }
     std::u16string value() const override { return plain_; }
     size_t rebuilt_last() const { return rebuilt_; }  // blocks rebuilt by the last set_markdown (tests)
+    size_t sets() const { return sets_; }             // set_markdown calls that re-parsed (tests)
     bool on_pointer(const PointerEvent& e) override;
     // The selected text as plain text, the parts of different blocks on lines of their own; empty when none.
     std::u16string selected_text() const;
     void clear_selection();
+    // Focus leaves the view: its selection goes too, so Ctrl+C never copies text the user cannot see selected.
+    void on_focus(bool on) override;
 
 private:
     struct Point {
@@ -98,6 +105,7 @@ private:
     std::vector<Block> blocks_;
     std::u16string plain_;
     size_t rebuilt_ = 0;
+    size_t sets_ = 0;
 };
 
 }  // namespace wb::ui

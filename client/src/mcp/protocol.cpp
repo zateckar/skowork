@@ -314,6 +314,7 @@ std::vector<ServerEntry> parse_entries(const json* servers, std::vector<std::str
     std::vector<ServerEntry> out;
     if (!servers || !servers->is_array()) return out;
     for (const auto& s : *servers) {
+        if (s.is_object() && jstr(s, "kind") == "api") continue;  // API connectors are client/api-connectors'
         auto e = parse_entry(s);
         if (!e) {
             if (problems) problems->push_back(e.error().message);

@@ -58,6 +58,8 @@ TEST(PolicyDecide, Table) {
         {"most specific pattern: exact denies", devs, call("browser.eval", "external"), Decision::deny, "tools.rules[\"browser.eval\"]"},
         {"default read allow", json::object(), call("files.read", "read"), Decision::allow, "tools.risk[\"read\"]"},
         {"default write-local approve", json::object(), call("files.write", "write-local"), Decision::approve, nullptr},
+        // skills.save (add-agent-created-skills 2.4): write-local, so the default approves each save.
+        {"skills.save default approve", json::object(), call("skills.save", "write-local"), Decision::approve, nullptr},
         {"default external approve", json::object(), call("web.fetch", "external"), Decision::approve, nullptr},
         {"default destructive deny", json::object(), call("files.delete", "destructive"), Decision::deny, "tools.risk[\"destructive\"]"},
         {"unknown risk class is destructive", json::object(), call("x.y", "weird"), Decision::deny, nullptr},

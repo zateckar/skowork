@@ -408,17 +408,17 @@ void StatusBarView::rebuild() {
         const McpHealth h = mcp_health(s);
         if (h.total > 0) {
             std::u16string text = !h.failed.empty()
-                                      ? shell_.t("status_bar.mcp_failed", {{"names", ui::to_utf16([&] {
+                                      ? shell_.t("status_bar.connectors_failed", {{"names", ui::to_utf16([&] {
                                                                                std::string names;
                                                                                for (const auto& f : h.failed)
                                                                                    names += (names.empty() ? "" : ", ") + f;
                                                                                return names;
                                                                            }())}})
-                                      : shell_.t("status_bar.mcp", {{"healthy", ui::to_utf16(std::to_string(h.healthy))},
+                                      : shell_.t("status_bar.connectors", {{"healthy", ui::to_utf16(std::to_string(h.healthy))},
                                                                     {"total", ui::to_utf16(std::to_string(h.total))}});
             auto* b = emplace<ui::Button>(shell_.ui(), "status-mcp", std::move(text), ui::Button::Kind::subtle);
             b->make_inline();
-            b->help = shell_.t("status_bar.mcp_title");
+            b->help = shell_.t("status_bar.connectors_title");
             b->on_click = [this] { shell_.navigate("#/settings"); };
         }
         if (const json* p = jobj(s, "policy")) {

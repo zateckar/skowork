@@ -511,9 +511,19 @@ void InboxService::register_rpc(RpcRegistry& rpc, bool expose_on_pipe) {
         if (!env_.runtime) return make_error("unavailable", "the agent runtime is not running");
         runtime::AgentRuntime& rt = *env_.runtime;
         json runs = json::array(), children = json::array(), actions = json::array(), queued = json::array();
-        for (const auto& r : rt.runs(*id)) {
+        const auto thread_runs = rt.runs(*id);
+        // A subagent waits when it, or a subagent it started, has an open Action item. The events of a waiting subagent
+        // are loaded, so its Approval and Question cards can be drawn under the call that started it (Child Run Action Items).
+        std::map<std::string, std::string> parent_of;
+        for (const auto& r : thread_runs) parent_of[r.id] = r.parent_run_id;
+        std::set<std::string> waiting;
+        for (const auto& a : rt.pending_actions(*id))
+            for (std::string cur = a.run_id; !cur.empty() && waiting.insert(cur).second; cur = parent_of[cur]) {}
+        for (const auto& r : thread_runs) {
             if (!r.parent_run_id.empty()) {
-                children.push_back(run_json(r));
+                json c = run_json(r);
+                if (r.state == runtime::RunState::interrupted && waiting.contains(r.id)) c["events"] = events_json(rt.events(r.id));
+                children.push_back(std::move(c));
                 continue;
             }
             json j = run_json(r);
@@ -536,11 +546,14 @@ void InboxService::register_rpc(RpcRegistry& rpc, bool expose_on_pipe) {
         j["events"] = events_json(env_.runtime->events(*id));
         return j;
     });
-    // Retry (Error Banners With Remedy): the last top-level Run's request is sent again as a new Run.
+    // Retry (Error Banners With Remedy): a failed latest Run continues as it is (client/agent-runtime Run Retry);
+    // any other latest Run (for example one the user stopped) has its request sent again as a new Run.
     rpc.add("threads.retry", ex, [this](const json& p) -> Result<json> {
         auto id = required(p, "thread_id");
         if (!id) return id.error();
         if (!env_.runtime) return make_error("unavailable", "the agent runtime is not running");
+        if (auto resumed = env_.runtime->retry_run(*id)) return json{{"thread_id", *id}, {"run_id", *resumed}};
+        else if (resumed.error().code != "not_failed") return resumed.error();
         std::string text;
         for (const auto& r : env_.runtime->runs(*id)) {
             if (!r.parent_run_id.empty() || r.role != "main") continue;

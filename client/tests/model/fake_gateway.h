@@ -25,6 +25,7 @@ struct Scripted {
 struct Recorded {
     std::string method, url, body;
     std::vector<std::pair<std::string, std::string>> headers;
+    std::chrono::milliseconds connect_timeout{0}, idle_timeout{0};
     [[nodiscard]] std::string header(const std::string& name) const {
         for (const auto& [k, v] : headers)
             if (k == name) return v;
@@ -49,6 +50,8 @@ public:
             r.url = req.url;
             r.body = req.body;
             r.headers = req.headers;
+            r.connect_timeout = req.connect_timeout;
+            r.idle_timeout = req.idle_timeout;
             requests.push_back(std::move(r));
             if (!queue.empty()) {
                 s = queue.front();

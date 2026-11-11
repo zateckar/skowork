@@ -128,17 +128,21 @@ export class FleetRegistry {
   }
 
   /** Called when a deny-list entry is added: marks installations revoked, pushes revocation and closes connections. */
-  revoke(kind: 'user' | 'installation', value: string): void {
+  /** Returns the number of API connector tokens deleted with a user (control-plane/api-connectors Personal Access Token Removal). */
+  revoke(kind: 'user' | 'installation', value: string): number {
     const now = nowIso();
+    let tokens = 0;
     if (kind === 'installation') {
       this.#db.prepare('UPDATE installations SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ?').run(now, value.toLowerCase());
       this.#push.send('revocation', { installation_id: value.toLowerCase() }, { scope: 'installation' });
       this.#push.closeRevoked({ installation_id: value });
     } else {
       this.#db.prepare('UPDATE installations SET revoked_at = COALESCE(revoked_at, ?) WHERE user_name = ? COLLATE NOCASE OR subject = ?').run(now, value, value);
+      tokens = Number(this.#db.prepare('DELETE FROM api_connector_tokens WHERE user_name = ? COLLATE NOCASE').run(value).changes);
       this.#push.send('revocation', { user: value }, { scope: 'user' });
       this.#push.closeRevoked({ user: value });
     }
+    return tokens;
   }
 
   list(q: Record<string, unknown>) {
@@ -253,8 +257,8 @@ export function fleetAdminRoutes(db: Db, audit: Audit, registry: FleetRegistry, 
     }
     const reason = str(req.body?.reason)?.trim() || 'revoked by administrator';
     addDenied(db, 'user', user, reason, req.user!.userName);
-    registry.revoke('user', user);
-    record(req, 'fleet.user.revoke', { user, reason });
+    const apiTokensRemoved = registry.revoke('user', user);
+    record(req, 'fleet.user.revoke', { user, reason, api_tokens_removed: apiTokensRemoved });
     res.json({ user, revoked: true });
   });
   r.get('/min-versions', requireRole('security-auditor'), (_req, res) => {

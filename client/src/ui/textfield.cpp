@@ -79,6 +79,7 @@ TextField::~TextField() {
 float TextField::line_height() const { return std::ceil(ui_.measure_text(u"Ag", TextStyle::body, 1000.f, false).h); }
 
 void TextField::create_window() {
+    if (opt_.secret) return create_secret_window();
     if (!load_msftedit()) return;
     DWORD style = WS_CHILD | WS_TABSTOP;
     style |= opt_.multiline ? (ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_NOHIDESEL) : ES_AUTOHSCROLL;
@@ -100,8 +101,22 @@ void TextField::create_window() {
     apply_theme();
 }
 
-void TextField::apply_theme() {
+// The masked field: a plain edit control with the password style. Only the messages a plain edit control understands are
+// sent to it; the rich-text ones would have no effect there.
+void TextField::create_secret_window() {
+    const DWORD style = WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL | ES_PASSWORD;
+    const DPI_AWARENESS_CONTEXT prev = ::SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    edit_ = ::CreateWindowExW(0, L"EDIT", L"", style, 0, 0, 10, 10, ui_.host, nullptr, ::GetModuleHandleW(nullptr), nullptr);
+    if (prev) ::SetThreadDpiAwarenessContext(prev);
     if (!edit_) return;
+    ::SetPropW(edit_, kProp, this);
+    base_proc_ = reinterpret_cast<WNDPROC>(::SetWindowLongPtrW(edit_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&TextField::edit_proc)));
+    ::SendMessageW(edit_, EM_EXLIMITTEXT, 0, opt_.max_length ? static_cast<LPARAM>(opt_.max_length) : 4096);
+    annotate_name(edit_, name);
+}
+
+void TextField::apply_theme() {
+    if (!edit_ || opt_.secret) return;
     const uint32_t text = ui_.color(Paint::text), bg = ui_.color(Paint::surface);
     if (text == applied_text_ && bg == applied_bg_) return;
     applied_text_ = text;
@@ -120,6 +135,12 @@ void TextField::apply_theme() {
 
 std::u16string TextField::text() const {
     if (!edit_) return offline_text_;
+    if (opt_.secret) {
+        const int n = ::GetWindowTextLengthW(edit_);
+        std::wstring buf(static_cast<size_t>(n) + 1, L'\0');
+        const int got = ::GetWindowTextW(edit_, buf.data(), n + 1);
+        return std::u16string(reinterpret_cast<const char16_t*>(buf.data()), static_cast<size_t>(std::max(0, got)));
+    }
     // Measured as it is read, with CRLF line breaks (the control stores CR alone).
     GETTEXTLENGTHEX gl{GTL_USECRLF | GTL_PRECISE | GTL_NUMCHARS, 1200};
     const auto n = static_cast<size_t>(::SendMessageW(edit_, EM_GETTEXTLENGTHEX, reinterpret_cast<WPARAM>(&gl), 0));
@@ -147,10 +168,14 @@ void TextField::set_text(const std::u16string& t) {
         invalidate();
         return;
     }
-    SETTEXTEX st{ST_DEFAULT | ST_UNICODE, 1200};
-    std::u16string z = t;
-    ::SendMessageW(edit_, EM_SETTEXTEX, reinterpret_cast<WPARAM>(&st), reinterpret_cast<LPARAM>(z.c_str()));
-    ::SendMessageW(edit_, EM_SETSEL, static_cast<WPARAM>(-1), -1);
+    if (opt_.secret) {
+        ::SetWindowTextW(edit_, reinterpret_cast<const wchar_t*>(t.c_str()));
+    } else {
+        SETTEXTEX st{ST_DEFAULT | ST_UNICODE, 1200};
+        std::u16string z = t;
+        ::SendMessageW(edit_, EM_SETTEXTEX, reinterpret_cast<WPARAM>(&st), reinterpret_cast<LPARAM>(z.c_str()));
+        ::SendMessageW(edit_, EM_SETSEL, static_cast<WPARAM>(-1), -1);
+    }
     update_height();
     invalidate();
 }
@@ -252,7 +277,8 @@ void TextField::draw(Canvas& c) {
     c.round(f, 4.f, Paint::surface, focused ? Paint::accent : Paint::control_border);
     if (focused && !ui_.theme.high_contrast) c.fill({f.x + 2, f.bottom() - 2, f.w - 4, 2}, Paint::accent);
     if (edit_ && shown_) return;  // the child window draws the text
-    const std::u16string t = text();
+    std::u16string t = text();
+    if (opt_.secret) t.assign(t.size(), u'\u2022');  // a hidden masked field never draws its characters
     const bool placeholder = t.empty();
     const std::u16string& shown = placeholder ? opt_.placeholder : t;
     if (shown.empty()) return;

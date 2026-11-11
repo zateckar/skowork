@@ -32,6 +32,16 @@ Shell::Shell(HostLink& host, const MainWindow::Options& options, std::function<v
     if (!w) return;
     window_ = std::move(w).value();
     language_ = window_->ui().strings.lang();
+    repaint_timer_ = std::make_unique<RepaintTimer>(
+        repaint_,
+        [this](unsigned ms, std::function<void()> fn) {
+            std::weak_ptr<int> alive = alive_;  // a repaint after the Shell is gone does nothing
+            return window_->set_timer(ms, [alive, fn] {
+                if (alive.lock()) fn();
+            });
+        },
+        [this](uintptr_t id) { window_->cancel_timer(id); }, [] { return now_millis(); },
+        [this] { thread_->update_feed(); });
     window_->on_key = [this](const ui::KeyEvent& e) { return on_key(e); };
     window_->on_closed = [this] {
         if (on_closed_) on_closed_();
@@ -366,6 +376,7 @@ void Shell::load_feed() {
         }
         const bool first = !feed_;
         feed_ = snapshot_from(*r);
+        settle_live(*feed_, live_);
         if (first) refresh_thread();
         else {
             thread_->update_feed();
@@ -764,6 +775,16 @@ void Shell::on_inbox_changed(const json& data) {
     refresh_nav();
 }
 
+void Shell::feed_changed(bool streamed) {
+    // A stored change repaints at once and covers a repaint that was waiting; a streamed one is limited (RepaintTimer).
+    if (!repaint_timer_) return;  // no window
+    if (streamed) {
+        repaint_timer_->streamed_change();
+    } else {
+        repaint_timer_->stored_change();
+    }
+}
+
 void Shell::on_run_event(const json& data) {
     if (!feed_) return;
     const LiveRunEvent ev = live_event_from(data);
@@ -775,7 +796,7 @@ void Shell::on_run_event(const json& data) {
                                                      : t("question.announce", {{"prompt", ui::to_utf16(jstr(payload, "prompt"))}}));
     }
     if (apply_live_event(*feed_, live_, ev) == Apply::refetch) load_feed();
-    thread_->update_feed();
+    feed_changed(ev.kind == "text.delta" || ev.kind == "reasoning.delta");
     if (ev.kind == "subagent" || ev.kind == "run.state") {
         rail_->rebuild();
         drawer_->rebuild();

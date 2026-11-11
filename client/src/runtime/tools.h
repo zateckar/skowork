@@ -64,6 +64,9 @@ struct ToolContext {
     RunControl* control = nullptr;
     // Adds an entry to the Run's Activity log (for example a retry delay). Unset outside a Run.
     std::function<void(const std::string& text)> activity;
+    // The stored result bodies this Run got from one tool, oldest first (client/knowledge-graph Citation Numbers Per
+    // Run reads the numbers already given after a restart). Unset outside a Run.
+    std::function<std::vector<std::string>(const std::string& tool)> stored_results;
     [[nodiscard]] bool cancelled() const { return control && control->cancelled(); }
 };
 
@@ -131,6 +134,12 @@ struct ToolDef {
     bool core = false;      // sent on every turn (find_tools, ask_user, tools pinned by the active skill)
     // Touches only the client's own data (Threads, attachments); see ToolCallInfo::own_data.
     bool own_data = false;
+    // Offered only in top-level Runs that are not Unattended runs (add-agent-created-skills design D10): a Child Run or
+    // an Unattended run does not see the tool, and a call from one fails with an error.
+    bool attended_only = false;
+    // Extra facts for the Approval payload of a call, computed from the arguments (for example what a Skill save
+    // changes). The payload carries them under "preview"; unset: none.
+    std::function<json(const json& args)> approval_preview;
     // The files and URLs a call uses, for the policy's argument checks (paths are taken as given; the policy
     // canonicalises them).
     std::function<std::vector<ToolResource>(const json& args)> resources_of;

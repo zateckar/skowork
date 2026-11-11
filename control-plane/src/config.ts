@@ -41,6 +41,15 @@ export interface Config {
     maxPackageBytes: number;
     discoveryTimeoutMs: number;
   };
+  /** add-api-connectors (design D9, D10): server limits of API connectors; not policy keys. */
+  apiConnectors: {
+    maxDocumentBytes: number;
+    callTimeoutMs: number;
+    maxConcurrentCalls: number;
+    maxResponseBytes: number;
+    /** Plain HTTP to a loopback address. Development and tests only; always false in production. */
+    allowLoopbackHttp: boolean;
+  };
   /** control-plane/user-messaging (add-user-messaging): retention in days and the largest message. */
   messaging: { retentionDays: number; maxMessageBytes: number };
   /** control-plane/team-knowledge (add-knowledge-sharing D2). */
@@ -85,7 +94,16 @@ export interface Config {
     requestTimeoutMs: number;
     /** Image generation requests (add-image-generation design D5). */
     imageTimeoutMs: number;
+    /** Streamed chat requests (fix-long-thread-model-calls D1, D2): keep-alive comments, and three stream limits. */
+    keepAliveMs: number;
+    /** From the upstream request to the first upstream byte; a stream past it fails over, then ends in TIMEOUT. */
+    firstTokenTimeoutMs: number;
+    /** Between upstream chunks after the first byte; a stream past it is cut (truncated). */
     streamIdleTimeoutMs: number;
+    /** Backstop for the whole stream after the first byte; a stream past it is cut (truncated). */
+    streamMaxMs: number;
+    /** After a fallback, requests for the model go straight to its fallback for this long (fallback cooldown, default 2 minutes). */
+    fallbackCooldownMs: number;
     healthCheckIntervalMs: number;
     imageTokenEstimate: number;
     maxAuditContentBytes: number;
@@ -180,6 +198,13 @@ export function loadConfig(e: NodeJS.ProcessEnv = process.env): Config {
       maxPackageBytes: num(e.WORKBENCH_MCP_MAX_PACKAGE_BYTES, 64 * 1024 * 1024),
       discoveryTimeoutMs: num(e.WORKBENCH_MCP_DISCOVERY_TIMEOUT_MS, 10_000),
     },
+    apiConnectors: {
+      maxDocumentBytes: num(e.WORKBENCH_API_MAX_DOCUMENT_BYTES, 5 * 1024 * 1024),
+      callTimeoutMs: num(e.WORKBENCH_API_CALL_TIMEOUT_MS, 30_000),
+      maxConcurrentCalls: 8,
+      maxResponseBytes: 256 * 1024,
+      allowLoopbackHttp: env !== 'production' && (e.WORKBENCH_API_ALLOW_LOOPBACK_HTTP === '1' || e.WORKBENCH_API_ALLOW_LOOPBACK_HTTP === 'true'),
+    },
     messaging: { retentionDays: num(e.WORKBENCH_MESSAGE_RETENTION_DAYS, 90), maxMessageBytes: 8192 },
     teamKnowledge: { maxItemBytes: num(e.WORKBENCH_TEAM_ITEM_MAX_BYTES, 2 * 1024 * 1024), quotaBytes: num(e.WORKBENCH_TEAM_QUOTA_BYTES, 200 * 1024 * 1024) },
     skills: {
@@ -215,7 +240,11 @@ export function loadConfig(e: NodeJS.ProcessEnv = process.env): Config {
       maxRequestBytes: 32 * 1024 * 1024,
       requestTimeoutMs: num(e.WORKBENCH_LLM_REQUEST_TIMEOUT_MS, 300_000),
       imageTimeoutMs: num(e.WORKBENCH_LLM_IMAGE_TIMEOUT_MS, 120_000),
+      keepAliveMs: num(e.WORKBENCH_LLM_KEEPALIVE_MS, 15_000),
+      firstTokenTimeoutMs: num(e.WORKBENCH_LLM_FIRST_TOKEN_TIMEOUT_MS, 180_000),
       streamIdleTimeoutMs: num(e.WORKBENCH_LLM_STREAM_IDLE_MS, 120_000),
+      streamMaxMs: num(e.WORKBENCH_LLM_STREAM_MAX_MS, 1_200_000),
+      fallbackCooldownMs: num(e.WORKBENCH_LLM_FALLBACK_COOLDOWN_MS, 120_000),
       healthCheckIntervalMs: num(e.WORKBENCH_LLM_HEALTH_INTERVAL_MS, 10_000),
       imageTokenEstimate: 1500,
       maxAuditContentBytes: 256 * 1024,

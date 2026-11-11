@@ -138,6 +138,7 @@ const json& client_policy_defaults() {
         {"tools.risk", {{"read", "allow"}, {"write-local", "approve"}, {"external", "approve"}, {"destructive", "deny"}}},
         {"unattended.allowed_risk", {"read", "write-local"}},
         {"unattended.rules", json::object()},
+        {"identity.offline_sign_in", "on"},
         {"filesystem.read", json::array()},
         {"filesystem.write", json::array()},
         {"filesystem.deny", json::array()},

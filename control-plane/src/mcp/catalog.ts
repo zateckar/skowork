@@ -8,6 +8,8 @@ import { ApiError } from '../http.ts';
 import type { Audit } from '../identity/audit.ts';
 import { EVERYONE, type User } from '../identity/identity.ts';
 import { type DiscoveredTool, DiscoveryError, MCP_PROTOCOL_VERSION, discoverTools } from './discovery.ts';
+import { checkSchemaBudget } from '../api-connectors/budget.ts';
+import { type ApiAuth, validateApiSettings } from '../api-connectors/settings.ts';
 
 export const RISK_CLASSES = ['read', 'write-local', 'external', 'destructive'] as const;
 export type RiskClass = (typeof RISK_CLASSES)[number];
@@ -16,17 +18,26 @@ export interface Entry {
   id: string;
   name: string;
   owner: string;
-  kind: 'remote' | 'local';
+  kind: 'remote' | 'local' | 'api';
   spec_version: string;
   url?: string;
-  auth?: 'user-token' | 'none';
+  auth?: 'user-token' | 'none' | ApiAuth;
   package?: string;
   args: string[];
   env: Record<string, string>;
   include_tools: string[];
   exclude_tools: string[];
   risk: Record<string, RiskClass>;
+  /** kind api only (control-plane/api-connectors): connection settings without any secret. */
+  base_url?: string;
+  key_header?: string;
+  key_scheme?: string;
+  help_text?: string;
+  help_link?: string;
 }
+
+/** The token state of one user for one connector (control-plane/api-connectors Personal Access Token Gating). */
+export type ApiState = 'ready' | 'needs-token' | 'token-rejected' | 'not-applicable';
 
 interface ServerRow {
   id: string;
@@ -99,7 +110,7 @@ export class McpCatalog {
     const owner = typeof body.owner === 'string' ? body.owner.trim() : '';
     if (!owner) throw invalid('owner', 'owner is required.');
     const kind = body.kind;
-    if (kind !== 'remote' && kind !== 'local') throw invalid('kind', 'kind must be remote or local.');
+    if (kind !== 'remote' && kind !== 'local' && kind !== 'api') throw invalid('kind', 'kind must be remote, local or api.');
     const spec_version = typeof body.spec_version === 'string' && body.spec_version ? body.spec_version : MCP_PROTOCOL_VERSION;
     const risk: Record<string, RiskClass> = {};
     if (body.risk !== undefined) {
@@ -116,7 +127,13 @@ export class McpCatalog {
       exclude_tools: strings(body.exclude_tools, 'exclude_tools'),
       risk,
     };
-    if (kind === 'remote') {
+    if (kind === 'api') {
+      // Connection settings only: the operations come from the document, and no key is ever part of the entry.
+      const s = validateApiSettings(body, this.#cfg.apiConnectors.allowLoopbackHttp);
+      e.base_url = s.base_url;
+      e.auth = s.auth;
+      Object.assign(e, { key_header: s.key_header, key_scheme: s.key_scheme, help_text: s.help_text, help_link: s.help_link });
+    } else if (kind === 'remote') {
       let url: URL;
       try {
         url = new URL(String(body.url ?? ''));
@@ -214,13 +231,60 @@ export class McpCatalog {
       .all(...gs) as unknown as ServerRow[];
   }
 
+  /** The token state of a user for an API connector: only user-pat connectors have one (Personal Access Token Gating). */
+  apiState(id: string, auth: string | undefined, userName: string | null): ApiState {
+    if (auth !== 'user-pat') return 'not-applicable';
+    if (!userName) return 'needs-token';
+    const t = this.#db
+      .prepare('SELECT rejected_at FROM api_connector_tokens WHERE connector_id = ? AND user_name = ? COLLATE NOCASE')
+      .get(id, userName) as { rejected_at: string | null } | undefined;
+    if (!t) return 'needs-token';
+    return t.rejected_at ? 'token-rejected' : 'ready';
+  }
+
+  /** The selected, usable operations of an API connector. */
+  selectedOperations(id: string): { tool: string; description: string; risk: RiskClass; input_schema: string; call_spec: string }[] {
+    return this.#db
+      .prepare("SELECT tool, description, risk, input_schema, call_spec FROM api_operations WHERE connector_id = ? AND status = 'selected' AND usable = 1 ORDER BY tool")
+      .all(id) as unknown as { tool: string; description: string; risk: RiskClass; input_schema: string; call_spec: string }[];
+  }
+
+  /** Drops the cached bundle entries, after a change that does not go through the catalog's versions. */
+  invalidate(): void {
+    this.#cache.clear();
+  }
+
+  /** Records a change of an entry's operations or settings: a version, an audit row, and the bundles of its Groups. */
+  recordChange(actor: Actor, id: string, action: string): void {
+    const row = this.#row(id);
+    if (!row) throw new ApiError(404, 'NOT_FOUND', `No catalog entry ${id}.`);
+    const before = this.#view(row);
+    this.#changed(actor, id, action, before, before.groups);
+  }
+
   /** Entry Delivered In The Policy Bundle: what the client needs, with tools awaiting review excluded. */
-  entriesFor(groups: string[]): unknown[] {
-    const key = [...groups].sort().join(',');
+  entriesFor(groups: string[], userName: string | null = null): unknown[] {
+    const key = `${[...groups].sort().join(',')}|${userName?.toLowerCase() ?? ''}`;
     const hit = this.#cache.get(key);
     if (hit && Date.now() - hit.at < this.#cfg.mcpCatalog.cacheSeconds * 1000) return hit.entries;
     const entries = this.#enabledFor(groups).map((row) => {
       const e = JSON.parse(row.entry) as Entry;
+      if (e.kind === 'api') {
+        const state = this.apiState(row.id, e.auth, userName);
+        const offered = state === 'ready' || state === 'not-applicable' ? this.selectedOperations(row.id) : [];
+        return {
+          id: e.id,
+          name: e.name,
+          kind: 'api',
+          auth: e.auth,
+          state,
+          // Only the names, descriptions, schemas and risk classes: never the base URL, a secret or the document.
+          operations: offered.map((o) => ({ name: o.tool, description: o.description, risk: o.risk, input_schema: JSON.parse(o.input_schema) as unknown })),
+          include_tools: [],
+          exclude_tools: [],
+          risk: Object.fromEntries(offered.map((o) => [o.tool, o.risk])),
+        };
+      }
       const tools = this.#tools(row.id);
       const exclude = new Set(e.exclude_tools);
       for (const t of tools) if (t.status === 'pending' || t.status === 'excluded') exclude.add(t.name);
@@ -294,6 +358,7 @@ export class McpCatalog {
     const e = this.validate(body);
     const groups = this.#groups(body.groups) ?? [];
     if (this.#row(e.id)) throw new ApiError(409, 'CONFLICT', `A catalog entry ${e.id} already exists.`);
+    if (e.kind === 'api') checkSchemaBudget(this.#db, e.id, groups);
     const wantEnabled = body.enabled === undefined ? true : body.enabled === true;
     const discovery = e.kind === 'remote' ? await this.#discover(e, token) : null;
     tx(this.#db, () => {
@@ -315,6 +380,7 @@ export class McpCatalog {
     const { groups: _g, enabled: _en, discovery: _d, tools: _t, ...current } = before;
     const e = this.validate({ ...current, ...body, id });
     const groups = this.#groups(body.groups);
+    if (e.kind === 'api') checkSchemaBudget(this.#db, id, groups ?? before.groups);
     const wantEnabled = body.enabled === undefined ? before.enabled : body.enabled === true;
     const discovery = e.kind === 'remote' ? await this.#discover(e, token) : null;
     if (wantEnabled && discovery && !discovery.ok && body.enabled === true) {

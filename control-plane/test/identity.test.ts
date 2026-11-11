@@ -198,3 +198,40 @@ describe('identity: admin directory', () => {
     assert.equal((await h.call('GET', '/api/v1/admin/identity/directory', await h.token('dev1'))).status, 403);
   });
 });
+
+describe('identity: offline-session tokens (add-offline-sign-in 3.1)', () => {
+  let h: Harness;
+  before(async () => (h = await startHarness()));
+  after(() => h.close());
+
+  it('accepts a fresh 5-minute access token from an offline session under the same rules', async () => {
+    const t = await h.token('offline1', { sid: 'offline-session-1' }, { lifetimeS: 300 });
+    const r = await h.call('GET', '/api/v1/identity/whoami', t);
+    assert.equal(r.status, 200);
+    assert.equal(r.body.subject, 'sub-offline1');
+  });
+
+  it('accepts such a token even when its sid is not known to the control plane', async () => {
+    const first = await h.token('offline2', { sid: 'offline-session-2' }, { lifetimeS: 300 });
+    const later = await h.token('offline2', { sid: 'offline-session-2-renewed' }, { lifetimeS: 300 });
+    assert.equal((await h.call('GET', '/api/v1/identity/whoami', first)).status, 200);
+    assert.equal((await h.call('GET', '/api/v1/identity/whoami', later)).status, 200);
+  });
+
+  it('refuses a 60-minute access token even when it comes from an offline session', async () => {
+    const t = await h.token('offline1', { sid: 'offline-session-1' }, { lifetimeS: 3600 });
+    const r = await h.call('GET', '/api/v1/identity/whoami', t);
+    assert.equal(r.status, 401);
+    assert.equal(r.body.error.code, 'UNAUTHORIZED');
+  });
+
+  it('refuses a fresh token from an offline session of a deny-listed installation with 403', async () => {
+    const admin = await h.token('admin1');
+    const installation = 'inst-offline-revoked';
+    assert.equal((await h.call('POST', '/api/v1/admin/identity/deny-list', admin, { kind: 'installation', value: installation, reason: 'lost' })).status, 200);
+    const t = await h.token('offline3', { sid: 'offline-session-3' }, { lifetimeS: 300 });
+    const r = await h.call('GET', '/api/v1/identity/whoami', t, undefined, { 'x-workbench-installation': installation });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.error.code, 'DENIED');
+  });
+});

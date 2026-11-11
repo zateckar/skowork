@@ -19,7 +19,10 @@ namespace wb {
 
 struct SkillAuthoringEnv {
     std::filesystem::path private_dir;  // <data>/skills/private
+    std::filesystem::path previous_dir; // <data>/skills/previous: the one kept version of an agent-updated Skill (D12)
     std::function<void()> reload;       // the catalogue reads the disk again
+    // Deletion removes the agent-created record of the Skill (add-agent-created-skills D6).
+    std::function<void(const std::string& name)> forget_agent_record;
     // Save as skill: the Thread's messages, its title, a tool's declared risk ("" when unknown), the user's name, and
     // the model call attributed to the Thread.
     std::function<std::vector<model::ChatMessage>(const std::string& thread)> conversation;
@@ -56,6 +59,8 @@ public:
     static json validate(const skills::SkillSource& s);
     Result<json> save(const std::string& original, const skills::SkillSource& s);
     Result<json> remove(const std::string& name);
+    // Restore previous version (add-agent-created-skills D12): swaps the current Skill with its kept version.
+    Result<json> restore(const std::string& name);
     Result<json> add_files(const std::string& name, const std::string& folder, const std::vector<std::string>& paths);
     Result<json> remove_file(const std::string& name, const std::string& path);
     Result<json> draft(const std::string& thread);

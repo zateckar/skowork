@@ -263,6 +263,20 @@ void MarkdownView::clear_selection() {
     anchor_ = focus_ = {};
     selecting_ = false;
     if (ui_.selection == this) ui_.selection = nullptr;
+    // Only a view that holds a selection takes keyboard focus, so the Tab order keeps its other stops.
+    focusable = false;
+}
+
+bool copy_message_selection(Ui& ui, const KeyEvent& e) {
+    if (!e.ctrl || e.alt || e.shift || e.key != kKeyC || !ui.selection || !ui.copy_text) return false;
+    const std::u16string text = ui.selection->selected_text();
+    if (text.empty()) return false;
+    ui.copy_text(text);
+    return true;
+}
+
+void MarkdownView::on_focus(bool on) {
+    if (!on && ui_.selection == this) clear_selection();
 }
 
 std::u16string MarkdownView::selected_text() const {
@@ -293,6 +307,9 @@ bool MarkdownView::on_pointer(const PointerEvent& e) {
         moved_ = false;
         ui_.selection = this;
         apply_selection();
+        // The selected view has keyboard focus, so Ctrl+C reaches the window's copy of the selection (design D8).
+        focusable = true;
+        if (Tree* t = tree(); t && t->focused() != this) t->set_focus(this);
         return true;  // the view keeps the pointer until release
     }
     if (!selecting_) return false;
@@ -335,6 +352,7 @@ void MarkdownView::set_blocks(std::vector<Block> next) {
     while (children().size() > keep) remove(children().back().get());
     for (size_t i = keep; i < next.size(); ++i) add(build(next[i], i));
     rebuilt_ = next.size() - keep;
+    ++sets_;
     blocks_ = std::move(next);
     plain_ = plain_text(blocks_);
     relayout();

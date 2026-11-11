@@ -3486,3 +3486,46 @@ TEST(KnowledgeTeamSearch, TeamPassagesCarryOwnerAndGroupsAndOfflineIsSaid) {
 }
 
 }  // namespace
+
+// ==== fix-feed-live-updates: Citation Numbers Per Run (design D7) ===================================================
+
+// A passage number names one passage of its Run: numbers continue across searches of a Run, a new Run starts at 1,
+// and a Run that continues after a restart takes its next number from the results stored for it.
+TEST(CitationNumbers, NumbersAreUniquePerRunAndContinueAfterARestart) {
+    Kg kg({{"knowledge.extraction", "off"}, {"knowledge.directory_enrichment", "off"}});
+    for (int i = 0; i < 6; ++i)
+        write_file(kg.folder / ("roadmap" + std::to_string(i) + ".txt"), "Quarterly roadmap item " + std::to_string(i) + " for the launch.");
+    ASSERT_TRUE(kg.svc->add_folder(u8(kg.folder)));
+    kg.idle();
+    std::map<std::string, std::vector<std::string>> stored;  // the results each Run has stored, oldest first
+    const auto context_for = [&stored](const std::string& run) {
+        runtime::ToolContext c;
+        c.run_id = run;
+        c.stored_results = [&stored, run](const std::string&) { return stored[run]; };
+        return c;
+    };
+    auto tools = kg.svc->tools();
+    const auto run_search = [&](runtime::ToolContext& c) {
+        const auto out = tool(tools, "knowledge.search").run(c, {{"query", "quarterly roadmap launch"}});
+        EXPECT_TRUE(out.ok);
+        stored[c.run_id].push_back(out.content);
+        return json::parse(out.content)["results"];
+    };
+    auto run1 = context_for("run-1");
+    const json first = run_search(run1);
+    const json second = run_search(run1);
+    ASSERT_GE(first.size(), 2u);
+    ASSERT_GE(second.size(), 1u);
+    EXPECT_EQ(first[0]["n"], 1);
+    EXPECT_EQ(first[first.size() - 1]["n"], static_cast<int>(first.size()));
+    EXPECT_EQ(second[0]["n"], static_cast<int>(first.size()) + 1);
+    // A new Run starts again at 1.
+    auto run2 = context_for("run-2");
+    EXPECT_EQ(run_search(run2)[0]["n"], 1);
+    // After a restart the Tools object is new; the next number comes from the Run's stored results.
+    auto restarted = kg.svc->tools();
+    auto run1_again = context_for("run-1");
+    const auto after_restart = json::parse(tool(restarted, "knowledge.search").run(run1_again, {{"query", "quarterly roadmap launch"}}).content)["results"];
+    ASSERT_GE(after_restart.size(), 1u);
+    EXPECT_EQ(after_restart[0]["n"], static_cast<int>(first.size() + second.size()) + 1);
+}

@@ -626,7 +626,31 @@ TEST(Strings, BuiltInBundlesLoadAndAgree) {
     EXPECT_TRUE(check_bundles({cs, de, en}).empty());
     EXPECT_EQ(cs.count("nav.count", 3), u"3 vlákna");
     EXPECT_EQ(de.get("views.inbox"), u"Posteingang");
-    EXPECT_EQ(en.get("status_bar.mcp", {{"healthy", u"2"}, {"total", u"3"}}), u"Connections 2/3");
+    EXPECT_EQ(en.get("status_bar.connectors", {{"healthy", u"2"}, {"total", u"3"}}), u"Connectors 2/3");
+}
+
+// add-api-connectors task 6.3: the Connections wording is renamed in every language, and the old keys are gone.
+TEST(Strings, ConnectorKeysAreRenamedInEveryLanguage) {
+    const Strings cs = load_bundle("cs"), de = load_bundle("de"), en = load_bundle("en");
+    for (const char* key : {"settings.connectors.title", "settings.connectors.body", "settings.connectors.api.heading",
+                            "settings.connectors.api.reason.token-rejected", "settings.connectors.api.replace_token", "status_bar.connectors",
+                            "status_bar.connectors_title", "apps.confirm_connectors_body"}) {
+        EXPECT_TRUE(en.has(key)) << key;
+        EXPECT_TRUE(de.has(key)) << key;
+        EXPECT_TRUE(cs.has(key)) << key;
+    }
+    for (const char* key : {"settings.connections.title", "settings.connections.body", "status_bar.mcp", "status_bar.mcp_title", "apps.confirm_body"}) {
+        EXPECT_FALSE(en.has(key)) << key;
+        EXPECT_FALSE(de.has(key)) << key;
+        EXPECT_FALSE(cs.has(key)) << key;
+    }
+    EXPECT_EQ(en.get("settings.connectors.title"), u"Connectors");
+    EXPECT_EQ(en.get("status_bar.connectors_title"), u"Open Connectors in Settings");
+    // The English text of the renamed keys no longer says "Connections" or "MCP catalog".
+    for (const char* key : {"settings.connectors.title", "settings.connectors.body", "settings.connectors.empty", "status_bar.connectors_failed",
+                            "apps.confirm_connectors_body"})
+        EXPECT_EQ(en.get(key).find(u"Connections"), std::u16string::npos) << key;
+    EXPECT_EQ(en.get("settings.connectors.body").find(u"MCP catalog"), std::u16string::npos);
 }
 
 TEST(Strings, LanguageFollowsSettingThenSystem) {

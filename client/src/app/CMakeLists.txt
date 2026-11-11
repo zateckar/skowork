@@ -11,9 +11,9 @@ configure_file(app.rc.in ${CMAKE_CURRENT_BINARY_DIR}/app.rc @ONLY)
 set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/app.rc PROPERTIES OBJECT_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/app.manifest;${CMAKE_CURRENT_SOURCE_DIR}/workbench.ico")
 
-add_library(wb_app STATIC app.cpp agent_service.cpp skill_authoring.cpp automations_rpc.cpp mail_rpc.cpp knowledge_rpc.cpp meeting_rpc.cpp apps_rpc.cpp messaging_rpc.cpp)
+add_library(wb_app STATIC app.cpp agent_service.cpp skill_authoring.cpp skill_save_tool.cpp automations_rpc.cpp mail_rpc.cpp connectors_rpc.cpp knowledge_rpc.cpp meeting_rpc.cpp apps_rpc.cpp messaging_rpc.cpp)
 target_include_directories(wb_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_BINARY_DIR}/gen)
-target_link_libraries(wb_app PUBLIC wb_telemetry wb_shell wb_inbox wb_scheduler wb_meeting wb_knowledge wb_mail wb_browser wb_computer wb_apps wb_messaging wb_mcp wb_tools wb_policy wb_sandbox wb_runtime wb_model wb_host wb_channel wb_identity wb_storage wb_platform wb_base secur32 wtsapi32)
+target_link_libraries(wb_app PUBLIC wb_telemetry wb_shell wb_inbox wb_scheduler wb_meeting wb_knowledge wb_mail wb_browser wb_computer wb_apps wb_messaging wb_mcp wb_api_connectors wb_tools wb_policy wb_sandbox wb_runtime wb_model wb_host wb_channel wb_identity wb_storage wb_platform wb_base secur32 wtsapi32)
 workbench_warnings(wb_app)
 # The host wiring is not a hot path; keep the installed client and its required license notices within the footprint budget.
 target_compile_options(wb_app PRIVATE $<$<CONFIG:Release>:-Os>)

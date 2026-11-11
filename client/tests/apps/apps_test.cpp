@@ -11,6 +11,9 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <thread>
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
@@ -39,6 +42,7 @@ std::shared_ptr<const policy::EffectivePolicy> policy_with(json apps) {
 
 // The app runtime of the tests: node.exe from client/runtime/node and the app host from the sources.
 struct Rig {
+    std::chrono::milliseconds start_timeout_;
     TempRoot tmp;
     fs::path rt = tmp.path / "runtime";
     sandbox::EgressProxy proxy{[](const std::string&) { return policy::RuleVerdict{false, "test", "no network in tests"}; },
@@ -52,7 +56,7 @@ struct Rig {
     std::unique_ptr<AppManager> apps;
     std::unique_ptr<AppServer> server;
 
-    Rig() {
+    explicit Rig(std::chrono::milliseconds start_timeout = std::chrono::seconds(10)) : start_timeout_(start_timeout) {
         std::error_code ec;
         fs::create_directories(rt, ec);
         if (node_present()) fs::copy_file(runtime_dir() / "node.exe", rt / "node.exe", ec);
@@ -76,6 +80,7 @@ struct Rig {
             return json{{"issues", {{{"key", "DEMO-1"}, {"query", jstr(args, "query")}}}}};
         };
         e.run_active = [](const std::string& run) { return run != "ended"; };
+        e.start_timeout = start_timeout_;
         apps = std::make_unique<AppManager>(std::move(e));
         server = std::make_unique<AppServer>(*apps);
     }
@@ -509,4 +514,116 @@ TEST(AppsTools, CreateWriteOpenWithConfirmationUnderPolicyAndModeOff) {
     EXPECT_TRUE(deleted.ok) << deleted.content;
     EXPECT_FALSE(fs::exists(r.tmp.path / "apps" / "q3-slides"));
     EXPECT_EQ(r.apps->running_count(), 0u);
+}
+
+// ---- fix-tool-waits 3.1-3.3: a start in progress does not hold the manager ---------------------------------------------
+
+namespace {
+
+long long ms_since(std::chrono::steady_clock::time_point t) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t).count();
+}
+
+}  // namespace
+
+TEST(AppsManager, FolderAccessAndAppChangesDoNotWaitForAPendingStart) {
+    if (!node_present()) GTEST_SKIP() << "client/runtime/node is missing (dev/scripts/fetch-node-runtime.ps1)";
+    Rig r(std::chrono::milliseconds(500));
+    auto a = r.apps->create(manifest("Stuck"), "run-1");
+    ASSERT_TRUE(a);
+    r.write(a->id, "server.js", "setInterval(() => {}, 1000);\n");  // never listens, so it never reports ready
+    std::atomic<bool> start_done{false};
+    Status start_result;
+    std::thread starter([&] {
+        start_result = r.apps->start(a->id);
+        start_done = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    ASSERT_FALSE(start_done.load());  // the start is still pending
+
+    auto t = std::chrono::steady_clock::now();
+    EXPECT_EQ(r.apps->folders_for("run-1"), std::vector<std::string>{a->folder});
+    EXPECT_LT(ms_since(t), 200);
+    EXPECT_FALSE(start_done.load());
+
+    t = std::chrono::steady_clock::now();
+    auto b = r.apps->create(manifest("Other"), "run-2");
+    EXPECT_TRUE(b);
+    EXPECT_LT(ms_since(t), 200);
+    EXPECT_FALSE(start_done.load());
+
+    t = std::chrono::steady_clock::now();
+    EXPECT_TRUE(r.apps->update(a->id, {{"description", "Still starting"}}, "run-1"));
+    EXPECT_LT(ms_since(t), 200);
+    EXPECT_FALSE(start_done.load());
+
+    starter.join();
+    EXPECT_EQ(start_result.error().code, "start");  // a failed start returns its error within the start timeout
+}
+
+TEST(AppsManager, TwoRequestsForAStoppedAppStartOneProcess) {
+    if (!node_present()) GTEST_SKIP() << "client/runtime/node is missing (dev/scripts/fetch-node-runtime.ps1)";
+    Rig r;
+    auto a = r.apps->create(manifest("Quick"), "run-1");
+    ASSERT_TRUE(a);
+    r.write(a->id, "server.js", "require('node:http').createServer((q, s) => s.end('ok')).listen(process.env.WORKBENCH_APP_PIPE);\n");
+    std::atomic<int> connected{0};
+    std::vector<std::thread> callers;
+    for (int i = 0; i < 2; ++i)
+        callers.emplace_back([&] {
+            if (r.apps->connect(a->id)) ++connected;
+        });
+    for (auto& c : callers) c.join();
+    EXPECT_EQ(connected.load(), 2);
+    EXPECT_EQ(r.apps->running_count(), 1u);
+    const std::string log = r.apps->logs(a->id);
+    size_t starts = 0;
+    for (size_t p = log.find("started"); p != std::string::npos; p = log.find("started", p + 1)) ++starts;
+    EXPECT_EQ(starts, 1u) << log;
+}
+
+TEST(AppsTools, WriteToAnAppFolderCompletesWhileAnotherAppStarts) {
+    if (!node_present()) GTEST_SKIP() << "client/runtime/node is missing (dev/scripts/fetch-node-runtime.ps1)";
+    Rig r(std::chrono::seconds(3));  // the other app's start is pending for three seconds
+    auto stuck = r.apps->create(manifest("Stuck"), "run-0");
+    ASSERT_TRUE(stuck);
+    r.write(stuck->id, "server.js", "setInterval(() => {}, 1000);\n");
+    auto target = r.apps->create(manifest("Target"), "run-1");
+    ASSERT_TRUE(target);
+    std::thread starter([&] { (void)r.apps->start(stuck->id); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    Env env;
+    const std::string data_root = narrow(r.tmp.path.wstring());
+    fs::create_directories(r.tmp.path / "workspace");
+    policy::EnforcerEnv ee;
+    ee.policy = [&r] { return r.pol; };
+    ee.workspace = narrow((r.tmp.path / "workspace").wstring());
+    ee.data_root = data_root;
+    ee.app_folders = [&r](const std::string& run) { return r.apps->folders_for(run); };
+    auto enforcer = std::make_shared<policy::PolicyEnforcer>(ee);
+    env.policy_hook = enforcer;
+    env.make_runtime();
+    tools::FileToolsEnv fe;
+    fe.rules = [enforcer] { return enforcer->path_rules_now(); };
+    fe.workspace = ee.workspace;
+    for (auto& d : tools::file_tools(fe)) env.add_tool(d);
+    env.start();
+    // The first model step waits until the test has granted the Run access to the target folder (the Run's id is known
+    // only once it starts), then the write follows.
+    Gate granted;
+    env.model.push_blocking(granted, calls_response({{"f1", "find_tools", {{"query", "files.write write a file"}}}}));
+    env.model.push_calls({{"d1", "files.write", {{"path", target->folder + "\\public\\index.html"}, {"content", "<h1>Updated</h1>"}}}});
+    env.model.push_text("Done.");
+    const auto t = env.thread();
+    const auto began = std::chrono::steady_clock::now();
+    const auto run = env.run(t, "update the page of the target app");
+    ASSERT_TRUE(r.apps->update(target->id, {{"description", "Updated by the agent"}}, run));
+    granted.release();
+    ASSERT_TRUE(env.wait(run, RunState::succeeded, std::chrono::seconds(10)));
+    EXPECT_LT(ms_since(began), 2000) << env.tool_content(run, "d1");
+    EXPECT_EQ(env.tool_content(run, "d1").find("denied"), std::string::npos) << env.tool_content(run, "d1");
+    std::ifstream written(r.tmp.path / "apps" / "target" / "public" / "index.html");
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(written), {}), "<h1>Updated</h1>");
+    starter.join();
 }

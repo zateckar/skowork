@@ -15,8 +15,11 @@ struct RunContextInfo {
     std::string home, documents, downloads, desktop;  // forward slashes; empty when unknown
 };
 
-// The text appended to the system prompt.
+// The text appended to the system prompt: the time zone, user and folders. It holds nothing that changes per Run.
 std::string format_run_context(const RunContextInfo& info);
+
+// The first line of the message that starts a Run: "Current time: Thursday 22 October 2026, 09:05 (2026-10-22), UTC+02:00".
+std::string format_run_time(const RunContextInfo& info);
 
 // Collects the context now from Windows (local time, time zone, known folders). `user` is the signed-in user.
 RunContextInfo collect_run_context(const std::string& user);

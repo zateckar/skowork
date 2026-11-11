@@ -2,6 +2,7 @@
 
 #include "base/strings.h"
 #include "base/url.h"
+#include "skills/agent_save.h"
 #include "skills/catalog.h"
 
 #include <algorithm>
@@ -48,7 +49,10 @@ Result<json> SkillAuthoring::source(const std::string& name) {
     std::ostringstream ss;
     ss << in.rdbuf();
     const auto s = skills::split_skill_md(ss.str());
-    return json{{"name", name}, {"frontmatter", s.frontmatter}, {"body", s.body}, {"files", files_json(name)}};
+    skills::AgentSkillEnv ae;
+    ae.previous_dir = env_.previous_dir;
+    return json{{"name", name}, {"frontmatter", s.frontmatter}, {"body", s.body}, {"files", files_json(name)},
+                {"previous", skills::has_previous(ae, name)}};
 }
 
 json SkillAuthoring::validate(const skills::SkillSource& s) {
@@ -70,8 +74,21 @@ Result<json> SkillAuthoring::save(const std::string& original, const skills::Ski
 
 Result<json> SkillAuthoring::remove(const std::string& name) {
     if (Status st = skills::delete_private(env_.private_dir, name); !st) return st.error();
+    skills::AgentSkillEnv ae;
+    ae.previous_dir = env_.previous_dir;
+    if (Status st = skills::forget_previous(ae, name); !st) return st.error();
+    if (env_.forget_agent_record) env_.forget_agent_record(name);
     if (env_.reload) env_.reload();
     return json{{"ok", true}};
+}
+
+Result<json> SkillAuthoring::restore(const std::string& name) {
+    skills::AgentSkillEnv ae;
+    ae.private_dir = env_.private_dir;
+    ae.previous_dir = env_.previous_dir;
+    ae.reload = env_.reload;
+    if (Status st = skills::restore_previous(ae, name); !st) return st.error();
+    return json{{"name", name}, {"restored", true}};
 }
 
 Result<json> SkillAuthoring::add_files(const std::string& name, const std::string& sub, const std::vector<std::string>& paths) {
@@ -194,6 +211,7 @@ void SkillAuthoring::register_rpc(RpcRegistry& rpc, RpcExposure ex) {
     rpc.add("skills.validate", ex, [](const json& p) -> Result<json> { return validate(source_of(p)); });
     rpc.add("skills.save", ex, [this](const json& p) { return save(jstr(p, "original"), source_of(p)); });
     rpc.add("skills.delete", ex, [this](const json& p) { return remove(jstr(p, "name")); });
+    rpc.add("skills.restore", ex, [this](const json& p) { return restore(jstr(p, "name")); });
     rpc.add("skills.files.add", ex, [this](const json& p) { return add_files(jstr(p, "name"), jstr(p, "folder"), strings_of(p, "paths")); });
     rpc.add("skills.files.remove", ex, [this](const json& p) { return remove_file(jstr(p, "name"), jstr(p, "path")); });
     rpc.add("skills.draft", ex, [this](const json& p) { return draft(jstr(p, "thread_id")); });

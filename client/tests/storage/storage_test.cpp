@@ -3,6 +3,8 @@
 #include "platform/crypto.h"
 #include "platform/win.h"
 #include "knowledge/kg_store.h"
+#include "app/skill_authoring.h"
+#include "storage/agent_skills.h"
 #include "storage/app_store.h"
 #include "storage/data_root.h"
 #include "storage/database.h"
@@ -2137,4 +2139,65 @@ TEST(Quota, WarningAndIndexingPauseAtNinetyPercent) {
     EXPECT_NE(s, QuotaState::normal);
     EXPECT_TRUE(quota.indexing_paused());
     EXPECT_GE(usage.by_category["knowledge"], 400u * 1024u);
+}
+
+TEST(AgentSkillRecords, RecordsCreateUpdateRemoveAndHoldNoSkillText) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get_or_create("agent.db");
+    ASSERT_TRUE(key);
+    MigrationOutcome outcome;
+    auto db = open_and_migrate(root->file("agent.db"), *key, app_migrations(), outcome);
+    ASSERT_TRUE(db) << db.error().message;
+    AgentSkillRecords records(**db);
+    EXPECT_FALSE(records.find("weekly-report"));
+    ASSERT_TRUE(records.create("weekly-report", "thread-1", 1000));
+    auto created = records.find("weekly-report");
+    ASSERT_TRUE(created);
+    EXPECT_EQ(created->thread_id, "thread-1");
+    EXPECT_EQ(created->created_at, 1000);
+    EXPECT_EQ(created->updated_at, 1000);
+    ASSERT_TRUE(records.touch("weekly-report", 2000));
+    auto updated = records.find("weekly-report");
+    ASSERT_TRUE(updated);
+    EXPECT_EQ(updated->created_at, 1000);
+    EXPECT_EQ(updated->updated_at, 2000);
+    // The record holds no Skill text: its columns are the name, the Thread and the two times only.
+    auto cols = (*db)->prepare("SELECT name FROM pragma_table_info('agent_skills')");
+    std::set<std::string> names;
+    while (cols.step()) names.insert(cols.col_text(0));
+    EXPECT_EQ(names, (std::set<std::string>{"name", "thread_id", "created_at", "updated_at"}));
+    ASSERT_TRUE(records.forget("weekly-report"));
+    EXPECT_FALSE(records.find("weekly-report"));
+}
+
+TEST(AgentSkillRecords, EditorDeletionRemovesTheRecordAndTheKeptVersion) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get_or_create("agent.db");
+    ASSERT_TRUE(key);
+    MigrationOutcome outcome;
+    auto db = open_and_migrate(root->file("agent.db"), *key, app_migrations(), outcome);
+    ASSERT_TRUE(db) << db.error().message;
+    AgentSkillRecords records(**db);
+    ASSERT_TRUE(records.create("weekly-report", "thread-1", 1000));
+    const auto private_dir = root->root() / "skills" / "private";
+    const auto previous_dir = root->root() / "skills" / "previous";
+    write_file(private_dir / "weekly-report" / "SKILL.md", 10);
+    write_file(previous_dir / "weekly-report" / "SKILL.md", 10);
+    SkillAuthoringEnv env;
+    env.private_dir = private_dir;
+    env.previous_dir = previous_dir;
+    env.forget_agent_record = [&records](const std::string& name) { (void)records.forget(name); };
+    SkillAuthoring authoring(std::move(env));
+    ASSERT_TRUE(authoring.remove("weekly-report"));
+    EXPECT_FALSE(records.find("weekly-report"));
+    EXPECT_FALSE(std::filesystem::exists(previous_dir / "weekly-report"));
+    EXPECT_FALSE(std::filesystem::exists(private_dir / "weekly-report"));
 }

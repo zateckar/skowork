@@ -19,6 +19,8 @@ import { PolicyService } from './policy/service.ts';
 import { policyAdminRoutes, policyRoutes } from './policy/routes.ts';
 import { McpCatalog } from './mcp/catalog.ts';
 import { mcpAdminRoutes, mcpRoutes } from './mcp/routes.ts';
+import { ApiConnectors } from './api-connectors/service.ts';
+import { connectorAdminRoutes, connectorRoutes } from './api-connectors/routes.ts';
 import { TelemetryIngest, type TelemetryLevel } from './telemetry/ingest.ts';
 import { telemetryAdminRoutes, telemetryRoutes } from './telemetry/routes.ts';
 import { adminGate, requireView } from './admin/authz.ts';
@@ -72,6 +74,10 @@ export function createControlPlane(
     ...Object.entries(cfg.gateway.models).map(([role, model]) => ({ scope: 'server default', role, model })),
   ]);
   const catalog = new McpCatalog(cfg, db, audit, { onChanged: (groups) => policy.catalogChanged(groups) });
+  const apiConnectors = new ApiConnectors(cfg, db, audit, catalog, {
+    onChanged: (groups) => policy.catalogChanged(groups),
+    secretKey: () => gateway.connections.secretKey,
+  });
   policy.setCatalogSource(catalog);
   const telemetry = new TelemetryIngest(cfg.telemetry, db, audit, (u) => {
     const level = policy.compileFor(u.groups, u.userName).flat.get('telemetry.level');
@@ -127,6 +133,7 @@ export function createControlPlane(
   app.use('/api/v1/policy', user);
   app.use('/api/v1/admin', user);
   app.use('/api/v1/mcp', user);
+  app.use('/api/v1/connectors', user);
   app.use('/api/v1/telemetry', user);
   app.use('/api/v1/skills', user);
   app.use('/api/v1/knowledge', user, teamKnowledgeRoutes(team));
@@ -135,6 +142,7 @@ export function createControlPlane(
 
   app.use(identityRoutes());
   app.use(mcpRoutes(catalog));
+  app.use('/api/v1/connectors', connectorRoutes(apiConnectors));
   app.use(policyRoutes(policy));
   app.use(fleetRoutes(cfg, fleet, (u, inst) => Boolean(identity.findDenied(u.userName, inst))));
   app.use(gatewayRoutes(gateway));
@@ -165,6 +173,7 @@ export function createControlPlane(
   app.use('/api/v1/admin/knowledge', requireRole('platform-admin'), teamKnowledgeAdminRoutes(team));
   app.get('/api/v1/admin/messaging/counts', requireView('dashboards'), (_req, res) => void res.json(messaging.counts()));
   app.use('/api/v1/admin/mcp', requireRole('platform-admin'), mcpAdminRoutes(catalog, cfg.mcpCatalog.maxPackageBytes));
+  app.use('/api/v1/admin/connectors', requireRole('platform-admin'), connectorAdminRoutes(apiConnectors, cfg.apiConnectors.maxDocumentBytes));
   app.use('/api/v1/admin/skills', requireView('skills'), skillAdminRoutes(skills, cfg.skills.maxPackageBytes));
 
   app.use((_req, res) => sendError(res, 404, 'NOT_FOUND', 'No such endpoint.'));
@@ -173,6 +182,9 @@ export function createControlPlane(
     const e = err as { type?: string; status?: number };
     if (e?.type === 'entity.too.large' && req.path.startsWith('/api/v1/admin/mcp/packages')) {
       return sendError(res, 413, 'TOO_LARGE', `The package is larger than the limit of ${cfg.mcpCatalog.maxPackageBytes} bytes.`);
+    }
+    if (e?.type === 'entity.too.large' && req.path.startsWith('/api/v1/admin/connectors/')) {
+      return sendError(res, 413, 'TOO_LARGE', `The document is larger than the limit of ${cfg.apiConnectors.maxDocumentBytes} bytes.`);
     }
     if (e?.type === 'entity.too.large' && /^\/api\/v1\/(admin\/)?skills\//.test(req.path)) {
       return sendError(res, 413, 'TOO_LARGE', `The package is larger than the limit of ${cfg.skills.maxPackageBytes} bytes.`);

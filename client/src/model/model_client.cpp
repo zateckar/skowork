@@ -97,6 +97,10 @@ ModelResult<HttpRequest> ModelClient::make_request(const std::string& method, co
     req.body = std::move(body);
     req.connect_timeout = cfg_.connect_timeout;
     req.idle_timeout = cfg_.idle_timeout;
+    if (cfg_.connect_timeout_now)
+        if (const auto t = cfg_.connect_timeout_now(); t.count() > 0) req.connect_timeout = t;
+    if (cfg_.idle_timeout_now)
+        if (const auto t = cfg_.idle_timeout_now(); t.count() > 0) req.idle_timeout = t;
     req.cancel = cancel;
     req.follow_redirects = false;  // a redirect must never carry the bearer token elsewhere
     req.headers.emplace_back("Accept", accept);
@@ -166,7 +170,8 @@ ModelResult<T> ModelClient::with_retries(const std::shared_ptr<CancelToken>& can
         ModelResult<T> r = attempt();
         if (r.ok()) return r;
         const ModelFailure& f = r.failure();
-        if (!f.retryable || retry >= cfg_.max_retries) return r;
+        const int limit = f.code == code::timeout ? std::min(cfg_.max_retries, cfg_.max_timeout_retries) : cfg_.max_retries;
+        if (!f.retryable || retry >= limit) return r;
         if (f.retry_after_s > cfg_.max_retry_wait_s) return r;  // too long to wait for: the caller decides
         const auto delay = std::max(backoff.next(), std::chrono::milliseconds(f.retry_after_s * 1000LL));
         if (sink && sink->on_retry) sink->on_retry(retry + 1, f, delay);

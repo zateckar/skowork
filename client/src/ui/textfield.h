@@ -27,6 +27,9 @@ public:
         size_t max_length = 0;  // characters; 0: no limit beyond the control's
         int max_lines = 8;      // a multi-line field grows with its text up to this many lines, then scrolls
         int min_lines = 1;
+        // A masked single-line field for a token (client/api-connectors Personal Token Entry): a plain edit control with the
+        // password style, so the characters are not shown. Rich text, spell checking and the theme do not apply to it.
+        bool secret = false;
     };
     TextField(Ui& ui, std::string id, std::u16string label, Options options);
     TextField(Ui& ui, std::string id, std::u16string label) : TextField(ui, std::move(id), std::move(label), Options{}) {}
@@ -67,6 +70,7 @@ private:
     static LRESULT CALLBACK edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
     LRESULT edit_message(UINT msg, WPARAM wp, LPARAM lp);
     void create_window();
+    void create_secret_window();
     void apply_theme();
     void update_height();
     float line_height() const;

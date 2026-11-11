@@ -105,6 +105,11 @@ public:
     // (the start gate's code "offline", client/control-channel Offline Operation) the message is queued even in a Thread
     // without a Run, and resume_waiting() starts it once the client is connected.
     Result<SendResult> send_message(const std::string& thread_id, const std::string& text, MessageMode mode = MessageMode::queue);
+
+    // Run Retry: continues the latest top-level Run of the Thread when it failed, without a new user message. Fails
+    // with "not_failed" when that Run did not fail, "thread_busy", "blocked"/"offline"/"revoked" (as start_run), or
+    // "not_found". Returns the Run id; the Run is queued until a slot is free.
+    Result<std::string> retry_run(const std::string& thread_id);
     // Starts a Run with the oldest queued message of every Thread that has queued messages and no active Run, oldest
     // first (called when the client connects again). Returns how many Runs started.
     int resume_waiting();
@@ -170,6 +175,11 @@ public:
     // Number of Runs currently executing (they occupy a slot).
     [[nodiscard]] size_t executing_runs();
     RunStore& store() { return store_; }
+
+    // Child Run waits (client/agent-runtime Child Run Approval Expiry, Child Run Time Limit): expires the Approvals of
+    // subagents of attended Runs that were unanswered for 30 minutes, and ends the subagents that waited 60 minutes. The
+    // application calls it periodically; returns how many Action items or Runs it changed. Top-level Runs are not touched.
+    size_t expire_child_waits();
 
     // Waits until the Run is in `state` (tests and callers that need to block).
     bool wait_for_state(const std::string& run_id, RunState state, std::chrono::milliseconds timeout);

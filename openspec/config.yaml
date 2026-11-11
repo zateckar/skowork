@@ -106,6 +106,12 @@ context: |
   - Run: one execution of the agent within a Thread. A Run is started by a user message, a Trigger
     Occurrence or a Remote task, and that is its origin. Run states: queued | running |
     interrupted | succeeded | failed | cancelled.
+  - Child Run: a Run started by another Run (a subagent or a Skill task). A Run that no other Run started is a
+    top-level Run.
+  - Run event: one stored, sequence-numbered record of what happened in a Run (messages, reasoning, tool calls,
+    state changes). The feed is built from Run events.
+  - Passage: a chunk of knowledge returned by knowledge.search.
+  - Citation: a numbered source listed under an answer, for a Passage the answer refers to.
   - Inbox: the implicit folder that holds every Inbox entry not in a user folder.
   - Inbox entry: a Thread or a Chat as listed in the Inbox views (client/work-inbox Chat Entries).
   - Inbox views: Unread, Action, Running, All, Archive and Folders (see client/work-inbox).
@@ -115,12 +121,17 @@ context: |
   - Automations: the UI label for the section where users manage Triggers. It is not a separate concept.
   - Tool: a callable capability exposed to the model. Tool ids look like: files.read, files.write,
     shell.run, web.fetch, browser.*, computer.*, image.generate, mail.*, calendar.*, knowledge.*, tasks.*,
-    messages.*, apps.*, ask_user, mcp:<server>/<tool>.
+    messages.*, apps.*, skills.*, ask_user, mcp:<server>/<tool>, api:<connector>/<operation>.
+  - Connector: an external service the agent can use through Tools. Its kinds are mcp (an MCP server) and
+    api (an API connector). The user-facing name is Connectors; internal names (policy.mcp, mcp-catalog,
+    mcp-client, tool ids mcp:) stay. LLM connections are not Connectors.
+  - API connector: a Connector described by an OpenAPI 3.0 or 3.1 definition. Its calls run in the control plane.
+  - Operation: one OpenAPI operation of an API connector. A platform-admin selects which Operations become Tools.
   - Risk class: the risk level each tool call declares. The values are
     read | write-local | external | destructive.
   - Policy bundle: a signed, versioned and expiring document issued by the control plane. It holds
     the effective policy for one user. Its top-level keys are:
-    llm, tools, filesystem, network, mcp, skills, knowledge, meeting_capture, scheduler,
+    llm, identity, tools, filesystem, network, mcp, skills, knowledge, meeting_capture, scheduler,
     unattended, telemetry, storage, mail, ui, messaging, apps, dictation, notifications, speech.
   - Policy key layout: decisions are written policy.tools.rules[<tool-id pattern>] = allow|approve|deny,
     with policy.tools.risk.<risk class> defaults. Unattended runs add policy.unattended.allowed_risk and
@@ -133,6 +144,9 @@ context: |
     or from assignment in the control plane. Regional
     differences are expressed as Groups (for example region-eu); there is no separate region concept.
   - Skill: a SKILL.md package. It has one of these scopes: private | shared | group | org.
+    An Agent-created Skill is a private Skill the agent saved with skills.save.
+  - Offline sign-in: a sign-in that keeps an offline refresh token (scope offline_access), so the user stays
+    signed in beyond the identity provider's SSO session, within the realm's offline session limits.
   - Trigger: a user-defined rule that starts a Run. Its kinds are schedule | file | mail | calendar |
     meeting | session.
   - Occurrence: one firing of a Trigger, or one accepted Remote task, as executed by client/scheduler.
@@ -191,6 +205,13 @@ context: |
   34 redesign-admin-console-records   [Hardening]
   35 fix-desktop-machine-config       [Hardening]
   36 improve-skowork-and-knowledge-control [Hardening, Knowledge]
+  37 fix-long-thread-model-calls      [Hardening]
+  38 add-model-fallback-and-effort    [Hardening]
+  39 fix-feed-live-updates            [Hardening]
+  40 fix-tool-waits                   [Hardening]
+  41 add-agent-created-skills         [Managed]
+  42 add-offline-sign-in              [Hardening]
+  43 add-api-connectors               [Managed]
 
 rules:
   proposal:

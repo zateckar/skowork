@@ -133,6 +133,9 @@ if(WIN32)
     platform/log_test.cpp
     storage/storage_test.cpp
     host/host_test.cpp
+    app/run_event_relay_test.cpp
+    app/periodic_pass_test.cpp
+    app/live_feed_load_test.cpp
     identity/loopback_test.cpp
     identity/token_manager_test.cpp
     model/model_client_test.cpp
@@ -149,6 +152,7 @@ if(WIN32)
     tools/web_test.cpp
     extract/extract_win_test.cpp
     mcp/mcp_test.cpp
+    api_connectors/api_connectors_test.cpp
     inbox/inbox_test.cpp
     browser/browser_win_test.cpp
     ui/device_test.cpp
@@ -161,7 +165,7 @@ if(WIN32)
     meeting/meeting_test.cpp
     apps/apps_test.cpp
     messaging/messaging_test.cpp)
-  target_link_libraries(win_tests PRIVATE wb_messaging wb_apps wb_meeting wb_knowledge wb_mail wb_telemetry wb_shell wb_ui wb_app wb_scheduler wb_browser wb_inbox wb_mcp wb_tools wb_extract miniz wb_sandbox wb_model wb_runtime GTest::gtest_main bcrypt ws2_32 iphlpapi)
+  target_link_libraries(win_tests PRIVATE wb_api_connectors wb_messaging wb_apps wb_meeting wb_knowledge wb_mail wb_telemetry wb_shell wb_ui wb_app wb_scheduler wb_browser wb_inbox wb_mcp wb_tools wb_extract miniz wb_sandbox wb_model wb_runtime GTest::gtest_main bcrypt ws2_32 iphlpapi)
   # The stdio MCP server the client/mcp-client tests package; the official SDK server lives in dev/mcp-test-server.
   # The retrieval benchmark of client/knowledge-graph (add-knowledge-graph spike 1.1), run by hand.
   add_executable(kg_bench knowledge/kg_bench.cpp)

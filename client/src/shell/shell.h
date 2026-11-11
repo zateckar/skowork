@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "api_connectors/token_draft.h"
 #include "shell/feed.h"
 #include "shell/host_link.h"
 #include "shell/inbox_model.h"
@@ -80,6 +81,9 @@ public:
     std::string shown_entry() const;
     std::optional<FeedSnapshot>& feed() { return feed_; }
     LiveText& live() { return live_; }
+    FeedFold& fold() { return fold_; }
+    // The feed repaints for a live update: streamed text at most 30 times a second, other updates at once.
+    void feed_changed(bool streamed);
     // Why the open Thread's feed could not be loaded: "" (loaded or loading), "not_found" or the error message.
     const std::string& feed_error() const { return feed_error_; }
     bool rail_open() const { return rail_open_; }
@@ -240,6 +244,9 @@ private:
     std::string open_id_;  // the Thread shown in the thread pane ("" none)
     std::optional<FeedSnapshot> feed_;
     LiveText live_;
+    FeedFold fold_;
+    RepaintLimit repaint_;
+    std::unique_ptr<RepaintTimer> repaint_timer_;  // the feed's streamed repaints (feed.h RepaintTimer)
     std::string feed_error_;
     std::string feed_in_flight_;  // the Thread whose snapshot is being loaded
     bool feed_again_ = false;
@@ -351,6 +358,7 @@ public:
     void update();
     const std::string& thread_id() const { return thread_; }
     size_t rebuilt_last() const { return rebuilt_; }  // items built anew by the last update (tests)
+    size_t rebuilt_total() const { return rebuilt_total_; }  // items built anew by all updates so far (tests)
     // The message the route points at (a search hit): scrolled to and highlighted briefly; "" when none is.
     const std::string& highlighted() const { return highlighted_; }
 
@@ -365,13 +373,17 @@ private:
     // Work Details Visibility: the items shown (reasoning, tool cards and step activity only where details are on), a
     // plain step label for the working line, and Show details after each finished Run with hidden work.
     std::vector<FeedItem> visible(std::vector<FeedItem> items) const;
-    void add_outputs(ui::Node& wrap, const FeedItem& it);
+    void add_outputs(ui::Node& wrap, const FeedItem& it, bool citations);
+    // A numbered list of links to passages, under an answer or a tool card (Cited Sources In The Feed).
+    void add_citations(ui::Node& wrap, const std::vector<Citation>& citations, const std::string& key, const char* list_prefix,
+                       const char* item_prefix);
     Shell& shell_;
     std::string thread_;
     std::vector<Slot> slots_;  // parallel to the children
     std::set<std::string> expanded_;
     std::set<std::string> details_;  // Runs whose details the user opened
     size_t rebuilt_ = 0;
+    size_t rebuilt_total_ = 0;
     std::optional<MessageRef> jumped_;
     std::string highlighted_;
     UINT_PTR jump_timer_ = 0, highlight_timer_ = 0;
@@ -498,6 +510,7 @@ private:
     void validate();
     void save();
     void ask_delete();
+    void restore();  // Restore previous version (add-agent-created-skills D12)
     void test();
     void keep(size_t index);
     void add_files();
@@ -523,6 +536,8 @@ private:
     ui::Button* save_ = nullptr;
     ui::Button* test_ = nullptr;
     ui::Button* delete_ = nullptr;
+    ui::Button* restore_ = nullptr;
+    bool has_previous_ = false;  // the Skill has a kept version (skills.source "previous")
     ui::TextField* test_input_ = nullptr;
     ui::Node* files_section_ = nullptr;
     ui::Node* files_ = nullptr;
@@ -770,6 +785,9 @@ private:
     void load_automations();
     void build_mail(ui::Node& card);
     void load_mail();
+    // The API connectors of the Connectors section (client/api-connectors): the listing, and the token entry.
+    void load_connectors();
+    void build_api_connectors(ui::Node& card);
     void build_knowledge(ui::Node& card);
     void load_knowledge();
     void find_knowledge(bool entities);
@@ -824,6 +842,9 @@ private:
     json automations_ = nullptr, automation_ = nullptr;
     json mail_ = nullptr;             // mail.status
     std::u16string mail_exclusion_;  // the exclusion being typed, kept across rebuilds
+    json connectors_ = nullptr;      // GET api/v1/connectors: this user's connectors (never a token)
+    std::string connector_editing_;  // the connector whose token field is open
+    connectors::TokenDraft connector_token_;  // the token being typed; taken (and cleared) when it is sent
     json knowledge_ = nullptr;                                                // knowledge.status
     json knowledge_items_ = nullptr, knowledge_entities_ = nullptr;          // the last item and entity searches
     json knowledge_entity_ = nullptr;                                         // knowledge.entity of the chosen entity

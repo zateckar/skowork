@@ -76,6 +76,11 @@ SkillEditor::SkillEditor(Shell& shell, const Route& route)
     delete_->width = Sizing::fit;
     delete_->on_click = [this] { ask_delete(); };
     delete_->visible = !original_.empty();
+    // Shown only for a Skill whose agent update kept the replaced version (add-agent-created-skills D12).
+    restore_ = actions->emplace<ui::Button>(shell_.ui(), "skill-editor-restore", shell_.t("skill_editor.restore"));
+    restore_->width = Sizing::fit;
+    restore_->on_click = [this] { restore(); };
+    restore_->visible = false;
 
     // Skill Test Run: a sample input, run in a labelled test Thread with the editor's current text.
     auto* test = emplace<Node>("skill-editor-test-row");
@@ -179,6 +184,7 @@ void SkillEditor::load() {
             loaded_ = true;
             show_status({});
             files_list_ = r->contains("files") ? (*r)["files"] : json::array();
+            has_previous_ = jbool(*r, "previous");
             set_source(*r);
             rebuild_files();
         });
@@ -236,6 +242,8 @@ void SkillEditor::update_buttons() {
     save_->enabled = valid_ && !busy_;
     test_->enabled = valid_ && !busy_;
     delete_->enabled = !busy_;
+    restore_->visible = has_previous_ && !original_.empty();
+    restore_->enabled = !busy_;
     files_section_->visible = !original_.empty();
     publish_section_->visible = !original_.empty();
     invalidate();
@@ -283,6 +291,23 @@ void SkillEditor::ask_delete() {
     shell_.window().modal().show(std::move(d));
     shell_.window().tree().set_focus(cancel);  // a destructive action is never the default
     shell_.window().render();
+}
+
+void SkillEditor::restore() {
+    if (busy_ || original_.empty()) return;
+    busy_ = true;
+    update_buttons();
+    std::weak_ptr<int> alive = alive_;
+    shell_.call("skills.restore", {{"name", original_}}, [this, alive](Result<json> r) {
+        if (!alive.lock()) return;
+        busy_ = false;
+        if (!r) {
+            update_buttons();
+            return show_status(shell_.t("common.error_prefix") + u" " + u16(r.error().message), Paint::error);
+        }
+        shell_.announce(shell_.t("skill_editor.restored", {{"name", u16(original_)}}));
+        load();  // the editor shows the restored text and the kept version now held
+    });
 }
 
 void SkillEditor::test() {

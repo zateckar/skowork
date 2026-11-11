@@ -14,6 +14,7 @@ export const BUILT_IN_TOOL_IDS = [
   'tasks.list', 'tasks.create', 'tasks.update', 'tasks.delete', 'tasks.run_now',
   'files.read', 'files.list', 'files.glob', 'files.grep', 'files.write', 'files.edit',
   'image.generate', 'shell.run', 'web.fetch',
+  'skills.save',
 ] as const;
 
 // Computer actions have dynamic risk: the concrete target and action may raise the decision to destructive.
@@ -119,5 +120,8 @@ export const BUILT_IN_TOOL_DETAILS: Record<string, ToolDetail> = {
   }),
   ...familyDetails('client/core-tools', 'The tool sandbox and PowerShell must be available.', 'The displayed risk is the worst case; command contents and policy determine the risk of each call.', {
     'shell.run': ['Run a PowerShell command in the tool sandbox.', 'destructive'],
+  }),
+  ...familyDetails('client/agent-skills', 'Offered only in attended top-level runs.', 'The saved Skill is private; sharing happens only in its Publish dialog.', {
+    'skills.save': ['Save or update a private Skill the agent drafted.', 'write_local'],
   }),
 };

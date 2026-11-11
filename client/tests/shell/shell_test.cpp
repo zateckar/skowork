@@ -31,6 +31,7 @@
 #include "shell/main_window.h"
 #include "shell/shell.h"
 #include "skills/catalog.h"
+#include "ui/richtext.h"
 #include "ui/window.h"
 
 namespace {
@@ -863,26 +864,124 @@ TEST(ShellFeed, StreamingDeltasKeepEarlierItems) {
     std::atomic<bool> streamed{false};
     push_streaming(f.in.env.model, gate, streamed);
     const auto run = f.in.env.run(t, "second");
+    // Declared before the first assertion on the stream: when one fails, the model call is still released, and the Run
+    // has ended before the gate and the flag (its references) go out of scope.
+    struct Release {
+        Fixture& f;
+        Gate& g;
+        std::string run;
+        ~Release() {
+            g.release();
+            f.in.env.wait(run, RunState::succeeded);
+        }
+    } release{f, gate, run};
     ASSERT_TRUE(f.in.env.wait_for([&] { return streamed.load(); }));
     // The live message appears once the snapshot holds the new Run.
     ASSERT_TRUE(w.until([&] { return w.shell().live().text.contains(run) && w.exists("md-" + run + "-live"); }));
-    // One more delta: nothing is rebuilt, the live message re-parses its last block only.
-    size_t rebuilt = 99, md_rebuilt = 99;
+    // One more delta: no feed item is rebuilt, the live message re-parses its last block only. A token repaints only the
+    // live message, so the check waits for that repaint and counts feed rebuilds over the whole span, not the last update.
+    std::function<ui::MarkdownView*(ui::Node&)> find = [&](ui::Node& n) -> ui::MarkdownView* {
+        if (n.automation_id() == "md-" + run + "-live") return static_cast<ui::MarkdownView*>(&n);
+        for (const auto& c : n.children())
+            if (auto* r = find(*c)) return r;
+        return nullptr;
+    };
+    size_t total_before = 0, sets_before = 0, total_after = 99, md_rebuilt = 99;
     w.run([&] {
-        w.main().emit("run.event", {{"kind", "text.delta"}, {"run_id", run}, {"thread_id", t}, {"seq", 0}, {"data", {{"text", " and more"}}}});
-        rebuilt = w.shell().thread().feed()->rebuilt_last();
-        std::function<ui::MarkdownView*(ui::Node&)> find = [&](ui::Node& n) -> ui::MarkdownView* {
-            if (n.automation_id() == "md-" + run + "-live") return static_cast<ui::MarkdownView*>(&n);
-            for (const auto& c : n.children())
-                if (auto* r = find(*c)) return r;
+        total_before = w.shell().thread().feed()->rebuilt_total();
+        if (auto* md = find(*w.shell().thread().feed())) sets_before = md->sets();
+    });
+    w.run([&] { w.main().emit("run.event", {{"kind", "text.delta"}, {"run_id", run}, {"thread_id", t}, {"seq", 0}, {"data", {{"text", " and more"}}}}); });
+    ASSERT_TRUE(w.until([&] { return w.shell().live().text.at(run).ends_with(" and more"); }));
+    // The live message repaints at the next interval of the repaint limit (Live Feed Updates). The wait is for the view to
+    // show the new text: an earlier pending repaint can re-set the old text in between, and that one rebuilds nothing.
+    ASSERT_TRUE(w.until([&] {
+        auto* md = find(*w.shell().thread().feed());
+        return md && md->value().find(u" and more") != std::u16string::npos;
+    }));
+    w.run([&] {
+        total_after = w.shell().thread().feed()->rebuilt_total();
+        if (auto* md = find(*w.shell().thread().feed())) {
+            md_rebuilt = md->rebuilt_last();
+            EXPECT_GT(md->sets(), sets_before);
+        }
+    });
+    EXPECT_EQ(total_after, total_before);
+    // The live message re-parses at most its last block. The last set can be a repaint with the same text (a stored
+    // change re-sets it), which re-parses nothing, so the count is 0 or 1; more would mean a full re-parse.
+    EXPECT_LE(md_rebuilt, 1u);
+    gate.release();  // the Run finishes; the guard releases the gate too, when the test returns early
+    ASSERT_TRUE(f.in.env.wait(run, RunState::succeeded));
+}
+
+// 3.4: a selection in an answer stays copyable while the composer has keyboard focus. Ctrl+C copies the selected
+// message text, not the composer's draft (the composer's field does not take the copy key).
+TEST(ShellFeed, CtrlCWithTheComposerFocusedCopiesTheMessageSelection) {
+    Fixture f;
+    const auto t = f.in.env.thread();
+    f.in.run_to_end(t, "a question", "Alpha beta gamma delta.");
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + t); });
+    ASSERT_TRUE(w.until([&] { return w.shell().feed().has_value() && w.exists("composer-input"); }));
+    w.type("composer-input", u"Draft text");
+
+    // The composer has the keyboard first (its draft is focused); a press and drag over "beta gamma" in the answer moves
+    // the focus there and selects the words (design D8), so Ctrl+C must copy the answer's selection, not the draft.
+    bool selected = false;
+    w.run([&] {
+        auto* win = w.main().window();
+        std::function<ui::Node*(ui::Node&)> find_field = [&](ui::Node& n) -> ui::Node* {
+            if (n.automation_id() == "composer-input") return &n;
+            for (auto& c : n.children())
+                if (ui::Node* r = find_field(*c)) return r;
             return nullptr;
         };
-        if (auto* md = find(*w.shell().thread().feed())) md_rebuilt = md->rebuilt_last();
+        ui::Node* field = find_field(win->tree().root());
+        if (!field) return;
+        win->tree().set_focus(field);
+        ui::RichText* para = nullptr;
+        std::function<void(ui::Node&)> walk = [&](ui::Node& n) {
+            if (auto* r = dynamic_cast<ui::RichText*>(&n))
+                if (!para && r->text().starts_with(u"Alpha")) para = r;
+            for (auto& c : n.children()) walk(*c);
+        };
+        walk(win->tree().root());
+        if (!para) return;
+        const float y = para->frame().y + para->frame().h / 2;
+        const auto x_of = [&](uint32_t pos) {
+            for (float x = para->frame().x; x < para->frame().right(); x += 0.5f)
+                if (para->position_at(x, y) >= pos) return x;
+            return para->frame().right();
+        };
+        win->tree().pointer({ui::PointerEvent::down, x_of(6) + 0.2f, y});
+        win->tree().pointer({ui::PointerEvent::move, x_of(16) + 0.2f, y});
+        win->tree().pointer({ui::PointerEvent::up, x_of(16) + 0.2f, y});
+        win->render();
+        selected = true;
     });
-    EXPECT_EQ(rebuilt, 0u);
-    EXPECT_EQ(md_rebuilt, 1u);
-    gate.release();
-    ASSERT_TRUE(f.in.env.wait(run, RunState::succeeded));
+    ASSERT_TRUE(selected);
+    std::string focused_id;
+    w.run([&] { focused_id = w.main().window()->tree().focused()->automation_id(); });
+    EXPECT_NE(focused_id, "composer-input");  // the press in the answer moved the focus there
+
+    // The window copies through the clipboard (Window::copy_text), so the test reads the clipboard back.
+    w.key(ui::kKeyC, true);
+    std::wstring clip;
+    if (::OpenClipboard(nullptr)) {
+        if (HANDLE h = ::GetClipboardData(CF_UNICODETEXT))
+            if (auto* p = static_cast<const wchar_t*>(::GlobalLock(h))) {
+                clip = p;
+                ::GlobalUnlock(h);
+            }
+        ::CloseClipboard();
+    }
+    EXPECT_EQ(clip, L"beta gamma");
+    std::u16string draft;
+    w.run([&] {
+        if (auto* c = w.shell().thread().composer()) draft = c->field().text();
+    });
+    EXPECT_EQ(draft, u"Draft text");  // the draft is untouched and was not copied over
 }
 
 TEST(ShellFeed, ErrorBannerOffersTheRemedyForTheCode) {
@@ -1349,6 +1448,7 @@ struct SkillsWiring {
         catalog = std::make_shared<skills::Catalog>(ce);
         SkillAuthoringEnv e;
         e.private_dir = dir / "private";
+        e.previous_dir = dir / "previous";
         e.reload = [this] { catalog->reload(); };
         e.conversation = [&f](const std::string& t) { return f.in.env.rt->conversation(t); };
         e.title = [&f](const std::string& t) { return f.in.entry(t).title; };
@@ -1846,7 +1946,7 @@ TEST(ShellComposer, DisconnectedMeansNoNewRuns) {
     ASSERT_TRUE(w.until([&] { return !w.shell().runs_blocked().empty(); }));
     Uia uia;
     auto m = uia.by_id(w.hwnd());
-    EXPECT_EQ(m[L"composer-blocked"].name, L"Workbench is disconnected, so new runs are unavailable.");
+    EXPECT_EQ(m[L"composer-blocked"].name, L"SkoWork is disconnected, so new runs are unavailable.");
     BOOL enabled = TRUE;
     m[L"composer-send"].el->get_CurrentIsEnabled(&enabled);
     EXPECT_FALSE(enabled);
@@ -1889,7 +1989,7 @@ TEST(ShellComposer, OfflineRequestWaitsForTheConnection) {
     ASSERT_TRUE(w.until([&] { return w.exists("composer-blocked"); }));
     Uia uia;
     auto m = uia.by_id(w.hwnd());
-    EXPECT_EQ(m[L"composer-blocked"].name, L"You're offline. Your request will start when Workbench is connected again.");
+    EXPECT_EQ(m[L"composer-blocked"].name, L"You're offline. Your request will start when SkoWork is connected again.");
     EXPECT_EQ(m[L"status-connection"].name.rfind(L"Offline since ", 0), 0u) << narrow(m[L"status-connection"].name);
     EXPECT_GT(m[L"status-connection"].name.size(), std::wstring(L"Offline since ").size());
     BOOL enabled = FALSE;
@@ -1921,7 +2021,7 @@ TEST(ShellComposer, OfflineRequestWaitsForTheConnection) {
     std::string shared_error;
     w.run([&] { w.shell().call("test.share", json::object(), [&](Result<json> r) { if (!r) shared_error = r.error().message; }); });
     ASSERT_TRUE(w.until([&] { return !shared_error.empty(); }));
-    EXPECT_EQ(shared_error, "Not available while Workbench is offline.");
+    EXPECT_EQ(shared_error, "Not available while SkoWork is offline.");
     // Connected again: the waiting request starts.
     *offline = false;
     f.in.env.model.push_text("Here is your week.");
@@ -2215,7 +2315,7 @@ TEST(ShellActions, QuestionCardTakesAChoiceOrFreeText) {
     f.in.svc->wait_idle();
     std::string card = "question-" + open_action(f, t);
     ASSERT_TRUE(w.until([&] { return w.exists(card + "-choice-1") && w.exists(card + "-answer"); }));
-    EXPECT_TRUE(said.heard(u"Question from Workbench: Which project folder should I use?"));
+    EXPECT_TRUE(said.heard(u"Question from SkoWork: Which project folder should I use?"));
     EXPECT_TRUE(f.in.in_view("action", t));  // listed in the Action view until answered
     Uia uia;
     auto m = uia.by_id(w.hwnd());
@@ -2263,7 +2363,7 @@ TEST(ShellActions, StandaloneQuestionOffersOnlyItsChoicesAndAnswersTheCapability
     ASSERT_TRUE(item);
     const std::string card = "question-" + item->id;
     ASSERT_TRUE(w.until([&] { return w.exists(card + "-choice-0"); }));
-    EXPECT_TRUE(said.heard(u"Question from Workbench: Connect your mailbox"));
+    EXPECT_TRUE(said.heard(u"Question from SkoWork: Connect your mailbox"));
     bool free_text = true;
     w.run([&] { free_text = w.exists(card + "-answer"); });
     EXPECT_FALSE(free_text);
@@ -2700,7 +2800,7 @@ TEST(ShellPages, AboutShowsTheVersionAndCopiesTheDetails) {
     ASSERT_TRUE(w.until([&] { return w.exists("about-copy-state"); }));
     std::string copied;
     w.run([&] { copied = w.copied; });
-    EXPECT_EQ(copied, "Workbench 1.2.3\nChannel: pilot\nCommit: abcdef0\nProcess ID: 4242");
+    EXPECT_EQ(copied, "SkoWork 1.2.3\nChannel: pilot\nCommit: abcdef0\nProcess ID: 4242");
     EXPECT_EQ(uia.by_id(w.hwnd())[L"about-copy-state"].name, L"Copied to the clipboard.");
 }
 
@@ -2716,7 +2816,7 @@ TEST(ShellPages, AboutListsThirdPartyNoticesWithTheSpeechModelAttribution) {
     ASSERT_TRUE(w.until([&] { return w.exists("section-notices"); }));
     Uia uia;
     auto m = uia.by_id(w.hwnd());
-    EXPECT_EQ(m[L"about-package-core"].name, L"Included in Workbench");
+    EXPECT_EQ(m[L"about-package-core"].name, L"Included in SkoWork");
     EXPECT_EQ(m[L"about-package-speech-to-text"].name, L"Speech-to-text package");
     EXPECT_EQ(m[L"about-notice-core-0"].name, L"SQLite3 Multiple Ciphers 2.6.1 (SQLite 3.54.0): MIT; SQLite: public domain");
     std::wstring parakeet;
@@ -3286,7 +3386,7 @@ TEST(ShellKnowledge, SearchResultsShowAsOpenableCitations) {
     });
     const auto t = f.in.env.thread();
     f.in.env.model.push_calls({{"c1", "knowledge.search", {{"query", "Phoenix"}}}});
-    f.in.env.model.push_text("Phoenix starts on Monday [1].");
+    f.in.env.model.push_text("Phoenix starts on Monday [1]. The report is in [2] and the budget in [3].");
     const auto r = f.in.env.run(t, "When does Phoenix start?");
     ASSERT_TRUE(f.in.env.wait(r, RunState::succeeded));
     f.in.svc->wait_idle();
@@ -3295,7 +3395,8 @@ TEST(ShellKnowledge, SearchResultsShowAsOpenableCitations) {
     w.run([&] { w.main().open("#/threads/" + t); });
     std::string first;
     ASSERT_TRUE(w.until([&] {
-        first = find_id(w, "tool-citation-", "-0");
+        // Cited Sources In The Feed: the passages the answer cites are listed under it (the tool card stays hidden).
+        first = find_id(w, "msg-source-", "-0");
         return !first.empty();
     }));
     const std::string base = first.substr(0, first.size() - 2);
@@ -3608,8 +3709,9 @@ TEST(ShellAutomations, EditorRunNowAndOpenResultFromHistory) {
         run = q.col_text(2);
         EXPECT_EQ(q.col_text(3), "manual");
     }
-    ASSERT_TRUE(w.until([&] { return w.exists("occurrence-open-" + occ); }));
-    EXPECT_NE(label_text(w, "occurrence-" + occ + "-attempt-1").find(u"succeeded"), std::u16string::npos);
+    // The open button can appear in a render where the attempt still says "running"; the list then renders the outcome.
+    ASSERT_TRUE(w.until([&] { return w.exists("occurrence-open-" + occ) && label_text(w, "occurrence-" + occ + "-attempt-1").find(u"succeeded") != std::u16string::npos; }))
+        << ui::to_utf8(label_text(w, "occurrence-" + occ + "-attempt-1"));
     ASSERT_TRUE(w.invoke("occurrence-open-" + occ));
     ASSERT_TRUE(w.until([&] { return w.shell().route().name == shell::RouteName::thread; }));
     EXPECT_EQ(w.shell().route().thread_id, thread);
@@ -5330,4 +5432,64 @@ TEST(ShellDictation, DictateInsertsAtTheCaretEscapeDiscardsAndAvailability) {
         });
         return !shown;
     }));
+}
+
+// Keyed feed updates (Live Feed Updates, design D4): when a later Run adds items, the elements of the earlier items are
+// the same objects as before, so their text layout, selection and reading position stay.
+TEST(ShellFeed, AnEarlierMessageKeepsItsElementWhenALaterRunArrives) {
+    Fixture f;
+    const auto t = f.in.env.thread();
+    f.in.run_to_end(t, "first question", "First answer.");
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + t); });
+    ASSERT_TRUE(w.until([&] { return w.shell().feed().has_value(); }));
+    std::vector<ui::Node*> before;
+    w.run([&] {
+        for (const auto& c : w.shell().thread().feed()->children()) before.push_back(c.get());
+    });
+    ASSERT_GE(before.size(), 2u);
+    f.in.run_to_end(t, "second question", "Second answer.");
+    ASSERT_TRUE(w.until([&] {
+        size_t n = 0;
+        w.run([&] { n = w.shell().thread().feed()->children().size(); });
+        return n > before.size();
+    }));
+    w.run([&] {
+        std::vector<const ui::Node*> now;
+        for (const auto& c : w.shell().thread().feed()->children()) now.push_back(c.get());
+        for (const ui::Node* old : before) EXPECT_NE(std::find(now.begin(), now.end(), old), now.end()) << old->automation_id();
+    });
+}
+
+// add-agent-created-skills 2.9: the Skill editor offers Restore previous version only for a Skill with a kept version,
+// and the restore swaps the current and the kept text.
+TEST(ShellSkills, RestorePreviousVersionIsOfferedOnlyWithAKeptVersion) {
+    SkillsWiring sw;
+    Fixture f([&sw](Inbox& in) { sw.configure(in); });
+    sw.attach(f);
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    const auto private_dir = sw.dir / "private";
+    const auto kept_dir = sw.dir / "previous";
+    std::filesystem::create_directories(private_dir / "plain-report");
+    std::ofstream(private_dir / "plain-report" / "SKILL.md")
+        << "---\nname: plain-report\ndescription: Writes a plain report\nversion: 1.0.0\n---\n\nPlain text.\n";
+    std::filesystem::create_directories(private_dir / "agent-report");
+    std::ofstream(private_dir / "agent-report" / "SKILL.md")
+        << "---\nname: agent-report\ndescription: Writes an agent report\nversion: 1.1.0\n---\n\nSecond text.\n";
+    std::filesystem::create_directories(kept_dir / "agent-report");
+    std::ofstream(kept_dir / "agent-report" / "SKILL.md")
+        << "---\nname: agent-report\ndescription: Writes an agent report\nversion: 1.0.0\n---\n\nFirst text.\n";
+    sw.catalog->reload();
+
+    w.run([&] { w.main().open("#/skills/edit/plain-report"); });
+    ASSERT_TRUE(w.until([&] { return field_text(w, "skill-editor-frontmatter").find(u"plain-report") != std::u16string::npos; }));
+    EXPECT_FALSE(shown(w, "skill-editor-restore"));
+
+    w.run([&] { w.main().open("#/skills/edit/agent-report"); });
+    ASSERT_TRUE(w.until([&] { return shown(w, "skill-editor-restore"); }));
+    ASSERT_TRUE(w.invoke("skill-editor-restore"));
+    ASSERT_TRUE(w.until([&] { return read_text(private_dir / "agent-report" / "SKILL.md").find("First text.") != std::string::npos; }));
+    EXPECT_NE(read_text(kept_dir / "agent-report" / "SKILL.md").find("Second text."), std::string::npos);
 }

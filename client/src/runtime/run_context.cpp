@@ -29,16 +29,28 @@ std::string known_folder(REFKNOWNFOLDERID id) {
 
 }  // namespace
 
+namespace {
+std::string utc_offset(int minutes) {
+    char buf[16];
+    const int off = std::abs(minutes);
+    std::snprintf(buf, sizeof buf, "UTC%c%02d:%02d", minutes < 0 ? '-' : '+', off / 60, off % 60);
+    return buf;
+}
+}  // namespace
+
+std::string format_run_time(const RunContextInfo& c) {
+    char date[128];
+    std::snprintf(date, sizeof date, "%s %d %s %d, %02d:%02d (%04d-%02d-%02d), ", kWeekdays[(c.weekday % 7 + 7) % 7], c.day,
+                  kMonths[std::clamp(c.month, 1, 12) - 1], c.year, c.hour, c.minute, c.year, c.month, c.day);
+    return std::string("Current time: ") + date + utc_offset(c.utc_offset_minutes);
+}
+
 std::string format_run_context(const RunContextInfo& c) {
-    char date[160];
-    const int off = std::abs(c.utc_offset_minutes);
-    std::snprintf(date, sizeof date, "%s %d %s %d, %02d:%02d (%04d-%02d-%02d), UTC%c%02d:%02d", kWeekdays[(c.weekday % 7 + 7) % 7],
-                  c.day, kMonths[std::clamp(c.month, 1, 12) - 1], c.year, c.hour, c.minute, c.year, c.month, c.day,
-                  c.utc_offset_minutes < 0 ? '-' : '+', off / 60, off % 60);
-    std::string text = "Context of this Run:\n- Now: ";
-    text += date;
+    // Nothing here changes from Run to Run, so the system prompt stays byte-stable (Stable Prompt Prefix); the time
+    // travels with the Run's starting message (format_run_time).
+    std::string text = "Context of this Run:\n- Time zone: " + utc_offset(c.utc_offset_minutes);
     if (!c.time_zone.empty()) text += " (" + c.time_zone + ")";
-    text += "\n";
+    text += "\n- The current time is on the first line of the user's message that started this Run.\n";
     if (!c.user.empty()) text += "- User: " + c.user + "\n";
     if (!c.home.empty()) text += "- Home folder: " + c.home + "\n";
     if (!c.documents.empty()) text += "- Documents: " + c.documents + "\n";

@@ -417,3 +417,50 @@ TEST(UiGolden, HighContrastUsesSystemColours) {
     EXPECT_EQ(s.at(px, 1, 1), 0x000000u);
     EXPECT_EQ(s.at(px, b->frame().x + 4, b->frame().y + b->frame().h / 2), 0x1AEBFFu);  // highlight, not the accent
 }
+
+// Ctrl+C copies the message selection while the selected view has keyboard focus; a press elsewhere moves the focus
+// and clears the selection (design D8).
+TEST(UiMarkdown, CtrlCCopiesTheSelectedWordsAndAPressElsewhereClearsThem) {
+    Surface s(600, 600);
+    std::vector<std::u16string> copied;
+    s.ui->copy_text = [&copied](const std::u16string& t) { copied.push_back(t); };
+    auto* md = s.content().emplace<MarkdownView>(*s.ui, u"Message");
+    md->set_markdown("Alpha beta gamma delta.\n\n- one two\n- three\n");
+    auto* other = s.content().emplace<Button>(*s.ui, "other-action", u"Other");
+    s.tree.layout(s.r->size_dip());
+    std::vector<RichText*> texts;
+    std::function<void(Node&)> walk = [&](Node& n) {
+        if (auto* r = dynamic_cast<RichText*>(&n)) texts.push_back(r);
+        for (auto& c : n.children()) walk(*c);
+    };
+    walk(*md);
+    ASSERT_EQ(texts.size(), 3u);
+    RichText* para = texts[0];
+    const float y = para->frame().y + para->frame().h / 2;
+    const auto x_of = [&](uint32_t pos) {
+        for (float x = para->frame().x; x < para->frame().right(); x += 0.5f)
+            if (para->position_at(x, y) >= pos) return x;
+        return para->frame().right();
+    };
+    // A press and drag over "beta gamma" gives the view keyboard focus.
+    s.tree.pointer({PointerEvent::down, x_of(6) + 0.2f, y});
+    s.tree.pointer({PointerEvent::move, x_of(16) + 0.2f, y});
+    s.tree.pointer({PointerEvent::up, x_of(16) + 0.2f, y});
+    EXPECT_EQ(s.tree.focused(), md);
+    const KeyEvent ctrl_c{kKeyC, false, true, false};
+    EXPECT_TRUE(copy_message_selection(*s.ui, ctrl_c));
+    ASSERT_EQ(copied.size(), 1u);
+    EXPECT_EQ(copied[0], u"beta gamma");
+    EXPECT_FALSE(copy_message_selection(*s.ui, KeyEvent{kKeyC, true, true, false}));  // Ctrl+Shift+C is not a copy here
+    EXPECT_FALSE(copy_message_selection(*s.ui, KeyEvent{0x56, false, true, false}));  // Ctrl+V
+
+    // A press on another control moves the focus there and clears the selection.
+    const float bx = other->frame().x + other->frame().w / 2, by = other->frame().y + other->frame().h / 2;
+    s.tree.pointer({PointerEvent::down, bx, by});
+    s.tree.pointer({PointerEvent::up, bx, by});
+    EXPECT_EQ(s.tree.focused(), other);
+    EXPECT_EQ(s.ui->selection, nullptr);
+    EXPECT_TRUE(md->selected_text().empty());
+    EXPECT_FALSE(copy_message_selection(*s.ui, ctrl_c));
+    EXPECT_EQ(copied.size(), 1u);
+}

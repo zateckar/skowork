@@ -140,6 +140,7 @@ test('built-in owners name their OpenSpec capabilities', async () => {
     'client/browser-use': 'add-agent-runtime',
     'client/computer-use': 'add-computer-use',
     'client/user-messaging': 'add-user-messaging',
+    'client/agent-skills': 'add-agent-created-skills',
   };
   for (const owner of new Set(Object.values(BUILT_IN_TOOL_DETAILS).map((detail) => detail.owner))) {
     assert.ok(specs[owner], `no owning capability spec for ${owner}`);

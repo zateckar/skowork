@@ -145,6 +145,9 @@ export const KEYS: KeyDef[] = [
   // specs: add-client-foundation/specs/client/desktop-host/spec.md
   { path: 'ui.background_on_battery', owner: 'client/desktop-host', description: 'Allow otherwise deferred background work while battery saver is on.', type: { kind: 'boolean' }, default: false, merge: 'scalar', guardrail: 'force' },
 
+  // specs: add-offline-sign-in/specs/client/identity/spec.md
+  { path: 'identity.offline_sign_in', owner: 'client/identity', description: 'Keep the user signed in beyond the browser session by requesting an offline refresh token at sign-in. Off revokes an existing offline token at the next policy update and requires sign-in again.', type: { kind: 'enum', values: ['off', 'on'] }, default: 'on', merge: 'scalar', guardrail: 'max-level' },
+
   // specs: add-mail-calendar/specs/client/mail-calendar/spec.md
   { path: 'mail.graph_base_url', owner: 'client/mail-calendar', description: 'Microsoft Graph endpoint used for mail and calendar; release builds require an approved Graph host.', type: { kind: 'string', pattern: '^(https://|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?(/|$))' }, default: 'https://graph.microsoft.com/v1.0', merge: 'scalar', guardrail: 'force' },
   { path: 'mail.oauth.authority', owner: 'client/mail-calendar', description: 'OAuth authority for the organization Graph app registration.', type: { kind: 'string' }, default: '', merge: 'scalar', guardrail: 'force' },

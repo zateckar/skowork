@@ -8,6 +8,7 @@
 #include "identity/oidc.h"
 #include "storage/app_store.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -49,6 +50,18 @@ enum class AuthState {
 };
 
 const char* to_string(AuthState s);
+
+// The offline sign-in status shown in the identity card (client/identity Offline Token Type).
+enum class OfflineStatus {
+    off,            // the policy is off, or no session is stored
+    active,         // the stored refresh token is an offline token
+    not_available,  // offline sign-in is on, but the realm issued a normal refresh token
+};
+
+const char* to_string(OfflineStatus s);
+
+// True when a refresh token is an offline token (its `typ` claim is "Offline"). Reads the claims without verifying them.
+bool is_offline_token(const std::string& refresh_token);
 
 struct PkceAttempt {
     std::string state;
@@ -93,6 +106,12 @@ public:
     // Revokes and deletes the refresh token, drops the access token, enters sign_in_required. Local data stays.
     Status sign_out();
 
+    // The effective policy's policy.identity.offline_sign_in (client/identity Offline Sign-In Policy). On (default) adds
+    // offline_access to the next sign-in. Off revokes a stored offline token, deletes it and enters sign_in_required
+    // without opening the browser. A normal refresh token is kept.
+    void set_offline_sign_in(bool on);
+    [[nodiscard]] OfflineStatus offline_sign_in_status() const;
+
     // Discards the access token so that the next call refreshes (revocation message, client/control-channel).
     void drop_access_token();
 
@@ -115,6 +134,8 @@ private:
     Status refresh_locked();  // requires refresh_mx_
     Status redeem_code(const std::string& code, const PkceAttempt& attempt);
     Status store_tokens(const json& token_response, bool from_code, const std::string& subject_hint);
+    Status revoke_refresh_token(const std::string& token);  // requires refresh_mx_; best effort, reports the failure
+    bool end_offline_session_if_disabled();                 // requires refresh_mx_; true when it ended a session
     void set_state(AuthState s);
     void security_event(const std::string& kind, const std::string& detail);
     void enter_sign_in_required(const std::string& reason, bool delete_refresh);
@@ -128,6 +149,7 @@ private:
 
     mutable std::mutex mx_;        // guards the fields below
     std::mutex refresh_mx_;        // single-flight token requests
+    std::atomic<bool> offline_on_{true};  // policy.identity.offline_sign_in (default on)
     AuthState state_ = AuthState::starting;
     std::string access_token_;
     long long access_expiry_ = 0;  // unix seconds

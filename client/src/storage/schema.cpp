@@ -2,7 +2,8 @@
 // Version ranges per roadmap change keep merges simple: 1-99 client-foundation, 100-199 agent-runtime,
 // 200-299 policy-and-sandbox, 300-399 work-inbox, 400-499 core-tools-and-mcp, 500-599 browser-use,
 // 600-699 telemetry, 700-799 computer-use, 800-899 skills, 900-999 scheduler, 1000-1099 mail-calendar,
-// 1100-1199 knowledge (app.db side), 1200-1299 meeting-capture, 1300-1399 skills additions made after them, 1400-1499 user-messaging.
+// 1100-1199 knowledge (app.db side), 1200-1299 meeting-capture, 1300-1399 skills additions made after them, 1400-1499 user-messaging,
+// 1500-1599 fix-long-thread-model-calls.
 #include "storage/app_store.h"
 
 namespace wb {
@@ -467,6 +468,20 @@ CREATE TABLE chat_inbox(
   pinned INTEGER NOT NULL DEFAULT 0,
   archived INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX chat_inbox_order ON chat_inbox(pinned, last_activity, chat_id);
+)sql"},
+        // client/agent-runtime Stable Prompt Prefix (fix-long-thread-model-calls D4): the boundary token that wraps a
+        // compaction summary is kept with its record, so every Turn until the next compaction sends the same bytes.
+        {1500, R"sql(
+ALTER TABLE thread_compactions ADD COLUMN nonce TEXT NOT NULL DEFAULT '';
+)sql"},
+        // client/skills Agent-Created Skill Record (add-agent-created-skills design D6): which private Skills the agent
+        // created. No Skill text is stored here.
+        {1600, R"sql(
+CREATE TABLE agent_skills(
+  name TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL);
 )sql"},
     };
     return migrations;

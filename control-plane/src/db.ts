@@ -463,6 +463,69 @@ const migrations: string[] = [
   `
   ALTER TABLE team_items ADD COLUMN server_content_hash TEXT NOT NULL DEFAULT '';
   `,
+  // fix-long-thread-model-calls D7: time to the first upstream byte and the prompt tokens served from the upstream cache;
+  // NULL when not measured or not reported by the upstream (control-plane/llm-gateway Prompt Cache Audit).
+  `
+  ALTER TABLE llm_usage ADD COLUMN ttft_ms INTEGER;
+  ALTER TABLE llm_usage ADD COLUMN cached_tokens INTEGER;
+  `,
+  // add-model-fallback-and-effort D1, D2, D5: per-model reasoning effort, fallback model and fallback wait (NULL = the
+  // model's own default, no fallback, 60 s); the model that answered and the fallback reason of each chat request.
+  `
+  ALTER TABLE llm_models ADD COLUMN reasoning_effort TEXT;
+  ALTER TABLE llm_models ADD COLUMN fallback_model TEXT;
+  ALTER TABLE llm_models ADD COLUMN fallback_after_s INTEGER;
+  ALTER TABLE llm_usage ADD COLUMN answered_by TEXT;
+  ALTER TABLE llm_usage ADD COLUMN fallback TEXT;
+  `,
+  // add-api-connectors (control-plane/api-connectors): the API connector's uploaded operations (no raw document is
+  // kept), the write-only api-key, and each user's personal access token per connector (design D6, D11). Connection
+  // data without secrets stays in the catalog entry; secrets are encrypted with the server key.
+  `
+  CREATE TABLE api_operations (
+    connector_id TEXT NOT NULL REFERENCES mcp_servers (id) ON DELETE CASCADE,
+    op_key TEXT NOT NULL,
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    operation_id TEXT,
+    tool TEXT,
+    description TEXT NOT NULL DEFAULT '',
+    usable INTEGER NOT NULL DEFAULT 0,
+    reason TEXT,
+    input_schema TEXT,
+    schema_bytes INTEGER NOT NULL DEFAULT 0,
+    call_spec TEXT,
+    status TEXT NOT NULL CHECK (status IN ('new', 'unselected', 'selected', 'gone')),
+    risk TEXT NOT NULL DEFAULT 'read',
+    risk_reason TEXT,
+    decided_by TEXT,
+    decided_at TEXT,
+    PRIMARY KEY (connector_id, op_key)
+  );
+  CREATE TABLE api_documents (
+    connector_id TEXT PRIMARY KEY REFERENCES mcp_servers (id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    openapi TEXT NOT NULL,
+    uploaded_by TEXT NOT NULL,
+    uploaded_at TEXT NOT NULL
+  );
+  CREATE TABLE api_connector_secrets (
+    connector_id TEXT PRIMARY KEY REFERENCES mcp_servers (id) ON DELETE CASCADE,
+    key_enc TEXT NOT NULL,
+    key_hint TEXT NOT NULL DEFAULT '',
+    set_by TEXT NOT NULL,
+    set_at TEXT NOT NULL
+  );
+  -- One row per user and connector; the token is encrypted and never returned. rejected_at is set on upstream 401/403.
+  CREATE TABLE api_connector_tokens (
+    connector_id TEXT NOT NULL REFERENCES mcp_servers (id) ON DELETE CASCADE,
+    user_name TEXT NOT NULL COLLATE NOCASE,
+    token_enc TEXT NOT NULL,
+    set_at TEXT NOT NULL,
+    rejected_at TEXT,
+    PRIMARY KEY (connector_id, user_name)
+  );
+  `,
 ];
 
 export function openDb(path: string): Db {

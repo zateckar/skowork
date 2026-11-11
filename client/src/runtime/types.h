@@ -156,7 +156,9 @@ struct RuntimeConfig {
     model::Role role = model::Role::main;
     std::string system_prompt = "You are SkoWork, an assistant that works for the user on their computer. Use the tools you have; "
                                 "call find_tools to discover more. Ask the user with ask_user when you need a decision. "
-                                "Delegate independent pieces of work to subagents with delegate.";
+                                "Delegate independent pieces of work to subagents with delegate. When an answer uses a passage "
+                                "that knowledge.search returned, write that passage's number in square brackets after the "
+                                "sentence it supports, such as [2]. Do not write the number of a passage you did not use.";
     // The system prompt of a subagent; the instructions of the delegate call follow it.
     std::string subagent_prompt = "You are a subagent of SkoWork. Complete the task you are given with the tools you have, then "
                                   "answer with the result only; your answer goes to the agent that delegated the task. Use "
@@ -176,6 +178,9 @@ struct RuntimeConfig {
     // Run Context: what the model cannot discover (date, time zone, user, folders). Called when a Run starts or resumes
     // executing; the text is appended to the Run's system prompt and stays fixed for that execution.
     std::function<std::string()> run_context;
+    // The time line of a Run's starting message (Run Context): called when the message is written, stored with it and
+    // resent unchanged in later Turns, so that only the newest message differs from the previous request.
+    std::function<std::string()> run_time_line;
     // Skills (client/skills): the usable Skills, listed to the main agent when a Run starts executing, and the lookup
     // of one by name when the agent or the user's /name selects it. Without them no Skill is offered. Both take the
     // Thread: a Skill test Thread resolves its draft (add-skills design D10).

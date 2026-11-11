@@ -6,6 +6,7 @@ add_library(wb_storage STATIC
   forget.cpp
   quota.cpp
   app_store.cpp
+  agent_skills.cpp
   schema.cpp)
 target_link_libraries(wb_storage PUBLIC wb_platform sqlite3mc)
 workbench_warnings(wb_storage)

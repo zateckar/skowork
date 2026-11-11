@@ -2,6 +2,7 @@
 // launch arguments and the RPC registry.
 #include "support/dev_endpoints.h"
 #include "app/app.h"
+#include "host/dispatch.h"
 #include "host/power.h"
 #include "host/registration.h"
 #include "host/rpc.h"
@@ -272,4 +273,20 @@ TEST(Rpc, PipeExposureAndErrors) {
     auto failed = parse_json(rpc.handle_pipe_request(R"({"jsonrpc":"2.0","id":2,"method":"fails"})"));
     EXPECT_EQ((*failed)["error"]["code"], -32000);
     EXPECT_EQ((*failed)["error"]["data"]["code"], "nope");
+}
+
+// Two pools (desktop-host design D5): four blocked background tasks do not delay a UI request.
+TEST(HostPools, UiRequestsDoNotWaitBehindBlockedBackgroundWork) {
+    ThreadPool background{2};
+    ThreadPool ui{4};
+    std::atomic<bool> release{false};
+    for (int i = 0; i < 4; ++i) background.post([&release] { while (!release) std::this_thread::sleep_for(1ms); });
+    std::atomic<bool> answered{false};
+    ui.post([&answered] { answered = true; });
+    const auto end = std::chrono::steady_clock::now() + 2s;
+    while (!answered && std::chrono::steady_clock::now() < end) std::this_thread::sleep_for(1ms);
+    EXPECT_TRUE(answered);
+    release = true;
+    background.shutdown();
+    ui.shutdown();
 }

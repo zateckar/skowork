@@ -17,6 +17,7 @@ class LoopbackHttpServer {
 public:
     struct Request {
         std::string method, path, head;  // head: request line and headers
+        std::string body;                // the Content-Length bytes after the head (empty when none)
         [[nodiscard]] bool has_header(const std::string& lower_name_prefix) const {
             std::string low;
             for (const char c : head) low += static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
@@ -93,7 +94,20 @@ private:
             return;
         }
         Request r;
-        r.head = raw.substr(0, raw.find("\r\n\r\n") + 2);
+        const size_t head_end = raw.find("\r\n\r\n") + 4;
+        r.head = raw.substr(0, head_end - 2);
+        // The body: read Content-Length bytes after the head.
+        std::string low;
+        for (const char c : r.head) low += static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+        if (const size_t at = low.find("\r\ncontent-length:"); at != std::string::npos) {
+            const size_t want = std::stoul(low.substr(at + 17));
+            while (raw.size() < head_end + want) {
+                const int n = ::recv(c, buf, sizeof buf, 0);
+                if (n <= 0) break;
+                raw.append(buf, n);
+            }
+            r.body = raw.substr(head_end, want);
+        }
         const auto sp1 = raw.find(' '), sp2 = raw.find(' ', sp1 + 1);
         if (sp1 != std::string::npos && sp2 != std::string::npos) {
             r.method = raw.substr(0, sp1);
