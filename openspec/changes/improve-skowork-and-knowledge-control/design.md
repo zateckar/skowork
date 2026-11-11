@@ -480,6 +480,45 @@ Add speech to the Policy bundle top-level glossary and also reconcile the alread
     - Effects on published team knowledge are labeled pending, not computed.
     - The native preview dialog is part of 10.1.
     - The older store-only item-removal preview (`preview_item_removal`) remains for its tests and is not exposed.
+- **Change reports and analysis scheduling, 2026-11-11:**
+  - **Change reports:** kg.db migration 10 adds `knowledge_change_reports` and `knowledge_change_report_facts`. They hold ids and counts only, are deleted with their item (and so by forget and exclusion), and are not knowledge, so they do not change the generation. Every revision of an existing item writes one, whether the update came from the watcher, a sweep or a confirmed preview. A first import or an unchanged check writes none. A report records:
+    - the new revision number;
+    - how many passages were added, kept, re-dated, rechecked and removed, counted as `plan_item_change` counts them;
+    - the facts that lost independent support, with supports before and after, those left with none first.
+    
+    The facts considered are those with a current support on the item's passages or on passages analyzed in the same extraction request, and the facts derived from them. A large change withdraws findings in steps before its switch, so it records these counts before withdrawing, and the switch adds only findings recorded on the item since. The report row is written in the revision's transaction with its facts marked not counted (`facts=-1`). The facts are counted right after, in a second transaction, once other writers have had the lock. A write in that moment could still lower a count and be included. If the count fails, the report stays marked not counted. At most 1,000 facts are listed per report. The newest 500 reports are kept, none older than 90 days.
+  - **User side:** `knowledge.changes` lists reports newest first, paged by the last id, for items the user may read now. `knowledge.change` shows one report with its facts in pages. A fact is described while one of its citations, retained ones included, may be read; it is shown with its current state, otherwise withheld. A report lists `extraction` as pending when passages were added, re-dated or rechecked, because what their new findings add is not part of it.
+  - **Scheduling:** extraction, categorization and consistency checking already share `extraction_daily_calls`. Analysis runs only in a round where extraction had nothing to do, deferral stops all of them, and their progress is durable (8.1, 8.2). Analysis now takes the most recently changed knowledge first: facts whose newest current excerpt is newest, then the rest by id, which also covers facts supported only by other facts. Before, facts were taken by id, so a revised document waited behind the whole backlog.
+  - **Tests:** `KnowledgeChangeReports.RevisionsRecordLostSupportDurablyAndGoWithTheirItem` covers:
+    - a watched revision that removes one of two supports, and then the last one;
+    - a report that survives a restart;
+    - paging;
+    - no report for an unchanged check;
+    - reports hidden when their file may no longer be read;
+    - reports deleted by forget;
+    - a 2,100-passage change whose findings were withdrawn in steps before the switch.
+    
+    `KnowledgeAnalysisBudget.SearchStaysUsableAndAnalysisResumesChangedKnowledgeFirst` covers:
+    - one request left in the budget, which takes the newest facts and leaves the rest visibly pending;
+    - full-text search with the model unavailable;
+    - a revision while the budget is spent;
+    - a restart, then deferral after the daily reset;
+    - resumption that compares the changed fact first and every fact exactly once.
+    
+    Generation fencing of analysis results is covered by the 8.5 and 8.2 tests. 153 knowledge, storage, shell, sharing, RPC and migration tests pass on the debug build; the new and related tests pass on the release build.
+  - **Measured** on the local MinGW release build, the development workstation (20 logical processors), warm cache. This is the only hardware measured, not the baseline hardware; it substitutes for it until 1.4.
+    - `KnowledgeRetrieval.DISABLED_EvidenceFactListScale`: 10,000 items, 100,000 facts in the evidence schema with their findings, half of them in a category, 500 change reports. Nearest-rank p95 of 20 samples:
+      - item list 10.7 ms;
+      - item reader 2.6 ms, or 2.3 ms filtered by category;
+      - entity profile 10.7 ms;
+      - change report list 0.6 ms, one report with 50 facts 3.2 ms;
+      - choosing the next consistency batch: 46 ms when nothing is pending (a full scan) and 116 ms with 1,000 pending. Most of the latter is reading related facts, because every synthetic fact shares one object. This is background work, not an interactive step.
+    - `Database.DISABLED_KnowledgeCascadeScale`, same store as for 7.7. A revision of a 1,000-support Source, including its change report, took p95 107–121 ms over three runs, against 77–78 ms with reports switched off in the same session. This is the 1,000-fact dependency-diff case, within the 500 ms target. The 10,000-passage switch with its report took 250–410 ms; switched off it took 244–258 ms today, against 141–160 ms when 7.7 was measured, so the machine was slower in this session. Other writers' longest wait during the switch was 174–237 ms with reports, and 249–255 ms without them in this session.
+    - `Database.DISABLED_KnowledgeImpactScale`: a snapshot and diff of 100,000 facts took 100 ms.
+  - **Limits:**
+    - The longest waits of other writers during a 10,000-passage switch are near or above the 200 ms target on this machine today; 7.7's numbers were measured on a less loaded session.
+    - A report does not list facts that new findings will support after extraction, and cannot say whether a re-extracted passage will restore a lost support.
+    - The native change report view is part of 10.1.
 - **Progress audit and triage, 2026-11-09:** code was compared with every task. Tasks were split or added where code and specification disagree (2.4, 4.5, 5.6, 6.6), where a prerequisite was implicit (7.5, 7.6, 7.7, 8.5, 9.5), and narrowed where two tasks claimed the same evidence (1.4, 5.5, 6.5). Publication code in the control plane is unmounted library code with unit tests; no publication route, schema installation or policy key exists. The earlier note that multi-pass summarization is not enabled is superseded by the multi-pass note above. tasks.md carries the per-task status and the delivery order.
 - Final immutable speech artifact URL/mirror and manifest digest, verified package sizes, proxy behavior and actual language-fixture timing.
 - Actual configured model ids and context metadata, token-count strategy supported by those models, and measured compaction coverage/latency.

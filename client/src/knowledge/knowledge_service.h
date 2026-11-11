@@ -233,6 +233,10 @@ public:
     Result<json> confirm_preview(const std::string& token, bool accept_incomplete);
     // Discards the preview and its kept passages.
     Status cancel_preview(const std::string& token);
+    // Source change reports (task 8.4): newest first, of items the user may read now; efore_id pages, item_id 0 lists all.
+    json change_reports(long long before_id, int limit, long long item_id = 0);
+    // One report with its facts, those left without support first.
+    Result<json> change_report(long long id, int offset, int limit);
 
     // ---- Tools ----
     std::vector<runtime::ToolDef> tools();
@@ -357,6 +361,7 @@ private:
     std::string preview_policy(const std::string& operation, const json& target);
     json exclusion_items(const std::string& kind, const std::string& value);
     bool files_importable(const std::string& path);
+    json described_fact(long long fact_id);
     Result<json> confirm_preview_checked(const std::string& token, bool accept_incomplete);
     // Computes a preview of the operation now (task 8.3): {summary, entries, generation}.
     struct ComputedPreview {

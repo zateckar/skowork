@@ -567,7 +567,7 @@ END;
         // policy it was made under. An import's reviewed passages are kept here (the database is encrypted) until it is
         // confirmed, cancelled or expires; its entries are the affected facts and passages, read page by page. Previews
         // are not knowledge, so they do not change the generation.
-        {kKgSchemaVersion, R"sql(
+        {kKgPreviewSchemaVersion, R"sql(
 CREATE TABLE knowledge_operation_previews(
   token TEXT PRIMARY KEY,
   operation TEXT NOT NULL CHECK(operation IN ('import','update','exclude','forget')),
@@ -589,6 +589,30 @@ CREATE TABLE knowledge_preview_entries(
   after INTEGER NOT NULL DEFAULT 0,
   text TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(token,kind,ord)) WITHOUT ROWID;
+)sql"},
+        // Task 8.4: a durable change report per revision of an indexed item, written with the revision. Ids and counts
+        // only, no content; it goes with its item. Reports are not knowledge, so they do not change the generation.
+        {kKgSchemaVersion, R"sql(
+CREATE TABLE knowledge_change_reports(
+  id INTEGER PRIMARY KEY,
+  item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  added INTEGER NOT NULL DEFAULT 0,
+  kept INTEGER NOT NULL DEFAULT 0,
+  redated INTEGER NOT NULL DEFAULT 0,
+  rechecked INTEGER NOT NULL DEFAULT 0,
+  removed INTEGER NOT NULL DEFAULT 0,
+  facts INTEGER NOT NULL DEFAULT 0,
+  unsupported INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX knowledge_change_reports_item ON knowledge_change_reports(item_id,id);
+CREATE INDEX knowledge_change_reports_time ON knowledge_change_reports(created_at);
+CREATE TABLE knowledge_change_report_facts(
+  report_id INTEGER NOT NULL REFERENCES knowledge_change_reports(id) ON DELETE CASCADE,
+  fact_id INTEGER NOT NULL,
+  before INTEGER NOT NULL,
+  after INTEGER NOT NULL,
+  PRIMARY KEY(report_id,fact_id)) WITHOUT ROWID;
 )sql"},
     };
     return m;
@@ -1379,6 +1403,38 @@ std::vector<long long> KgStore::facts_about(long long entity_id, int limit) {
     return out;
 }
 
+namespace {
+
+// Facts not yet analyzed by the analysis whose progress checks records, most recently changed knowledge first
+// (Bounded Knowledge Analysis): facts whose newest current excerpt is newest, then facts by id, which also covers
+// facts supported only by other facts. At most wanted (and 2,000), without those in skip.
+std::vector<long long> changed_first(Database& db, const std::string& checks, size_t wanted, const std::set<long long>& skip) {
+    wanted = std::min<size_t>(wanted, 2000);
+    std::vector<long long> ids;
+    std::set<long long> seen;
+    const auto take = [&](Statement& s) {
+        while (ids.size() < wanted && s.step()) {
+            const long long id = s.col_int(0);
+            if (!skip.count(id) && seen.insert(id).second) ids.push_back(id);
+        }
+    };
+    // Scans excerpts newest first and stops when enough facts are found; rows of facts already checked are skipped.
+    auto recent = db.prepare("SELECT s.fact_id FROM knowledge_evidence e JOIN knowledge_support_evidence se ON se.evidence_id=e.id "
+                             "JOIN knowledge_support_sets s ON s.id=se.support_id WHERE s.state IN ('current','unverified') "
+                             "AND NOT EXISTS(SELECT 1 FROM " + checks + " k WHERE k.fact_id=s.fact_id) ORDER BY e.id DESC");
+    take(recent);
+    if (ids.size() < wanted) {
+        auto rest = db.prepare("SELECT f.id FROM knowledge_facts f WHERE NOT EXISTS(SELECT 1 FROM " + checks + " k WHERE k.fact_id=f.id) "
+                               "AND EXISTS(SELECT 1 FROM knowledge_support_sets s WHERE s.fact_id=f.id AND s.state IN ('current','unverified')) "
+                               "ORDER BY f.id LIMIT ?1");
+        rest.bind(1, static_cast<long long>(wanted + skip.size() + seen.size()));
+        take(rest);
+    }
+    return ids;
+}
+
+}  // namespace
+
 CategoryWork KgStore::category_work(int limit, const std::set<long long>& skip) {
     const std::lock_guard lock(db_->mutex());
     CategoryWork out;
@@ -1391,14 +1447,7 @@ CategoryWork KgStore::category_work(int limit, const std::set<long long>& skip) 
         while (s.step()) out.categories.push_back({s.col_int(0), s.col_text(1)});
     }
     if (out.categories.empty()) return out;
-    auto facts = db_->prepare(
-        "SELECT f.id FROM knowledge_facts f WHERE NOT EXISTS(SELECT 1 FROM knowledge_category_checks k WHERE k.fact_id=f.id) "
-        "AND EXISTS(SELECT 1 FROM knowledge_support_sets s WHERE s.fact_id=f.id AND s.state IN ('current','unverified')) "
-        "ORDER BY f.id LIMIT ?1");
-    facts.bind(1, static_cast<long long>(std::min<size_t>(static_cast<size_t>(limit) + skip.size(), 2000)));
-    std::vector<long long> ids;
-    while (facts.step())
-        if (!skip.count(facts.col_int(0))) ids.push_back(facts.col_int(0));
+    std::vector<long long> ids = changed_first(*db_, "knowledge_category_checks", static_cast<size_t>(limit) + skip.size(), skip);
     // Only whole passages a current support cites: the model quotes from them, and the quote must bind to that support.
     auto passages = db_->prepare(
         "SELECT DISTINCT c.id,c.item_id,c.heading,c.text,ifnull(c.at,0) FROM knowledge_support_sets s "
@@ -1439,14 +1488,7 @@ ConsistencyWork KgStore::consistency_work(int limit, int related, int passage_li
     const auto generation = generation_of(*db_);
     if (!generation) return out;
     out.generation = *generation;
-    auto unchecked = db_->prepare(
-        "SELECT f.id FROM knowledge_facts f WHERE NOT EXISTS(SELECT 1 FROM knowledge_consistency_checks k WHERE k.fact_id=f.id) "
-        "AND EXISTS(SELECT 1 FROM knowledge_support_sets s WHERE s.fact_id=f.id AND s.state IN ('current','unverified')) "
-        "ORDER BY f.id LIMIT ?1");
-    unchecked.bind(1, static_cast<long long>(std::min<size_t>(static_cast<size_t>(limit) * 4 + skip.size(), 2000)));
-    std::vector<long long> ids;
-    while (unchecked.step())
-        if (!skip.count(unchecked.col_int(0))) ids.push_back(unchecked.col_int(0));
+    std::vector<long long> ids = changed_first(*db_, "knowledge_consistency_checks", static_cast<size_t>(limit) * 4 + skip.size(), skip);
     auto passages = db_->prepare(
         "SELECT DISTINCT c.id,c.item_id,c.heading,c.text,ifnull(c.at,0) FROM knowledge_support_sets s "
         "JOIN knowledge_support_evidence se ON se.support_id=s.id JOIN knowledge_evidence e ON e.id=se.evidence_id "
@@ -2178,7 +2220,7 @@ Result<KnowledgeImpactPreview> KgStore::preview_passage_changes(const std::vecto
         long long generation = 0, categories = 0, reviews = 0;
         {
             const std::lock_guard lock(db_->mutex());
-            if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Knowledge impact previews are not available yet.");
+            if (db_->user_version() < kKgPreviewSchemaVersion) return make_error("schema", "Knowledge impact previews are not available yet.");
             const auto g = generation_of(*db_);
             if (!g) return make_error("storage", "The knowledge generation is unavailable.");
             generation = *g;
@@ -2243,7 +2285,7 @@ Result<std::string> KgStore::save_operation_preview(OperationPreview p, const st
     p.token = token;
     p.expires_at = p.created_at + kLifetime;
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Knowledge impact previews are not available yet.");
+    if (db_->user_version() < kKgPreviewSchemaVersion) return make_error("schema", "Knowledge impact previews are not available yet.");
     const auto status = db_->transaction([&]() -> Status {
         auto expired = db_->prepare("DELETE FROM knowledge_operation_previews WHERE expires_at<=?1");
         expired.bind(1, p.created_at);
@@ -2272,7 +2314,7 @@ Result<std::string> KgStore::save_operation_preview(OperationPreview p, const st
 
 std::optional<OperationPreview> KgStore::operation_preview(const std::string& token) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < kKgSchemaVersion || token.size() != 32) return std::nullopt;
+    if (db_->user_version() < kKgPreviewSchemaVersion || token.size() != 32) return std::nullopt;
     auto s = db_->prepare("SELECT token,operation,target,content,content_hash,policy,summary,generation,created_at,expires_at "
                           "FROM knowledge_operation_previews WHERE token=?1");
     s.bind(1, token);
@@ -2284,7 +2326,7 @@ std::optional<OperationPreview> KgStore::operation_preview(const std::string& to
 std::vector<PreviewEntry> KgStore::preview_entries(const std::string& token, const std::string& kind, int offset, int limit) {
     const std::lock_guard lock(db_->mutex());
     std::vector<PreviewEntry> out;
-    if (db_->user_version() < kKgSchemaVersion || limit <= 0 || offset < 0) return out;
+    if (db_->user_version() < kKgPreviewSchemaVersion || limit <= 0 || offset < 0) return out;
     auto s = db_->prepare("SELECT kind,effect,ref,before,after,text FROM knowledge_preview_entries WHERE token=?1 AND kind=?2 "
                           "AND ord>=?3 ORDER BY ord LIMIT ?4");
     s.bind(1, token).bind(2, kind).bind(3, static_cast<long long>(offset)).bind(4, static_cast<long long>(std::min(limit, 500)));
@@ -2295,7 +2337,7 @@ std::vector<PreviewEntry> KgStore::preview_entries(const std::string& token, con
 
 long long KgStore::preview_entry_count(const std::string& token, const std::string& kind) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < kKgSchemaVersion) return 0;
+    if (db_->user_version() < kKgPreviewSchemaVersion) return 0;
     auto s = db_->prepare("SELECT count(*) FROM knowledge_preview_entries WHERE token=?1 AND kind=?2");
     s.bind(1, token).bind(2, kind);
     return s.step() ? s.col_int(0) : 0;
@@ -2303,7 +2345,7 @@ long long KgStore::preview_entry_count(const std::string& token, const std::stri
 
 Status KgStore::delete_operation_preview(const std::string& token) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < kKgSchemaVersion) return {};
+    if (db_->user_version() < kKgPreviewSchemaVersion) return {};
     auto s = db_->prepare("DELETE FROM knowledge_operation_previews WHERE token=?1");
     s.bind(1, token);
     return s.run();
@@ -2311,7 +2353,7 @@ Status KgStore::delete_operation_preview(const std::string& token) {
 
 Status KgStore::delete_item_previews(const std::string& source, const std::string& ext_id) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < kKgSchemaVersion) return {};
+    if (db_->user_version() < kKgPreviewSchemaVersion) return {};
     auto s = db_->prepare("DELETE FROM knowledge_operation_previews WHERE json_extract(target,'$.source')=?1 "
                           "AND (?2='' OR json_extract(target,'$.ext_id')=?2)");
     s.bind(1, source).bind(2, ext_id);
@@ -2320,10 +2362,78 @@ Status KgStore::delete_item_previews(const std::string& source, const std::strin
 
 Status KgStore::purge_expired_previews(long long now) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < kKgSchemaVersion) return {};
+    if (db_->user_version() < kKgPreviewSchemaVersion) return {};
     auto s = db_->prepare("DELETE FROM knowledge_operation_previews WHERE expires_at<=?1");
     s.bind(1, now);
     return s.run();
+}
+
+// ---- Source change reports (task 8.4) ----------------------------------------------------------------------------------
+
+std::map<long long, long long> KgStore::support_counts_at_risk(long long item_id, bool findings_only) {
+    // Every fact one of whose current supports rests on a passage of the item, or on a passage analyzed in one request
+    // with one (its findings are extracted again when that passage moves), and the facts derived from those. A
+    // superset of what a revision can affect: facts that keep their supports are left out of the report afterwards.
+    std::map<long long, long long> out;
+    // After a stepped withdrawal only findings recorded since then can still be taken: those on the item's passages.
+    if (findings_only) {
+        auto s = db_->prepare(R"sql(
+WITH RECURSIVE f(id) AS (
+   SELECT s.fact_id FROM chunks c JOIN relations r ON r.chunk_id=c.id JOIN knowledge_support_sets s ON s.legacy_relation_id=r.id
+     WHERE c.item_id=?1 AND s.state IN ('current','unverified')
+   UNION SELECT s.fact_id FROM f JOIN knowledge_support_facts sf ON sf.required_fact_id=f.id JOIN knowledge_support_sets s ON s.id=sf.support_id)
+SELECT f.id,(SELECT count(*) FROM knowledge_support_sets s WHERE s.fact_id=f.id AND s.state IN ('current','unverified')) FROM f)sql");
+        s.bind(1, item_id);
+        while (s.step()) out[s.col_int(0)] = s.col_int(1);
+        return out;
+    }
+    auto s = db_->prepare(R"sql(
+WITH RECURSIVE
+ own(id) AS (SELECT id FROM chunks WHERE item_id=?1),
+ ch(id) AS (SELECT id FROM own UNION SELECT d.chunk_id FROM knowledge_extraction_inputs d WHERE d.result=1
+            AND d.batch_id IN (SELECT batch_id FROM knowledge_extraction_inputs WHERE chunk_id IN (SELECT id FROM own))),
+ f(id) AS (
+   SELECT s.fact_id FROM knowledge_evidence e JOIN knowledge_support_evidence se ON se.evidence_id=e.id
+     JOIN knowledge_support_sets s ON s.id=se.support_id WHERE e.chunk_id IN (SELECT id FROM ch) AND s.state IN ('current','unverified')
+   UNION SELECT s.fact_id FROM relations r JOIN knowledge_support_sets s ON s.legacy_relation_id=r.id
+     WHERE r.chunk_id IN (SELECT id FROM ch) AND s.state IN ('current','unverified')
+   UNION SELECT s.fact_id FROM f JOIN knowledge_support_facts sf ON sf.required_fact_id=f.id JOIN knowledge_support_sets s ON s.id=sf.support_id)
+SELECT f.id,(SELECT count(*) FROM knowledge_support_sets s WHERE s.fact_id=f.id AND s.state IN ('current','unverified')) FROM f)sql");
+    s.bind(1, item_id);
+    while (s.step()) out[s.col_int(0)] = s.col_int(1);
+    return out;
+}
+
+std::vector<ChangeReport> KgStore::change_reports(long long before_id, int limit, long long item_id) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<ChangeReport> out;
+    if (db_->user_version() < kKgSchemaVersion || limit <= 0) return out;
+    auto s = db_->prepare("SELECT r.id,r.item_id,r.revision,r.created_at,r.added,r.kept,r.redated,r.rechecked,r.removed,r.facts,r.unsupported,"
+                          "i.source,i.ext_id,i.title FROM knowledge_change_reports r JOIN items i ON i.id=r.item_id "
+                          "WHERE (?1=0 OR r.id<?1) AND (?2=0 OR r.item_id=?2) ORDER BY r.id DESC LIMIT ?3");
+    s.bind(1, before_id).bind(2, item_id).bind(3, static_cast<long long>(std::min(limit, 500)));
+    while (s.step())
+        out.push_back({s.col_int(0), s.col_int(1), s.col_int(2), s.col_int(3), s.col_int(4), s.col_int(5), s.col_int(6), s.col_int(7),
+                       s.col_int(8), s.col_int(9), s.col_int(10), s.col_text(11), s.col_text(12), s.col_text(13)});
+    return out;
+}
+
+std::optional<ChangeReport> KgStore::change_report(long long id) {
+    if (id <= 0) return std::nullopt;
+    auto one = change_reports(id + 1, 1);
+    if (one.empty() || one.front().id != id) return std::nullopt;
+    return one.front();
+}
+
+std::vector<ChangeReportFact> KgStore::change_report_facts(long long report_id, int offset, int limit) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<ChangeReportFact> out;
+    if (db_->user_version() < kKgSchemaVersion || limit <= 0 || offset < 0) return out;
+    auto s = db_->prepare("SELECT fact_id,before,after FROM knowledge_change_report_facts WHERE report_id=?1 "
+                          "ORDER BY after>0,fact_id LIMIT ?2 OFFSET ?3");
+    s.bind(1, report_id).bind(2, static_cast<long long>(std::min(limit, 500))).bind(3, static_cast<long long>(offset));
+    while (s.step()) out.push_back({s.col_int(0), s.col_int(1), s.col_int(2)});
+    return out;
 }
 
 Status KgStore::withdraw_findings(const std::vector<long long>& chunk_ids) {
@@ -2383,6 +2493,13 @@ Status KgStore::prepare_item_change(const ItemInput& in) {
             auto beside = db_->prepare("SELECT DISTINCT d.chunk_id FROM knowledge_extraction_inputs d WHERE d.result=1 AND d.batch_id IN "
                                        "(SELECT batch_id FROM knowledge_extraction_inputs WHERE chunk_id IN (" + id_list(moved) + "))");
             while (beside.step()) withdraw.push_back(beside.col_int(0));
+        }
+        // Withdrawn in steps before the switch: the change report starts from the supports as they are now.
+        if (!withdraw.empty() && previous && db_->user_version() >= kKgSchemaVersion) {
+            auto& [hash, counts] = report_before_[hidden_key(in.source, in.ext_id)];
+            if (hash != in.hash) counts.clear();
+            hash = in.hash;
+            for (const auto& [fact, n] : support_counts_at_risk(previous->id, false)) counts[fact] = std::max(counts[fact], n);
         }
     }
     std::sort(withdraw.begin(), withdraw.end());
@@ -2475,6 +2592,7 @@ Status KgStore::discard_item_change(const std::string& source, const std::string
     {
         const std::lock_guard lock(db_->mutex());
         if (db_->user_version() < kKgEvidenceSchemaVersion) return {};
+        report_before_.erase(hidden_key(source, ext_id));
         auto retire = db_->prepare("UPDATE items SET source=?1, ext_id=ext_id||'#'||id WHERE source=?2 AND ext_id=?3");
         retire.bind(1, kRetiredSource).bind(2, kStagedSource).bind(3, hidden_key(source, ext_id));
         if (Status s = retire.run(); !s) return s;
@@ -2566,10 +2684,23 @@ Result<long long> KgStore::put_item(const ItemInput& in, long long now) {
 }
 
 Result<long long> KgStore::put_prepared_item(const ItemInput& in, long long now) {
-    const std::lock_guard lock(db_->mutex());
-    long long id = 0;
+    std::unique_lock lock(db_->mutex());
+    long long id = 0, report_id = 0;
+    const std::string report_key = hidden_key(in.source, in.ext_id);
+    std::map<long long, long long> before;  // a change report's facts with their supports before the write
     Status st = db_->transaction([&]() -> Status {
         const auto previous = item(in.source, in.ext_id);
+        // A revision of an existing item gets a change report: the supports its facts have before the write.
+        const bool report = previous && db_->user_version() >= kKgSchemaVersion;
+        if (report) {
+            // A large change counted its supports before withdrawing them in steps; the switch adds only what was
+            // recorded on the item since, so it does not scan every passage again while holding the writer.
+            const auto withdrawn = report_before_.find(report_key);
+            const bool staged_counts = withdrawn != report_before_.end() && withdrawn->second.first == in.hash;
+            before = support_counts_at_risk(previous->id, staged_counts);
+            if (staged_counts)
+                for (const auto& [fact, n] : withdrawn->second.second) before[fact] = std::max(before[fact], n);
+        }
         if (!in.legacy_tombstone_hash.empty()) {
             auto carry = db_->prepare(
                 "INSERT OR IGNORE INTO fact_tombstones(source, ext_id, item_hash, fact_key) "
@@ -2646,6 +2777,7 @@ Result<long long> KgStore::put_prepared_item(const ItemInput& in, long long now)
                 return s;
         if (Status s = each("DELETE FROM chunks WHERE item_id=" + item_id + " AND id IN ", dropped); !s) return s;
         std::vector<long long> rechecked, adopted, added;
+        long long kept_count = 0, redated_count = 0, rechecked_count = 0;
         int ord = 0;
         for (const auto& c : in.chunks) {
             const long long existing_id = retained[static_cast<size_t>(ord)];
@@ -2657,7 +2789,12 @@ Result<long long> KgStore::put_prepared_item(const ItemInput& in, long long now)
                     if (Status s = update.run(); !s) return s;
                 }
                 ++ord;
-                if (recheck_retained(recorded ? &*recorded : nullptr, plan, previous, in, existing_id, c.at)) rechecked.push_back(existing_id);
+                const bool again = recheck_retained(recorded ? &*recorded : nullptr, plan, previous, in, existing_id, c.at);
+                if (again) rechecked.push_back(existing_id);
+                // As plan_item_change reports it: a re-dated passage, else a rechecked one, else kept.
+                if (old_dates.at(existing_id) != c.at) ++redated_count;
+                else if (again) ++rechecked_count;
+                else ++kept_count;
                 continue;
             }
             if (const auto ready = staged.find(ord); ready != staged.end() && ready->second.heading == c.heading &&
@@ -2701,12 +2838,66 @@ Result<long long> KgStore::put_prepared_item(const ItemInput& in, long long now)
             discard.bind(1, kRetiredSource).bind(2, kStagedSource).bind(3, key);
             if (Status s = discard.run(); !s) return s;
         }
+        if (report && (previous->hash != in.hash || !dropped.empty() || !added.empty() || redated_count || rechecked_count)) {
+            // The report is written with the revision; its facts are counted right after, outside this transaction
+            // (facts=-1 until then), so that a large switch does not hold the writer to count them.
+            auto revision = db_->prepare("SELECT sequence FROM knowledge_revisions WHERE item_id=?1 AND current=1");
+            revision.bind(1, id);
+            const long long sequence = revision.step() ? revision.col_int(0) : 0;
+            auto r = db_->prepare("INSERT INTO knowledge_change_reports(item_id,revision,created_at,added,kept,redated,rechecked,removed,facts,"
+                                  "unsupported) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,-1,0)");
+            r.bind(1, id).bind(2, sequence).bind(3, now).bind(4, static_cast<long long>(added.size())).bind(5, kept_count).bind(6, redated_count);
+            r.bind(7, rechecked_count).bind(8, static_cast<long long>(dropped.size()));
+            if (Status s = r.run(); !s) return s;
+            report_id = db_->last_insert_id();
+            // Retention: the newest 500 reports, none older than 90 days.
+            auto prune = db_->prepare("DELETE FROM knowledge_change_reports WHERE created_at<?1 OR id<=(SELECT id FROM knowledge_change_reports "
+                                      "ORDER BY id DESC LIMIT 1 OFFSET 500)");
+            prune.bind(1, now - 90LL * 24 * 60 * 60 * 1000);
+            if (Status s = prune.run(); !s) return s;
+        } else before.clear();
         auto sk = db_->prepare("DELETE FROM skipped WHERE source=?1 AND ext_id=?2");
         sk.bind(1, in.source).bind(2, in.ext_id);
         return sk.run();
     });
     if (!st) return st.error();
+    report_before_.erase(report_key);
     delete_orphan_entities(*db_);
+    if (report_id) {
+        // Other readers and writers go first; then the facts that lost support in the write, those left without any
+        // first, at most 1,000 listed. A write in that moment could still lower a count, and the report would then
+        // include it.
+        lock.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        lock.lock();
+        std::vector<ChangeReportFact> lost;
+        long long unsupported = 0;
+        auto count = db_->prepare("SELECT count(*) FROM knowledge_support_sets WHERE fact_id=?1 AND state IN ('current','unverified')");
+        for (const auto& [fact, n] : before) {
+            count.reset();
+            count.bind(1, fact);
+            const long long now_count = count.step() ? count.col_int(0) : 0;
+            if (now_count >= n) continue;
+            lost.push_back({fact, n, now_count});
+            if (!now_count) ++unsupported;
+        }
+        std::sort(lost.begin(), lost.end(), [](const ChangeReportFact& a, const ChangeReportFact& b) {
+            return std::pair{a.after > 0, a.fact_id} < std::pair{b.after > 0, b.fact_id};
+        });
+        const auto counted = db_->transaction([&]() -> Status {
+            auto entry = db_->prepare("INSERT INTO knowledge_change_report_facts(report_id,fact_id,before,after) "
+                                      "SELECT ?1,?2,?3,?4 WHERE EXISTS(SELECT 1 FROM knowledge_change_reports WHERE id=?1)");
+            for (size_t k = 0; k < std::min<size_t>(lost.size(), 1000); ++k) {
+                entry.reset();
+                entry.bind(1, report_id).bind(2, lost[k].fact_id).bind(3, lost[k].before).bind(4, lost[k].after);
+                if (Status s = entry.run(); !s) return s;
+            }
+            auto done = db_->prepare("UPDATE knowledge_change_reports SET facts=?2,unsupported=?3 WHERE id=?1");
+            done.bind(1, report_id).bind(2, static_cast<long long>(lost.size())).bind(3, unsupported);
+            return done.run();
+        });
+        (void)counted;  // if not, the report stays marked as not counted (facts=-1)
+    }
     return id;
 }
 

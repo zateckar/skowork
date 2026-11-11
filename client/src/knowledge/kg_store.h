@@ -37,8 +37,10 @@ inline constexpr int kKgEvidenceSchemaVersion = 6;
 inline constexpr int kKgCategoryChecksSchemaVersion = 7;
 // Durable consistency-analysis progress, inconsistency kinds and cleared rechecks (task 8.2).
 inline constexpr int kKgConsistencySchemaVersion = 8;
-// The latest schema: revision-bound operation previews with paged entries (task 8.3).
-inline constexpr int kKgSchemaVersion = 9;
+// Revision-bound operation previews with paged entries (task 8.3).
+inline constexpr int kKgPreviewSchemaVersion = 9;
+// The latest schema: durable Source change reports (task 8.4).
+inline constexpr int kKgSchemaVersion = 10;
 // The longest chain of facts a derivation may form through required facts; the evidence schema enforces it.
 inline constexpr int kMaxDerivationDepth = 32;
 // Superseded revisions of an item whose excerpts are kept as history beside the current one.
@@ -123,6 +125,20 @@ struct PreviewEntry {
     long long ref = 0;
     int before = 0, after = 0;
     std::string text;
+};
+
+// A durable report of one revision of an indexed item (Incremental Source Reconciliation, task 8.4): how its passages
+// changed and how many facts lost independent support when it was written. It holds ids and counts only.
+struct ChangeReport {
+    long long id = 0, item_id = 0, revision = 0, created_at = 0;
+    long long added = 0, kept = 0, redated = 0, rechecked = 0, removed = 0;
+    long long facts = 0, unsupported = 0;  // all facts that lost support; those left with none
+    std::string source, ext_id, title;
+};
+
+// A fact a revision took support from: independent supports before and right after the write.
+struct ChangeReportFact {
+    long long fact_id = 0, before = 0, after = 0;
 };
 
 struct PreparedItemRemoval {
@@ -388,6 +404,14 @@ public:
     Status delete_item_previews(const std::string& source, const std::string& ext_id);
     Status purge_expired_previews(long long now);
 
+    // ---- Source change reports (Incremental Source Reconciliation; task 8.4) ----
+    // Written by put_item in the transaction of an item's new revision; deleted with the item. Newest first; efore_id
+    // 0 starts at the newest, item_id 0 lists every item.
+    std::vector<ChangeReport> change_reports(long long before_id, int limit, long long item_id = 0);
+    std::optional<ChangeReport> change_report(long long id);
+    // The report's facts, those left without support first.
+    std::vector<ChangeReportFact> change_report_facts(long long report_id, int offset, int limit);
+
     // ---- Sources, folders, exclusions ----
     SourceState source(const std::string& kind);
     void set_source(const SourceState& s);
@@ -576,7 +600,13 @@ private:
     Status prepare_item_removal_steps(const std::string& source, const std::string& ext_id);
     Result<KnowledgeImpactPreview> preview_evidence_snapshot(std::unordered_set<long long> removed,
                                                             std::optional<long long> item_id);
+    // Facts that the item's revision may take support from, with their independent supports now.
+    // indings_only: only facts with findings on the item's own passages (after a stepped withdrawal).
+    std::map<long long, long long> support_counts_at_risk(long long item_id, bool findings_only);
     std::unique_ptr<Database> db_;
+    // Support counts taken before a large change withdrew findings in steps, by hidden_key(source, ext_id) and content
+    // hash, so that its change report still starts from them. Guarded by the database mutex.
+    std::map<std::string, std::pair<std::string, std::map<long long, long long>>> report_before_;
 };
 
 // "zprava o rozpoctu" -> "\"zprava\" OR \"o\" OR \"rozpoctu\"" (FTS5 query of the words, quoted).

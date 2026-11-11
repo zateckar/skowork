@@ -2579,6 +2579,211 @@ TEST(KnowledgeImpactPreview, ChangedFilePolicyOrGraphRequiresAFreshConfirmation)
     EXPECT_EQ(static_cast<long long>(kg.svc->store().chunks_of_item(kg.svc->store().item("files", kg.file_path("big.txt"))->id).size()), added);
 }
 
+// improve-skowork-and-knowledge-control 8.4: every revision of an indexed item leaves a durable change report: how its
+// passages changed and which facts lost support, also when a large change withdrew them in steps beforehand. A report
+// is shown only while its item may be read, and goes with the item.
+TEST(KnowledgeChangeReports, RevisionsRecordLostSupportDurablyAndGoWithTheirItem) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    RpcRegistry rpc;
+    register_knowledge_rpc(rpc, [&kg] { return kg.svc.get(); }, nullptr);
+    const auto call = [&](const char* method, const json& params) { return (*rpc.find(method, false))(params); };
+    for (const char* name : {"a.txt", "b.txt"}) {
+        write_file(kg.folder / name, "Jana Nováková leads Phoenix.");
+        ASSERT_TRUE(kg.svc->add_document(kg.file_path(name)));
+        kg.idle();
+    }
+    const long long fact = kg.count("SELECT id FROM knowledge_facts WHERE predicate='leads'");
+    ASSERT_GT(fact, 0);
+    auto listed = call("knowledge.changes", json::object());
+    ASSERT_TRUE(listed);
+    EXPECT_TRUE((*listed)["items"].empty());  // a first import is not a change
+
+    // A watched revision removes one of two supports: the fact stays and the removed support is reported.
+    write_file(kg.folder / "a.txt", "The canteen opens at noon.");
+    kg.svc->sweep_now();
+    kg.idle();
+    kg.make(false);  // durable
+    listed = call("knowledge.changes", json::object());
+    ASSERT_TRUE(listed);
+    ASSERT_EQ((*listed)["items"].size(), 1u) << listed->dump(2);
+    json report = (*listed)["items"][0];
+    EXPECT_EQ(report["title"], "a.txt");
+    EXPECT_EQ(report["revision"], 2);
+    EXPECT_EQ(report["passages"]["added"], 1);
+    EXPECT_EQ(report["passages"]["removed"], 1);
+    EXPECT_EQ(report["facts"]["lost_support"], 1);
+    EXPECT_EQ(report["facts"]["weakened"], 1);
+    EXPECT_EQ(report["facts"]["unsupported"], 0);
+    auto detail = call("knowledge.change", {{"id", report["id"]}});
+    ASSERT_TRUE(detail);
+    ASSERT_EQ((*detail)["entries"].size(), 1u);
+    EXPECT_EQ((*detail)["entries"][0]["fact_id"], fact);
+    EXPECT_EQ((*detail)["entries"][0]["effect"], "weakened");
+    EXPECT_EQ((*detail)["entries"][0]["supports_before"], 2);
+    EXPECT_EQ((*detail)["entries"][0]["supports_after"], 1);
+    EXPECT_EQ((*detail)["entries"][0]["state"], "current");
+    EXPECT_EQ((*detail)["entries"][0]["fact"]["predicate"], "leads");
+
+    // The last support goes: the fact is reported unsupported and is not current knowledge any more.
+    write_file(kg.folder / "b.txt", "The canteen closes at six.");
+    kg.svc->sweep_now();
+    kg.idle();
+    listed = call("knowledge.changes", json::object());
+    ASSERT_TRUE(listed);
+    ASSERT_EQ((*listed)["items"].size(), 2u);
+    report = (*listed)["items"][0];  // newest first
+    EXPECT_EQ(report["title"], "b.txt");
+    EXPECT_EQ(report["facts"]["unsupported"], 1);
+    detail = call("knowledge.change", {{"id", report["id"]}});
+    ASSERT_TRUE(detail);
+    EXPECT_EQ((*detail)["entries"][0]["effect"], "unsupported");
+    EXPECT_NE((*detail)["entries"][0]["state"], "current");
+    // Paging by the last id seen.
+    auto older = call("knowledge.changes", {{"limit", 1}});
+    ASSERT_TRUE(older);
+    ASSERT_EQ((*older)["items"].size(), 1u);
+    older = call("knowledge.changes", {{"limit", 1}, {"before", (*older)["next"]}});
+    ASSERT_TRUE(older);
+    ASSERT_EQ((*older)["items"].size(), 1u);
+    EXPECT_EQ((*older)["items"][0]["title"], "a.txt");
+    EXPECT_FALSE(older->contains("next"));
+
+    // An unchanged check writes no report; a file the user may no longer read hides its reports.
+    kg.svc->sweep_now();
+    kg.idle();
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_change_reports"), 2);
+    {
+        const std::lock_guard lock(kg.mx);
+        kg.denied_read_paths.insert(kg.file_path("b.txt"));
+    }
+    listed = call("knowledge.changes", json::object());
+    ASSERT_EQ((*listed)["items"].size(), 1u);
+    EXPECT_EQ((*listed)["items"][0]["title"], "a.txt");
+    EXPECT_FALSE(call("knowledge.change", {{"id", report["id"]}}));
+    {
+        const std::lock_guard lock(kg.mx);
+        kg.denied_read_paths.clear();
+    }
+    // Forgetting the item deletes its reports.
+    const auto a = kg.svc->store().item("files", kg.file_path("a.txt"));
+    ASSERT_TRUE(a);
+    ASSERT_TRUE(kg.svc->forget_item(a->id));
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_change_reports WHERE item_id=" + std::to_string(a->id)), 0);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_change_report_facts WHERE report_id NOT IN (SELECT id FROM knowledge_change_reports)"), 0);
+
+    // A large change withdraws its findings in steps before the switch; its report still counts them.
+    auto& store = kg.svc->store();
+    ItemInput large{"threads", "large", "Large", "workbench://thread/large", "l1", 100, 100, 1, {}, false};
+    for (int n = 0; n < 2100; ++n) large.chunks.push_back({"", "Passage " + std::to_string(n) + ".", 0});
+    const auto large_id = store.put_item(large, 200);
+    ASSERT_TRUE(large_id);
+    const auto chunks = store.chunks_of_item(*large_id);
+    const long long phoenix = store.resolve_entity("Project", "Phoenix", "", 1);
+    for (int n = 0; n < 3; ++n)
+        ASSERT_TRUE(store.add_relation(phoenix, "milestone", store.resolve_entity("Date", "M" + std::to_string(n), "", 1), 0.9, "", "",
+                                       chunks.at(static_cast<size_t>(n)).id));
+    ItemInput revised = large;
+    revised.hash = "l2";
+    for (auto& c : revised.chunks) c.text += " Revised.";
+    ASSERT_TRUE(store.prepare_item_change(revised));
+    EXPECT_EQ(kg.count("SELECT count(*) FROM relations WHERE predicate='milestone'"), 0);  // withdrawn before the switch
+    ASSERT_TRUE(store.put_prepared_item(revised, 300));
+    ASSERT_TRUE(store.finish_item_changes());
+    const auto reports = store.change_reports(0, 10, *large_id);
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_EQ(reports[0].removed, 2100);
+    EXPECT_EQ(reports[0].added, 2100);
+    EXPECT_EQ(reports[0].facts, 3);
+    EXPECT_EQ(reports[0].unsupported, 3);
+}
+
+// 8.4: categorization and consistency checking share the extraction budget. When it is spent, the model is unavailable
+// or background work is deferred, search keeps working and unfinished analysis stays visibly pending; it resumes after
+// the budget resets and after a restart without repeating completed work, most recently changed knowledge first.
+TEST(KnowledgeAnalysisBudget, SearchStaysUsableAndAnalysisResumesChangedKnowledgeFirst) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    constexpr int kFiles = 9;
+    for (int i = 0; i < kFiles; ++i) {
+        const std::string name = "m" + std::to_string(i) + ".txt";
+        write_file(kg.folder / name, "Phoenix milestone note " + std::to_string(i) + ".");
+        ASSERT_TRUE(kg.svc->add_document(kg.file_path(name)));
+        kg.idle();
+    }
+    auto& store = kg.svc->store();
+    const long long phoenix = store.resolve_entity("Project", "Phoenix", "", 1);
+    const auto add_fact = [&](int file, const std::string& date) -> long long {
+        const auto it = store.item("files", kg.file_path("m" + std::to_string(file) + ".txt"));
+        EXPECT_TRUE(it);
+        if (!it) return 0;
+        const long long relation =
+            store.add_relation(phoenix, "milestone", store.resolve_entity("Date", date, "", 1), 0.9, "", "", store.chunks_of_item(it->id).at(0).id);
+        const auto f = relation ? store.fact_of_relation(*store.relation(relation)) : std::nullopt;
+        EXPECT_TRUE(f);
+        return f.value_or(0);
+    };
+    std::vector<long long> facts;
+    for (int i = 0; i < kFiles; ++i) facts.push_back(add_fact(i, "M" + std::to_string(i)));
+    ASSERT_EQ(kg.svc->status()["consistency"]["pending"], kFiles);
+    std::vector<std::string> prompts;
+    kg.gw.consistency = [&](const model::ChatRequest& r) {
+        prompts.push_back(r.messages.back().content);
+        return std::string(R"({"categories": [], "conflicts": []})");
+    };
+    const auto compared = [](const std::string& prompt, long long fact) {
+        return prompt.find("Compare fact " + std::to_string(fact) + " with facts") != std::string::npos;
+    };
+
+    // One analysis request is left in today's shared budget: it takes the newest facts, then the rest waits, visibly.
+    const long long used = kg.svc->status()["budget"]["extract_calls_used"].get<long long>();
+    kg.set("knowledge.extraction_daily_calls", used + 1);
+    kg.idle();
+    ASSERT_EQ(prompts.size(), 1u);
+    EXPECT_TRUE(compared(prompts[0], facts[kFiles - 1]));
+    EXPECT_FALSE(compared(prompts[0], facts[0]));
+    auto status = kg.svc->status();
+    EXPECT_EQ(status["budget"]["extract_exhausted"], true);
+    EXPECT_EQ(status["consistency"]["pending"], kFiles - 3);
+
+    // Full-text search works without the model and without budget.
+    kg.gw.offline = true;
+    kg.gw.chat_failure = model::code::timeout;
+    EXPECT_FALSE(kg.svc->search("milestone note", {}).passages.empty());
+    kg.gw.offline = false;
+    kg.gw.chat_failure.clear();
+
+    // A revised file drops its fact and gains a new one, while the budget is spent; then the client restarts.
+    write_file(kg.folder / "m0.txt", "Phoenix milestone note 0, moved.");
+    kg.svc->sweep_now();
+    kg.idle();
+    const long long moved = add_fact(0, "M0 moved");
+    kg.make(false);
+    kg.idle();
+    EXPECT_EQ(prompts.size(), 1u);
+    EXPECT_EQ(kg.svc->status()["consistency"]["pending"], kFiles - 3);  // facts[0] lost support, `moved` is new
+
+    // A new day resets the budget, but nothing runs while background work is deferred.
+    kg.next_day();
+    kg.deferred = true;
+    kg.idle();
+    EXPECT_EQ(prompts.size(), 1u);
+    kg.deferred = false;
+    kg.idle();
+    // The changed knowledge goes before the older backlog, and every fact is compared once.
+    ASSERT_GE(prompts.size(), 2u);
+    EXPECT_TRUE(compared(prompts[1], moved));
+    EXPECT_EQ(kg.svc->status()["consistency"]["pending"], 0);
+    std::vector<long long> seen;
+    for (const auto& p : prompts)
+        for (long long f : facts)
+            if (compared(p, f)) seen.push_back(f);
+    for (const auto& p : prompts)
+        if (compared(p, moved)) seen.push_back(moved);
+    std::set<long long> once(seen.begin(), seen.end());
+    EXPECT_EQ(once.size(), seen.size());
+    EXPECT_EQ(seen.size(), static_cast<size_t>(kFiles));  // eight remaining facts and the new one
+    EXPECT_FALSE(once.count(facts[0]));  // it lost its support before it was compared
+}
+
 // 8.2: with consistency or extraction off, the model unavailable, a Source turned off during analysis or the budget
 // spent, nothing is recorded and the facts stay pending; an answer citing an invented fact is refused as a whole.
 TEST(KnowledgeConsistency, UnavailableOrBudgetLimitedAnalysisStaysPendingAndUnsafeAnswersAreRefused) {
@@ -3213,6 +3418,68 @@ WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
     });
     std::cout << "[ knowledge list ] encrypted 10000-item / 100000-relation service p95 ms: list+counts " << list
               << ", status " << status << ", item reader " << reader << ", list+counts with 9800 exclusions " << excluded_list << '\n';
+}
+
+// Explicit scratch qualification for task 8.4, not part of the ordinary suite: 10,000 items and 100,000 facts in the
+// evidence schema (no legacy relations), measured through the service and the store as the UI and the scheduler call them.
+TEST(KnowledgeRetrieval, DISABLED_EvidenceFactListScale) {
+    Kg kg({{"knowledge.extraction", "on"}});
+    auto& db = kg.svc->store().db();
+    const auto setup = db.transaction([&]() -> wb::Status {
+        return db.exec(R"sql(
+WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000)
+ INSERT INTO entities(id,type,name,key) SELECT x,'project','Project '||x,'project '||x FROM n;
+INSERT INTO entities(id,type,name,key) VALUES(1001,'date','2026','2026');
+WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+ INSERT INTO items(id,source,ext_id,title,ref,updated_at)
+ SELECT x,'threads','thread-'||x,'Thread '||x,'workbench://thread/thread-'||x,x FROM n;
+INSERT INTO chunks(id,item_id,ord,text) SELECT id,id,0,'Indexed source passage' FROM items;
+INSERT INTO knowledge_revisions(id,item_id,sequence,source_hash,indexed_at,current) SELECT id,id,1,'hash',1,1 FROM items;
+INSERT INTO knowledge_evidence(id,revision_id,chunk_id,excerpt,precision) SELECT id,id,id,'Indexed source passage','passage' FROM items;
+WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
+ INSERT INTO knowledge_facts(id,subject,predicate,object) SELECT x,((x-1)%1000)+1,'fact-'||x,1001 FROM n;
+INSERT INTO relations(id,subject,predicate,object,confidence,chunk_id) SELECT id,subject,predicate,object,0.9,(id-1)/10+1 FROM knowledge_facts;
+INSERT INTO knowledge_support_sets(id,fact_id,legacy_relation_id,state) SELECT id,id,id,'current' FROM knowledge_facts;
+INSERT INTO knowledge_support_evidence(support_id,evidence_id) SELECT id,(id-1)/10+1 FROM knowledge_support_sets;
+INSERT INTO knowledge_categories(id,name,normalized_name) VALUES(1,'Projects','projects');
+INSERT INTO knowledge_category_assignments(fact_id,category_id,decision,reason) SELECT id,1,'manual','' FROM knowledge_facts WHERE id%2=0;
+INSERT INTO knowledge_category_checks(fact_id,checked_at) SELECT id,1 FROM knowledge_facts;
+INSERT INTO knowledge_consistency_checks(fact_id,checked_at) SELECT id,1 FROM knowledge_facts;
+WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<500)
+ INSERT INTO knowledge_change_reports(id,item_id,revision,created_at,added,removed,facts,unsupported) SELECT x,x,2,x,1,1,10,5 FROM n;
+INSERT INTO knowledge_change_report_facts(report_id,fact_id,before,after) SELECT (fact_id-1)/10+1,fact_id,2,fact_id%2
+ FROM knowledge_support_sets WHERE fact_id<=5000;
+)sql");
+    });
+    ASSERT_TRUE(setup) << setup.error().message;
+    const auto measure = [](const auto& f) {
+        std::vector<double> samples;
+        f();  // Warm the database and executable pages.
+        for (int i = 0; i < 20; ++i) {
+            const auto start = std::chrono::steady_clock::now();
+            f();
+            samples.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        }
+        std::sort(samples.begin(), samples.end());
+        return samples[18];  // nearest-rank p95 of 20 measured samples
+    };
+    KnowledgeFilter all, projects;
+    projects.category = 1;
+    size_t reader_facts = 0, entity_facts = 0, filtered_facts = 0;
+    const double list = measure([&] { EXPECT_EQ(kg.svc->browse("threads", "", 200).size(), 200u); });
+    const double reader = measure([&] { reader_facts = kg.svc->item_detail(5000, all)["facts"].size(); });
+    const double filtered = measure([&] { filtered_facts = kg.svc->item_detail(5000, projects)["facts"].size(); });
+    const double entity = measure([&] { entity_facts = kg.svc->entity_profile(500, all)["relations"].size(); });
+    const double changes = measure([&] { EXPECT_EQ(kg.svc->change_reports(0, 50)["items"].size(), 50u); });
+    const double change = measure([&] { EXPECT_TRUE(kg.svc->change_report(250, 0, 50)); });
+    // The scheduler's pick when every fact is analyzed (the full scan) and when 1,000 changed facts wait.
+    const double idle_pick = measure([&] { EXPECT_TRUE(kg.svc->store().consistency_work(3, 5, 2, {}).facts.empty()); });
+    ASSERT_TRUE(db.exec("DELETE FROM knowledge_consistency_checks WHERE fact_id>99000"));
+    const double busy_pick = measure([&] { EXPECT_FALSE(kg.svc->store().consistency_work(3, 5, 2, {}).facts.empty()); });
+    std::cout << "[ knowledge facts ] encrypted 10000-item / 100000-fact evidence schema, service p95 ms: list " << list << ", item reader "
+              << reader << " (" << reader_facts << " facts), category-filtered reader " << filtered << " (" << filtered_facts
+              << "), entity profile " << entity << " (" << entity_facts << "), change reports " << changes << ", one report " << change
+              << "; analysis pick with nothing pending " << idle_pick << ", with 1000 pending " << busy_pick << '\n';
 }
 
 TEST(KnowledgeRetrieval, HiddenSearchCandidatesDoNotCrowdOutVisibleResults) {

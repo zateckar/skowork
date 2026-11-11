@@ -244,6 +244,10 @@ A Source update SHALL invalidate evidence from changed or removed passages and r
 - **WHEN** a fact's sole supporting passage is replaced and extraction is temporarily unavailable
 - **THEN** the old fact is marked unsupported or awaiting recheck and is excluded from current-fact answers until valid support is established
 
+#### Scenario: Change report of a large revision
+- **WHEN** a revision replaces thousands of passages and their findings are withdrawn in steps before it becomes current
+- **THEN** its change report still counts every fact that lost support, it is shown only while its item may be read, and forgetting the item deletes it
+
 #### Scenario: Large Source revision
 - **WHEN** a revision replaces thousands of passages of one Source
 - **THEN** search and knowledge answers see either the previous or the new content of that Source in full, never a mixture or the not-yet-current passages, and other knowledge reads and writes are not held behind the revision beyond the interactive target

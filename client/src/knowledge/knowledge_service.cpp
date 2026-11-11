@@ -2580,18 +2580,97 @@ Result<json> KnowledgeService::preview_page(const std::string& token, const std:
         } else {
             j["supports_before"] = e.before;
             j["supports_after"] = e.after;
-            // A fact is described only while the user may read one of its citations.
-            const auto state = store_->fact_state(e.ref, false);
-            bool visible = false;
-            if (state)
-                for (const auto& c : state->citations)
-                    if (const auto it = store_->item(c.item_id); it && item_visible(*it)) visible = true;
-            if (visible) j["fact"] = fact_row_json(state->fact);
-            else j["withheld"] = true;
+            j.update(described_fact(e.ref));
         }
         entries.push_back(std::move(j));
     }
     return json{{"kind", kind}, {"offset", std::max(0, offset)}, {"total", store_->preview_entry_count(token, kind)}, {"entries", std::move(entries)}};
+}
+
+json KnowledgeService::described_fact(long long fact_id) {
+    // A fact is described only while the user may read one of its citations, retained ones included: a fact that just
+    // lost its last support is still explained by the excerpts it had.
+    const auto state = store_->fact_state(fact_id, true);
+    if (!state) return {{"withheld", true}};
+    bool visible = false;
+    for (const auto& c : state->citations)
+        if (const auto it = store_->item(c.item_id); it && item_visible(*it)) visible = true;
+    if (!visible) return {{"withheld", true}};
+    const auto current = store_->fact_state(fact_id, false);
+    return {{"fact", fact_row_json(state->fact)}, {"state", current ? current->state : std::string("unsupported")}};
+}
+
+// ---- Source change reports (Incremental Source Reconciliation; task 8.4) ------------------------------------------------
+
+namespace {
+
+json change_report_json(const ChangeReport& r) {
+    return {{"id", r.id},
+            {"item_id", r.item_id},
+            {"source", r.source},
+            {"title", r.title},
+            {"revision", r.revision},
+            {"at", r.created_at},
+            {"passages", {{"added", r.added}, {"kept", r.kept}, {"redated", r.redated}, {"rechecked", r.rechecked}, {"removed", r.removed}}},
+            // facts<0: written with the revision but not counted yet (or the count failed).
+            {"facts", r.facts < 0 ? json{{"counted", false}}
+                                  : json{{"counted", true}, {"lost_support", r.facts}, {"unsupported", r.unsupported}, {"weakened", r.facts - r.unsupported}}},
+            // Findings of changed passages are extracted again after the report; what they add is not part of it.
+            {"pending", r.added + r.redated + r.rechecked > 0 ? json::array({"extraction"}) : json::array()}};
+}
+
+}  // namespace
+
+json KnowledgeService::change_reports(long long before_id, int limit, long long item_id) {
+    limit = std::clamp(limit, 1, 200);
+    json items = json::array();
+    long long cursor = std::max(0LL, before_id), next = 0;
+    // Reports of items the user may not read now are skipped, not counted; at most 5,000 are scanned per page.
+    for (int scanned = 0; static_cast<int>(items.size()) < limit && scanned < 5000;) {
+        const auto page = store_->change_reports(cursor, 200, item_id);
+        if (page.empty()) break;
+        for (const auto& r : page) {
+            ++scanned;
+            cursor = r.id;
+            ItemRow it;
+            it.id = r.item_id;
+            it.source = r.source;
+            it.ext_id = r.ext_id;
+            if (!item_visible(it)) continue;
+            items.push_back(change_report_json(r));
+            if (static_cast<int>(items.size()) == limit) {
+                next = r.id;
+                break;
+            }
+        }
+        if (page.size() < 200) break;
+    }
+    json out = {{"items", std::move(items)}};
+    if (next && !store_->change_reports(next, 1, item_id).empty()) out["next"] = next;
+    return out;
+}
+
+Result<json> KnowledgeService::change_report(long long id, int offset, int limit) {
+    const auto r = store_->change_report(id);
+    if (!r) return make_error("not_found", "No such change report.");
+    ItemRow it;
+    it.id = r->item_id;
+    it.source = r->source;
+    it.ext_id = r->ext_id;
+    if (!item_visible(it)) return make_error("not_found", "No such change report.");
+    json out = change_report_json(*r);
+    json facts = json::array();
+    offset = std::max(0, offset);
+    for (const auto& f : store_->change_report_facts(id, offset, std::clamp(limit, 1, 200))) {
+        json j = {{"fact_id", f.fact_id}, {"supports_before", f.before}, {"supports_after", f.after},
+                  {"effect", f.after ? "weakened" : "unsupported"}};
+        j.update(described_fact(f.fact_id));
+        facts.push_back(std::move(j));
+    }
+    out["offset"] = offset;
+    out["listed"] = std::clamp<long long>(r->facts, 0, 1000);  // at most 1,000 facts are kept per report
+    out["entries"] = std::move(facts);
+    return out;
 }
 
 Status KnowledgeService::cancel_preview(const std::string& token) {

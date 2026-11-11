@@ -95,6 +95,13 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
         return s.confirm_preview(jstr(p, "token"), p.value("accept_incomplete", false));
     });
     add("knowledge.preview.cancel", [done](Svc& s, const json& p) { return done(s.cancel_preview(jstr(p, "token"))); });
+    // Source change reports: what each revision of an indexed item changed and which facts lost support.
+    add("knowledge.changes", [](Svc& s, const json& p) -> Result<json> {
+        return s.change_reports(jint(p, "before", 0), static_cast<int>(jint(p, "limit", 50)), jint(p, "item_id", 0));
+    });
+    add("knowledge.change", [](Svc& s, const json& p) {
+        return s.change_report(jint(p, "id"), static_cast<int>(jint(p, "offset", 0)), static_cast<int>(jint(p, "limit", 50)));
+    });
     // A citation of a file: opened only when it is an indexed item of the files Source, never an arbitrary path.
     add("knowledge.open", [done, open_file](Svc& s, const json& p) -> Result<json> {
         const std::string ref = jstr(p, "ref");
