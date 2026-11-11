@@ -313,6 +313,10 @@ bool KnowledgeService::excluded_item(const std::string& source, const std::strin
 
 Status KnowledgeService::apply_exclusions() {
     const std::lock_guard sharing_lock(share_mx_);
+    return apply_exclusions_locked();
+}
+
+Status KnowledgeService::apply_exclusions_locked() {
     const auto cfg = config();
     const auto remove = [&](const std::string& source, const std::string& id) -> Status {
         const std::lock_guard db_lock(store_->db().mutex());
@@ -462,58 +466,52 @@ void KnowledgeService::file_error(const std::string& path, const std::string& er
     store_->touch_source("files", updated, shown);
 }
 
-void KnowledgeService::index_file(const std::string& path, int priority) {
+KnowledgeService::FileRead KnowledgeService::read_file_item(const std::string& path, int priority, bool skip_unchanged) {
+    FileRead out;
     const auto cfg = config();
     std::error_code ec;
     const auto p = fs_path(path);
     if (env_.read_permitted && !env_.read_permitted(path)) {
-        store_->remove_item("files", path);
-        store_->set_skipped("files", path, "not permitted by policy");
-        file_error(path, {});
-        return;
+        out.skip = "not permitted by policy";
+        return out;
     }
     const auto size = std::filesystem::file_size(p, ec);
     if (ec) {
         // A missing path can also mean an unavailable drive. The next successful folder scan decides deletion.
-        file_error(path, "Cannot read " + path + ": " + ec.message());
-        return;
+        out.error = "Cannot read " + path + ": " + ec.message();
+        return out;
     }
     const std::string kind = file_kind(path);
     if (kind.empty()) {
-        store_->remove_item("files", path);
-        store_->set_skipped("files", path, "unsupported type");
-        file_error(path, {});
-        return;
+        out.skip = "unsupported type";
+        return out;
     }
     if (static_cast<long long>(size) > cfg.max_file_mb * 1024 * 1024) {
-        store_->remove_item("files", path);
-        store_->set_skipped("files", path, "larger than " + std::to_string(cfg.max_file_mb) + " MB");
-        file_error(path, {});
-        return;
+        out.skip = "larger than " + std::to_string(cfg.max_file_mb) + " MB";
+        return out;
     }
     const auto write_time = std::filesystem::last_write_time(p, ec);
     if (ec) {
-        file_error(path, "Cannot read " + path + ": " + ec.message());
-        return;
+        out.error = "Cannot read " + path + ": " + ec.message();
+        return out;
     }
     const auto mtime = write_time.time_since_epoch().count();
     const std::string legacy_hash = std::to_string(size) + ":" + std::to_string(mtime);
     auto snapshot = read_file_snapshot(p, size);
     if (!snapshot) {
-        file_error(path, "Cannot read " + path + ": " + snapshot.error().message);
-        return;
+        out.error = "Cannot read " + path + ": " + snapshot.error().message;
+        return out;
     }
     auto fingerprint = file_content_hash(*snapshot);
     if (!fingerprint) {
-        file_error(path, "Cannot read " + path + ": " + fingerprint.error().message);
-        return;
+        out.error = "Cannot read " + path + ": " + fingerprint.error().message;
+        return out;
     }
     const std::string hash = *fingerprint;
+    // Whether the file still has the content read above; otherwise `out` says why not.
     const auto still_current = [&]() {
         if (env_.read_permitted && !env_.read_permitted(path)) {
-            store_->remove_item("files", path);
-            store_->set_skipped("files", path, "not permitted by policy");
-            file_error(path, {});
+            out.skip = "not permitted by policy";
             return false;
         }
         std::error_code check_ec;
@@ -525,62 +523,54 @@ void KnowledgeService::index_file(const std::string& path, int priority) {
                 const auto current_hash = current ? file_content_hash(*current) : Result<std::string>(current.error());
                 if (current_hash && *current_hash == hash) return true;
                 if (!current_hash) {
-                    file_error(path, "Cannot read " + path + ": " + current_hash.error().message);
+                    out.error = "Cannot read " + path + ": " + current_hash.error().message;
                     return false;
                 }
             }
         }
-        if (check_ec) file_error(path, "Cannot read " + path + ": " + check_ec.message());
-        else file_error(path, "File changed while indexing " + path + "; another indexing attempt is needed.");
+        if (check_ec) out.error = "Cannot read " + path + ": " + check_ec.message();
+        else out.error = "File changed while indexing " + path + "; another indexing attempt is needed.";
         return false;
     };
-    if (store_->item_hash("files", path) == hash) {
-        if (still_current()) file_error(path, {});
-        return;
+    if (skip_unchanged && store_->item_hash("files", path) == hash) {
+        out.unchanged = still_current();
+        return out;
     }
     std::vector<Chunk> chunks;
     if (is_document_kind(kind)) {
         if (!env_.extract_document || !env_.index) {
-            file_error(path, "Cannot read " + path + ": document extraction is unavailable.");
-            return;
+            out.error = "Cannot read " + path + ": document extraction is unavailable.";
+            return out;
         }
         auto text = env_.extract_document(kind, *snapshot);
-        if (!still_current()) return;
+        if (!still_current()) return out;
         if (!text) {
-            if (text.error().code == "corrupt") {
-                store_->remove_item("files", path);
-                store_->set_skipped("files", path, "text extraction failed (" + text.error().code + ")");
-                file_error(path, {});
-            } else file_error(path, "Cannot extract " + path + ": " + text.error().message);
-            return;
+            if (text.error().code == "corrupt") out.skip = "text extraction failed (" + text.error().code + ")";
+            else out.error = "Cannot extract " + path + ": " + text.error().message;
+            return out;
         }
         auto r = env_.index("index.chunk", {{"kind", kind}, {"text", *text}});
-        if (!still_current()) return;
+        if (!still_current()) return out;
         if (!r) {
-            file_error(path, "Cannot index " + path + ": " + r.error().message);
-            return;
+            out.error = "Cannot index " + path + ": " + r.error().message;
+            return out;
         }
         chunks = chunks_from_json(r->value("chunks", json::array()));
     } else {
         if (!env_.index) {
-            file_error(path, "Cannot read " + path + ": the index worker is unavailable.");
-            return;
+            out.error = "Cannot read " + path + ": the index worker is unavailable.";
+            return out;
         }
         auto r = env_.index("index.read", {{"path", path}, {"kind", kind}, {"max_bytes", cfg.max_file_mb * 1024 * 1024}});
-        if (!still_current()) return;
+        if (!still_current()) return out;
         if (!r) {
-            if (r.error().code == "binary" || r.error().code == "too_large") {
-                store_->remove_item("files", path);
-                store_->set_skipped("files", path, r.error().code == "binary" ? "not text" : "too large");
-                file_error(path, {});
-            } else {
-                file_error(path, "Cannot read " + path + ": " + r.error().message);
-            }
-            return;
+            if (r.error().code == "binary" || r.error().code == "too_large") out.skip = r.error().code == "binary" ? "not text" : "too large";
+            else out.error = "Cannot read " + path + ": " + r.error().message;
+            return out;
         }
         if (jstr(*r, "hash") != content_hash(*snapshot)) {
-            file_error(path, "File changed while indexing " + path + "; another indexing attempt is needed.");
-            return;
+            out.error = "File changed while indexing " + path + "; another indexing attempt is needed.";
+            return out;
         }
         chunks = chunks_from_json(r->value("chunks", json::array()));
     }
@@ -588,8 +578,28 @@ void KnowledgeService::index_file(const std::string& path, int priority) {
     const long long modified = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::file_clock::to_sys(write_time).time_since_epoch())
                                    .count();
-    ItemInput in{"files", path, name, path, hash, modified, modified, priority, std::move(chunks), true};
-    in.legacy_tombstone_hash = legacy_hash;
+    out.input = ItemInput{"files", path, name, path, hash, modified, modified, priority, std::move(chunks), true};
+    out.input->legacy_tombstone_hash = legacy_hash;
+    return out;
+}
+
+void KnowledgeService::index_file(const std::string& path, int priority) {
+    auto read = read_file_item(path, priority, true);
+    if (!read.skip.empty()) {
+        store_->remove_item("files", path);
+        store_->set_skipped("files", path, read.skip);
+        file_error(path, {});
+        return;
+    }
+    if (!read.error.empty()) {
+        file_error(path, read.error);
+        return;
+    }
+    if (read.unchanged || !read.input) {
+        file_error(path, {});
+        return;
+    }
+    ItemInput& in = *read.input;
     const auto current_cfg = config();
     bool eligible = false;
     std::string write_error;
@@ -2251,6 +2261,7 @@ Status KnowledgeService::forget_source(const std::string& kind) {
         const std::lock_guard lock(share_mx_);
         if (store_->remove_source(kind, true) < 0) return make_error("storage", "The Source could not be forgotten.");
     }
+    (void)store_->delete_item_previews(kind, {});
     sync_sharing(false);
     notify();
     return {};
@@ -2260,13 +2271,17 @@ Status KnowledgeService::forget_item(long long item_id) {
     const auto it = store_->item(item_id);
     if (!it) return make_error("not_found", "no such item");
     if (auto s = store_->purge_recovery_copy(); !s) return s;
-    if (it->source == "notes") return delete_note(std::atoll(it->ext_id.c_str()));
+    if (it->source == "notes") {
+        (void)store_->delete_item_previews(it->source, it->ext_id);
+        return delete_note(std::atoll(it->ext_id.c_str()));
+    }
     // A forgotten item is not indexed again: it becomes an item exclusion. A shared one is unshared.
     if (auto s = store_->add_user_exclusion("item", it->source + ":" + it->ext_id); !s) return s;
     {
         const std::lock_guard lock(share_mx_);
         if (!store_->remove_item(item_id, true)) return make_error("storage", "The item could not be forgotten.");
     }
+    (void)store_->delete_item_previews(it->source, it->ext_id);
     sync_sharing(false);
     notify();
     return {};
@@ -2330,6 +2345,383 @@ Status KnowledgeService::add_exclusion(const std::string& kind, const std::strin
             if (excluded_path(id, config())) store_->clear_skipped("files", id);
     notify();
     return {};
+}
+
+// ---- Impact previews (Knowledge Impact Preview, Revision-Safe Impact Confirmation; task 8.3) ------------------------------
+
+namespace {
+
+constexpr size_t kPreviewPassageText = 300;  // characters of a passage shown in a preview entry
+
+// What a preview cannot know yet; a preview is never complete.
+json preview_pending(const std::string& operation) {
+    json pending = json::array();
+    if (operation == "import" || operation == "update")
+        pending.push_back({{"stage", "extraction"},
+                           {"about", "New and changed passages are analyzed after the import: the facts they add, corroborate or "
+                                     "dispute are not known yet."}});
+    else
+        pending.push_back({{"stage", "extraction"},
+                           {"about", "Findings of other passages that were analyzed together with the removed ones are extracted "
+                                     "again; until then they are not counted as support."}});
+    pending.push_back({{"stage", "consistency"},
+                       {"about", "Possible inconsistencies with existing knowledge are checked after the change."}});
+    pending.push_back({{"stage", "publication"},
+                       {"about", "Effects on published team knowledge are not included; published content changes only when "
+                                 "you confirm it in Sharing."}});
+    return pending;
+}
+
+json preview_response(const std::string& token, const OperationPreview& p) {
+    json out = parse_json(p.summary).value_or(json::object());
+    out["token"] = token;
+    out["generation"] = p.generation;
+    out["expires_at"] = p.created_at + 30 * 60 * 1000;
+    return out;
+}
+
+}  // namespace
+
+std::string KnowledgeService::preview_policy(const std::string& operation, const json& target) {
+    const auto cfg = config();
+    json p = {{"extraction", cfg.extraction}, {"consistency", cfg.consistency}, {"categorization", cfg.categorization}};
+    const auto files = cfg.source_policy.find("files");
+    p["files"] = files != cfg.source_policy.end() && files->second;
+    if (operation == "import" || operation == "update") {
+        const std::string path = jstr(target, "path");
+        const auto source = store_->source("files");
+        p["read"] = !env_.read_permitted || env_.read_permitted(path);
+        p["excluded"] = excluded_path(path, cfg);
+        p["max_file_mb"] = cfg.max_file_mb;
+        p["source"] = {source.user_enabled, source.paused};
+    } else {
+        json exclusions = json::array();
+        for (const auto& [kind, value] : store_->user_exclusions()) exclusions.push_back({kind, value});
+        p["exclusions"] = std::move(exclusions);
+        p["policy_exclusions"] = cfg.exclusions;
+    }
+    return p.dump();
+}
+
+Result<KnowledgeService::ComputedPreview> KnowledgeService::compute_preview(const std::string& operation, const json& target,
+                                                                            const std::optional<ItemInput>& input) {
+    ComputedPreview out;
+    json summary = {{"operation", operation}, {"target", target}, {"complete", false}, {"pending", preview_pending(operation)}};
+    std::vector<long long> items;
+    for (const auto& id : target.value("items", json::array()))
+        if (id.is_number_integer()) items.push_back(id.get<long long>());
+    // The passage plan and the support graph are read in one generation, or read again.
+    for (int attempt = 0;; ++attempt) {
+        if (attempt == 3) return make_error("stale", "Knowledge kept changing while the preview was prepared; try again.");
+        out.entries.clear();
+        const auto before = store_->knowledge_generation();
+        if (!before) return make_error("schema", "Knowledge impact previews are not available yet.");
+        Result<KnowledgeImpactPreview> impact = make_error("invalid", "Unknown operation.");
+        json passages = json::object(), shares = 0;
+        if (input) {
+            const auto plan = store_->plan_item_change(*input);
+            std::map<std::string, long long> counts = {{"added", 0}, {"kept", 0}, {"redated", 0}, {"rechecked", 0}, {"removed", 0}};
+            for (const auto& c : plan.passages) {
+                ++counts[c.effect];
+                std::string text = c.heading.empty() ? c.text : c.heading + "\n" + c.text;
+                if (text.size() > kPreviewPassageText) text = utf8_truncate(text, kPreviewPassageText) + "…";
+                out.entries.push_back({"passage", c.effect, c.position >= 0 ? c.position : c.chunk_id, 0, 0, std::move(text)});
+            }
+            for (const auto& [effect, n] : counts) passages[effect] = n;
+            impact = store_->preview_passage_changes(plan.removed, plan.redated, plan.rechecked, {});
+            if (const auto share = store_->share(input->source, input->ext_id); share && share->state != "removed" && share->state != "withdrawn")
+                shares = 1;
+        } else {
+            long long removed = 0, shared = 0;
+            for (long long id : items) {
+                const auto it = store_->item(id);
+                if (!it) continue;
+                for (const auto& c : store_->chunks_of_item(id)) {
+                    ++removed;
+                    std::string text = c.heading.empty() ? c.text : c.heading + "\n" + c.text;
+                    if (text.size() > kPreviewPassageText) text = utf8_truncate(text, kPreviewPassageText) + "…";
+                    out.entries.push_back({"passage", "removed", c.id, 0, 0, std::move(text)});
+                }
+                if (const auto share = store_->share(it->source, it->ext_id); share && share->state != "removed" && share->state != "withdrawn")
+                    ++shared;
+            }
+            passages["removed"] = removed;
+            shares = shared;
+            impact = store_->preview_passage_changes({}, {}, {}, items);
+        }
+        if (!impact) return impact.error();
+        if (impact->generation != *before) continue;
+        long long unsupported = 0;
+        for (const auto& f : impact->facts) {
+            const bool gone = f.after == 0;
+            unsupported += gone ? 1 : 0;
+            out.entries.push_back({"fact", gone ? "unsupported" : "weakened", f.id, f.before, f.after, {}});
+        }
+        summary["passages"] = std::move(passages);
+        summary["items"] = input ? 1 : static_cast<long long>(items.size());
+        summary["facts"] = {{"affected", impact->facts.size()},
+                            {"unsupported", unsupported},
+                            {"weakened", static_cast<long long>(impact->facts.size()) - unsupported}};
+        summary["excerpts"] = impact->evidence;
+        summary["categories"] = {{"automatic_removed", impact->automatic_categories}};
+        summary["reviews"] = {{"need_recheck", impact->reviews}};
+        summary["shares"] = {{"affected", shares}};
+        out.summary = std::move(summary);
+        out.generation = impact->generation;
+        return out;
+    }
+}
+
+// Whether a selected file would be indexed now: the files Source is permitted, on and not paused, and the path is not
+// excluded. Called with or without the database lock (it is recursive).
+bool KnowledgeService::files_importable(const std::string& path) {
+    const auto cfg = config();
+    const auto source = store_->source("files");
+    const auto allowed = cfg.source_policy.find("files");
+    return source.user_enabled && !source.paused && allowed != cfg.source_policy.end() && allowed->second && !excluded_path(path, cfg);
+}
+
+Result<json> KnowledgeService::preview_import(const std::string& path_in) {
+    std::string path = trim(path_in);
+    std::error_code ec;
+    if (path.empty() || !std::filesystem::is_regular_file(fs_path(path), ec)) return make_error("not_found", "The file does not exist.");
+    path = utf8_path(std::filesystem::absolute(fs_path(path), ec).lexically_normal());
+    if (env_.read_permitted && !env_.read_permitted(path)) return make_error("policy", "Policy does not allow reading this file.");
+    if (file_kind(path).empty()) return make_error("unsupported", "This type of file cannot be imported.");
+    if (!files_importable(path)) return make_error("policy", "The files Source is off, paused or excludes this file.");
+    auto read = read_file_item(path, 2, false);
+    if (!read.skip.empty()) return make_error("unsupported", "This file cannot be imported: " + read.skip + ".");
+    if (!read.error.empty() || !read.input) return make_error("unavailable", read.error.empty() ? "The file could not be read." : read.error);
+    const auto previous = store_->item_hash("files", path);
+    const std::string operation = previous ? "update" : "import";
+    const json target = {{"source", "files"}, {"ext_id", path}, {"path", path}, {"previous_hash", previous.value_or("")}};
+    auto computed = compute_preview(operation, target, read.input);
+    if (!computed) return computed.error();
+    const auto& in = *read.input;
+    OperationPreview p;
+    p.operation = operation;
+    p.target = target.dump();
+    p.content = json{{"title", in.title}, {"ref", in.ref}, {"created_at", in.created_at}, {"updated_at", in.updated_at},
+                     {"legacy_tombstone_hash", in.legacy_tombstone_hash}, {"chunks", chunks_json(in.chunks)}}
+                    .dump();
+    p.content_hash = in.hash;
+    p.policy = preview_policy(operation, target);
+    p.summary = computed->summary.dump();
+    p.generation = computed->generation;
+    p.created_at = now_ms();
+    auto token = store_->save_operation_preview(p, computed->entries);
+    if (!token) return token.error();
+    return preview_response(*token, p);
+}
+
+// The indexed items an exclusion would remove now (as apply_exclusions removes them).
+json KnowledgeService::exclusion_items(const std::string& kind, const std::string& value) {
+    const auto cfg = config();
+    const auto now_excluded = store_->user_exclusions();
+    auto with = now_excluded;
+    with.emplace_back(kind, value);
+    json items = json::array();
+    for (const auto& id : store_->item_ids("files"))
+        if (!path_excluded(id, cfg, now_excluded) && path_excluded(id, cfg, with))
+            if (const auto it = store_->item("files", id)) items.push_back(it->id);
+    if (kind == "item")
+        if (const size_t colon = value.find(':'); colon != std::string::npos && value.substr(0, colon) != "files")
+            if (const auto it = store_->item(value.substr(0, colon), value.substr(colon + 1))) items.push_back(it->id);
+    return items;
+}
+
+Result<json> KnowledgeService::preview_exclusion(const std::string& kind, const std::string& value_in) {
+    const std::string value = trim(value_in);
+    if (kind != "path" && kind != "type" && kind != "item") return make_error("invalid", "kind must be path, type or item");
+    if (value.empty()) return make_error("invalid", "empty exclusion");
+    const json target = {{"kind", kind}, {"value", value}, {"items", exclusion_items(kind, value)}};
+    auto computed = compute_preview("exclude", target, std::nullopt);
+    if (!computed) return computed.error();
+    OperationPreview p;
+    p.operation = "exclude";
+    p.target = target.dump();
+    p.policy = preview_policy("exclude", target);
+    p.summary = computed->summary.dump();
+    p.generation = computed->generation;
+    p.created_at = now_ms();
+    auto token = store_->save_operation_preview(p, computed->entries);
+    if (!token) return token.error();
+    return preview_response(*token, p);
+}
+
+Result<json> KnowledgeService::preview_forget(long long item_id) {
+    const auto it = store_->item(item_id);
+    if (!it || it->source.rfind('~', 0) == 0) return make_error("not_found", "no such item");
+    const json target = {{"source", it->source}, {"ext_id", it->ext_id}, {"item_id", it->id}, {"items", json::array({it->id})}};
+    auto computed = compute_preview("forget", target, std::nullopt);
+    if (!computed) return computed.error();
+    OperationPreview p;
+    p.operation = "forget";
+    p.target = target.dump();
+    p.policy = preview_policy("forget", target);
+    p.summary = computed->summary.dump();
+    p.generation = computed->generation;
+    p.created_at = now_ms();
+    auto token = store_->save_operation_preview(p, computed->entries);
+    if (!token) return token.error();
+    return preview_response(*token, p);
+}
+
+Result<json> KnowledgeService::preview_page(const std::string& token, const std::string& kind, int offset, int limit) {
+    if (kind != "fact" && kind != "passage") return make_error("invalid", "kind must be fact or passage");
+    const auto p = store_->operation_preview(token);
+    if (!p || p->expires_at <= now_ms()) return make_error("not_found", "The preview expired or is no longer available.");
+    json entries = json::array();
+    for (const auto& e : store_->preview_entries(token, kind, std::max(0, offset), std::clamp(limit, 1, 200))) {
+        json j = {{"effect", e.effect}};
+        if (kind == "passage") {
+            j[e.effect == "removed" ? "passage_id" : "position"] = e.ref;
+            j["text"] = e.text;
+        } else {
+            j["supports_before"] = e.before;
+            j["supports_after"] = e.after;
+            // A fact is described only while the user may read one of its citations.
+            const auto state = store_->fact_state(e.ref, false);
+            bool visible = false;
+            if (state)
+                for (const auto& c : state->citations)
+                    if (const auto it = store_->item(c.item_id); it && item_visible(*it)) visible = true;
+            if (visible) j["fact"] = fact_row_json(state->fact);
+            else j["withheld"] = true;
+        }
+        entries.push_back(std::move(j));
+    }
+    return json{{"kind", kind}, {"offset", std::max(0, offset)}, {"total", store_->preview_entry_count(token, kind)}, {"entries", std::move(entries)}};
+}
+
+Status KnowledgeService::cancel_preview(const std::string& token) {
+    if (!store_->operation_preview(token)) return make_error("not_found", "The preview is no longer available.");
+    return store_->delete_operation_preview(token);
+}
+
+Result<json> KnowledgeService::confirm_preview(const std::string& token, bool accept_incomplete) {
+    auto done = confirm_preview_checked(token, accept_incomplete);
+    // A stale preview cannot be confirmed any more: it is dropped, and the change is previewed again.
+    if (!done && done.error().code == "stale") (void)store_->delete_operation_preview(token);
+    return done;
+}
+
+Result<json> KnowledgeService::confirm_preview_checked(const std::string& token, bool accept_incomplete) {
+    const auto p = store_->operation_preview(token);
+    if (!p || p->expires_at <= now_ms()) {
+        if (p) (void)store_->delete_operation_preview(token);
+        return make_error("stale", "The preview expired or is no longer available; preview the change again.");
+    }
+    // The preview never includes extraction, consistency or publication effects.
+    if (!accept_incomplete) return make_error("incomplete", "This preview does not include every effect yet; confirm that you accept that.");
+    const json target = parse_json(p->target).value_or(json::object());
+    const std::string& op = p->operation;
+    std::optional<ItemInput> input;
+    if (op == "import" || op == "update") {
+        const json content = parse_json(p->content).value_or(json::object());
+        ItemInput in{"files", jstr(target, "path"), jstr(content, "title"), jstr(content, "ref"), p->content_hash,
+                     jint(content, "created_at"), jint(content, "updated_at"), 2, chunks_from_json(content.value("chunks", json::array())), true};
+        in.legacy_tombstone_hash = jstr(content, "legacy_tombstone_hash");
+        // The reviewed bytes only: a file that changed since is never imported under this confirmation.
+        const auto now_read = read_file_item(in.ext_id, 2, false);
+        if (!now_read.input || now_read.input->hash != p->content_hash)
+            return make_error("stale", "The file changed or cannot be read since the preview; preview it again.");
+        input = std::move(in);
+    }
+    if (preview_policy(op, target) != p->policy) return make_error("stale", "Policy or settings changed since the preview; preview it again.");
+    // Knowledge changed since the preview: confirm only if the effects did not.
+    long long expected = p->generation;
+    if (store_->knowledge_generation() != expected) {
+        auto again = compute_preview(op, target, input);
+        if (!again) return again.error();
+        std::vector<PreviewEntry> reviewed;
+        for (int at = 0;; at += 500) {
+            auto page = store_->preview_entries(token, "fact", at, 500);
+            if (page.empty()) break;
+            reviewed.insert(reviewed.end(), page.begin(), page.end());
+        }
+        std::vector<PreviewEntry> now_facts;
+        for (const auto& e : again->entries)
+            if (e.kind == "fact") now_facts.push_back(e);
+        const auto same = [](const PreviewEntry& a, const PreviewEntry& b) {
+            return a.ref == b.ref && a.effect == b.effect && a.before == b.before && a.after == b.after;
+        };
+        if (again->summary != parse_json(p->summary).value_or(json()) || reviewed.size() != now_facts.size() ||
+            !std::equal(reviewed.begin(), reviewed.end(), now_facts.begin(), same))
+            return make_error("stale", "Knowledge changed and so did the effects of this change; review the new preview.");
+        expected = again->generation;
+    }
+    const auto stale_now = [&] {
+        return make_error("stale", "Knowledge changed while the change was confirmed; preview it again.");
+    };
+    if (op == "import" || op == "update") {
+        const ItemInput& in = *input;
+        {
+            const std::lock_guard lock(store_->db().mutex());
+            if (store_->knowledge_generation() != expected) return stale_now();
+        }
+        // A large change is withdrawn and staged in steps first, as for indexing, so it does not hold the writer;
+        // the switch below then requires that the item itself was not written meanwhile.
+        (void)store_->prepare_item_change(in);
+        std::string error;
+        {
+            const std::lock_guard lock(store_->db().mutex());
+            if (store_->item_hash("files", in.ext_id).value_or("") != jstr(target, "previous_hash") || !files_importable(in.ext_id))
+                error = "stale";
+            else if (Status s = store_->add_document(in.ext_id); !s) error = s.error().message;
+            else {
+                (void)store_->remove_user_exclusion("item", "files:" + in.ext_id);
+                if (auto put = store_->put_prepared_item(in, now_ms()); !put) error = put.error().message;
+                else (void)store_->delete_operation_preview(token);
+            }
+        }
+        if (!error.empty()) {
+            (void)store_->discard_item_change("files", in.ext_id);
+            return error == "stale" ? Result<json>(stale_now()) : Result<json>(make_error("storage", error));
+        }
+        (void)store_->finish_item_changes();
+        file_error(in.ext_id, {}, now_ms());
+    } else if (op == "exclude") {
+        {
+            const std::lock_guard sharing_lock(share_mx_);
+            const std::lock_guard lock(store_->db().mutex());
+            if (store_->knowledge_generation() != expected) return stale_now();
+            // Items indexed since the preview were not reviewed: the confirmed exclusion must remove exactly those listed.
+            if (exclusion_items(jstr(target, "kind"), jstr(target, "value")) != target.value("items", json::array())) return stale_now();
+            if (auto s = store_->purge_recovery_copy(); !s) return s.error();
+            if (Status s = store_->add_user_exclusion(jstr(target, "kind"), jstr(target, "value")); !s) return s.error();
+            if (auto s = apply_exclusions_locked(); !s) return s.error();
+            (void)store_->delete_operation_preview(token);
+        }
+        sync_sharing(false);
+        for (const auto& [id, _] : store_->skipped("files", 1'000'000))
+            if (excluded_path(id, config())) store_->clear_skipped("files", id);
+    } else if (op == "forget") {
+        const long long id = jint(target, "item_id");
+        const auto it = store_->item(id);
+        if (!it || it->source != jstr(target, "source") || it->ext_id != jstr(target, "ext_id")) return stale_now();
+        if (it->source == "notes") {
+            {
+                const std::lock_guard lock(store_->db().mutex());
+                if (store_->knowledge_generation() != expected) return stale_now();
+            }
+            if (Status s = delete_note(std::atoll(it->ext_id.c_str())); !s) return s.error();
+        } else {
+            {
+                const std::lock_guard sharing_lock(share_mx_);
+                const std::lock_guard lock(store_->db().mutex());
+                if (store_->knowledge_generation() != expected) return stale_now();
+                if (auto s = store_->purge_recovery_copy(); !s) return s.error();
+                if (auto s = store_->add_user_exclusion("item", it->source + ":" + it->ext_id); !s) return s.error();
+                if (!store_->remove_item(id, true)) return make_error("storage", "The item could not be forgotten.");
+            }
+            sync_sharing(false);
+        }
+        (void)store_->delete_item_previews(it->source, it->ext_id);
+        (void)store_->delete_operation_preview(token);
+    } else return make_error("invalid", "Unknown operation.");
+    notify();
+    return json{{"done", true}};
 }
 
 Status KnowledgeService::remove_exclusion(const std::string& kind, const std::string& value) {

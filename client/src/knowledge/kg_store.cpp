@@ -539,7 +539,7 @@ END;
         // review that needed a recheck was compared again without being found. An excerpt that analysis binds inside a
         // passage the same support already cites is not new evidence: it clears neither check, so categorization and
         // consistency analysis cannot keep invalidating each other's progress.
-        {kKgSchemaVersion, R"sql(
+        {kKgConsistencySchemaVersion, R"sql(
 CREATE TABLE knowledge_consistency_checks(
   fact_id INTEGER PRIMARY KEY REFERENCES knowledge_facts(id) ON DELETE CASCADE,
   checked_at INTEGER NOT NULL);
@@ -562,6 +562,33 @@ BEGIN
   UPDATE knowledge_conflicts SET cleared=0 WHERE id=new.id;
   DELETE FROM knowledge_consistency_checks WHERE fact_id IN (new.left_fact,new.right_fact);
 END;
+)sql"},
+        // Task 8.3: a preview of an explicit import, update, exclusion or forget, bound to the knowledge generation and
+        // policy it was made under. An import's reviewed passages are kept here (the database is encrypted) until it is
+        // confirmed, cancelled or expires; its entries are the affected facts and passages, read page by page. Previews
+        // are not knowledge, so they do not change the generation.
+        {kKgSchemaVersion, R"sql(
+CREATE TABLE knowledge_operation_previews(
+  token TEXT PRIMARY KEY,
+  operation TEXT NOT NULL CHECK(operation IN ('import','update','exclude','forget')),
+  target TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  content_hash TEXT NOT NULL DEFAULT '',
+  policy TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL);
+CREATE TABLE knowledge_preview_entries(
+  token TEXT NOT NULL REFERENCES knowledge_operation_previews(token) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK(kind IN ('fact','passage')),
+  ord INTEGER NOT NULL,
+  ref INTEGER NOT NULL,
+  effect TEXT NOT NULL,
+  before INTEGER NOT NULL DEFAULT 0,
+  after INTEGER NOT NULL DEFAULT 0,
+  text TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(token,kind,ord)) WITHOUT ROWID;
 )sql"},
     };
     return m;
@@ -923,7 +950,7 @@ Result<long long> write_conflict(Database& db, long long left_fact, long long ri
         (kind != "conflict" && kind != "uncertain_entity"))
         return make_error("invalid", "A possible inconsistency needs two facts and an explanation.");
     // Before the consistency schema a review has no kind and cannot be cleared.
-    const bool kinds = db.user_version() >= kKgSchemaVersion;
+    const bool kinds = db.user_version() >= kKgConsistencySchemaVersion;
     if (!kinds && kind != "conflict") return make_error("schema", "Possible inconsistency kinds are not available yet.");
     if (left_fact > right_fact) {
         std::swap(left_fact, right_fact);
@@ -1010,7 +1037,7 @@ Status KgStore::apply_analysis(const AnalysisProposals& proposals, long long exp
             if (const auto recorded = write_conflict(*db_, c.left_id, c.right_id, *left, *right, c.reason, c.kind); !recorded)
                 return recorded.error();
         }
-        if ((!consistency_checked.empty() || !cleared.empty()) && db_->user_version() < kKgSchemaVersion)
+        if ((!consistency_checked.empty() || !cleared.empty()) && db_->user_version() < kKgConsistencySchemaVersion)
             return make_error("schema", "Consistency progress is not available yet.");
         // A review proposed again above is open; one that still needs a recheck was compared and not found again.
         for (long long id : cleared) {
@@ -1181,7 +1208,7 @@ std::vector<ConflictRow> KgStore::conflicts(int limit) {
     const std::lock_guard lock(db_->mutex());
     std::vector<ConflictRow> result;
     if (db_->user_version() < kKgEvidenceSchemaVersion || limit <= 0) return result;
-    const bool kinds = db_->user_version() >= kKgSchemaVersion;
+    const bool kinds = db_->user_version() >= kKgConsistencySchemaVersion;
     auto s = db_->prepare(std::string("SELECT id,left_fact,right_fact,left_evidence,right_evidence,explanation,state,decision,decision_reason,") +
                           (kinds ? "kind,cleared" : "'conflict',0") +
                           " FROM knowledge_conflicts ORDER BY CASE state WHEN 'open' THEN 0 WHEN 'needs_recheck' THEN 1 "
@@ -1196,7 +1223,7 @@ std::vector<ConflictRow> KgStore::conflicts(int limit) {
 std::optional<ConflictRow> KgStore::conflict(long long id) {
     const std::lock_guard lock(db_->mutex());
     if (db_->user_version() < kKgEvidenceSchemaVersion) return std::nullopt;
-    const bool kinds = db_->user_version() >= kKgSchemaVersion;
+    const bool kinds = db_->user_version() >= kKgConsistencySchemaVersion;
     auto s = db_->prepare(std::string("SELECT id,left_fact,right_fact,left_evidence,right_evidence,explanation,state,decision,decision_reason,") +
                           (kinds ? "kind,cleared" : "'conflict',0") + " FROM knowledge_conflicts WHERE id=?1");
     s.bind(1, id);
@@ -1317,7 +1344,7 @@ std::optional<FactState> KgStore::fact_state(long long fact_id, bool history) {
     else {
         // An unresolved review counts only while its other side is current knowledge too.
         // A recheck that compared both facts again without finding the disagreement no longer disputes them.
-        const bool kinds = db_->user_version() >= kKgSchemaVersion;
+        const bool kinds = db_->user_version() >= kKgConsistencySchemaVersion;
         auto s = db_->prepare(std::string("SELECT id,CASE WHEN left_fact=?1 THEN right_fact ELSE left_fact END,state,explanation,"
                               "CASE WHEN left_fact=?1 THEN left_evidence ELSE right_evidence END,"
                               "CASE WHEN left_fact=?1 THEN right_evidence ELSE left_evidence END,") +
@@ -1408,7 +1435,7 @@ long long KgStore::category_pending() {
 ConsistencyWork KgStore::consistency_work(int limit, int related, int passage_limit, const std::set<long long>& skip) {
     const std::lock_guard lock(db_->mutex());
     ConsistencyWork out;
-    if (db_->user_version() < kKgSchemaVersion || limit <= 0 || related < 0 || passage_limit <= 0) return out;
+    if (db_->user_version() < kKgConsistencySchemaVersion || limit <= 0 || related < 0 || passage_limit <= 0) return out;
     const auto generation = generation_of(*db_);
     if (!generation) return out;
     out.generation = *generation;
@@ -1487,7 +1514,7 @@ ConsistencyWork KgStore::consistency_work(int limit, int related, int passage_li
 
 long long KgStore::consistency_pending() {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < kKgSchemaVersion) return 0;
+    if (db_->user_version() < kKgConsistencySchemaVersion) return 0;
     auto s = db_->prepare(
         "SELECT count(*) FROM knowledge_facts f WHERE NOT EXISTS(SELECT 1 FROM knowledge_consistency_checks k WHERE k.fact_id=f.id) "
         "AND EXISTS(SELECT 1 FROM knowledge_support_sets s WHERE s.fact_id=f.id AND s.state IN ('current','unverified'))");
@@ -2093,6 +2120,211 @@ std::vector<std::vector<long long>> cascade_steps(Database& db, const std::vecto
 }
 
 }  // namespace
+
+// ---- Operation previews (Knowledge Impact Preview, Revision-Safe Impact Confirmation; task 8.3) -------------------------
+
+ItemChangePlan KgStore::plan_item_change(const ItemInput& in) {
+    const std::lock_guard lock(db_->mutex());
+    ItemChangePlan out;
+    const auto previous = item(in.source, in.ext_id);
+    const auto plan = plan_passages(*db_, previous ? previous->id : 0, previous, in);
+    out.previous_hash = previous ? previous->hash : std::string{};
+    std::optional<Statement> recorded;
+    if (db_->user_version() >= kKgEvidenceSchemaVersion) recorded.emplace(db_->prepare(kRecordedInputs));
+    // The same decisions put_item makes for each passage.
+    for (size_t n = 0; n < in.chunks.size(); ++n) {
+        const auto& c = in.chunks[n];
+        const long long kept = plan.retained[n];
+        PassageChange p{static_cast<int>(n), kept, "added", c.heading, c.text};
+        if (kept) {
+            if (plan.old_dates.at(kept) != c.at) {
+                p.effect = "redated";
+                out.redated.push_back(kept);
+            } else if (recheck_retained(recorded ? &*recorded : nullptr, plan, previous, in, kept, c.at)) {
+                p.effect = "rechecked";
+                out.rechecked.push_back(kept);
+            } else p.effect = "kept";
+        }
+        out.passages.push_back(std::move(p));
+    }
+    auto text = db_->prepare("SELECT heading,text FROM chunks WHERE id=?1");
+    for (long long id : plan.old_ids) {
+        if (plan.used.count(id)) continue;
+        out.removed.push_back(id);
+        text.reset();
+        text.bind(1, id);
+        PassageChange p{-1, id, "removed", {}, {}};
+        if (text.step()) {
+            p.heading = text.col_text(0);
+            p.text = text.col_text(1);
+        }
+        out.passages.push_back(std::move(p));
+    }
+    return out;
+}
+
+Result<KnowledgeImpactPreview> KgStore::preview_passage_changes(const std::vector<long long>& removed, const std::vector<long long>& redated,
+                                                                const std::vector<long long>& rechecked, const std::vector<long long>& items) {
+    constexpr size_t kPart = 500;
+    const auto in_parts = [&](const std::vector<long long>& ids, const std::function<void(const std::string&)>& each) {
+        for (size_t at = 0; at < ids.size(); at += kPart)
+            each(id_list(std::vector<long long>(ids.begin() + static_cast<std::ptrdiff_t>(at),
+                                                ids.begin() + static_cast<std::ptrdiff_t>(std::min(ids.size(), at + kPart)))));
+    };
+    // The graph is read twice (the ids here, the support graph in preview_evidence_snapshot); both must be one
+    // generation, or the preview is prepared again.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        std::unordered_set<long long> evidence;
+        long long generation = 0, categories = 0, reviews = 0;
+        {
+            const std::lock_guard lock(db_->mutex());
+            if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Knowledge impact previews are not available yet.");
+            const auto g = generation_of(*db_);
+            if (!g) return make_error("storage", "The knowledge generation is unavailable.");
+            generation = *g;
+            std::set<long long> chunks(removed.begin(), removed.end());
+            chunks.insert(redated.begin(), redated.end());
+            chunks.insert(rechecked.begin(), rechecked.end());
+            std::vector<long long> shifted(removed);  // their extraction requests are checked again
+            shifted.insert(shifted.end(), redated.begin(), redated.end());
+            for (long long id : items) {
+                auto of_item = db_->prepare("SELECT id FROM chunks WHERE item_id=?1");
+                of_item.bind(1, id);
+                while (of_item.step()) {
+                    chunks.insert(of_item.col_int(0));
+                    shifted.push_back(of_item.col_int(0));
+                }
+                auto all = db_->prepare("SELECT e.id FROM knowledge_evidence e JOIN knowledge_revisions v ON v.id=e.revision_id WHERE v.item_id=?1");
+                all.bind(1, id);
+                while (all.step()) evidence.insert(all.col_int(0));
+            }
+            in_parts(shifted, [&](const std::string& ids) {
+                auto beside = db_->prepare("SELECT DISTINCT d.chunk_id FROM knowledge_extraction_inputs d WHERE d.result=1 AND d.batch_id IN "
+                                           "(SELECT batch_id FROM knowledge_extraction_inputs WHERE chunk_id IN (" + ids + "))");
+                while (beside.step()) chunks.insert(beside.col_int(0));
+            });
+            in_parts(std::vector<long long>(chunks.begin(), chunks.end()), [&](const std::string& ids) {
+                auto current = db_->prepare("SELECT e.id FROM knowledge_evidence e JOIN knowledge_revisions v ON v.id=e.revision_id "
+                                            "AND v.current=1 WHERE e.chunk_id IN (" + ids + ")");
+                while (current.step()) evidence.insert(current.col_int(0));
+            });
+            const std::vector<long long> withdrawn(evidence.begin(), evidence.end());
+            in_parts(withdrawn, [&](const std::string& ids) {
+                auto c = db_->prepare("SELECT count(*) FROM knowledge_category_assignments WHERE decision='automatic' AND evidence_id IN (" + ids + ")");
+                if (c.step()) categories += c.col_int(0);
+            });
+            // A review counts once even when both of its excerpts are withdrawn.
+            std::set<long long> affected_reviews;
+            in_parts(withdrawn, [&](const std::string& ids) {
+                auto r = db_->prepare("SELECT id FROM knowledge_conflicts WHERE state<>'needs_recheck' AND (left_evidence IN (" + ids +
+                                      ") OR right_evidence IN (" + ids + "))");
+                while (r.step()) affected_reviews.insert(r.col_int(0));
+            });
+            reviews = static_cast<long long>(affected_reviews.size());
+        }
+        auto impact = preview_evidence_snapshot(evidence, std::nullopt);
+        if (!impact) return impact.error();
+        if (impact->generation != generation) continue;
+        std::erase_if(impact->facts, [](const FactImpact& f) { return f.after >= f.before; });
+        impact->evidence = static_cast<long long>(evidence.size());
+        impact->automatic_categories = categories;
+        impact->reviews = reviews;
+        return impact;
+    }
+    return make_error("stale", "Knowledge kept changing while the preview was prepared; try again.");
+}
+
+Result<std::string> KgStore::save_operation_preview(OperationPreview p, const std::vector<PreviewEntry>& entries) {
+    constexpr long long kLifetime = 30 * 60 * 1000;
+    const auto token = random_urlsafe(24);
+    if (token.size() != 32) return make_error("crypto", "Could not create a preview token.");
+    if (p.created_at <= 0 || p.created_at > std::numeric_limits<long long>::max() - kLifetime)
+        return make_error("invalid", "Invalid preview time.");
+    p.token = token;
+    p.expires_at = p.created_at + kLifetime;
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Knowledge impact previews are not available yet.");
+    const auto status = db_->transaction([&]() -> Status {
+        auto expired = db_->prepare("DELETE FROM knowledge_operation_previews WHERE expires_at<=?1");
+        expired.bind(1, p.created_at);
+        if (auto s = expired.run(); !s) return s;
+        auto count = db_->prepare("SELECT count(*) FROM knowledge_operation_previews");
+        if (!count.step()) return make_error("storage", "Could not count knowledge previews.");
+        if (count.col_int(0) >= 32) return make_error("capacity", "Too many open previews; confirm or cancel one first.");
+        auto insert = db_->prepare("INSERT INTO knowledge_operation_previews(token,operation,target,content,content_hash,policy,summary,"
+                                   "generation,created_at,expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)");
+        insert.bind(1, p.token).bind(2, p.operation).bind(3, p.target).bind(4, p.content).bind(5, p.content_hash).bind(6, p.policy)
+            .bind(7, p.summary).bind(8, p.generation).bind(9, p.created_at).bind(10, p.expires_at);
+        if (auto s = insert.run(); !s) return s;
+        auto entry = db_->prepare("INSERT INTO knowledge_preview_entries(token,kind,ord,ref,effect,before,after,text) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)");
+        std::map<std::string, long long> ord;
+        for (const auto& e : entries) {
+            entry.reset();
+            entry.bind(1, p.token).bind(2, e.kind).bind(3, ord[e.kind]++).bind(4, e.ref).bind(5, e.effect)
+                .bind(6, static_cast<long long>(e.before)).bind(7, static_cast<long long>(e.after)).bind(8, e.text);
+            if (auto s = entry.run(); !s) return s;
+        }
+        return {};
+    });
+    if (!status) return status.error();
+    return token;
+}
+
+std::optional<OperationPreview> KgStore::operation_preview(const std::string& token) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion || token.size() != 32) return std::nullopt;
+    auto s = db_->prepare("SELECT token,operation,target,content,content_hash,policy,summary,generation,created_at,expires_at "
+                          "FROM knowledge_operation_previews WHERE token=?1");
+    s.bind(1, token);
+    if (!s.step()) return std::nullopt;
+    return OperationPreview{s.col_text(0), s.col_text(1), s.col_text(2), s.col_text(3), s.col_text(4), s.col_text(5), s.col_text(6),
+                            s.col_int(7), s.col_int(8), s.col_int(9)};
+}
+
+std::vector<PreviewEntry> KgStore::preview_entries(const std::string& token, const std::string& kind, int offset, int limit) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<PreviewEntry> out;
+    if (db_->user_version() < kKgSchemaVersion || limit <= 0 || offset < 0) return out;
+    auto s = db_->prepare("SELECT kind,effect,ref,before,after,text FROM knowledge_preview_entries WHERE token=?1 AND kind=?2 "
+                          "AND ord>=?3 ORDER BY ord LIMIT ?4");
+    s.bind(1, token).bind(2, kind).bind(3, static_cast<long long>(offset)).bind(4, static_cast<long long>(std::min(limit, 500)));
+    while (s.step())
+        out.push_back({s.col_text(0), s.col_text(1), s.col_int(2), static_cast<int>(s.col_int(3)), static_cast<int>(s.col_int(4)), s.col_text(5)});
+    return out;
+}
+
+long long KgStore::preview_entry_count(const std::string& token, const std::string& kind) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return 0;
+    auto s = db_->prepare("SELECT count(*) FROM knowledge_preview_entries WHERE token=?1 AND kind=?2");
+    s.bind(1, token).bind(2, kind);
+    return s.step() ? s.col_int(0) : 0;
+}
+
+Status KgStore::delete_operation_preview(const std::string& token) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return {};
+    auto s = db_->prepare("DELETE FROM knowledge_operation_previews WHERE token=?1");
+    s.bind(1, token);
+    return s.run();
+}
+
+Status KgStore::delete_item_previews(const std::string& source, const std::string& ext_id) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return {};
+    auto s = db_->prepare("DELETE FROM knowledge_operation_previews WHERE json_extract(target,'$.source')=?1 "
+                          "AND (?2='' OR json_extract(target,'$.ext_id')=?2)");
+    s.bind(1, source).bind(2, ext_id);
+    return s.run();
+}
+
+Status KgStore::purge_expired_previews(long long now) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return {};
+    auto s = db_->prepare("DELETE FROM knowledge_operation_previews WHERE expires_at<=?1");
+    s.bind(1, now);
+    return s.run();
+}
 
 Status KgStore::withdraw_findings(const std::vector<long long>& chunk_ids) {
     const auto steps = cascade_steps(*db_, chunk_ids, [](const std::string& ids) {

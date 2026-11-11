@@ -35,8 +35,10 @@ std::string kg_evidence_migration_sql();
 inline constexpr int kKgEvidenceSchemaVersion = 6;
 // Durable automatic-categorization progress (task 8.1).
 inline constexpr int kKgCategoryChecksSchemaVersion = 7;
-// The latest schema: durable consistency-analysis progress, inconsistency kinds and cleared rechecks (task 8.2).
-inline constexpr int kKgSchemaVersion = 8;
+// Durable consistency-analysis progress, inconsistency kinds and cleared rechecks (task 8.2).
+inline constexpr int kKgConsistencySchemaVersion = 8;
+// The latest schema: revision-bound operation previews with paged entries (task 8.3).
+inline constexpr int kKgSchemaVersion = 9;
 // The longest chain of facts a derivation may form through required facts; the evidence schema enforces it.
 inline constexpr int kMaxDerivationDepth = 32;
 // Superseded revisions of an item whose excerpts are kept as history beside the current one.
@@ -88,6 +90,39 @@ struct KnowledgeImpactPreview {
     long long generation = 0;
     bool complete = false;  // Extraction, conflict checks and publication differences are not included yet.
     std::vector<FactImpact> facts;
+    // preview_passage_changes only: the excerpts withdrawn, and the automatic category assignments and undecided or
+    // decided reviews that rest on them (they are removed or need a recheck).
+    long long evidence = 0, automatic_categories = 0, reviews = 0;
+};
+
+// One passage of an item change: its position in the new content (-1 for a removed passage), the stored passage it
+// keeps or removes (0 for a new one), and its effect: added, kept, redated (findings extracted again with the new
+// date), rechecked (kept, findings extracted again) or removed.
+struct PassageChange {
+    int position = -1;
+    long long chunk_id = 0;
+    std::string effect, heading, text;
+};
+
+struct ItemChangePlan {
+    std::string previous_hash;  // empty for a new item
+    std::vector<PassageChange> passages;
+    std::vector<long long> removed, redated, rechecked;
+};
+
+// A stored operation preview (task 8.3). `target`, `summary` and an import's `content` are JSON text.
+struct OperationPreview {
+    std::string token, operation, target, content, content_hash, policy, summary;
+    long long generation = 0, created_at = 0, expires_at = 0;
+};
+
+// One paged entry of a preview: a fact (ref: fact id, with its independent supports before and after) or a passage
+// (ref: position in the new content, or the removed passage's id).
+struct PreviewEntry {
+    std::string kind, effect;
+    long long ref = 0;
+    int before = 0, after = 0;
+    std::string text;
 };
 
 struct PreparedItemRemoval {
@@ -333,6 +368,25 @@ public:
     Result<PreparedItemRemoval> prepare_item_removal(long long item_id, long long now);
     Status cancel_item_removal(const std::string& token);
     Status confirm_item_removal(const std::string& token, bool accept_incomplete, long long now);
+
+    // ---- Operation previews (Knowledge Impact Preview, Revision-Safe Impact Confirmation; task 8.3) ----
+    // What writing `in` would do to the item's passages now, without writing anything.
+    ItemChangePlan plan_item_change(const ItemInput& in);
+    // The facts committing a change would leave with fewer independent supports, read in one snapshot: committing
+    // withdraws the findings of `removed`, `redated` and `rechecked` passages and of every passage that shared an
+    // extraction request with a removed or re-dated one, and removing `items` withdraws every excerpt of theirs and of
+    // their passages' request partners. Only affected facts are returned.
+    Result<KnowledgeImpactPreview> preview_passage_changes(const std::vector<long long>& removed, const std::vector<long long>& redated,
+                                                           const std::vector<long long>& rechecked, const std::vector<long long>& items);
+    // Saves a preview with its entries under a new token (expired previews are purged first; at most 32 are active).
+    Result<std::string> save_operation_preview(OperationPreview preview, const std::vector<PreviewEntry>& entries);
+    std::optional<OperationPreview> operation_preview(const std::string& token);
+    std::vector<PreviewEntry> preview_entries(const std::string& token, const std::string& kind, int offset, int limit);
+    long long preview_entry_count(const std::string& token, const std::string& kind);
+    Status delete_operation_preview(const std::string& token);
+    // Previews whose target is the item (an import or update preview holds its passages), when it is forgotten.
+    Status delete_item_previews(const std::string& source, const std::string& ext_id);
+    Status purge_expired_previews(long long now);
 
     // ---- Sources, folders, exclusions ----
     SourceState source(const std::string& kind);

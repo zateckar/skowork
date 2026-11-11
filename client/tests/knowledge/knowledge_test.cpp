@@ -2378,6 +2378,207 @@ TEST(KnowledgeConsistency, NewFactsAreComparedIncrementallyAndDecisionsFollowThe
     EXPECT_EQ(kg.svc->status()["consistency"]["pending"], 0);
 }
 
+// improve-skowork-and-knowledge-control 8.3: import, update, exclude and forget are previewed first. The preview counts
+// match the committed change, it is never complete and must be accepted as such, and it is bound to what was analyzed.
+TEST(KnowledgeImpactPreview, PreviewedEffectsMatchTheConfirmedChangeAndAreLabeledIncomplete) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    RpcRegistry rpc;
+    register_knowledge_rpc(rpc, [&kg] { return kg.svc.get(); }, nullptr);
+    const auto call = [&](const char* method, const json& params) { return (*rpc.find(method, false))(params); };
+    for (const char* name : {"lead.txt", "team.txt", "other.txt"}) {
+        write_file(kg.folder / name, std::string(name) == "other.txt" ? "The canteen opens at noon." : "Jana Nováková leads Phoenix.");
+        ASSERT_TRUE(kg.svc->add_document(kg.file_path(name)));
+        kg.idle();
+    }
+    const long long fact = kg.count("SELECT id FROM knowledge_facts WHERE predicate='leads'");
+    ASSERT_GT(fact, 0);
+    const auto supports = [&] {  // an unsupported fact is not current knowledge
+        const auto state = kg.svc->store().fact_state(fact, false);
+        return state ? state->citations.size() : 0u;
+    };
+    ASSERT_EQ(supports(), 2u);
+    const auto lead = kg.svc->store().item("files", kg.file_path("lead.txt"));
+    ASSERT_TRUE(lead);
+
+    // Forget: one passage removed, the fact weakened from two supports to one; nothing changes before confirmation.
+    auto forget = call("knowledge.preview.forget", {{"id", lead->id}});
+    ASSERT_TRUE(forget) << forget.error().message;
+    EXPECT_EQ((*forget)["operation"], "forget");
+    EXPECT_FALSE((*forget)["complete"].get<bool>());
+    std::set<std::string> stages;
+    for (const auto& p : (*forget)["pending"]) stages.insert(p["stage"].get<std::string>());
+    EXPECT_EQ(stages, (std::set<std::string>{"extraction", "consistency", "publication"}));
+    EXPECT_EQ((*forget)["passages"]["removed"], 1);
+    EXPECT_EQ((*forget)["facts"]["affected"], 1);
+    EXPECT_EQ((*forget)["facts"]["weakened"], 1);
+    EXPECT_EQ((*forget)["facts"]["unsupported"], 0);
+    auto facts = call("knowledge.preview.page", {{"token", (*forget)["token"]}, {"kind", "fact"}});
+    ASSERT_TRUE(facts);
+    ASSERT_EQ((*facts)["total"], 1);
+    EXPECT_EQ((*facts)["entries"][0]["effect"], "weakened");
+    EXPECT_EQ((*facts)["entries"][0]["supports_before"], 2);
+    EXPECT_EQ((*facts)["entries"][0]["supports_after"], 1);
+    EXPECT_EQ((*facts)["entries"][0]["fact"]["fact_id"], fact);
+    EXPECT_EQ(supports(), 2u);
+    ASSERT_TRUE(kg.svc->store().item(lead->id));
+    // The incomplete analysis must be accepted explicitly.
+    auto refused = call("knowledge.preview.confirm", {{"token", (*forget)["token"]}});
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "incomplete");
+    ASSERT_TRUE(call("knowledge.preview.confirm", {{"token", (*forget)["token"]}, {"accept_incomplete", true}}));
+    EXPECT_FALSE(kg.svc->store().item(lead->id));
+    EXPECT_EQ(supports(), 1u);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_operation_previews"), 0);
+    EXPECT_FALSE(call("knowledge.preview.confirm", {{"token", (*forget)["token"]}, {"accept_incomplete", true}}));  // used once
+
+    // Exclude: the last support goes, the fact becomes unsupported; the unrelated file is untouched.
+    auto exclude = call("knowledge.preview.exclusion", {{"kind", "path"}, {"value", kg.file_path("team.txt")}});
+    ASSERT_TRUE(exclude) << exclude.error().message;
+    EXPECT_EQ((*exclude)["items"], 1);
+    EXPECT_EQ((*exclude)["passages"]["removed"], 1);
+    EXPECT_EQ((*exclude)["facts"]["unsupported"], 1);
+    ASSERT_TRUE(call("knowledge.preview.confirm", {{"token", (*exclude)["token"]}, {"accept_incomplete", true}}));
+    EXPECT_FALSE(kg.svc->store().item("files", kg.file_path("team.txt")));
+    EXPECT_TRUE(kg.svc->store().item("files", kg.file_path("other.txt")));
+    EXPECT_EQ(supports(), 0u);
+
+    // Import: the passages to be added are listed, their analysis is pending, and the reviewed bytes are what is stored.
+    write_file(kg.folder / "new.txt", "Jana Nováková leads Phoenix again.");
+    auto import = call("knowledge.preview.import", {{"path", kg.file_path("new.txt")}});
+    ASSERT_TRUE(import) << import.error().message;
+    EXPECT_EQ((*import)["operation"], "import");
+    EXPECT_EQ((*import)["passages"]["added"], 1);
+    EXPECT_EQ((*import)["facts"]["affected"], 0);
+    EXPECT_EQ((*import)["pending"][0]["stage"], "extraction");
+    auto passages = call("knowledge.preview.page", {{"token", (*import)["token"]}, {"kind", "passage"}});
+    ASSERT_TRUE(passages);
+    EXPECT_EQ((*passages)["entries"][0]["effect"], "added");
+    EXPECT_NE((*passages)["entries"][0]["text"].get<std::string>().find("again"), std::string::npos);
+    EXPECT_FALSE(kg.svc->store().item("files", kg.file_path("new.txt")));
+    ASSERT_TRUE(call("knowledge.preview.confirm", {{"token", (*import)["token"]}, {"accept_incomplete", true}}));
+    ASSERT_TRUE(kg.svc->store().item("files", kg.file_path("new.txt")));
+    kg.idle();
+    EXPECT_EQ(supports(), 1u);  // extraction ran after the import
+
+    // Update: the changed passage replaces the old one and the fact it supported loses that support.
+    write_file(kg.folder / "new.txt", "The canteen closes at six.");
+    auto update = call("knowledge.preview.import", {{"path", kg.file_path("new.txt")}});
+    ASSERT_TRUE(update) << update.error().message;
+    EXPECT_EQ((*update)["operation"], "update");
+    EXPECT_EQ((*update)["passages"]["added"], 1);
+    EXPECT_EQ((*update)["passages"]["removed"], 1);
+    EXPECT_EQ((*update)["facts"]["unsupported"], 1);
+    ASSERT_TRUE(call("knowledge.preview.confirm", {{"token", (*update)["token"]}, {"accept_incomplete", true}}));
+    EXPECT_EQ(supports(), 0u);
+}
+
+// 8.3: a confirmation applies only to what was analyzed: changed bytes, policy or effects require a new preview, an
+// expired or cancelled preview is gone, and a large preview is read in pages.
+TEST(KnowledgeImpactPreview, ChangedFilePolicyOrGraphRequiresAFreshConfirmation) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    RpcRegistry rpc;
+    register_knowledge_rpc(rpc, [&kg] { return kg.svc.get(); }, nullptr);
+    const auto call = [&](const char* method, const json& params) { return (*rpc.find(method, false))(params); };
+    const auto confirm = [&](const json& preview) { return call("knowledge.preview.confirm", {{"token", preview["token"]}, {"accept_incomplete", true}}); };
+    for (const char* name : {"a.txt", "b.txt"}) {
+        write_file(kg.folder / name, "Jana Nováková leads Phoenix.");
+        ASSERT_TRUE(kg.svc->add_document(kg.file_path(name)));
+        kg.idle();
+    }
+    const auto a = kg.svc->store().item("files", kg.file_path("a.txt"));
+    const auto b = kg.svc->store().item("files", kg.file_path("b.txt"));
+    ASSERT_TRUE(a && b);
+
+    // The file changes after its import was reviewed: the new bytes are not ingested under the old confirmation.
+    write_file(kg.folder / "c.txt", "Reviewed text.");
+    auto import = call("knowledge.preview.import", {{"path", kg.file_path("c.txt")}});
+    ASSERT_TRUE(import);
+    write_file(kg.folder / "c.txt", "Changed text.");
+    auto stale = confirm(*import);
+    ASSERT_FALSE(stale);
+    EXPECT_EQ(stale.error().code, "stale");
+    EXPECT_FALSE(kg.svc->store().item("files", kg.file_path("c.txt")));
+
+    // Policy changes after the preview.
+    import = call("knowledge.preview.import", {{"path", kg.file_path("c.txt")}});
+    ASSERT_TRUE(import);
+    kg.set("knowledge.max_file_mb", 1);
+    stale = confirm(*import);
+    ASSERT_FALSE(stale);
+    EXPECT_EQ(stale.error().code, "stale");
+    // A paused files Source imports nothing: no preview is offered, and an earlier one cannot be confirmed.
+    import = call("knowledge.preview.import", {{"path", kg.file_path("c.txt")}});
+    ASSERT_TRUE(import);
+    ASSERT_TRUE(kg.svc->set_source_paused("files", true));
+    EXPECT_FALSE(call("knowledge.preview.import", {{"path", kg.file_path("c.txt")}}));
+    EXPECT_FALSE(confirm(*import));
+    EXPECT_FALSE(kg.svc->store().item("files", kg.file_path("c.txt")));
+    ASSERT_TRUE(kg.svc->set_source_paused("files", false));
+
+    // Knowledge changes without changing the previewed effects: confirmed as reviewed.
+    auto forget_a = call("knowledge.preview.forget", {{"id", a->id}});
+    ASSERT_TRUE(forget_a);
+    const auto generation = kg.svc->store().knowledge_generation();
+    ASSERT_TRUE(confirm(*call("knowledge.preview.import", {{"path", kg.file_path("c.txt")}})));
+    ASSERT_NE(kg.svc->store().knowledge_generation(), generation);
+    // ...but once another support of the same fact is gone, the reviewed effects no longer hold.
+    auto forget_b = call("knowledge.preview.forget", {{"id", b->id}});
+    ASSERT_TRUE(forget_b);
+    EXPECT_EQ((*forget_b)["facts"]["weakened"], 1);
+    ASSERT_TRUE(confirm(*forget_a));
+    stale = confirm(*forget_b);
+    ASSERT_FALSE(stale);
+    EXPECT_EQ(stale.error().code, "stale");
+    forget_b = call("knowledge.preview.forget", {{"id", b->id}});
+    ASSERT_TRUE(forget_b);
+    EXPECT_EQ((*forget_b)["facts"]["unsupported"], 1);
+
+    // A file indexed after an exclusion was previewed is not removed by it unreviewed.
+    auto exclude = call("knowledge.preview.exclusion", {{"kind", "type"}, {"value", ".md"}});
+    ASSERT_TRUE(exclude);
+    EXPECT_EQ((*exclude)["items"], 0);
+    write_file(kg.folder / "late.md", "Late notes.");
+    ASSERT_TRUE(kg.svc->add_document(kg.file_path("late.md")));
+    kg.idle();
+    stale = confirm(*exclude);
+    ASSERT_FALSE(stale);
+    EXPECT_EQ(stale.error().code, "stale");
+    EXPECT_TRUE(kg.svc->store().item("files", kg.file_path("late.md")));
+
+    // Cancel and expiry remove the preview and its entries.
+    ASSERT_TRUE(call("knowledge.preview.cancel", {{"token", (*forget_b)["token"]}}));
+    EXPECT_FALSE(confirm(*forget_b));
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_operation_previews WHERE operation='forget'"), 0);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_preview_entries WHERE token NOT IN (SELECT token FROM knowledge_operation_previews)"), 0);
+    forget_b = call("knowledge.preview.forget", {{"id", b->id}});
+    ASSERT_TRUE(forget_b);
+    kg.clock.advance(std::chrono::minutes(31));
+    stale = confirm(*forget_b);
+    ASSERT_FALSE(stale);
+    EXPECT_EQ(stale.error().code, "stale");
+    EXPECT_TRUE(kg.svc->store().item(b->id));
+
+    // A large import is listed in pages.
+    std::string big;
+    for (int i = 0; i < 400; ++i)
+        big += "Paragraph " + std::to_string(i) + ": " + std::string(300, static_cast<char>('a' + i % 26)) + "\n\n";
+    write_file(kg.folder / "big.txt", big);
+    auto large = call("knowledge.preview.import", {{"path", kg.file_path("big.txt")}});
+    ASSERT_TRUE(large) << large.error().message;
+    const long long added = (*large)["passages"]["added"].get<long long>();
+    ASSERT_GT(added, 20);
+    auto first = call("knowledge.preview.page", {{"token", (*large)["token"]}, {"kind", "passage"}, {"offset", 0}, {"limit", 20}});
+    auto second = call("knowledge.preview.page", {{"token", (*large)["token"]}, {"kind", "passage"}, {"offset", 20}, {"limit", 20}});
+    ASSERT_TRUE(first && second);
+    EXPECT_EQ((*first)["total"], added);
+    EXPECT_EQ((*first)["entries"].size(), 20u);
+    EXPECT_EQ((*first)["entries"][0]["position"], 0);
+    EXPECT_EQ((*second)["entries"][0]["position"], 20);
+    EXPECT_LE((*first)["entries"][0]["text"].get<std::string>().size(), 304u);  // a bounded excerpt, not the passage
+    ASSERT_TRUE(confirm(*large));
+    EXPECT_EQ(static_cast<long long>(kg.svc->store().chunks_of_item(kg.svc->store().item("files", kg.file_path("big.txt"))->id).size()), added);
+}
+
 // 8.2: with consistency or extraction off, the model unavailable, a Source turned off during analysis or the budget
 // spent, nothing is recorded and the facts stay pending; an answer citing an invented fact is refused as a whole.
 TEST(KnowledgeConsistency, UnavailableOrBudgetLimitedAnalysisStaysPendingAndUnsafeAnswersAreRefused) {

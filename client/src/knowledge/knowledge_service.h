@@ -216,6 +216,24 @@ public:
     // Earlier decisions with the excerpts they were based on: [{decision, reason, decided_at, left, right}].
     Result<json> review_history(long long review_id);
 
+    // ---- Impact previews (Knowledge Impact Preview, Revision-Safe Impact Confirmation; task 8.3) ----
+    // A preview of an explicit operation, before anything changes: importing or updating a file as a document, adding
+    // an exclusion, or forgetting an item. Returns {token, operation, target, generation, expires_at, complete: false,
+    // pending: [...], passages {...}, facts {...}, categories, reviews, shares, items}; entries are read with
+    // preview_page. The import's passages are kept (encrypted) under the token until it is confirmed or cancelled.
+    Result<json> preview_import(const std::string& path);
+    Result<json> preview_exclusion(const std::string& kind, const std::string& value);
+    Result<json> preview_forget(long long item_id);
+    // A page of a preview's affected facts or passages: {kind, offset, total, entries: [...]}.
+    Result<json> preview_page(const std::string& token, const std::string& kind, int offset, int limit);
+    // Commits the reviewed operation, only as reviewed: the file must still have the reviewed content, the policy
+    // must be unchanged, and when knowledge changed the effects must be unchanged; otherwise stale (preview again).
+    // A preview is never complete (extraction, consistency and publication effects follow), so `accept_incomplete`
+    // must be set. Returns {done: true}.
+    Result<json> confirm_preview(const std::string& token, bool accept_incomplete);
+    // Discards the preview and its kept passages.
+    Status cancel_preview(const std::string& token);
+
     // ---- Tools ----
     std::vector<runtime::ToolDef> tools();
 
@@ -325,6 +343,28 @@ private:
     bool embed_step();
     bool extract_step();
     // Automatic categorization (design D7): one bounded batch of unchecked facts against the existing categories.
+    // A file read for indexing or for a preview: the item to write, or why not (skip: not indexable, recorded as
+    // skipped; error: cannot be read now), or unchanged when `skip_unchanged` and the stored revision has this content.
+    struct FileRead {
+        std::optional<ItemInput> input;
+        std::string skip, error;
+        bool unchanged = false;
+    };
+    FileRead read_file_item(const std::string& path, int priority, bool skip_unchanged);
+    // Removes indexed knowledge of excluded items; the caller holds share_mx_.
+    Status apply_exclusions_locked();
+    // The policy a preview of the operation was made under; a confirmation needs the same.
+    std::string preview_policy(const std::string& operation, const json& target);
+    json exclusion_items(const std::string& kind, const std::string& value);
+    bool files_importable(const std::string& path);
+    Result<json> confirm_preview_checked(const std::string& token, bool accept_incomplete);
+    // Computes a preview of the operation now (task 8.3): {summary, entries, generation}.
+    struct ComputedPreview {
+        json summary;
+        std::vector<PreviewEntry> entries;
+        long long generation = 0;
+    };
+    Result<ComputedPreview> compute_preview(const std::string& operation, const json& target, const std::optional<ItemInput>& input);
     bool categorize_step();
     // Possible inconsistency review (design D7): unchecked facts against bounded related facts.
     bool consistency_step();

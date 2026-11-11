@@ -84,6 +84,17 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
     });
     add("knowledge.review.reopen", [done](Svc& s, const json& p) { return done(s.reopen_review(jint(p, "id"), jint(p, "generation"))); });
     add("knowledge.review.history", [](Svc& s, const json& p) { return s.review_history(jint(p, "id")); });
+    // Knowledge impact previews: a destructive or large change is confirmed against the revision it was previewed on.
+    add("knowledge.preview.import", [](Svc& s, const json& p) { return s.preview_import(jstr(p, "path")); });
+    add("knowledge.preview.exclusion", [](Svc& s, const json& p) { return s.preview_exclusion(jstr(p, "kind"), jstr(p, "value")); });
+    add("knowledge.preview.forget", [](Svc& s, const json& p) { return s.preview_forget(jint(p, "id")); });
+    add("knowledge.preview.page", [](Svc& s, const json& p) {
+        return s.preview_page(jstr(p, "token"), jstr(p, "kind"), static_cast<int>(jint(p, "offset", 0)), static_cast<int>(jint(p, "limit", 50)));
+    });
+    add("knowledge.preview.confirm", [](Svc& s, const json& p) {
+        return s.confirm_preview(jstr(p, "token"), p.value("accept_incomplete", false));
+    });
+    add("knowledge.preview.cancel", [done](Svc& s, const json& p) { return done(s.cancel_preview(jstr(p, "token"))); });
     // A citation of a file: opened only when it is an indexed item of the files Source, never an arbitrary path.
     add("knowledge.open", [done, open_file](Svc& s, const json& p) -> Result<json> {
         const std::string ref = jstr(p, "ref");
