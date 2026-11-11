@@ -43,6 +43,8 @@ ToolOutput untrusted(json body, const std::string& what) {
 }
 
 const json kEntityRef = {{"type", "string"}, {"description", "The entity's name, email address or id from an earlier knowledge result"}};
+const json kCategory = {{"type", "string"},
+                        {"description", "Only knowledge in this category of the user's (Uncategorized: knowledge without a category)"}};
 
 // The highest passage number a stored knowledge.search result body gives; 0 when it has none.
 int highest_number(const std::string& body) {
@@ -93,10 +95,22 @@ public:
         return std::nullopt;
     }
 
+    // The category and history of a call; an unknown category names the ones there are.
+    Result<KnowledgeFilter> filter(const json& a) {
+        auto f = svc_.knowledge_filter(a);
+        if (f) return f;
+        std::string known;
+        for (const auto& c : svc_.categories()) known += (known.empty() ? "" : ", ") + jstr(c, "name");
+        return make_error("not_found", f.error().message + " Categories: " + known + ".");
+    }
+
     ToolOutput search(ToolContext& ctx, const json& a) {
         const std::string q = trim(jstr(a, "query"));
         if (q.empty()) return ToolOutput::failure("query is required");
+        const auto f = filter(a);
+        if (!f) return ToolOutput::failure(f.error().message);
         SearchOptions o;
+        o.category = f->category;
         o.limit = static_cast<int>(std::clamp<long long>(jint(a, "limit", 8), 1, 20));
         if (const json* s = jobj(a, "sources"); s && s->is_array())
             for (const auto& x : *s)
@@ -127,7 +141,7 @@ public:
             results.push_back(std::move(x));
         }
         json facts = json::array();
-        for (const auto& f : r.facts) facts.push_back(fact_json(f));
+        for (const auto& u : r.facts) facts.push_back(fact_json(u));
         json body = {{"results", results}, {"user_facts", facts}};
         if (!r.semantic) body["note"] = "Semantic search is unavailable right now; these results come from full-text and graph search only.";
         if (results.empty() && facts.empty()) body["note"] = "No indexed knowledge matches this query.";
@@ -144,9 +158,16 @@ public:
     }
 
     ToolOutput entity(ToolContext&, const json& a) {
+        const auto f = filter(a);
+        if (!f) return ToolOutput::failure(f.error().message);
         const auto e = find(a);
         if (!e) return ToolOutput::failure("No entity with that name is known. Try knowledge.search.");
-        json profile = svc_.entity_profile(e->id);
+        json profile = svc_.entity_profile(e->id, *f);
+        if (f->history)
+            profile["history_note"] = "history lists facts that are no longer current knowledge (rejected in review, superseded by a "
+                                      "newer revision, or unsupported); do not present them as current.";
+        if (std::any_of(profile["relations"].begin(), profile["relations"].end(), [](const json& r) { return jstr(r, "state") == "disputed"; }))
+            profile["dispute_note"] = "Some relations are disputed: give both sides with their sources instead of choosing one.";
         json others = json::array();
         const std::string ref = jstr(a, "entity", jstr(a, "name"));
         if (!ref.empty())
@@ -157,6 +178,8 @@ public:
     }
 
     ToolOutput related(ToolContext&, const json& a) {
+        const auto f = filter(a);
+        if (!f) return ToolOutput::failure(f.error().message);
         const auto e = find(a);
         if (!e) return ToolOutput::failure("No entity with that name is known. Try knowledge.search.");
         const int depth = static_cast<int>(std::clamp<long long>(jint(a, "depth", 1), 1, 2));
@@ -168,17 +191,21 @@ public:
             std::vector<long long> next;
             for (long long id : frontier) {
                 for (const auto& r : svc_.store().relations_of(id, 50)) {
-                    if (!svc_.relation_visible(r)) continue;
                     const long long other = r.subject == id ? r.object : r.subject;
                     if (seen.count(other) || static_cast<int>(out.size()) >= limit) continue;
+                    const json stated = svc_.current_relation(r, *f);
+                    if (stated.is_null()) continue;
                     seen.insert(other);
                     next.push_back(other);
                     const auto o = svc_.store().entity(other);
                     if (!o) continue;
                     json x = {{"id", o->id}, {"type", o->type}, {"name", o->name}, {"hops", hop},
-                              {"relation", r.subject_name + " " + r.predicate + " " + r.object_name}, {"confidence", r.confidence}};
+                              {"relation", r.subject_name + " " + r.predicate + " " + r.object_name}, {"confidence", r.confidence},
+                              {"state", stated["state"]}, {"categories", stated["categories"]}};
                     if (!r.valid_from.empty()) x["valid_from"] = r.valid_from;
                     if (!r.valid_to.empty()) x["valid_to"] = r.valid_to;
+                    for (const char* k : {"citations", "disputes"})
+                        if (stated.contains(k)) x[k] = stated[k];
                     out.push_back(std::move(x));
                 }
             }
@@ -188,6 +215,8 @@ public:
     }
 
     ToolOutput timeline(ToolContext& ctx, const json& a) {
+        const auto f = filter(a);
+        if (!f) return ToolOutput::failure(f.error().message);
         const auto since = parse_iso8601_ms(jstr(a, "since")), until = parse_iso8601_ms(jstr(a, "until"));
         const int limit = static_cast<int>(std::clamp<long long>(jint(a, "limit", 30), 1, 100));
         const auto in_range = [&](long long ms) { return (!since || ms >= *since) && (!until || ms <= *until); };
@@ -195,12 +224,16 @@ public:
         const auto e = find(a);
         if (e) {
             for (const auto& r : svc_.store().relations_of(e->id, 200)) {
-                if (!svc_.relation_visible(r)) continue;
                 const std::string date = !r.valid_from.empty() ? r.valid_from : r.valid_to;
                 if (date.empty()) continue;
                 const auto ms = parse_iso8601_ms(date);
                 if (!ms || !in_range(*ms)) continue;
-                json x = {{"date", date}, {"kind", "fact"}, {"text", r.subject_name + " " + r.predicate + " " + r.object_name}};
+                const json stated = svc_.current_relation(r, *f);
+                if (stated.is_null()) continue;
+                json x = {{"date", date}, {"kind", "fact"}, {"text", r.subject_name + " " + r.predicate + " " + r.object_name},
+                          {"state", stated["state"]}, {"categories", stated["categories"]}};
+                for (const char* k : {"citations", "disputes"})
+                    if (stated.contains(k)) x[k] = stated[k];
                 if (!r.valid_to.empty()) x["until"] = r.valid_to;
                 if (r.chunk_id)
                     for (const auto& c : svc_.store().chunks({r.chunk_id}))
@@ -212,7 +245,12 @@ public:
                 events.emplace_back(date, std::move(x));
             }
             std::set<long long> items;
-            for (const auto& c : svc_.store().chunks(svc_.store().chunks_mentioning({e->id}, 200))) {
+            auto mentioning = svc_.store().chunks_mentioning({e->id}, 200);
+            if (f->category) {
+                const auto keep = svc_.store().chunks_in_category(mentioning, *f->category);
+                mentioning.erase(std::remove_if(mentioning.begin(), mentioning.end(), [&](long long c) { return !keep.count(c); }), mentioning.end());
+            }
+            for (const auto& c : svc_.store().chunks(mentioning)) {
                 if (!svc_.chunk_visible(c.id)) continue;
                 if (!items.insert(c.item_id).second) continue;
                 const auto it = svc_.store().item(c.item_id);
@@ -222,18 +260,20 @@ public:
                 events.emplace_back(iso(when), json{{"date", iso(when)}, {"kind", "item"}, {"source", it->source}, {"title", it->title},
                                                     {"ref", it->ref}, {"passage", c.text}, {"provenance", item_provenance(it->source, it->ref)}});
             }
-            for (const auto& f : svc_.store().facts_of(e->id)) {
-                if (!svc_.fact_visible(f)) continue;
-                json x = fact_json(f);
-                x["date"] = iso(f.created_at);
+            // User-stated facts have no category: they belong to Uncategorized only.
+            for (const auto& u : (f->category && *f->category != 0) ? std::vector<FactRow>{} : svc_.store().facts_of(e->id)) {
+                if (!svc_.fact_visible(u)) continue;
+                json x = fact_json(u);
+                x["date"] = iso(u.created_at);
                 x["kind"] = "user_fact";
-                events.emplace_back(iso(f.created_at), std::move(x));
+                events.emplace_back(iso(u.created_at), std::move(x));
             }
         } else {
             const std::string topic = trim(jstr(a, "topic", jstr(a, "entity", jstr(a, "name"))));
             if (topic.empty()) return ToolOutput::failure("entity or topic is required");
             SearchOptions o;
             o.limit = limit;
+            o.category = f->category;
             o.run_id = ctx.run_id;
             o.thread_id = ctx.thread_id;
             for (const auto& p : svc_.search(topic, o).passages) {
@@ -298,7 +338,8 @@ std::vector<runtime::ToolDef> KnowledgeService::tools() {
         sources.push_back("team");
         d.parameters = schema({{"query", {{"type", "string"}, {"description", "What to look for, in any language"}}},
                                {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 20}}},
-                               {"sources", {{"type", "array"}, {"items", {{"type", "string"}, {"enum", sources}}}}}},
+                               {"sources", {{"type", "array"}, {"items", {{"type", "string"}, {"enum", sources}}}}},
+                               {"category", kCategory}},
                               {"query"});
         d.risk = Risk::read;
         d.provenance = untrusted;
@@ -309,8 +350,13 @@ std::vector<runtime::ToolDef> KnowledgeService::tools() {
         ToolDef d;
         d.id = "knowledge.entity";
         d.description = "The profile of a person, project, organization, document, meeting, topic or system the user's knowledge "
-                        "knows: names, directory details, user-stated facts and relations with their sources.";
-        d.parameters = schema({{"entity", kEntityRef}}, {"entity"});
+                        "knows: names, directory details, user-stated facts and current relations with the excerpts and revisions "
+                        "they cite. A disputed relation comes with the other side of the disagreement. Facts that are no longer "
+                        "current are returned only with history.";
+        d.parameters = schema({{"entity", kEntityRef},
+                               {"category", kCategory},
+                               {"history", {{"type", "boolean"}, {"description", "Also list facts that are no longer current, labeled"}}}},
+                              {"entity"});
         d.risk = Risk::read;
         d.provenance = untrusted;
         d.run = [t](ToolContext& c, const json& a) { return t->entity(c, a); };
@@ -322,7 +368,8 @@ std::vector<runtime::ToolDef> KnowledgeService::tools() {
         d.description = "Entities connected to an entity in the user's knowledge graph, up to two relations away.";
         d.parameters = schema({{"entity", kEntityRef},
                                {"depth", {{"type", "integer"}, {"minimum", 1}, {"maximum", 2}}},
-                               {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 50}}}},
+                               {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 50}}},
+                               {"category", kCategory}},
                               {"entity"});
         d.risk = Risk::read;
         d.provenance = untrusted;
@@ -337,7 +384,8 @@ std::vector<runtime::ToolDef> KnowledgeService::tools() {
                                {"topic", {{"type", "string"}, {"description", "A topic, when there is no entity"}}},
                                {"since", {{"type", "string"}, {"description", "ISO 8601 date"}}},
                                {"until", {{"type", "string"}, {"description", "ISO 8601 date"}}},
-                               {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}}});
+                               {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}},
+                               {"category", kCategory}});
         d.risk = Risk::read;
         d.provenance = untrusted;
         d.run = [t](ToolContext& c, const json& a) { return t->timeline(c, a); };

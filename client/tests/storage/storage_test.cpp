@@ -1963,6 +1963,81 @@ INSERT INTO knowledge_support_evidence(support_id,evidence_id) VALUES(1,1),(2,2)
     EXPECT_TRUE(store.conflicts(10).empty());
 }
 
+// improve-skowork-and-knowledge-control 7.4: the state filter separates current knowledge from history.
+TEST(Database, KnowledgeFactStateSeparatesCurrentKnowledgeFromHistory) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get_or_create("state.db");
+    ASSERT_TRUE(key);
+    MigrationOutcome outcome;
+    auto db = knowledge::open_kg_database(root->file("state.db"), *key, outcome);
+    ASSERT_TRUE(db) << db.error().message;
+    knowledge::KgStore store(std::move(*db));
+    // Fact 2 is derived: its only support needs fact 1 and an excerpt of the team page. Fact 3 has its own support.
+    ASSERT_TRUE(store.db().exec(R"sql(
+INSERT INTO entities(id,type,name,key) VALUES(1,'project','Phoenix','phoenix'),(2,'date','June','june'),(3,'person','Jana','jana');
+INSERT INTO knowledge_facts(id,subject,predicate,object) VALUES(1,1,'deadline',2),(2,3,'must_deliver_by',2),(3,3,'leads',1);
+INSERT INTO items(id,source,ext_id,hash) VALUES(1,'files','plan','v1'),(2,'files','team','v1');
+INSERT INTO chunks(id,item_id,ord,text) VALUES(1,1,0,'Deadline June'),(2,2,0,'Jana leads Phoenix');
+INSERT INTO knowledge_revisions(id,item_id,sequence,source_hash,indexed_at,current) VALUES(1,1,1,'v1',1,1),(2,2,1,'v1',1,1);
+INSERT INTO knowledge_evidence(id,revision_id,chunk_id,excerpt,precision) VALUES(1,1,1,'Deadline June','passage'),(2,2,2,'Jana leads Phoenix','passage');
+INSERT INTO knowledge_evidence(id,revision_id,chunk_id,excerpt,precision,byte_start,byte_end) VALUES(3,2,2,'Jana','exact',0,4);
+INSERT INTO knowledge_support_sets(id,fact_id,state) VALUES(1,1,'unverified'),(2,2,'unverified'),(3,3,'current');
+INSERT INTO knowledge_support_evidence(support_id,evidence_id) VALUES(1,1),(2,3),(3,2);
+INSERT INTO knowledge_support_facts(support_id,required_fact_id) VALUES(2,1);
+)sql"));
+    for (const long long fact : {1, 2, 3}) {
+        const auto state = store.fact_state(fact, false);
+        ASSERT_TRUE(state);
+        EXPECT_EQ(state->state, "current") << fact;
+        ASSERT_EQ(state->citations.size(), 1u) << fact;
+        EXPECT_EQ(state->citations[0].revision, 1);
+        EXPECT_TRUE(state->citations[0].current_revision);
+    }
+    const auto schedule = store.create_category("Schedule");
+    ASSERT_TRUE(schedule);
+    ASSERT_TRUE(store.set_category_assignment(1, *schedule, "manual", ""));
+    EXPECT_EQ(store.find_category("SCHEDULE"), *schedule);
+    EXPECT_EQ(store.find_category("Uncategorized"), 0);
+    EXPECT_FALSE(store.find_category("Budget"));
+    EXPECT_EQ(store.chunks_in_category({1, 2}, *schedule), (std::unordered_set<long long>{1}));
+    // The plan passage supports only the categorized deadline; the team page supports uncategorized facts.
+    EXPECT_EQ(store.chunks_in_category({1, 2}, 0), (std::unordered_set<long long>{2}));
+
+    // The plan is replaced: fact 1 is superseded and the fact derived from it becomes unsupported.
+    ASSERT_TRUE(store.db().exec("INSERT INTO knowledge_revisions(id,item_id,sequence,source_hash,indexed_at,current) VALUES(3,1,2,'v2',2,0);"
+                                "UPDATE knowledge_revisions SET current=0 WHERE id=1; UPDATE knowledge_revisions SET current=1 WHERE id=3;"));
+    const auto superseded = store.fact_state(1, false), unsupported = store.fact_state(2, false), unaffected = store.fact_state(3, false);
+    ASSERT_TRUE(superseded && unsupported && unaffected);
+    EXPECT_EQ(superseded->state, "superseded");
+    EXPECT_EQ(unsupported->state, "unsupported");
+    EXPECT_EQ(unaffected->state, "current");
+    // A current answer cites nothing of a replaced revision; history keeps the retained excerpt with its revision.
+    EXPECT_TRUE(superseded->citations.empty());
+    EXPECT_TRUE(unsupported->citations.empty());
+    const auto history = store.fact_state(1, true);
+    ASSERT_TRUE(history);
+    ASSERT_EQ(history->citations.size(), 1u);
+    EXPECT_EQ(history->citations[0].excerpt, "Deadline June");
+    EXPECT_EQ(history->citations[0].revision, 1);
+    EXPECT_FALSE(history->citations[0].current_revision);
+    EXPECT_EQ(history->citations[0].support, "superseded");
+    const auto derived = store.fact_state(2, true);
+    ASSERT_TRUE(derived);
+    ASSERT_EQ(derived->citations.size(), 1u);
+    EXPECT_EQ(derived->citations[0].excerpt, "Jana");
+    EXPECT_TRUE(derived->citations[0].current_revision);
+    EXPECT_EQ(derived->citations[0].support, "unsupported");
+    EXPECT_EQ(store.fact_state(1, true)->categories.size(), 1u);
+    EXPECT_TRUE(store.chunks_in_category({1, 2}, *schedule).empty());
+    const auto about = store.facts_about(3, 10);
+    EXPECT_EQ(std::set<long long>(about.begin(), about.end()), (std::set<long long>{2, 3}));
+    EXPECT_FALSE(store.fact_state(99, false));
+}
+
 TEST(Database, KnowledgeImpactSnapshotReportsIndependentAndRequiredSupport) {
     TempRoot t;
     auto root = DataRoot::open(t.path);

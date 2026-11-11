@@ -178,6 +178,42 @@ struct BoundAnalysisEvidence {
     long long evidence_id = 0, generation = 0;
 };
 
+// A canonical fact of the evidence schema with its entities' names.
+struct KnowledgeFactRow {
+    long long id = 0, subject = 0, object = 0;
+    std::string subject_name, predicate, object_name, unit, scope, valid_from, valid_to;
+};
+
+// One excerpt a fact cites: the item, the number of the item's revision it was taken from, and whether that revision
+// is the item's current one. `support` is the state of the support it belongs to; empty for a review's excerpt.
+struct FactCitation {
+    long long evidence_id = 0, item_id = 0, chunk_id = 0, revision = 0;
+    bool current_revision = false;
+    std::string excerpt, precision, support;
+};
+
+// An unresolved review of the fact: open, deferred or needs_recheck, with the excerpt reviewed on each side.
+struct FactDispute {
+    long long conflict_id = 0;
+    std::string state, explanation;
+    KnowledgeFactRow other;
+    std::optional<FactCitation> own, other_citation;
+};
+
+// The shared knowledge state filter (client/knowledge-graph Retrieval Respects Knowledge State). `state` is current or
+// disputed for current knowledge; rejected (the other side of the review was preferred), superseded (supported only by
+// replaced revisions) or unsupported are history. Categories are accepted assignments (automatic or manual).
+struct FactState {
+    KnowledgeFactRow fact;
+    std::string state;
+    std::vector<CategoryRow> categories;
+    std::vector<FactCitation> citations;  // current supports in current revisions; with history every retained excerpt
+    std::vector<FactDispute> disputes;
+};
+
+// The reserved name of the category filter for facts without an accepted category.
+inline constexpr const char* kUncategorized = "Uncategorized";
+
 class KgStore {
 public:
     explicit KgStore(std::unique_ptr<Database> db) : db_(std::move(db)) {}
@@ -212,6 +248,21 @@ public:
     Status reopen_conflict(long long conflict_id, long long expected_generation);
     std::vector<ConflictRow> conflicts(int limit);
     std::vector<ConflictDecision> conflict_history(long long conflict_id);
+
+    // ---- Knowledge state (Retrieval Respects Knowledge State) ----
+    // The canonical fact an extracted relation supports; nullopt for a directory relation or before the evidence schema.
+    std::optional<long long> fact_of_relation(const RelationRow& relation);
+    // The fact's state, accepted categories, citations and unresolved reviews; nullopt when there is no such fact.
+    // Without `history` only excerpts of current supports in current revisions are cited.
+    std::optional<FactState> fact_state(long long fact_id, bool history);
+    // Facts about the entity, newest first, for a history request; the caller keeps those that are not current.
+    std::vector<long long> facts_about(long long entity_id, int limit);
+    // A category by name (case and accents ignored); 0 for kUncategorized, nullopt when there is none.
+    std::optional<long long> find_category(const std::string& name);
+    // The passages among `chunk_ids` that belong to the category: current excerpts of a current, not rejected fact
+    // with an accepted assignment to it. For category 0 (Uncategorized), passages that support such a fact without an
+    // accepted category, or no current fact at all.
+    std::unordered_set<long long> chunks_in_category(const std::vector<long long>& chunk_ids, long long category);
     Result<KnowledgeImpactPreview> preview_evidence_removal(const std::unordered_set<long long>& evidence_ids);
     Result<KnowledgeImpactPreview> preview_item_removal(long long item_id);
     Result<PreparedItemRemoval> prepare_item_removal(long long item_id, long long now);

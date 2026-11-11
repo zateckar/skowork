@@ -1265,6 +1265,141 @@ std::vector<std::string> KnowledgeService::visible_entity_aliases(const EntityRo
     return out;
 }
 
+// ---- The knowledge state filter (Retrieval Respects Knowledge State; design D7) ------------------------------------------
+
+namespace {
+
+std::string fact_row_text(const KnowledgeFactRow& f) {
+    std::string p = f.predicate;
+    std::replace(p.begin(), p.end(), '_', ' ');
+    return f.subject_name + " " + p + " " + f.object_name;
+}
+
+json fact_row_json(const KnowledgeFactRow& f) {
+    json j = {{"fact_id", f.id}, {"text", fact_row_text(f)}, {"subject", f.subject_name}, {"predicate", f.predicate}, {"object", f.object_name}};
+    if (!f.valid_from.empty()) j["valid_from"] = f.valid_from;
+    if (!f.valid_to.empty()) j["valid_to"] = f.valid_to;
+    if (!f.unit.empty()) j["unit"] = f.unit;
+    if (!f.scope.empty()) j["scope"] = f.scope;
+    return j;
+}
+
+json category_names(const std::vector<CategoryRow>& categories) {
+    json out = json::array();
+    for (const auto& c : categories) out.push_back(c.name);
+    return out;
+}
+
+bool in_category(const std::vector<CategoryRow>& categories, const KnowledgeFilter& filter) {
+    if (!filter.category) return true;
+    if (*filter.category == 0) return categories.empty();
+    return std::any_of(categories.begin(), categories.end(), [&](const CategoryRow& c) { return c.id == *filter.category; });
+}
+
+}  // namespace
+
+Result<KnowledgeFilter> KnowledgeService::knowledge_filter(const json& params) {
+    KnowledgeFilter f;
+    f.history = jbool(params, "history", false);
+    const std::string name = trim(jstr(params, "category"));
+    if (name.empty()) return f;
+    f.category = store_->find_category(name);
+    if (!f.category) return make_error("not_found", "No category is named \"" + name + "\".");
+    return f;
+}
+
+json KnowledgeService::categories() {
+    json out = json::array();
+    for (const auto& c : store_->categories()) out.push_back({{"id", c.id}, {"name", c.name}});
+    out.push_back({{"id", 0}, {"name", kUncategorized}});
+    return out;
+}
+
+// One excerpt as a reader cites it, or null when its item is no longer permitted.
+static json citation_json(KnowledgeService& svc, const FactCitation& c) {
+    const auto it = svc.store().item(c.item_id);
+    if (!it || !svc.item_visible(*it)) return nullptr;
+    std::string excerpt = c.excerpt;
+    if (excerpt.size() > 1000) excerpt = utf8_truncate(excerpt, 1000) + "…";
+    json j = {{"item_id", it->id}, {"source", it->source}, {"title", it->title}, {"ref", it->ref}, {"revision", c.revision},
+              {"current_revision", c.current_revision}, {"excerpt", excerpt}, {"precision", c.precision},
+              {"provenance", provenance_json(passage_provenance(it->source, it->ref))}};
+    if (!c.support.empty()) j["support"] = c.support;
+    return j;
+}
+
+json KnowledgeService::current_relation(const RelationRow& r, const KnowledgeFilter& filter) {
+    if (!relation_visible(r)) return nullptr;
+    json rel = {{"id", r.id}, {"subject", r.subject_name}, {"predicate", r.predicate}, {"object", r.object_name}, {"confidence", r.confidence},
+                {"state", "current"}, {"categories", json::array()}};
+    if (!r.valid_from.empty()) rel["valid_from"] = r.valid_from;
+    if (!r.valid_to.empty()) rel["valid_to"] = r.valid_to;
+    if (!r.chunk_id) {
+        // A directory relation has no passage, no canonical fact and no category.
+        if (!in_category({}, filter)) return nullptr;
+        rel["source"] = {{"source", "directory"}};
+        return rel;
+    }
+    const auto fact = store_->fact_of_relation(r);
+    const auto state = fact ? store_->fact_state(*fact, false) : std::nullopt;
+    if (fact && !state) return nullptr;  // removed since the relation was read
+    if (state && state->state != "current" && state->state != "disputed") return nullptr;
+    if (!in_category(state ? state->categories : std::vector<CategoryRow>{}, filter)) return nullptr;
+    if (state) {
+        rel["fact_id"] = state->fact.id;
+        rel["categories"] = category_names(state->categories);
+        json citations = json::array();
+        for (const auto& c : state->citations)
+            if (json j = citation_json(*this, c); !j.is_null()) citations.push_back(std::move(j));
+        // The relation's own passage is permitted, so a current fact always has a permitted citation; without one the
+        // relation was replaced while it was read.
+        if (citations.empty()) return nullptr;
+        rel["citations"] = std::move(citations);
+        json disputes = json::array();
+        for (const auto& d : state->disputes) {
+            // The other side counts only when the user may read it; the reviewed excerpts are shown as they were.
+            json other = d.other_citation ? citation_json(*this, *d.other_citation) : json(nullptr);
+            if (other.is_null()) continue;
+            json x = {{"review_id", d.conflict_id}, {"state", d.state}, {"explanation", d.explanation},
+                      {"other", fact_row_json(d.other)}, {"other_citation", std::move(other)}};
+            if (d.own)
+                if (json own = citation_json(*this, *d.own); !own.is_null()) x["own_citation"] = std::move(own);
+            disputes.push_back(std::move(x));
+        }
+        if (!disputes.empty()) {
+            rel["state"] = "disputed";
+            rel["disputes"] = std::move(disputes);
+        }
+    }
+    for (const auto& c : store_->chunks({r.chunk_id}))
+        if (const auto it = store_->item(c.item_id)) {
+            rel["source"] = {{"source", it->source}, {"title", it->title}, {"ref", it->ref}};
+            rel["provenance"] = provenance_json(passage_provenance(it->source, it->ref));
+        }
+    return rel;
+}
+
+json KnowledgeService::fact_history(long long entity_id, const KnowledgeFilter& filter, int limit) {
+    json out = json::array();
+    if (!entity_visible(entity_id)) return out;
+    for (const long long id : store_->facts_about(entity_id, 1000)) {
+        if (static_cast<int>(out.size()) >= limit) break;
+        const auto state = store_->fact_state(id, true);
+        if (!state || state->state == "current" || state->state == "disputed" || !in_category(state->categories, filter)) continue;
+        json citations = json::array();
+        for (const auto& c : state->citations)
+            if (json j = citation_json(*this, c); !j.is_null()) citations.push_back(std::move(j));
+        // Knowledge only from items the user can no longer read is not history the user may see.
+        if (citations.empty()) continue;
+        json x = fact_row_json(state->fact);
+        x["state"] = state->state;
+        x["categories"] = category_names(state->categories);
+        x["citations"] = std::move(citations);
+        out.push_back(std::move(x));
+    }
+    return out;
+}
+
 SearchResult KnowledgeService::search(const std::string& query, const SearchOptions& opt) {
     SearchResult out;
     const auto cfg = config();
@@ -1344,6 +1479,11 @@ SearchResult KnowledgeService::search(const std::string& query, const SearchOpti
     std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.second > b.second || (a.second == b.second && a.first > b.first); });
     std::vector<long long> top;
     for (const auto& [id, _] : order) top.push_back(id);
+    // A category keeps the passages that support its current facts, before the bounded reranking pool is filled.
+    if (opt.category) {
+        const auto keep = store_->chunks_in_category(top, *opt.category);
+        top.erase(std::remove_if(top.begin(), top.end(), [&](long long id) { return !keep.count(id); }), top.end());
+    }
     std::vector<Passage> candidates;
     std::map<long long, std::optional<ItemRow>> items;
     for (const auto& c : store_->chunks(top)) {
@@ -1413,7 +1553,8 @@ SearchResult KnowledgeService::search(const std::string& query, const SearchOpti
     filter_current_permissions();
     if (static_cast<int>(candidates.size()) > opt.limit) candidates.resize(static_cast<size_t>(opt.limit));
     out.passages = std::move(candidates);
-    out.facts = store_->find_facts(query, 2000);
+    // User-stated facts have no category: they belong to Uncategorized only.
+    if (!opt.category || *opt.category == 0) out.facts = store_->find_facts(query, 2000);
     out.facts.erase(std::remove_if(out.facts.begin(), out.facts.end(), [&](const FactRow& f) {
         return !fact_visible(f) || (!f.item_source.empty() && !opt.sources.empty() &&
                                    std::find(opt.sources.begin(), opt.sources.end(), f.item_source) == opt.sources.end());
@@ -1434,6 +1575,10 @@ SearchResult KnowledgeService::search(const std::string& query, const SearchOpti
 void KnowledgeService::search_team(const std::string& query, const SearchOptions& opt, SearchResult& out) {
     if (!opt.team || !env_.team) return;
     if (!opt.sources.empty() && std::find(opt.sources.begin(), opt.sources.end(), "team") == opt.sources.end()) return;
+    if (opt.category) {
+        out.team_note = "Team knowledge was not searched: it has none of the user's categories. These results are the user's own knowledge only.";
+        return;
+    }
     auto r = env_.team("POST", "api/v1/knowledge/search", {{"query", query}, {"limit", std::max(opt.limit, 8)}});
     if (!r) {
         out.team_note = r.error().code == "offline"
@@ -1750,11 +1895,12 @@ json KnowledgeService::items(const std::string& query, int limit) {
     return out;
 }
 
-json KnowledgeService::entity_profile(long long id) {
+json KnowledgeService::entity_profile(long long id, const KnowledgeFilter& filter) {
     const auto e = store_->entity(id);
     if (!e || !entity_visible(id)) return nullptr;
     json facts = json::array();
-    for (const auto& f : store_->facts_of(id)) {
+    // User-stated facts have no category: they are Uncategorized.
+    for (const auto& f : (filter.category && *filter.category != 0) ? std::vector<FactRow>{} : store_->facts_of(id)) {
         if (!fact_visible(f)) continue;
         json fact = {{"id", f.id},
                      {"text", f.text},
@@ -1767,24 +1913,18 @@ json KnowledgeService::entity_profile(long long id) {
         facts.push_back(std::move(fact));
     }
     json relations = json::array();
+    std::set<long long> listed_facts;  // a fact several passages support is listed once, citing each of them
     for (const auto& r : store_->relations_of(id, 30)) {
-        if (!relation_visible(r)) continue;
-        json rel = {{"id", r.id}, {"subject", r.subject_name}, {"predicate", r.predicate}, {"object", r.object_name}, {"confidence", r.confidence}};
-        if (!r.valid_from.empty()) rel["valid_from"] = r.valid_from;
-        if (!r.valid_to.empty()) rel["valid_to"] = r.valid_to;
-        if (r.chunk_id)
-            for (const auto& c : store_->chunks({r.chunk_id}))
-                if (const auto it = store_->item(c.item_id)) {
-                    rel["source"] = {{"source", it->source}, {"title", it->title}, {"ref", it->ref}};
-                    rel["provenance"] = provenance_json(passage_provenance(it->source, it->ref));
-                }
-        if (!r.chunk_id) rel["source"] = {{"source", "directory"}};
+        json rel = current_relation(r, filter);
+        if (rel.is_null()) continue;
+        if (rel.contains("fact_id") && !listed_facts.insert(rel["fact_id"].get<long long>()).second) continue;
         relations.push_back(std::move(rel));
     }
     const auto mentioned = store_->chunks_mentioning({id}, 1000);
     const auto visible_mentions = std::count_if(mentioned.begin(), mentioned.end(), [&](long long chunk) { return chunk_visible(chunk); });
     json profile = {{"id", e->id}, {"type", e->type}, {"name", e->name}, {"aliases", visible_entity_aliases(*e)}, {"facts", facts}, {"relations", relations},
                     {"mentions", visible_mentions}};
+    if (filter.history) profile["history"] = fact_history(id, filter, 50);
     if (!e->email.empty()) profile["email"] = e->email;
     if (!e->department.empty()) profile["department"] = e->department;
     if (!e->title.empty()) profile["title"] = e->title;
@@ -2209,7 +2349,7 @@ json KnowledgeService::source_counts() {
     return out;
 }
 
-json KnowledgeService::item_detail(long long id) {
+json KnowledgeService::item_detail(long long id, const KnowledgeFilter& filter) {
     // The indexed text: a note's own text; otherwise the passages in order, cut at about 20,000 characters.
     std::string text;
     long long indexed = 0;
@@ -2249,7 +2389,13 @@ json KnowledgeService::item_detail(long long id) {
     for (const auto& c : chunks) chunks_by_id.emplace(c.id, &c);
     json facts = json::array();
     for (const auto& r : relations) {
-        json fact = {{"kind", "relation"}, {"id", r.id}, {"text", fact_text(r)}, {"entity_id", r.subject}, {"valid_from", r.valid_from}};
+        // The same state filter as the knowledge tools: rejected, superseded and unsupported facts are not listed.
+        const json stated = current_relation(r, filter);
+        if (stated.is_null()) continue;
+        json fact = {{"kind", "relation"}, {"id", r.id}, {"text", fact_text(r)}, {"entity_id", r.subject}, {"valid_from", r.valid_from},
+                     {"state", stated["state"]}, {"categories", stated["categories"]}};
+        for (const char* k : {"fact_id", "citations", "disputes"})
+            if (stated.contains(k)) fact[k] = stated[k];
         if (const auto found = chunks_by_id.find(r.chunk_id); found != chunks_by_id.end()) {
             // This is the passage sent for extraction, not an exact quoted evidence span or an earlier revision.
             std::string passage = found->second->text;
@@ -2258,7 +2404,7 @@ json KnowledgeService::item_detail(long long id) {
         }
         facts.push_back(std::move(fact));
     }
-    for (const auto& f : store_->facts_of_item(it->source, it->ext_id)) {
+    for (const auto& f : (filter.category && *filter.category != 0) ? std::vector<FactRow>{} : store_->facts_of_item(it->source, it->ext_id)) {
         const auto e = store_->entity(f.entity_id);
         facts.push_back({{"kind", "user"}, {"id", f.id}, {"text", f.text}, {"entity_id", f.entity_id}, {"entity", e ? e->name : ""}, {"stated", iso(f.created_at)}});
     }

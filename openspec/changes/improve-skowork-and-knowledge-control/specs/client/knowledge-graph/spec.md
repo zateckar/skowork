@@ -296,6 +296,25 @@ Knowledge tools and the Knowledge view SHALL apply the same category, Source, re
 #### Scenario: Unresolved deadline
 - **WHEN** the agent retrieves the project's deadline while a relevant disagreement is unresolved
 - **THEN** retrieval includes the alternatives and dispute state rather than a single unlabeled definitive date
+- **AND** a disagreement whose review is open, deferred or awaiting recheck counts as unresolved
+
+#### Scenario: Preferred side of a review
+- **WHEN** the user resolved a disagreement by preferring the approved plan's deadline over the draft's
+- **THEN** knowledge tools and the Knowledge view return only the approved deadline as current, without a dispute label
+- **AND** the draft's deadline appears only in an explicit history request, labeled rejected
+
+#### Scenario: Superseded or unsupported fact
+- **WHEN** a fact's only support is in a replaced revision or depends on a fact that lost its support
+- **THEN** current answers omit it, and a history request returns it labeled superseded or unsupported with the retained excerpt and its revision number
+
+#### Scenario: Category filter
+- **WHEN** the agent or the Knowledge view asks for knowledge in one category
+- **THEN** only facts with an accepted automatic or manual assignment to that category, and passages that support them, are returned
+- **AND** Uncategorized returns facts without an accepted category, including user-stated facts, and a rejected suggestion never places a fact in a category
+
+#### Scenario: Citation of a changed Source
+- **WHEN** a Source item was revised after a fact was extracted from it
+- **THEN** a current answer cites the excerpt and number of the item's current revision, never a replaced one, and a citation from an item the user can no longer read is not returned
 
 #### Scenario: Source access changes before background cleanup
 - **WHEN** policy or a user exclusion makes an indexed Source item unavailable before its background records are removed

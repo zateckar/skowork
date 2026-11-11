@@ -741,7 +741,8 @@ Result<long long> KgStore::create_category(const std::string& name) {
     if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge categories are not available yet.");
     const auto display = trim(name);
     const auto normalized = normalize_name(display);
-    if (display.empty() || display.size() > 160 || normalized.empty()) return make_error("invalid", "Enter a valid category name.");
+    if (display.empty() || display.size() > 160 || normalized.empty() || normalized == normalize_name(kUncategorized))
+        return make_error("invalid", "Enter a valid category name.");  // Uncategorized is the filter for facts without one
     auto s = db_->prepare("INSERT INTO knowledge_categories(name,normalized_name) VALUES(?1,?2)");
     s.bind(1, display).bind(2, normalized);
     if (auto status = s.run(); !status) return status.error();
@@ -753,7 +754,8 @@ Status KgStore::rename_category(long long id, const std::string& name) {
     if (db_->user_version() < kKgEvidenceSchemaVersion) return make_error("schema", "Knowledge categories are not available yet.");
     const auto display = trim(name);
     const auto normalized = normalize_name(display);
-    if (display.empty() || display.size() > 160 || normalized.empty()) return make_error("invalid", "Enter a valid category name.");
+    if (display.empty() || display.size() > 160 || normalized.empty() || normalized == normalize_name(kUncategorized))
+        return make_error("invalid", "Enter a valid category name.");  // Uncategorized is the filter for facts without one
     auto s = db_->prepare("UPDATE knowledge_categories SET name=?2,normalized_name=?3 WHERE id=?1");
     s.bind(1, id).bind(2, display).bind(3, normalized);
     if (auto status = s.run(); !status) return status;
@@ -1104,6 +1106,181 @@ std::vector<ConflictDecision> KgStore::conflict_history(long long id) {
     s.bind(1, id);
     while (s.step()) result.push_back({s.col_int(0), s.col_int(1), s.col_int(2), s.col_text(3), s.col_text(4)});
     return result;
+}
+
+// ---- Knowledge state (Retrieval Respects Knowledge State; design D7, knowledge state filter) ---------------------------
+
+namespace {
+
+// The fact was the other side of a review the user resolved by preferring one side. A review whose evidence changed is
+// set back to needs_recheck by the schema and clears its decision, so the rejection lapses with it.
+std::string rejected_sql(const std::string& fact) {
+    return "EXISTS(SELECT 1 FROM knowledge_conflicts k WHERE k.state='resolved' AND ((k.decision='prefer_left' AND k.right_fact=" +
+           fact + ") OR (k.decision='prefer_right' AND k.left_fact=" + fact + ")))";
+}
+
+bool fact_rejected(Database& db, long long fact) {
+    auto s = db.prepare("SELECT " + rejected_sql("?1"));
+    s.bind(1, fact);
+    return s.step() && s.col_int(0);
+}
+
+bool fact_supported(Database& db, long long fact) {
+    auto s = db.prepare("SELECT 1 FROM knowledge_support_sets WHERE fact_id=?1 AND state IN ('current','unverified') LIMIT 1");
+    s.bind(1, fact);
+    return s.step();
+}
+
+std::optional<KnowledgeFactRow> read_fact(Database& db, long long fact) {
+    auto s = db.prepare("SELECT f.id,f.subject,f.object,s.name,f.predicate,o.name,f.unit,f.scope,f.valid_from,f.valid_to "
+                        "FROM knowledge_facts f JOIN entities s ON s.id=f.subject JOIN entities o ON o.id=f.object WHERE f.id=?1");
+    s.bind(1, fact);
+    if (!s.step()) return std::nullopt;
+    return KnowledgeFactRow{s.col_int(0), s.col_int(1), s.col_int(2), s.col_text(3), s.col_text(4), s.col_text(5),
+                            s.col_text(6), s.col_text(7), s.col_text(8), s.col_text(9)};
+}
+
+std::optional<FactCitation> read_citation(Database& db, long long evidence) {
+    auto s = db.prepare("SELECT e.id,v.item_id,ifnull(e.chunk_id,0),v.sequence,v.current,e.excerpt,e.precision "
+                        "FROM knowledge_evidence e JOIN knowledge_revisions v ON v.id=e.revision_id WHERE e.id=?1");
+    s.bind(1, evidence);
+    if (!s.step()) return std::nullopt;
+    return FactCitation{s.col_int(0), s.col_int(1), s.col_int(2), s.col_int(3), s.col_int(4) != 0, s.col_text(5), s.col_text(6), {}};
+}
+
+}  // namespace
+
+std::optional<long long> KgStore::fact_of_relation(const RelationRow& r) {
+    const std::lock_guard lock(db_->mutex());
+    if (!r.chunk_id || db_->user_version() < kKgEvidenceSchemaVersion) return std::nullopt;
+    auto s = db_->prepare("SELECT id FROM knowledge_facts WHERE subject=?1 AND predicate=?2 AND object=?3 AND unit='' AND scope='' "
+                          "AND valid_from=?4 AND valid_to=?5");
+    s.bind(1, r.subject).bind(2, r.predicate).bind(3, r.object).bind(4, r.valid_from).bind(5, r.valid_to);
+    if (!s.step()) return std::nullopt;
+    return s.col_int(0);
+}
+
+std::optional<FactState> KgStore::fact_state(long long fact_id, bool history) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return std::nullopt;
+    auto fact = read_fact(*db_, fact_id);
+    if (!fact) return std::nullopt;
+    FactState out;
+    out.fact = std::move(*fact);
+    bool current = false, unsupported = false;
+    {
+        auto s = db_->prepare("SELECT DISTINCT state FROM knowledge_support_sets WHERE fact_id=?1");
+        s.bind(1, fact_id);
+        while (s.step()) {
+            const auto state = s.col_text(0);
+            current = current || state == "current" || state == "unverified";
+            unsupported = unsupported || state == "unsupported";
+        }
+    }
+    {
+        // Several supports can share one excerpt; each is cited once, current revisions first.
+        auto s = db_->prepare(std::string(
+            "SELECT e.id,v.item_id,ifnull(e.chunk_id,0),v.sequence,v.current,e.excerpt,e.precision,"
+            "min(CASE s.state WHEN 'current' THEN 0 WHEN 'unverified' THEN 1 WHEN 'superseded' THEN 2 ELSE 3 END) "
+            "FROM knowledge_support_sets s JOIN knowledge_support_evidence se ON se.support_id=s.id "
+            "JOIN knowledge_evidence e ON e.id=se.evidence_id JOIN knowledge_revisions v ON v.id=e.revision_id "
+            "WHERE s.fact_id=?1") + (history ? "" : " AND s.state IN ('current','unverified') AND v.current=1") +
+            " GROUP BY e.id ORDER BY v.current DESC,v.sequence DESC,e.id LIMIT 50");
+        s.bind(1, fact_id);
+        static const char* const kSupport[] = {"current", "unverified", "superseded", "unsupported"};
+        while (s.step())
+            out.citations.push_back({s.col_int(0), s.col_int(1), s.col_int(2), s.col_int(3), s.col_int(4) != 0, s.col_text(5),
+                                     s.col_text(6), kSupport[std::clamp<long long>(s.col_int(7), 0, 3)]});
+    }
+    {
+        auto s = db_->prepare("SELECT c.id,c.name FROM knowledge_category_assignments a JOIN knowledge_categories c ON c.id=a.category_id "
+                              "WHERE a.fact_id=?1 AND a.decision IN ('automatic','manual') ORDER BY c.normalized_name,c.id");
+        s.bind(1, fact_id);
+        while (s.step()) out.categories.push_back({s.col_int(0), s.col_text(1)});
+    }
+    if (fact_rejected(*db_, fact_id)) out.state = "rejected";
+    else if (!current) out.state = unsupported ? "unsupported" : "superseded";
+    else {
+        // An unresolved review counts only while its other side is current knowledge too.
+        auto s = db_->prepare("SELECT id,CASE WHEN left_fact=?1 THEN right_fact ELSE left_fact END,state,explanation,"
+                              "CASE WHEN left_fact=?1 THEN left_evidence ELSE right_evidence END,"
+                              "CASE WHEN left_fact=?1 THEN right_evidence ELSE left_evidence END "
+                              "FROM knowledge_conflicts WHERE (left_fact=?1 OR right_fact=?1) "
+                              "AND state IN ('open','deferred','needs_recheck') ORDER BY id");
+        s.bind(1, fact_id);
+        struct Row { long long id, other, own_evidence, other_evidence; std::string state, explanation; };
+        std::vector<Row> rows;
+        while (s.step()) rows.push_back({s.col_int(0), s.col_int(1), s.col_int(4), s.col_int(5), s.col_text(2), s.col_text(3)});
+        for (const auto& r : rows) {
+            if (!fact_supported(*db_, r.other) || fact_rejected(*db_, r.other)) continue;
+            auto other = read_fact(*db_, r.other);
+            if (!other) continue;
+            out.disputes.push_back({r.id, r.state, r.explanation, std::move(*other), read_citation(*db_, r.own_evidence),
+                                    read_citation(*db_, r.other_evidence)});
+        }
+        out.state = out.disputes.empty() ? "current" : "disputed";
+    }
+    return out;
+}
+
+std::vector<long long> KgStore::facts_about(long long entity_id, int limit) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<long long> out;
+    if (db_->user_version() < kKgEvidenceSchemaVersion || limit <= 0) return out;
+    auto s = db_->prepare("SELECT id FROM knowledge_facts WHERE subject=?1 UNION SELECT id FROM knowledge_facts WHERE object=?1 "
+                          "ORDER BY id DESC LIMIT ?2");
+    s.bind(1, entity_id).bind(2, std::min(limit, 1000));
+    while (s.step()) out.push_back(s.col_int(0));
+    return out;
+}
+
+std::optional<long long> KgStore::find_category(const std::string& name) {
+    const auto normalized = normalize_name(trim(name));
+    if (normalized.empty()) return std::nullopt;
+    if (normalized == normalize_name(kUncategorized)) return 0;
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return std::nullopt;
+    auto s = db_->prepare("SELECT id FROM knowledge_categories WHERE normalized_name=?1");
+    s.bind(1, normalized);
+    if (!s.step()) return std::nullopt;
+    return s.col_int(0);
+}
+
+std::unordered_set<long long> KgStore::chunks_in_category(const std::vector<long long>& chunk_ids, long long category) {
+    const std::lock_guard lock(db_->mutex());
+    std::unordered_set<long long> out;
+    if (db_->user_version() < kKgEvidenceSchemaVersion) {
+        if (category == 0) out.insert(chunk_ids.begin(), chunk_ids.end());
+        return out;
+    }
+    // The current, not rejected facts the passage's current excerpts support. A passage belongs to a category when one
+    // of them is assigned to it, and to Uncategorized when one of them has no accepted category or it supports none.
+    const std::string supported =
+        "SELECT 1 FROM knowledge_evidence e JOIN knowledge_revisions v ON v.id=e.revision_id AND v.current=1 "
+        "JOIN knowledge_support_evidence se ON se.evidence_id=e.id "
+        "JOIN knowledge_support_sets s ON s.id=se.support_id AND s.state IN ('current','unverified') "
+        "WHERE e.chunk_id=?1 AND NOT " + rejected_sql("s.fact_id");
+    auto in_category = db_->prepare(supported + " AND EXISTS(SELECT 1 FROM knowledge_category_assignments a WHERE a.fact_id=s.fact_id "
+                                                "AND a.decision IN ('automatic','manual') AND a.category_id=?2) LIMIT 1");
+    auto any = db_->prepare(supported + " LIMIT 1");
+    auto uncategorized = db_->prepare(supported + " AND NOT EXISTS(SELECT 1 FROM knowledge_category_assignments a "
+                                                  "WHERE a.fact_id=s.fact_id AND a.decision IN ('automatic','manual')) LIMIT 1");
+    for (const long long chunk : chunk_ids) {
+        bool keep = false;
+        if (category != 0) {
+            in_category.reset();
+            in_category.bind(1, chunk).bind(2, category);
+            keep = in_category.step();
+        } else {
+            uncategorized.reset();
+            uncategorized.bind(1, chunk);
+            any.reset();
+            any.bind(1, chunk);
+            keep = uncategorized.step() || !any.step();
+        }
+        if (keep) out.insert(chunk);
+    }
+    return out;
 }
 
 Result<KnowledgeImpactPreview> KgStore::preview_evidence_removal(const std::unordered_set<long long>& removed) {

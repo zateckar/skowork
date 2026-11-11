@@ -1921,6 +1921,206 @@ TEST(KnowledgeRetrieval, SourcePolicyAppliesBeforeBackgroundCleanupAcrossReaders
     EXPECT_TRUE(kg.svc->search("Phoenix", {}).passages.empty());
 }
 
+// improve-skowork-and-knowledge-control 7.4: the knowledge tools and the Knowledge view read through one state filter.
+TEST(KnowledgeRetrieval, ToolsAndKnowledgeViewShareTheKnowledgeStateFilter) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    auto& store = kg.svc->store();
+    const auto approved_path = kg.file_path("approved.txt"), draft_path = kg.file_path("draft.txt");
+    write_file(kg.folder / "approved.txt", "Jana Nováková leads Phoenix. The approved deadline is June.");
+    write_file(kg.folder / "draft.txt", "Draft: the Phoenix deadline is July.");
+    // Separate extraction requests: a change to one passage rechecks every finding of the request that saw it.
+    ASSERT_TRUE(kg.svc->add_document(approved_path));
+    kg.idle();
+    ASSERT_TRUE(kg.svc->add_document(draft_path));
+    kg.idle();
+    const auto approved = store.item("files", approved_path), draft = store.item("files", draft_path);
+    ASSERT_TRUE(approved && draft);
+    const auto phoenix = store.find_entities("Phoenix", 1);
+    ASSERT_EQ(phoenix.size(), 1u);
+    const long long june = store.resolve_entity("Date", "June", "", 1), july = store.resolve_entity("Date", "July", "", 1);
+    const auto approved_chunk = store.chunks_of_item(approved->id).at(0), draft_chunk = store.chunks_of_item(draft->id).at(0);
+    const long long june_relation = store.add_relation(phoenix[0].id, "deadline", june, 0.9, "", "", approved_chunk.id);
+    const long long july_relation = store.add_relation(phoenix[0].id, "deadline", july, 0.9, "", "", draft_chunk.id);
+    ASSERT_TRUE(june_relation && july_relation);
+    const auto june_fact = store.fact_of_relation(*store.relation(june_relation));
+    const auto july_fact = store.fact_of_relation(*store.relation(july_relation));
+    ASSERT_TRUE(june_fact && july_fact);
+    // A possible inconsistency cites exact excerpts of both current revisions.
+    const auto span = [](const ChunkRow& c, const std::string& word) {
+        const auto at = c.text.find(word);
+        return AnalysisSpan{c.id, at, at + word.size()};
+    };
+    auto generation = store.knowledge_generation();
+    ASSERT_TRUE(generation);
+    const auto june_excerpt = store.bind_analysis_evidence(*june_fact, span(approved_chunk, "June"), *generation);
+    ASSERT_TRUE(june_excerpt) << june_excerpt.error().message;
+    const auto july_excerpt = store.bind_analysis_evidence(*july_fact, span(draft_chunk, "July"), june_excerpt->generation);
+    ASSERT_TRUE(july_excerpt) << july_excerpt.error().message;
+    const auto review = store.record_conflict(*june_fact, *july_fact, june_excerpt->evidence_id, july_excerpt->evidence_id,
+                                              "Two deadlines for the same milestone", july_excerpt->generation);
+    ASSERT_TRUE(review) << review.error().message;
+
+    auto tools = kg.svc->tools();
+    runtime::ToolContext ctx;
+    const auto run = [&](const char* name, const json& args) {
+        const auto out = tool(tools, name).run(ctx, args);
+        EXPECT_TRUE(out.ok) << name << ": " << out.content;
+        return out.ok ? json::parse(out.content) : json();
+    };
+    RpcRegistry rpc;
+    register_knowledge_rpc(rpc, [&kg] { return kg.svc.get(); }, nullptr);
+    const auto view = [&](const char* method, const json& params) {
+        const auto r = (*rpc.find(method, false))(params);
+        EXPECT_TRUE(r) << method << ": " << (r ? "" : r.error().message);
+        return r ? *r : json();
+    };
+    const auto deadlines = [](const json& relations) {
+        std::map<std::string, json> out;
+        for (const auto& r : relations)
+            if (jstr(r, "predicate") == "deadline") out[jstr(r, "object")] = r;
+        return out;
+    };
+
+    // Unresolved: both deadlines are returned, each labeled with the other side and the excerpts that were reviewed.
+    json entity = run("knowledge.entity", {{"entity", "Phoenix"}});
+    auto both = deadlines(entity["relations"]);
+    ASSERT_EQ(both.size(), 2u) << entity.dump(2);
+    for (const auto& [date, other] : std::map<std::string, std::string>{{"June", "July"}, {"July", "June"}}) {
+        const json& r = both[date];
+        EXPECT_EQ(r["state"], "disputed") << date;
+        ASSERT_EQ(r["disputes"].size(), 1u) << date;
+        EXPECT_EQ(r["disputes"][0]["state"], "open");
+        EXPECT_EQ(r["disputes"][0]["other"]["object"], other);
+        EXPECT_EQ(r["disputes"][0]["other_citation"]["excerpt"], other);
+        EXPECT_EQ(r["disputes"][0]["own_citation"]["excerpt"], date);
+        EXPECT_EQ(r["disputes"][0]["other_citation"]["revision"], 1);
+    }
+    EXPECT_TRUE(entity.contains("dispute_note"));
+    // The Knowledge view gets the same states through its own query API.
+    EXPECT_EQ(deadlines(view("knowledge.entity", {{"id", phoenix[0].id}})["relations"])["July"]["state"], "disputed");
+    // A deferred review is still unresolved.
+    generation = store.knowledge_generation();
+    ASSERT_TRUE(store.decide_conflict(*review, "defer", "", 1, *generation));
+    EXPECT_EQ(deadlines(run("knowledge.entity", {{"entity", "Phoenix"}})["relations"])["June"]["disputes"][0]["state"], "deferred");
+
+    // Preferring the approved plan: only June is current knowledge; July appears only in an explicit history request.
+    generation = store.knowledge_generation();
+    ASSERT_TRUE(store.decide_conflict(*review, *june_fact < *july_fact ? "prefer_left" : "prefer_right", "Approved plan", 2, *generation));
+    entity = run("knowledge.entity", {{"entity", "Phoenix"}});
+    both = deadlines(entity["relations"]);
+    ASSERT_EQ(both.size(), 1u) << entity.dump(2);
+    EXPECT_EQ(both["June"]["state"], "current");
+    EXPECT_FALSE(both["June"].contains("disputes"));
+    EXPECT_FALSE(entity.contains("history"));
+    EXPECT_EQ(entity.dump().find("July"), std::string::npos);
+    const json timeline_facts = run("knowledge.timeline", {{"entity", "Phoenix"}});
+    EXPECT_EQ(timeline_facts.dump().find("deadline July"), std::string::npos);
+    const json related = run("knowledge.related", {{"entity", "Phoenix"}});
+    EXPECT_EQ(related.dump().find("\"July\""), std::string::npos) << related.dump(2);
+    EXPECT_TRUE(view("knowledge.item", {{"id", draft->id}})["facts"].empty());
+    const json history = run("knowledge.entity", {{"entity", "Phoenix"}, {"history", true}});
+    ASSERT_EQ(history["history"].size(), 1u) << history.dump(2);
+    EXPECT_EQ(history["history"][0]["object"], "July");
+    EXPECT_EQ(history["history"][0]["state"], "rejected");
+    EXPECT_TRUE(history.contains("history_note"));
+    bool cites_draft = false;
+    for (const auto& c : history["history"][0]["citations"]) cites_draft = cites_draft || c["item_id"] == draft->id;
+    EXPECT_TRUE(cites_draft);
+    EXPECT_EQ(view("knowledge.entity", {{"id", phoenix[0].id}, {"history", true}})["history"], history["history"]);
+
+    // Categories: an accepted manual assignment places a fact, a rejected suggestion does not; Uncategorized is the rest.
+    const auto schedule = store.create_category("Schedule");
+    const auto people = store.create_category("People");
+    ASSERT_TRUE(schedule && people);
+    EXPECT_FALSE(store.create_category("uncategorized"));
+    ASSERT_TRUE(store.set_category_assignment(*june_fact, *schedule, "manual", ""));
+    const auto leads = store.relations_of_item(approved->id);
+    const auto leads_relation = std::find_if(leads.begin(), leads.end(), [](const RelationRow& r) { return r.predicate == "leads"; });
+    ASSERT_NE(leads_relation, leads.end());
+    const auto leads_fact = store.fact_of_relation(*leads_relation);
+    ASSERT_TRUE(leads_fact);
+    ASSERT_TRUE(store.set_category_assignment(*leads_fact, *people, "rejected", ""));
+    ASSERT_NE(store.add_fact(phoenix[0].id, "Phoenix is the user's priority", "", 3), 0);
+    json in_schedule = run("knowledge.entity", {{"entity", "Phoenix"}, {"category", "schedule"}});
+    ASSERT_EQ(in_schedule["relations"].size(), 1u) << in_schedule.dump(2);
+    EXPECT_EQ(in_schedule["relations"][0]["object"], "June");
+    EXPECT_EQ(in_schedule["relations"][0]["categories"], json::array({"Schedule"}));
+    EXPECT_TRUE(in_schedule["facts"].empty());
+    EXPECT_TRUE(run("knowledge.entity", {{"entity", "Phoenix"}, {"category", "People"}})["relations"].empty());
+    json uncategorized = run("knowledge.entity", {{"entity", "Phoenix"}, {"category", "Uncategorized"}});
+    ASSERT_EQ(uncategorized["relations"].size(), 1u) << uncategorized.dump(2);
+    EXPECT_EQ(uncategorized["relations"][0]["predicate"], "leads");
+    EXPECT_EQ(uncategorized["facts"].size(), 1u);
+    EXPECT_EQ(view("knowledge.entity", {{"id", phoenix[0].id}, {"category", "Schedule"}})["relations"], in_schedule["relations"]);
+    const auto unknown = tool(tools, "knowledge.entity").run(ctx, {{"entity", "Phoenix"}, {"category", "Budget"}});
+    EXPECT_FALSE(unknown.ok);
+    EXPECT_NE(unknown.content.find("Schedule"), std::string::npos) << unknown.content;
+    EXPECT_FALSE((*rpc.find("knowledge.entity", false))({{"id", phoenix[0].id}, {"category", "Budget"}}));
+    // Search keeps the passages that support facts of the category, in the tool and in the Knowledge view.
+    const auto refs = [](const json& passages, const char* key) {
+        std::set<std::string> out;
+        for (const auto& p : passages) out.insert(jstr(p, key));
+        return out;
+    };
+    EXPECT_EQ(refs(run("knowledge.search", {{"query", "Phoenix deadline"}, {"category", "Schedule"}})["results"], "ref"),
+              std::set<std::string>{approved->ref});
+    EXPECT_EQ(refs(view("knowledge.search", {{"query", "Phoenix deadline"}, {"category", "Schedule"}})["passages"], "ref"),
+              std::set<std::string>{approved->ref});
+    // The approved passage also supports the uncategorized "leads" fact; the draft's only fact was rejected.
+    EXPECT_EQ(refs(run("knowledge.search", {{"query", "Phoenix deadline"}, {"category", "Uncategorized"}})["results"], "ref"),
+              (std::set<std::string>{approved->ref, draft->ref}));
+    EXPECT_TRUE(run("knowledge.search", {{"query", "Phoenix deadline"}, {"category", "People"}})["results"].empty());
+    const json schedule_item = view("knowledge.item", {{"id", approved->id}, {"category", "Schedule"}});
+    ASSERT_EQ(schedule_item["facts"].size(), 1u) << schedule_item.dump(2);
+    EXPECT_EQ(schedule_item["facts"][0]["state"], "current");
+    EXPECT_EQ(view("knowledge.categories", json::object())["categories"].size(), 3u);
+
+    // Citations name the item's current revision; after the approved plan changes, the old deadline is history.
+    json current = deadlines(run("knowledge.entity", {{"entity", "Phoenix"}})["relations"])["June"];
+    ASSERT_FALSE(current["citations"].empty());
+    for (const auto& c : current["citations"]) {
+        EXPECT_EQ(c["item_id"], approved->id);
+        EXPECT_EQ(c["revision"], 1);
+        EXPECT_TRUE(c["current_revision"].get<bool>());
+    }
+    write_file(kg.folder / "approved.txt", "Jana Nováková leads Phoenix. The approved deadline moved to August.");
+    kg.svc->sweep_now();
+    kg.idle();
+    entity = run("knowledge.entity", {{"entity", "Phoenix"}});
+    both = deadlines(entity["relations"]);
+    EXPECT_EQ(both.count("June"), 0u) << entity.dump(2);
+    // The decision's premise changed: the review needs a recheck, so the draft is no longer rejected and has no
+    // current other side to dispute.
+    ASSERT_EQ(both.count("July"), 1u) << entity.dump(2);
+    ASSERT_EQ(store.conflicts(10).at(0).state, "needs_recheck");
+    EXPECT_EQ(both["July"]["state"], "current");
+    const auto revised_chunk = store.chunks_of_item(approved->id).at(0);
+    bool leads_current = false;
+    for (const auto& r : entity["relations"]) {
+        if (jstr(r, "predicate") != "leads") continue;
+        leads_current = true;
+        ASSERT_EQ(r["citations"].size(), 1u) << r.dump(2);
+        EXPECT_EQ(r["citations"][0]["revision"], 2);
+        EXPECT_EQ(r["citations"][0]["excerpt"], revised_chunk.text);
+    }
+    EXPECT_TRUE(leads_current);
+    json old = run("knowledge.entity", {{"entity", "Phoenix"}, {"history", true}})["history"];
+    ASSERT_EQ(old.size(), 1u) << old.dump(2);
+    EXPECT_EQ(old[0]["object"], "June");
+    // Its only support was replaced: superseded, or unsupported when the change withdrew the finding first.
+    EXPECT_TRUE(old[0]["state"] == "superseded" || old[0]["state"] == "unsupported") << old.dump(2);
+    for (const auto& c : old[0]["citations"]) {
+        EXPECT_EQ(c["revision"], 1);
+        EXPECT_FALSE(c["current_revision"].get<bool>());
+    }
+    // History from an item the user can no longer read is not returned either.
+    {
+        const std::lock_guard lock(kg.mx);
+        kg.denied_read_paths.insert(approved_path);
+    }
+    EXPECT_TRUE(run("knowledge.entity", {{"entity", "Phoenix"}, {"history", true}})["history"].empty());
+}
+
 TEST(KnowledgeRetrieval, SourceCountsExcludeUnavailableItemsBeforeCleanup) {
     Kg kg({{"knowledge.extraction", "off"}});
     const auto first = kg.file_path("first-count.txt");

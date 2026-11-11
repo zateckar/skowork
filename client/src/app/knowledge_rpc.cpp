@@ -54,11 +54,15 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
     add("knowledge.items", [](Svc& s, const json& p) -> Result<json> {
         return json{{"items", s.items(jstr(p, "query"), static_cast<int>(jint(p, "limit", 20)))}};
     });
+    // The Knowledge view reads with the knowledge tools' state filter: {category, history} as they take them.
     add("knowledge.entity", [](Svc& s, const json& p) -> Result<json> {
-        json e = s.entity_profile(jint(p, "id"));
+        const auto f = s.knowledge_filter(p);
+        if (!f) return f.error();
+        json e = s.entity_profile(jint(p, "id"), *f);
         if (e.is_null()) return make_error("not_found", "no such entity");
         return e;
     });
+    add("knowledge.categories", [](Svc& s, const json&) -> Result<json> { return json{{"categories", s.categories()}}; });
     // A citation of a file: opened only when it is an indexed item of the files Source, never an arbitrary path.
     add("knowledge.open", [done, open_file](Svc& s, const json& p) -> Result<json> {
         const std::string ref = jstr(p, "ref");
@@ -106,15 +110,20 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
                     {"counts", s.source_counts()}};
     });
     add("knowledge.item", [](Svc& s, const json& p) -> Result<json> {
-        json it = s.item_detail(jint(p, "id"));
+        const auto f = s.knowledge_filter(p);
+        if (!f) return f.error();
+        json it = s.item_detail(jint(p, "id"), *f);
         if (it.is_null()) return make_error("not_found", "This item is no longer in your knowledge.");
         return it;
     });
     // The same retrieval the agent uses, with team knowledge.
     add("knowledge.search", [](Svc& s, const json& p) -> Result<json> {
+        const auto f = s.knowledge_filter(p);
+        if (!f) return f.error();
         knowledge::SearchOptions o;
         o.limit = static_cast<int>(std::clamp<long long>(jint(p, "limit", 20), 1, 50));
         o.team = true;
+        o.category = f->category;
         const auto r = s.search(trim(jstr(p, "query")), o);
         json passages = json::array();
         for (const auto& x : r.passages) {

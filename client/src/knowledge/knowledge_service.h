@@ -88,12 +88,22 @@ struct KnowledgeEnv {
     long long sweep_interval_ms = 60'000;  // files rescan and reconciliation
 };
 
+// The category and history filter the knowledge tools and the Knowledge view share (client/knowledge-graph Retrieval
+// Respects Knowledge State).
+struct KnowledgeFilter {
+    std::optional<long long> category;  // a category id; 0 is Uncategorized
+    bool history = false;               // also return facts that are no longer current, labeled
+};
+
 struct SearchOptions {
     int limit = 8;
     std::vector<std::string> sources;  // empty: all
     std::string run_id, thread_id;
     std::shared_ptr<CancelToken> cancel;
     bool team = false;  // also search control-plane/team-knowledge (knowledge.search and the Knowledge view)
+    // Only passages that support current facts of this category (0: a fact without a category, or no fact). Team
+    // knowledge has no local categories and is not searched then.
+    std::optional<long long> category;
 };
 
 struct Passage {
@@ -161,6 +171,18 @@ public:
     bool entity_visible(long long entity_id);
     std::vector<EntityRow> visible_entities(const std::string& query, int limit);
     std::vector<std::string> visible_entity_aliases(const EntityRow& entity);
+    // ---- The knowledge state filter (Retrieval Respects Knowledge State) ----
+    // {category, history} of a tool call or Knowledge view request; an unknown category is not_found.
+    Result<KnowledgeFilter> knowledge_filter(const json& params);
+    // The relation as current knowledge: its state (current | disputed), accepted categories, the excerpts of permitted
+    // current revisions it cites and the other side of each unresolved review. Null when the relation is not permitted,
+    // not current knowledge (rejected, superseded, unsupported) or outside the filter's category.
+    json current_relation(const RelationRow& relation, const KnowledgeFilter& filter);
+    // Facts about the entity that are no longer current knowledge, labeled with their state and cited with the
+    // retained excerpts and revision numbers of permitted items (an explicit history request).
+    json fact_history(long long entity_id, const KnowledgeFilter& filter, int limit);
+    // The categories a filter can name: [{id, name}], then Uncategorized.
+    json categories();
 
     // ---- Tools ----
     std::vector<runtime::ToolDef> tools();
@@ -182,7 +204,7 @@ public:
     json entities(const std::string& query, int limit);
     // Indexed items by title or reference, for forgetting one: [{id, source, title, ref}].
     json items(const std::string& query, int limit);
-    json entity_profile(long long id);
+    json entity_profile(long long id, const KnowledgeFilter& filter = {});
     // Forget everything (client/local-storage: forget all).
     Status forget_all();
     // Stops new item uploads and withdraws existing shares before a whole-profile wipe.
@@ -210,7 +232,8 @@ public:
     // The number of items of every Source for the Source tabs ({source: n}); notes count every note.
     json source_counts();
     // An item with its indexed text, entities, facts and sharing state.
-    json item_detail(long long id);
+    // Facts are filtered by the same state filter and the filter's category.
+    json item_detail(long long id, const KnowledgeFilter& filter = {});
     // Curation (Knowledge Curation, design D5): kind relation (an extracted fact) or user (a user-stated fact).
     Status edit_fact(const std::string& kind, long long id, const std::string& text);
     Status delete_fact(const std::string& kind, long long id);
