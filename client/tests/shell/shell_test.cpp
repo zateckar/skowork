@@ -4144,6 +4144,11 @@ TEST(ShellKnowledge, KnowledgeViewImportNotesSearchCurateAndShare) {
         // Import one document: only it is indexed.
         w.picks = {(docs / L"falcon.txt").wstring()};
         ASSERT_TRUE(add("knowledge-import-files"));
+        // The import is previewed first (10.5); nothing is stored until it is confirmed as incomplete.
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-import-accept"); }));
+        EXPECT_TRUE(store.documents().empty());
+        ASSERT_TRUE(w.with("knowledge-import-accept", [](ui::Node& n) { n.toggle(); return true; }));
+        ASSERT_TRUE(w.invoke("knowledge-import-ok"));
         ASSERT_TRUE(w.until([&] { return store.documents().size() == 1; }));
         svc.run_until_idle();
         const std::string falcon = store.documents()[0];
@@ -4239,8 +4244,9 @@ TEST(ShellKnowledge, KnowledgeViewImportNotesSearchCurateAndShare) {
         ASSERT_TRUE(w.invoke("knowledge-item-forget"));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-forget-body"); }));
         const auto forget_body = label_text(w, "knowledge-forget-body");
-        EXPECT_NE(forget_body.find(u"Facts or corrections shown when this item was opened: 1"), std::u16string::npos);
-        EXPECT_NE(forget_body.find(u"have not been fully analyzed"), std::u16string::npos);
+        // The host's preview: what is removed, and what the preview leaves out.
+        EXPECT_NE(label_text(w, "knowledge-forget-passages").find(u"1 removed"), std::u16string::npos);
+        EXPECT_NE(label_text(w, "knowledge-forget-pending").find(u"effects on shared knowledge"), std::u16string::npos);
         EXPECT_NE(forget_body.find(u"The original source remains"), std::u16string::npos);
         EXPECT_EQ(forget_body.find(u"Everything derived"), std::u16string::npos);
         ASSERT_TRUE(w.invoke("knowledge-forget-cancel"));
@@ -4248,7 +4254,7 @@ TEST(ShellKnowledge, KnowledgeViewImportNotesSearchCurateAndShare) {
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-exclude"); }));
         ASSERT_TRUE(w.invoke("knowledge-item-exclude"));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-exclude-body"); }));
-        EXPECT_NE(label_text(w, "knowledge-exclude-body").find(u"have not been fully analyzed"), std::u16string::npos);
+        EXPECT_NE(label_text(w, "knowledge-exclude-pending").find(u"Not included in this preview"), std::u16string::npos);
         ASSERT_TRUE(w.invoke("knowledge-exclude-cancel"));
         EXPECT_EQ(name_of("knowledge-fact-relation-" + std::to_string(rel)), u"Jana Novakova leads Falcon");
         ASSERT_TRUE(w.expand("knowledge-fact-source-relation-" + std::to_string(rel) + "-header"));
@@ -5747,6 +5753,228 @@ TEST(ShellPages, ConnectorsShowApiStatesAndTakeAPersonalTokenOnce) {
     EXPECT_TRUE(problems.empty()) << problems.front();
 }
 
+// improve-skowork-and-knowledge-control 10.5: import, exclude and forget show the host's impact preview first, in a
+// dialog operated by keyboard. Over the real service with a scripted model:
+// - the passage counts and the import's analysis (pending with its reason, then the findings) are those of the RPCs;
+// - nothing is stored before the preview is confirmed, and confirming needs the incomplete preview accepted;
+// - a file that changed since the preview is not imported: the new preview is shown and must be confirmed again;
+// - Escape cancels, and the host deletes the preview.
+TEST(ShellKnowledge, ImpactPreviewDialogShowsAnalysisAndAsksAgainWhenStale) {
+    struct Dir {
+        ~Dir() {
+            std::error_code ec;
+            std::filesystem::remove_all(path, ec);
+        }
+        std::filesystem::path path = std::filesystem::temp_directory_path() / L"workbench-test" / wb::widen(wb::random_urlsafe(6));
+    } dir;
+    const auto docs = dir.path / L"docs";
+    std::filesystem::create_directories(docs);
+    const auto write = [](const std::filesystem::path& p, const std::string& text) {
+        std::ofstream out(p, std::ios::binary | std::ios::trunc);
+        out << text;
+    };
+    auto root = DataRoot::open(dir.path / L"data");
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto k = keys.get_or_create("kg.db");
+    ASSERT_TRUE(k);
+    MigrationOutcome o;
+    auto db = knowledge::open_kg_database(root->file("kg.db"), *k, o);
+    ASSERT_TRUE(db);
+    std::atomic<ShellThread*> window{nullptr};
+    std::mutex mx;
+    json policy = {{"knowledge.directory_enrichment", "off"}};
+    std::atomic<int> chats{0};
+    knowledge::KnowledgeEnv e;
+    e.clock = &system_clock();
+    e.policy = [&](const std::string& key) -> std::optional<json> {
+        const std::lock_guard lock(mx);
+        if (policy.contains(key)) return policy[key];
+        return std::nullopt;
+    };
+    e.index = [](const std::string& m, const json& p) { return knowledge::index_request(m, p); };
+    e.embed = [](const std::vector<std::string>&, const model::RequestContext&) -> model::ModelResult<model::EmbedResult> {
+        model::ModelFailure fail;
+        fail.code = model::code::timeout;
+        fail.message = "offline";
+        return fail;
+    };
+    // A passage saying that someone leads Phoenix yields that Jana Nováková leads it; nothing is ever inconsistent.
+    e.chat = [&chats](const model::ChatRequest& req) -> model::ModelResult<model::ChatResponse> {
+        ++chats;
+        model::ChatResponse r;
+        r.finish_reason = "stop";
+        if (req.feature == "knowledge.consistency" || req.feature == "knowledge.categorize") {
+            r.text = R"({"categories": [], "conflicts": []})";
+            return r;
+        }
+        const std::string& user = req.messages.back().content;
+        json entities = json::array(), relations = json::array();
+        for (int i = 0; i < 16; ++i) {
+            const size_t at = user.find("[" + std::to_string(i) + "]");
+            if (at == std::string::npos) break;
+            const size_t end = user.find("\n[" + std::to_string(i + 1) + "]", at);
+            const std::string passage = user.substr(at, end == std::string::npos ? std::string::npos : end - at);
+            if (passage.find("leads Phoenix") == std::string::npos) continue;
+            entities.push_back({{"name", "Jana Nováková"}, {"type", "Person"}, {"chunks", {i}}});
+            entities.push_back({{"name", "Phoenix"}, {"type", "Project"}, {"chunks", {i}}});
+            relations.push_back({{"subject", "Jana Nováková"}, {"predicate", "leads"}, {"object", "Phoenix"}, {"chunk", i}, {"confidence", 0.9}});
+        }
+        r.text = json{{"entities", entities}, {"relations", relations}}.dump();
+        return r;
+    };
+    e.read_permitted = [](const std::string&) { return true; };
+    e.changed = [&window] {
+        if (ShellThread* w = window.load()) w->post([w] { w->main().emit("knowledge.changed", json::object()); });
+    };
+    knowledge::KnowledgeService svc(std::move(e), std::make_unique<knowledge::KgStore>(std::move(*db)));
+    auto& store = svc.store();
+    const auto path = [&](const wchar_t* name) { return wb::narrow((docs / name).wstring()); };
+    write(docs / L"lead.txt", "Jana Nováková leads Phoenix.");
+    ASSERT_TRUE(svc.add_document(path(L"lead.txt")));
+    svc.run_until_idle();
+    const auto token = [&] {
+        auto q = store.db().prepare("SELECT token FROM knowledge_operation_previews");
+        return q.step() ? q.col_text(0) : std::string();
+    };
+    const auto previews = [&] {
+        auto q = store.db().prepare("SELECT count(*) FROM knowledge_operation_previews");
+        return q.step() ? q.col_int(0) : -1;
+    };
+
+    Fixture f;
+    register_knowledge_rpc(f.rpc, [&svc] { return &svc; }, nullptr);
+    const auto call = [&](const char* method, const json& params) { return (*f.rpc.find(method, false))(params); };
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    window = &w;
+    const auto focused = [&w] {
+        std::string id;
+        w.run([&] {
+            const ui::Node* n = w.main().window()->tree().focused();
+            id = n ? n->automation_id() : "";
+        });
+        return id;
+    };
+    const auto tab_to = [&](const std::string& id) {
+        for (int i = 0; i < 12 && focused() != id; ++i) w.key(ui::kKeyTab);
+        return focused() == id;
+    };
+    const auto has = [&w](const std::string& id, const std::u16string& part) { return label_text(w, id).find(part) != std::u16string::npos; };
+    const auto n16 = [](const json& n) { return wb::ui::to_utf16(std::to_string(n.get<long long>())); };
+    w.run([&] { w.main().open("#/knowledge"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-add"); }));
+    const auto import = [&](const wchar_t* name) {
+        w.picks = {(docs / name).wstring()};
+        if (!w.invoke("knowledge-add") || !w.until([&] { return w.exists("knowledge-import-files"); })) return false;
+        return w.invoke("knowledge-import-files") && w.until([&] { return w.exists("knowledge-import-analysis"); });
+    };
+
+    // The budget is spent: the preview shows its passages, and says that the analysis waits and why.
+    {
+        const std::lock_guard lock(mx);
+        policy["knowledge.extraction_daily_calls"] = store.used(svc.today(), "extract_calls");
+    }
+    write(docs / L"plan.txt", "Jana Nováková leads Phoenix, says the plan.");
+    ASSERT_TRUE(import(L"plan.txt"));
+    EXPECT_TRUE(has("knowledge-import-body", u"plan.txt"));
+    const auto summary_passages = call("knowledge.preview.page", {{"token", token()}, {"kind", "passage"}});
+    ASSERT_TRUE(summary_passages);
+    EXPECT_EQ((*summary_passages)["total"], 1);
+    EXPECT_TRUE(has("knowledge-import-passages", u"1 added"));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-import-passage-0"); }));
+    EXPECT_TRUE(has("knowledge-import-passage-0", u"Added: Jana Nováková leads Phoenix, says the plan."));
+    EXPECT_TRUE(has("knowledge-import-analysis", u"being analyzed"));
+    svc.run_until_idle();
+    auto analysis = call("knowledge.preview.analysis", {{"token", token()}});
+    ASSERT_TRUE(analysis);
+    ASSERT_EQ((*analysis)["state"], "waiting");
+    ASSERT_TRUE(w.until([&] { return has("knowledge-import-analysis", u"budget is used up"); }));
+    EXPECT_TRUE(has("knowledge-import-pending", u"facts in passages still to be analyzed"));
+
+    // The budget allows it: the dialog shows the counts and findings of the analysis RPC.
+    {
+        const std::lock_guard lock(mx);
+        policy.erase("knowledge.extraction_daily_calls");
+    }
+    svc.run_until_idle();
+    analysis = call("knowledge.preview.analysis", {{"token", token()}});
+    ASSERT_TRUE(analysis);
+    ASSERT_EQ((*analysis)["state"], "done") << analysis->dump(2);
+    const json counts = (*analysis)["counts"];
+    EXPECT_EQ(counts["corroborate"], 1);
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-import-finding-0"); }));
+    EXPECT_TRUE(has("knowledge-import-analysis", n16(counts["add"]) + u" new facts, " + n16(counts["corroborate"]) + u" already known, " +
+                                                     n16(counts["dispute"]) + u" possible disagreements"));
+    EXPECT_EQ(label_text(w, "knowledge-import-finding-0"), u"Already known: Jana Nováková leads Phoenix");
+    // Analyzed in full, so only the effects on shared knowledge are left out.
+    EXPECT_FALSE(has("knowledge-import-pending", u"still to be analyzed"));
+    EXPECT_TRUE(has("knowledge-import-pending", u"effects on shared knowledge"));
+
+    // By keyboard: Enter on Import without accepting the incomplete preview imports nothing and says why.
+    ASSERT_TRUE(tab_to("knowledge-import-ok"));
+    w.key(ui::kKeyEnter);
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-import-problem"); }));
+    EXPECT_FALSE(store.item("files", path(L"plan.txt")));
+
+    // The file changes after the preview: accepting and confirming imports nothing; the new preview asks again.
+    write(docs / L"plan.txt", "Jana Nováková leads Phoenix, says the new plan.");
+    ASSERT_TRUE(tab_to("knowledge-import-accept"));
+    w.key(ui::kKeySpace);
+    ASSERT_TRUE(tab_to("knowledge-import-ok"));
+    w.key(ui::kKeyEnter);
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-import-stale") && w.exists("knowledge-import-passage-0"); }));
+    EXPECT_FALSE(store.item("files", path(L"plan.txt")));
+    EXPECT_EQ(previews(), 1);  // the stale preview was dropped
+    EXPECT_TRUE(has("knowledge-import-passage-0", u"says the new plan."));
+    int checked = -1;
+    w.with("knowledge-import-accept", [&](ui::Node& n) { checked = n.toggle_state(); return true; });
+    EXPECT_EQ(checked, 0);
+    svc.run_until_idle();
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-import-finding-0"); }));
+    const int asked = chats;
+    ASSERT_TRUE(tab_to("knowledge-import-accept"));
+    w.key(ui::kKeySpace);
+    ASSERT_TRUE(tab_to("knowledge-import-ok"));
+    w.key(ui::kKeyEnter);
+    ASSERT_TRUE(w.until([&] { return store.item("files", path(L"plan.txt")).has_value() && !w.exists("knowledge-import-ok"); }));
+    svc.run_until_idle();
+    EXPECT_EQ(chats, asked);  // recorded as previewed
+    EXPECT_EQ(previews(), 0);
+    const auto plan = store.item("files", path(L"plan.txt"));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-row-" + std::to_string(plan->id)); }));
+
+    // Escape cancels an import preview: the host deletes it and nothing is imported.
+    write(docs / L"memo.txt", "Jana Nováková leads Phoenix, says the memo.");
+    ASSERT_TRUE(import(L"memo.txt"));
+    EXPECT_EQ(previews(), 1);
+    w.key(ui::kKeyEscape);
+    ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-import-ok") && previews() == 0; }));
+    EXPECT_FALSE(store.item("files", path(L"memo.txt")));
+
+    // Forget shows what the item's removal does to existing facts: the fact keeps one of its two sources.
+    ASSERT_TRUE(w.invoke("knowledge-row-" + std::to_string(plan->id)));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-more"); }));
+    ASSERT_TRUE(w.invoke("knowledge-item-more"));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-forget"); }));
+    ASSERT_TRUE(w.invoke("knowledge-item-forget"));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-forget-fact-0"); }));
+    const auto facts = call("knowledge.preview.page", {{"token", token()}, {"kind", "fact"}});
+    ASSERT_TRUE(facts);
+    ASSERT_EQ((*facts)["total"], 1);
+    EXPECT_EQ((*facts)["entries"][0]["effect"], "weakened");
+    EXPECT_TRUE(has("knowledge-forget-facts", u"0 lose their last source, 1 keep fewer sources"));
+    EXPECT_EQ(label_text(w, "knowledge-forget-fact-0"), u"Fewer sources (2 → 1): Jana Nováková leads Phoenix");
+    EXPECT_FALSE(w.exists("knowledge-forget-analysis"));
+    ASSERT_TRUE(tab_to("knowledge-forget-accept"));
+    w.key(ui::kKeySpace);
+    ASSERT_TRUE(tab_to("knowledge-forget-ok"));
+    w.key(ui::kKeyEnter);
+    ASSERT_TRUE(w.until([&] { return !store.item("files", path(L"plan.txt")); }));
+    window = nullptr;
+}
+
 // improve-skowork-and-knowledge-control 10.1: the Knowledge workspace with the real service.
 // - Sources: an item's fact opens with its evidence, an excerpt opens back in its item, and Back returns through them to
 //   where the reader was; an item's revisions show what each changed.
@@ -6214,8 +6442,12 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
         ASSERT_TRUE(w.invoke("knowledge-item-more"));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-forget"); }));
         ASSERT_TRUE(w.invoke("knowledge-item-forget"));
-        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-forget-ok"); }));
-        for (int i = 0; i < 6 && focused(w) != "knowledge-forget-ok"; ++i) w.key(ui::kKeyTab);
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-forget-passage-0"); }));
+        // The preview is incomplete and says so; Space accepts that, then Tab to Forget and Enter.
+        for (int i = 0; i < 8 && focused(w) != "knowledge-forget-accept"; ++i) w.key(ui::kKeyTab);
+        ASSERT_EQ(focused(w), "knowledge-forget-accept");
+        w.key(ui::kKeySpace);
+        for (int i = 0; i < 8 && focused(w) != "knowledge-forget-ok"; ++i) w.key(ui::kKeyTab);
         ASSERT_EQ(focused(w), "knowledge-forget-ok");
         w.key(ui::kKeyEnter);
         ASSERT_TRUE(w.until([&] { return !store.item("files", path(L"late.txt")); }));

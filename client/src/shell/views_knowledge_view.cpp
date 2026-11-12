@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <set>
+#include <utility>
 
 namespace wb::shell {
 
@@ -48,6 +49,14 @@ std::u16string joined(const json& list) {
 }
 
 // The last part of a path, for Manage imports (the full path is the second line).
+bool import_preview(const json& summary) {
+    const std::string op = jstr(summary, "operation");
+    return op == "import" || op == "update";
+}
+
+// Analysis that has not produced its findings: nothing is claimed about the facts of the import.
+bool analysis_pending(const json& analysis) { return !analysis.is_object() || jbool(analysis, "pending"); }
+
 std::u16string leaf(const std::string& path) {
     std::string p = path;
     while (!p.empty() && (p.back() == '\\' || p.back() == '/')) p.pop_back();
@@ -224,6 +233,8 @@ void KnowledgeView::changed() {
         save_as_note_ = on;
         rebuild();
     });
+    // An open import preview learns that its analysis finished, or why it waits.
+    if (preview_ && preview_dialog_ && import_preview(preview_->summary) && analysis_pending(preview_->analysis)) load_preview_analysis(false);
     if (section_ != "sources") load_section();
     if (reader_mode_ == Reader::item && item_.is_object()) open_item(jint(item_, "id"), selected_);
     else if (reader_mode_ == Reader::fact) open_fact(detail_id_);
@@ -493,19 +504,26 @@ void KnowledgeView::show_more_menu() {
     if (const auto* facts = jobj(item_, "facts"); facts && facts->is_array())
         impact = shell_.t("knowledge.impact_listed", {{"count", u16(std::to_string(facts->size()))}});
     auto m = std::make_unique<ui::Menu>("knowledge-more-menu", shell_.t("knowledge.more"));
-    m->add_item(shell_.ui(), "knowledge-item-exclude", shell_.t("knowledge.exclude") + u"…", [this, source, ext, title, impact] {
-        ask_confirm("knowledge-exclude", shell_.t("knowledge.exclude_title"), shell_.t("knowledge.exclude_body", {{"name", title}}) + u"\n\n" + impact,
-                    shell_.t("knowledge.exclude"), [this, source, ext] {
-                        act("knowledge.exclusion.add", {{"kind", "item"}, {"value", source + ":" + ext}}, [this](const json&) {
-                            reader_mode_ = Reader::empty;
-                            item_ = nullptr;
-                            selected_.clear();
-                            load_list();
-                        });
-                    });
+    // Excluding or forgetting an indexed item is previewed by the host first; a note is the user's own text and asks plainly.
+    m->add_item(shell_.ui(), "knowledge-item-exclude", shell_.t("knowledge.exclude") + u"…", [this, source, ext, title] {
+        Preview p;
+        p.id = "knowledge-exclude";
+        p.method = "knowledge.preview.exclusion";
+        p.params = {{"kind", "item"}, {"value", source + ":" + ext}};
+        p.name = title;
+        start_preview(std::move(p));
     });
     m->add_item(shell_.ui(), "knowledge-item-forget", shell_.t("knowledge.forget") + u"…", [this, id, title, source, impact] {
-        const auto body = shell_.t(source == "notes" ? "knowledge.delete_note_body" : "knowledge.forget_body", {{"name", title}}) + u"\n\n" + impact;
+        if (source != "notes") {
+            Preview p;
+            p.id = "knowledge-forget";
+            p.method = "knowledge.preview.forget";
+            p.params = {{"id", id}};
+            p.name = title;
+            start_preview(std::move(p));
+            return;
+        }
+        const auto body = shell_.t("knowledge.delete_note_body", {{"name", title}}) + u"\n\n" + impact;
         ask_confirm("knowledge-forget", shell_.t("knowledge.forget_title"), body,
                     shell_.t("knowledge.forget"), [this, id] {
                         act("knowledge.item.forget", {{"item_id", id}}, [this](const json&) {
@@ -520,16 +538,18 @@ void KnowledgeView::show_more_menu() {
 }
 
 void KnowledgeView::import_files() {
-    json paths = json::array();
+    std::vector<std::string> paths;
     for (const auto& p : shell_.pick_files()) paths.push_back(narrow(p));
     if (paths.empty()) return;
-    act("knowledge.document.add", {{"paths", paths}}, [this](const json& r) {
-        notice_ = shell_.t("knowledge.imported");
-        if (const json* f = jobj(r, "failed"); f && !f->empty()) error_ = u16(jstr((*f)[0], "reason"));
-        shell_.announce(notice_);
-        tab_ = "files";
-        load_list();
-    });
+    // Each document is previewed and confirmed on its own, in the order picked.
+    Preview p;
+    p.id = "knowledge-import";
+    p.method = "knowledge.preview.import";
+    p.params = {{"path", paths.front()}};
+    p.name = leaf(paths.front());
+    p.count = paths.size();
+    p.queue.assign(paths.begin() + 1, paths.end());
+    start_preview(std::move(p));
 }
 
 void KnowledgeView::import_folder() {
@@ -602,6 +622,276 @@ void KnowledgeView::ask_share(const std::string& id, const std::u16string& title
         share(chosen);
     });
     shell_.window().modal().show(std::move(d));
+    shell_.window().render();
+}
+
+// ---- the impact preview (task 10.5) ---------------------------------------------------------------------------------
+
+namespace {
+
+constexpr int kPreviewFirstPage = 5, kPreviewNextPage = 20;
+
+}  // namespace
+
+void KnowledgeView::start_preview(Preview p) {
+    auto asked = std::make_shared<Preview>(std::move(p));
+    act(asked->method, asked->params, [this, asked](const json& r) {
+        ++preview_request_;
+        preview_ = *asked;
+        preview_->summary = r;
+        show_preview();
+        load_preview_page("fact");
+        load_preview_page("passage");
+        if (import_preview(r)) load_preview_analysis(false);
+    });
+}
+
+void KnowledgeView::show_preview() {
+    if (!preview_) return;
+    if (preview_dialog_) preview_dialog_->close();
+    const std::string op = jstr(preview_->summary, "operation");
+    const std::string id = preview_->id;
+    auto d = std::make_unique<ui::Dialog>(shell_.ui(), id, shell_.t(op == "forget" ? "knowledge.forget_title" : op == "exclude" ? "knowledge.exclude_title" : "knowledge.preview.title." + op), 560);
+    d->on_cancel = [this] { end_preview(true); };
+    d->add_button(id + "-cancel", shell_.t("knowledge.cancel"), ui::Button::Kind::standard, [this] { end_preview(true); });
+    d->add_button(id + "-ok", shell_.t(op == "forget" ? "knowledge.forget" : op == "exclude" ? "knowledge.exclude" : "knowledge.preview.action." + op), ui::Button::Kind::primary, [this] { confirm_preview(); });
+    preview_dialog_ = shell_.window().modal().show(std::move(d));
+    fill_preview();
+}
+
+// The dialog's body, built again when a page or the analysis arrives; the keyboard stays on the control it was on.
+void KnowledgeView::fill_preview() {
+    if (!preview_ || !preview_dialog_) return;
+    Preview& p = *preview_;
+    ui::Ui& u = shell_.ui();
+    Node& body = preview_dialog_->body();
+    ui::Tree* tree = preview_dialog_->tree();
+    std::string focused;
+    if (tree)
+        for (const Node* n = tree->focused(); n; n = n->parent())
+            if (n == &body) focused = tree->focused()->automation_id();
+    body.clear_children();
+    const std::string& id = p.id;
+    const std::string op = jstr(p.summary, "operation");
+    const auto n16 = [](long long n) { return u16(std::to_string(n)); };
+    const auto count = [&](const char* group, const char* key) {
+        const json* g = jobj(p.summary, group);
+        return g ? jint(*g, key) : 0;
+    };
+    std::u16string intro = shell_.t(op == "forget" ? "knowledge.forget_body" : op == "exclude" ? "knowledge.exclude_body" : "knowledge.preview.body." + op, {{"name", p.name}});
+    if (p.count > 1) intro += u" " + shell_.t("knowledge.preview.queue", {{"i", n16(static_cast<long long>(p.position))}, {"n", n16(static_cast<long long>(p.count))}});
+    body.emplace<ui::Label>(u, intro, TextStyle::body, Paint::text, true, id + "-body");
+    if (p.stale) body.emplace<ui::Label>(u, shell_.t("knowledge.preview.stale"), TextStyle::body, Paint::warning, true, id + "-stale");
+    body.emplace<ui::Label>(u, shell_.t("knowledge.preview.passages", {{"added", n16(count("passages", "added"))},
+                                                                         {"kept", n16(count("passages", "kept"))},
+                                                                         {"again", n16(count("passages", "redated") + count("passages", "rechecked"))},
+                                                                         {"removed", n16(count("passages", "removed"))}}),
+                            TextStyle::body, Paint::text, true, id + "-passages");
+    body.emplace<ui::Label>(u, count("facts", "affected") ? shell_.t("knowledge.preview.facts", {{"unsupported", n16(count("facts", "unsupported"))},
+                                                                                                  {"weakened", n16(count("facts", "weakened"))}})
+                                                          : shell_.t("knowledge.preview.facts_none"),
+                            TextStyle::body, Paint::text, true, id + "-facts");
+    if (count("shares", "affected"))
+        body.emplace<ui::Label>(u, shell_.t("knowledge.preview.shares", {{"n", n16(count("shares", "affected"))}}), TextStyle::body, Paint::warning, true,
+                                id + "-shares");
+
+    // The effects one by one, in pages, in a list of bounded height.
+    auto* list = body.emplace<ui::ScrollView>(id + "-effects");
+    list->height = ui::Sizing::fixed;
+    list->fixed_h = 220;
+    list->gap = 6;
+    const auto fact_text = [&](const json& described) {
+        const json* f = jobj(described, "fact");
+        return f ? u16(jstr(*f, "text")) : shell_.t("knowledge.preview.fact_withheld");
+    };
+    const auto line = [&](const std::u16string& s, const std::string& line_id, Paint paint = Paint::text) {
+        list->emplace<ui::Label>(u, s, TextStyle::caption, paint, true, line_id);
+    };
+    const auto more = [&](const std::string& what, size_t have, long long total, std::function<void()> load) {
+        if (static_cast<long long>(have) >= total) return;
+        button(*list, id + "-more-" + what, shell_.t("knowledge.preview.more_" + what, {{"n", n16(total - static_cast<long long>(have))}}),
+               std::move(load), ui::Button::Kind::subtle);
+    };
+    size_t i = 0;
+    for (const auto& f : p.facts)
+        line(shell_.t("knowledge.preview.fact." + jstr(f, "effect"), {{"fact", fact_text(f)},
+                                                                      {"before", n16(jint(f, "supports_before"))},
+                                                                      {"after", n16(jint(f, "supports_after"))}}),
+             id + "-fact-" + std::to_string(i++));
+    more("facts", p.facts.size(), p.facts_total, [this] { load_preview_page("fact"); });
+    i = 0;
+    for (const auto& e : p.passages)
+        line(shell_.t("knowledge.preview.passage." + jstr(e, "effect")) + u": " + u16(jstr(e, "text")), id + "-passage-" + std::to_string(i++),
+             Paint::text_secondary);
+    more("passages", p.passages.size(), p.passages_total, [this] { load_preview_page("passage"); });
+
+    // What the import says, once analyzed; otherwise that it is not known yet, and why.
+    bool analyzed = false;
+    if (import_preview(p.summary)) {
+        std::string state = p.analysis.is_object() ? jstr(p.analysis, "state") : "analyzing";
+        if (state != "done" && state != "waiting" && state != "failed" && state != "off" && state != "too_large") state = "analyzing";
+        analyzed = state == "done";
+        if (analyzed) {
+            const json counts = p.analysis.value("counts", json::object());
+            body.emplace<ui::Label>(u, shell_.t("knowledge.preview.analysis.done", {{"add", n16(jint(counts, "add"))},
+                                                                                    {"corroborate", n16(jint(counts, "corroborate"))},
+                                                                                    {"dispute", n16(jint(counts, "dispute"))}}),
+                                    TextStyle::body, Paint::text, true, id + "-analysis");
+            i = 0;
+            for (const auto& e : p.findings) {
+                const std::string effect = jstr(e, "effect");
+                std::u16string s = shell_.t("knowledge.preview.finding." + effect, {{"fact", u16(jstr(e, "text"))}});
+                if (effect == "dispute") {
+                    const json* existing = jobj(e, "existing");
+                    s += u" ↔ " + (existing ? fact_text(*existing) : u16(jstr(e, "other_text")));
+                    if (!jstr(e, "evidence").empty()) s += u" · “" + u16(jstr(e, "evidence")) + u"” / “" + u16(jstr(e, "existing_evidence")) + u"”";
+                }
+                line(s, id + "-finding-" + std::to_string(i++), effect == "dispute" ? Paint::warning : Paint::text);
+            }
+            more("findings", p.findings.size(), p.findings_total, [this] { load_preview_analysis(true); });
+        } else {
+            body.emplace<ui::Label>(u, shell_.t("knowledge.preview.analysis." + state, {{"reason", u16(jstr(p.analysis, "reason"))}}), TextStyle::body,
+                                    Paint::warning, true, id + "-analysis");
+        }
+    }
+    // Never complete: the stages this preview leaves out are named, and accepted explicitly.
+    std::u16string stages;
+    const bool all_analyzed = analyzed && !count("passages", "redated") && !count("passages", "rechecked");
+    for (const auto& s : p.summary.value("pending", json::array())) {
+        const std::string stage = jstr(s, "stage");
+        if (all_analyzed && (stage == "extraction" || stage == "consistency")) continue;
+        stages += (stages.empty() ? u"" : u", ") + shell_.t("knowledge.preview.stage." + stage);
+    }
+    if (!stages.empty())
+        body.emplace<ui::Label>(u, shell_.t("knowledge.preview.pending", {{"stages", stages}}), TextStyle::body, Paint::text_secondary, true, id + "-pending");
+    auto* accept = body.emplace<ui::Checkbox>(u, id + "-accept", shell_.t("knowledge.preview.accept"), p.accepted);
+    accept->on_change = [this](bool on) {
+        if (preview_) preview_->accepted = on;
+    };
+    if (!p.problem.empty()) body.emplace<ui::Label>(u, p.problem, TextStyle::caption, Paint::error, true, id + "-problem");
+    body.relayout();
+    if (tree && !focused.empty()) {
+        std::function<Node*(Node&)> find = [&](Node& n) -> Node* {
+            if (n.automation_id() == focused) return &n;
+            for (const auto& c : n.children())
+                if (Node* f = find(*c)) return f;
+            return nullptr;
+        };
+        Node* again = find(body);
+        tree->layout_if_needed();
+        tree->set_focus(again ? again : accept);
+    }
+    shell_.window().render();
+}
+
+void KnowledgeView::load_preview_page(const std::string& kind) {
+    if (!preview_) return;
+    const bool fact = kind == "fact";
+    const size_t have = (fact ? preview_->facts : preview_->passages).size();
+    const size_t request = preview_request_;
+    std::weak_ptr<int> alive = alive_;
+    shell_.call("knowledge.preview.page",
+                {{"token", jstr(preview_->summary, "token")}, {"kind", kind}, {"offset", have}, {"limit", have ? kPreviewNextPage : kPreviewFirstPage}},
+                [this, alive, request, fact, have](Result<json> r) {
+                    if (!alive.lock() || request != preview_request_ || !preview_ || !r) return;
+                    json& entries = fact ? preview_->facts : preview_->passages;
+                    if (entries.size() != have) return;  // asked twice
+                    for (const auto& e : r->value("entries", json::array())) entries.push_back(e);
+                    (fact ? preview_->facts_total : preview_->passages_total) = jint(*r, "total");
+                    fill_preview();
+                });
+}
+
+void KnowledgeView::load_preview_analysis(bool more) {
+    if (!preview_) return;
+    const size_t have = more ? preview_->findings.size() : 0;
+    const size_t request = preview_request_;
+    std::weak_ptr<int> alive = alive_;
+    shell_.call("knowledge.preview.analysis", {{"token", jstr(preview_->summary, "token")}, {"offset", have}, {"limit", have ? kPreviewNextPage : kPreviewFirstPage}},
+                [this, alive, request, have](Result<json> r) {
+                    if (!alive.lock() || request != preview_request_ || !preview_ || !r) return;
+                    if (have && preview_->findings.size() != have) return;
+                    if (!have) preview_->findings = json::array();
+                    for (const auto& e : r->value("entries", json::array())) preview_->findings.push_back(e);
+                    preview_->findings_total = jint(*r, "total");
+                    preview_->analysis = *r;
+                    preview_->analysis.erase("entries");
+                    fill_preview();
+                });
+}
+
+void KnowledgeView::confirm_preview() {
+    if (!preview_ || preview_->confirming) return;
+    if (!preview_->accepted) {
+        preview_->problem = shell_.t("knowledge.preview.accept_missing");
+        shell_.announce(preview_->problem);
+        fill_preview();
+        return;
+    }
+    preview_->confirming = true;
+    const size_t request = preview_request_;
+    std::weak_ptr<int> alive = alive_;
+    shell_.call("knowledge.preview.confirm", {{"token", jstr(preview_->summary, "token")}, {"accept_incomplete", true}},
+                [this, alive, request](Result<json> r) {
+                    if (!alive.lock() || request != preview_request_ || !preview_) return;
+                    Preview done = *preview_;
+                    if (!r && r.error().code == "stale") {
+                        // What was reviewed no longer holds: the change is previewed again and must be confirmed again.
+                        end_preview(false);
+                        Preview again;
+                        again.id = done.id;
+                        again.method = done.method;
+                        again.params = done.params;
+                        again.name = done.name;
+                        again.queue = done.queue;
+                        again.position = done.position;
+                        again.count = done.count;
+                        again.stale = true;
+                        shell_.announce(shell_.t("knowledge.preview.stale"));
+                        start_preview(std::move(again));
+                        return;
+                    }
+                    if (!r) {
+                        preview_->confirming = false;
+                        preview_->problem = u16(r.error().message);
+                        shell_.announce(shell_.t("common.error_prefix") + u" " + preview_->problem);
+                        fill_preview();
+                        return;
+                    }
+                    end_preview(false);
+                    if (import_preview(done.summary)) {
+                        notice_ = shell_.t("knowledge.imported");
+                        shell_.announce(notice_);
+                        tab_ = "files";
+                        if (!done.queue.empty()) {
+                            Preview next;
+                            next.id = done.id;
+                            next.method = done.method;
+                            next.params = {{"path", done.queue.front()}};
+                            next.name = leaf(done.queue.front());
+                            next.queue.assign(done.queue.begin() + 1, done.queue.end());
+                            next.position = done.position + 1;
+                            next.count = done.count;
+                            load_list();
+                            start_preview(std::move(next));
+                            return;
+                        }
+                    } else {
+                        reader_mode_ = Reader::empty;
+                        item_ = nullptr;
+                        selected_.clear();
+                    }
+                    load_list();
+                    rebuild();
+                });
+}
+
+// Closes the dialog; a cancelled preview is deleted by the host, with its analysis.
+void KnowledgeView::end_preview(bool cancel) {
+    ++preview_request_;
+    if (ui::Dialog* d = std::exchange(preview_dialog_, nullptr)) d->close();
+    if (cancel && preview_) shell_.call("knowledge.preview.cancel", {{"token", jstr(preview_->summary, "token")}});
+    preview_.reset();
     shell_.window().render();
 }
 

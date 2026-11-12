@@ -692,6 +692,32 @@ private:
                      const std::u16string& action, std::function<void()> confirmed);
     void act(const std::string& method, const json& params, std::function<void(const json&)> done = {},
              std::function<bool()> current = {});
+    // The impact preview dialog (client/knowledge-graph Knowledge Impact Preview; task 10.5): an import, update,
+    // exclusion or forget is previewed by the host and confirmed, or cancelled, here.
+    struct Preview {
+        std::string id;      // the dialog: knowledge-import, knowledge-exclude or knowledge-forget
+        std::string method;  // the preview RPC, asked again when the confirmation is stale
+        json params;
+        std::u16string name;  // the item's title or the file's name
+        json summary = nullptr;  // the preview RPC's answer
+        json facts = json::array(), passages = json::array(), findings = json::array();  // the pages loaded so far
+        long long facts_total = 0, passages_total = 0, findings_total = 0;
+        json analysis = nullptr;  // knowledge.preview.analysis of an import
+        bool accepted = false, stale = false, confirming = false;
+        std::u16string problem;
+        std::vector<std::string> queue;  // the documents to import after this one
+        size_t position = 1, count = 1;
+    };
+    void start_preview(Preview p);
+    void show_preview();
+    void fill_preview();
+    void load_preview_page(const std::string& kind);
+    void load_preview_analysis(bool more);
+    void confirm_preview();
+    void end_preview(bool cancel);
+    std::optional<Preview> preview_;
+    ui::Dialog* preview_dialog_ = nullptr;
+    size_t preview_request_ = 0;
     void build_item(ui::Node& parent);
     void build_details(ui::Node& parent, long long id);
     void build_editor(ui::Node& parent);
