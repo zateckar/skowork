@@ -188,20 +188,21 @@ RAM: the core process idles at about 30–40 MB. The index worker runs no model 
   - undefined behaviour: `-fsanitize=undefined -fsanitize-trap=all` in debug builds (trap mode needs no runtime library on MinGW);
   - linker: `-Wl,--dynamicbase,--nxcompat,--high-entropy-va`.
 - **Code layout for testability:** parsers and other platform-independent code (JSON, HTTP and Graph payloads, MCP, CDP, document extractors, SKILL.md, path globbing) live in libraries that use no Win32 headers.
-- **Sanitizers and fuzzing:** the MinGW GCC has no AddressSanitizer or libFuzzer runtime. The portable libraries are therefore also built on a Linux CI job with GCC: unit tests run under `-fsanitize=address,undefined`, and fuzz targets run under AFL++ in GCC-plugin mode. Fuzz targets use the `LLVMFuzzerTestOneInput` entry point, so they stay portable.
+- **Client test execution (user decision, 2026-11-12):** owned by client/build-pipeline, introduced by keep-client-unit-tests-local. Client unit tests, including portable sanitizer unit suites, run locally. Existing debug, release and sanitizer test presets remain available; GitHub Actions product builds override `WORKBENCH_TESTS=OFF`.
+- **Sanitizers and fuzzing:** MinGW GCC has no AddressSanitizer or libFuzzer runtime. Local Linux sanitizer builds run the portable unit tests under `-fsanitize=address,undefined`. The separate Linux CI parser fuzz job remains automated with libFuzzer and sanitizers; fuzz targets retain the portable `LLVMFuzzerTestOneInput` entry point.
 - **CI on every merge request:**
-  - the Windows release build and its unit tests (GoogleTest). Only the release preset is built in CI, to keep the job short: tests that need the dev-only endpoints skip there, and the debug build (with the UBSan trap) and `-fanalyzer` run locally;
-  - the Linux sanitizer and fuzz smoke job, which also covers undefined behaviour in the portable libraries;
-  - `clang-tidy` over `compile_commands.json`;
-  - a footprint check that fails the build if a budget in client/desktop-host is exceeded.
+  - Windows release product compilation with warnings as errors, manifest and footprint checks; the debug build with UBSan traps and `-fanalyzer` remains local;
+  - Linux parser fuzz smoke runs, strict OpenSpec validation, control-plane checks and tests, and Graph mock tests;
+  - `clang-tidy` over `compile_commands.json` (the existing design gate, separate from client unit-test execution).
+  Client/build-pipeline owns which client checks run locally versus in GitHub Actions.
 - **Signing:** Authenticode signing with the organization code-signing certificate.
 - **Published artifacts (decided 2026-11-04):** every change publishes fresh artifacts, so what was last merged can always be deployed and tried.
   - A version tag `vMAJOR.MINOR.PATCH[-pre]` publishes a release: the control plane image tagged with the version (and `latest` unless it is a pre-release), and a GitHub release with the desktop zip, the optional app runtime package and their SHA-256 files. Channel `stable`.
-  - Every push to `main` whose CI passes publishes a dev build from the same CI run, reusing the build its tests ran against. Its version is the patch after the last release tag, with the suffix `-dev.<CI run number>` (after `v0.1.0`: `0.1.1-dev.42`), so it sorts after that release and before the next one. Channel `dev`. The image is tagged with that version and with `main`, never `latest`. The packages replace those of one rolling GitHub pre-release, tag `dev`, which never becomes the latest release; each CI run also keeps them as workflow artifacts.
-  - Pull requests build and test only; nothing is published.
+  - Every push to `main` whose CI passes publishes a dev build from the same CI run, reusing the checked Windows product build. Its version is the patch after the last release tag, with the suffix `-dev.<CI run number>` (after `v0.1.0`: `0.1.1-dev.42`), so it sorts after that release and before the next one. Channel `dev`. The image is tagged with that version and with `main`, never `latest`. The packages replace those of one rolling GitHub pre-release, tag `dev`, which never becomes the latest release; each CI run also keeps them as workflow artifacts.
+  - Pull requests build and run the automated checks above; nothing is published.
   - Pushes to `main` do not cancel each other's CI runs, so a run that is publishing is not cut off; the queue keeps only the newest pending run, so the last change is always the one published.
   - Executables are signed in both cases when the certificate is configured; unsigned dev builds reach organization hosts only through the dev proxy (D12).
-  - Alternatives: a dev release per commit (tags and releases pile up; the workflow artifacts already keep each build); a separate workflow triggered after CI (builds and tests the Windows client a second time).
+  - Alternatives: a dev release per commit (tags and releases pile up; the workflow artifacts already keep each build); a separate workflow triggered after CI (rebuilds the Windows client a second time).
 
 ### D10. Repository layout and wire contracts
 These are the contracts that the client and the control plane are built against. Later changes extend them in their own design.md.
@@ -301,7 +302,7 @@ Gaps found and handled:
 ## Risks / Trade-offs
 
 - [The MinGW-w64 WinRT ABI headers contain defects (the `IReference<boolean>` collision found in spike 1.5)] → Include them only through one wrapper header that applies the known workarounds; never use `IReference<boolean>`; cover every WinRT interface used with a test against the real API.
-- [C++ memory-safety bugs while handling untrusted content] → Use hardened, well-fuzzed parsers; keep them in portable libraries that run under ASan, UBSan and AFL++ on the Linux CI job; use `std::span` and `_GLIBCXX_ASSERTIONS` bounds checks. Parse in workers where practical. Commission an external code review before GA.
+- [C++ memory-safety bugs while handling untrusted content] → Use hardened, well-fuzzed parsers; keep them in portable libraries covered by local ASan/UBSan unit tests and the automated Linux parser fuzz job; use `std::span` and `_GLIBCXX_ASSERTIONS` bounds checks. Parse in workers where practical. Commission an external code review before GA.
 - [GCC's PE output has no Control Flow Guard or Spectre mitigations, and Windows-only code gets no AddressSanitizer] → Keep Windows-only code thin and free of parsing. Apply the stack protector, fortify, CET-compatible code generation, DEP and high-entropy ASLR. Untrusted parsing runs in Job-Object workers. If the external review requires CFG, add llvm-mingw for release builds through a change.
 - [Hand-written WinRT/COM declarations are wrong or drift from the Windows SDK] → Declare only what is used, in one place, and test each interface against the real API in spike 1.5 and in the owning change's tests.
 - [Keycloak is unreachable off-network] → The offline mode is defined in client/control-channel. A valid refresh token survives short outages; VPN is required for LLM features, and users are told so in the UI.

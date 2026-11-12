@@ -87,51 +87,20 @@ jobs:
       - name: Put the toolchain first on PATH
         shell: pwsh
         run: Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\winlibs\mingw64\bin"
-      - name: Fetch the app runtime for the client/local-apps tests (pinned Node.js, SHA-256 and signature checked)
+      - name: Fetch the optional app runtime (pinned Node.js, SHA-256 and signature checked)
         shell: pwsh
         run: ./dev/scripts/fetch-node-runtime.ps1
-      - name: Display large enough for the desktop tests (the runner starts at 1024x768)
-        shell: pwsh
-        run: ./dev/scripts/ci-display.ps1
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '26'  # dev/graph-mock runs its TypeScript directly
-      - name: MCP reference server for the client/mcp-client tests (dev-only, never shipped)
-        shell: pwsh
-        working-directory: dev/mcp-test-server
-        run: npm ci
-      - name: Graph mock for the client/mail-calendar tests (dev-only, never shipped)
-        shell: pwsh
-        working-directory: dev/graph-mock
-        run: npm ci
-      # Release preset only, to keep the job short (add-client-foundation design D9): the debug build with the UBSan
-      # trap and -fanalyzer run locally; undefined behaviour in the portable libraries is covered by the Linux job.
+      # Client unit tests run locally (client/build-pipeline); CI builds and checks the product only.
       - name: Release build (warnings as errors)
         shell: pwsh
         working-directory: client
         run: |
           g++ --version | Select-Object -First 1
-          # The published dev build reports its version and the dev channel; the tests run against that same build.
+          # The published dev build reports its version and the dev channel.
           $publish = if ($env:PUBLISH -eq 'true') { @("-DWORKBENCH_VERSION=$env:VERSION", '-DWORKBENCH_CHANNEL=dev') } else { @() }
-          cmake --preset release '-DWORKBENCH_COMMIT=${{ github.sha }}' @publish
+          cmake --preset release -DWORKBENCH_TESTS=OFF '-DWORKBENCH_COMMIT=${{ github.sha }}' @publish
           cmake --build --preset release
           ./tools/check-manifests.ps1 -BuildDir build/release
-      - name: Unit tests
-        shell: pwsh
-        working-directory: client
-        run: ctest --preset release -LE e2e
-      - name: Keep the images of failed golden tests
-        if: failure()
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force golden-actual | Out-Null
-          Copy-Item "$env:TEMP\*.actual.png" golden-actual -ErrorAction SilentlyContinue
-      - if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: golden-actual
-          path: golden-actual
-          if-no-files-found: ignore
       - name: Sign executables (dev build, when a code-signing certificate is configured)
         if: env.PUBLISH == 'true' && env.HAS_SIGNING_CERT == 'true'
         shell: pwsh
@@ -164,19 +133,6 @@ jobs:
           path: |
             client/build/package/*.zip
             client/build/package/*.zip.sha256
-  portable-sanitizers:
-    name: Portable libraries (Linux, ASan/UBSan)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build and test under sanitizers
-        working-directory: client
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build g++-14
-          cmake --preset sanitize -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14
-          cmake --build --preset sanitize
-          ctest --preset sanitize
-
   fuzz:
     name: Fuzz untrusted-input parsers (Linux, libFuzzer, ASan/UBSan)
     runs-on: ubuntu-24.04
@@ -268,7 +224,7 @@ jobs:
   publish-image:
     name: Publish the control plane image (dev build)
     runs-on: ubuntu-latest
-    needs: [version, specs, client-windows, portable-sanitizers, fuzz, control-plane, graph-mock]
+    needs: [version, specs, client-windows, fuzz, control-plane, graph-mock]
     if: needs.version.outputs.publish == 'true'
     permissions:
       contents: read
@@ -307,7 +263,7 @@ jobs:
   publish-packages:
     name: Publish the desktop packages (dev pre-release)
     runs-on: ubuntu-latest
-    needs: [version, specs, client-windows, portable-sanitizers, fuzz, control-plane, graph-mock]
+    needs: [version, specs, client-windows, fuzz, control-plane, graph-mock]
     if: needs.version.outputs.publish == 'true'
     permissions:
       contents: write

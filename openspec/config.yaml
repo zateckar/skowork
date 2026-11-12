@@ -76,6 +76,8 @@ context: |
   - CI/CD: GitHub Actions. Two release artifacts: the control plane as a container image and the
     desktop client as a zip package. (Decided 2026-10-22.) Both are published for every version
     tag, and as a dev build for every change on main. (Decided 2026-11-04; add-client-foundation D9.)
+    Client test execution and pipeline checks are owned by client/build-pipeline.
+    (Decided 2026-11-12; keep-client-unit-tests-local.)
   - Formats: skills use SKILL.md (agentskills.io / Claude compatible). MCP configuration uses
     .mcp.json semantics. Telemetry uses OpenTelemetry (OTLP).
 
@@ -213,6 +215,7 @@ context: |
   42 add-offline-sign-in              [Hardening]
   43 add-api-connectors               [Managed]
   44 improve-meeting-capture-quality  [Hardening, Knowledge]
+  45 keep-client-unit-tests-local     [Hardening]
 
 rules:
   proposal:
