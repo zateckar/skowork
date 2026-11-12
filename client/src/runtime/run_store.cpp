@@ -702,6 +702,59 @@ std::string RunStore::ensure_compaction_nonce(long long id, const std::string& c
     return st.step() ? st.col_text(0) : candidate;
 }
 
+ThreadContext RunStore::run_context(const std::string& run_id) {
+    const std::lock_guard lock(db_.mutex());
+    ThreadContext ctx;
+    std::vector<ContextMessage> all;
+    json latest;  // the latest checkpoint event of this Run, if any
+    for (const auto& e : events(run_id)) {
+        if (e.kind == "message") {
+            all.push_back({message_from_event(e.payload), run_id, e.seq, false});
+        } else if (e.kind == "compaction") {
+            latest = e.payload;
+            ctx.compaction_revision = e.seq;
+        }
+    }
+    if (latest.is_null()) {
+        ctx.messages = std::move(all);
+        return ctx;
+    }
+    ctx.summary = jstr(latest, "summary");
+    ctx.summary_nonce = jstr(latest, "nonce");
+    const long long boundary = jint(latest, "boundary_seq");
+    const json carried = latest.value("carried", json::array());
+    if (carried.is_array())
+        for (const auto& c : carried) ctx.messages.push_back({message_from_event(c), jstr(c, "run_id"), jint(c, "seq"), true});
+    for (auto& m : all)
+        if (m.seq >= boundary) ctx.messages.push_back(std::move(m));
+    return ctx;
+}
+
+Result<long long> RunStore::add_run_compaction(const std::string& run_id, const json& checkpoint, const ThreadContext& expected,
+                                               const std::function<bool()>& cancelled) {
+    long long id = 0;
+    auto result = db_.transaction([&]() -> Status {
+        const auto current = run_context(run_id);
+        bool same = current.compaction_revision == expected.compaction_revision && current.summary == expected.summary &&
+                    current.messages.size() == expected.messages.size();
+        for (size_t i = 0; same && i < current.messages.size(); ++i) {
+            const auto& a = current.messages[i];
+            const auto& b = expected.messages[i];
+            same = a.run_id == b.run_id && a.seq == b.seq && a.carried == b.carried && message_to_event(a.msg) == message_to_event(b.msg);
+        }
+        if (!same) return make_error("context_changed", "the Run's conversation changed while it was being summarised");
+        if (cancelled && cancelled()) return make_error("cancelled", "compaction was cancelled");
+        auto seq = append_event_locked(run_id, "compaction", checkpoint);
+        if (!seq) return make_error(seq.error().code, seq.error().message);
+        // Returning an error rolls the event back if cancellation arrived while it was written.
+        if (cancelled && cancelled()) return make_error("cancelled", "compaction was cancelled");
+        id = *seq;
+        return {};
+    });
+    if (!result) return result.error();
+    return id;
+}
+
 // ---- Thread attachments ------------------------------------------------------------------------------------------------
 
 Result<std::string> RunStore::add_attachment(const std::string& thread_id, const std::string& run_id, const std::string& call_id,

@@ -46,7 +46,7 @@ const PURPOSES: Record<string, string> = {
   policy: 'Write, publish, roll out and roll back the policy of the organization and of each Group.',
   models: 'Which models each Group may use, and its token quotas.',
   connections: 'The LLM servers the gateway sends requests to, and the models they offer.',
-  mcp: 'MCP servers and API connectors that the agent may use, and who may use them.',
+  mcp: 'Connectors the agent may use, MCP servers and API connectors alike, and who may use them.',
   skills: 'Review Skills submitted for the whole organization, import public Skills, and revoke published ones.',
   knowledge: 'Knowledge items users have shared with their Groups.',
   remote: 'Which systems may hand tasks to users, their limits and callback addresses.',

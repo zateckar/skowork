@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Starts (or stops) the local Workbench control plane from the repository for development and the client end-to-end
+  Starts (or stops) the local SkoWork control plane from the repository for development and the client end-to-end
   tests. It uses the organization Keycloak test realm and the real organization LLM API from the repository's .env. Nothing is
   installed outside the repository: dependencies go to control-plane/node_modules, state to dev/.stack.
 
@@ -67,4 +67,4 @@ while ($true) {
     if (-not $alive -or (Get-Date) -gt $deadline) { Get-Content (Join-Path $state 'cp.err') -Tail 20; throw 'The control plane did not start.' }
     Start-Sleep -Milliseconds 300
 }
-Write-Host "Workbench control plane is up on http://localhost:$CpPort (logs in $state)"
+Write-Host "SkoWork control plane is up on http://localhost:$CpPort (logs in $state)"

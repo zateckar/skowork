@@ -741,6 +741,8 @@ void Shell::emit(const std::string& event, const json& data) {
             }
         }
         if (chats_) chats_->changed(data);
+    } else if (event == "speech.changed") {
+        if (route_.name == RouteName::settings && page_) page_->speech_changed(data);
     } else if (event == "dictation.changed") {
         // The 5-minute limit stopped the recording: transcribe it as Stop would (add-dictation D1).
         if (jstr(data, "state") == "limit") stop_dictation();

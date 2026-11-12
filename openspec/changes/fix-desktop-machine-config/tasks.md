@@ -6,6 +6,8 @@
 ## 2. Implementation
 - [x] 2.1 Support the specified encodings and source-specific diagnostics, with regression tests for malformed input, missing/unreadable files, extra `.txt`, defaults, registry precedence and production URL validation.
 
+- [x] 2.2 Read the SkoWork registry key and `skowork.machine.json` first and keep reading the Workbench names (D4). Verify: `machine_config_tests` covers the legacy registry key, the legacy file alone, and the SkoWork file winning over a legacy file (10 of 10 pass, test preset, 2026-11-12).
+
 ## 3. Validation
 - [ ] 3.1 Build the release desktop client, run configuration regressions and relevant existing tests, and record results in design.md; run OpenSpec strict validation.
 

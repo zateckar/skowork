@@ -1,4 +1,4 @@
-# Workbench control plane: one Node.js process (API, push WebSocket, LLM gateway, admin console), SQLite on a volume.
+# SkoWork control plane: one Node.js process (API, push WebSocket, LLM gateway, admin console), SQLite on a volume.
 #   docker build -t workbench-control-plane control-plane
 #   docker run -p 8080:8080 -v workbench-data:/data --env-file .env -e WORKBENCH_ENV=production workbench-control-plane
 FROM node:24-alpine AS build
@@ -18,7 +18,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY src ./src
 COPY --from=build /app/dist ./dist
 ARG VERSION=0.0.0
-LABEL org.opencontainers.image.title="Workbench control plane" org.opencontainers.image.version=$VERSION
+LABEL org.opencontainers.image.title="SkoWork control plane" org.opencontainers.image.version=$VERSION
 RUN mkdir -p /data && chown node:node /data
 VOLUME /data
 USER node

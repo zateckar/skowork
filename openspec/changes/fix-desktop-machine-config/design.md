@@ -18,6 +18,11 @@ Keep registry selection and the exact filename unchanged. Error messages include
 
 A dedicated Windows test executable links the real channel loader, path resolution, HTTP URL validation and loopback validation. A link-time registry reader double supplies deterministic absent/valid/invalid registry values without modifying machine or user registry. Copy that test executable into a unique temporary Unicode directory and run its probe mode with a different working directory and adjacent JSON; no development-only config argument is used. Test the release preset with development endpoints disabled. Alternatives: testing only an explicit file path misses source discovery, and launching the resident production app would modify the user's profile and registration.
 
+### D4: SkoWork names first, Workbench names still read
+- **Choice (user, 2026-11-12):** the registry key is `HKLM\SOFTWARE\Policies\SkoWork` and the file is `skowork.machine.json`. The client still reads `HKLM\SOFTWARE\Policies\Workbench` and `workbench.machine.json`, in the order the spec gives, because one deployment already uses them. Errors name the SkoWork locations, or the legacy source when that one was selected.
+- **Alternatives:** rename without a fallback (breaks the existing deployment); keep the Workbench names (improve-skowork-and-knowledge-control D2 keeps internal contracts, but these two names are typed by administrators and shown in the README, so they are visible identity).
+- **Unchanged:** the default client id `workbench-desktop`, `WORKBENCH_*` settings, data roots and pipe names stay as improve-skowork-and-knowledge-control decided.
+
 ## Risks
 
 - [The user's precise production cause remains unknown] -> Reproduce the supported encoding failures, verify the README example, and expose the attempted path and extra extension rather than claim a deployment-specific diagnosis.

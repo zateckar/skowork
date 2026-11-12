@@ -212,6 +212,23 @@ Whenever a guardrail changes a Group's value, `src` names the guardrail and simu
 
 Not applicable: this is new functionality. Before this change is deployed, the gateway's static role mapping from add-agent-runtime is replaced by `llm.models` from the effective policy.
 
+## Spike results
+
+**Proxy variables (tasks 1.1 and 1.2, partial, 2026-11-12).** `dev/scripts/proxy-probe.mjs` ran each tool with the variables the sandbox sets, against a local proxy that refuses every request, as no-network mode does. It ran on the development workstation, outside the Job Object and restricted token, and not on the baseline laptop. A tool that never reached the proxy ignores the variables.
+
+| Tool | Result |
+|---|---|
+| git 2.x (https remote), curl, npm, Python urllib, PowerShell 7 Invoke-WebRequest, .NET HttpClient | Uses the proxy; the request was refused |
+| Node.js 26 `fetch` and `https` | Ignores the variables and connects directly. With `NODE_USE_ENV_PROXY=1` both use the proxy and are refused |
+| Windows PowerShell 5.1 Invoke-WebRequest | Ignores the variables (it uses the system proxy) and connects directly |
+
+- **Choice:** the sandbox sets `NODE_USE_ENV_PROXY=1` next to the proxy variables. Node.js versions before 22.21 and 24.5 do not know it and still bypass.
+- **Alternative:** a preload script for Node.js. Rejected: it needs a file on disk and `NODE_OPTIONS`, which a script can unset just as easily.
+- [Windows PowerShell 5.1 and old Node.js bypass the proxy] -> This is the `proxy-only` level that Enforcement Limits Disclosure reports. The shell mode stays `off` for standard users, and Groups that need a hard guarantee get the OS firewall profile.
+- **Not verified:** allowed traffic of these tools through the real egress proxy inside the Job Object, and the baseline laptop.
+
+**Enforcement level (task 4.7).** `detect_network_enforcement` reads the local, Group Policy and MDM firewall rule stores for an active outbound block rule of the group "Workbench Child Processes". The client reports the level at start in telemetry, with every heartbeat, and in the policy status. Verified by `SandboxEnforcement.RuleDetection` on a machine without the profile and with rule strings for the with-profile cases. A machine that has the deployed profile was not available.
+
 ## Open Questions
 
 - The exact identity-provider role names and the initial Group set (standard, power-users, developers). This is configuration agreed with IT security.

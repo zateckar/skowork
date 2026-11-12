@@ -2926,9 +2926,12 @@ TEST(ShellPages, DeleteEverythingNeedsTheConfirmationWord) {
 
 TEST(ShellGolden, SettingsPage) {
     Fixture f([](Inbox& in) { in.policy["notifications.failed"] = false; });
+    f.rpc.add("speech.status", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"state", "idle"}, {"installed", false}, {"version", ""}, {"error", ""}, {"download", true}, {"available_version", "1"}};
+    });
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
     w.run([&] { w.main().open("#/settings"); });
-    ASSERT_TRUE(w.until([&] { return w.exists("notify-completed"); }));
+    ASSERT_TRUE(w.until([&] { return w.exists("notify-completed") && w.exists("settings-speech-download"); }));
     std::vector<uint32_t> px;
     UINT pw = 0, ph = 0;
     w.run([&] {
@@ -5437,6 +5440,18 @@ TEST(ShellDictation, DictateInsertsAtTheCaretEscapeDiscardsAndAvailability) {
             return json::object();
         });
     }
+    // Speech setup (client/speech-models): the host's package state, and the calls of Download.
+    json speech = {{"state", "idle"}, {"installed", false}, {"version", ""}, {"error", ""}, {"download", true}, {"available_version", "1"}};
+    f.rpc.add("speech.status", RpcExposure::ui, [&](const json&) -> Result<json> {
+        const std::lock_guard l(mx);
+        return speech;
+    });
+    f.rpc.add("speech.install", RpcExposure::ui, [&](const json&) -> Result<json> {
+        const std::lock_guard l(mx);
+        calls.push_back("speech.install");
+        speech["state"] = "downloading";
+        return json{{"started", true}};
+    });
     const auto called = [&](const std::string& method) {
         const std::lock_guard l(mx);
         return static_cast<size_t>(std::count(calls.begin(), calls.end(), method));
@@ -5496,10 +5511,10 @@ TEST(ShellDictation, DictateInsertsAtTheCaretEscapeDiscardsAndAvailability) {
     w.run([&] { w.main().open("#/threads/" + t); });
     ASSERT_TRUE(w.until([&] { return w.exists("composer-dictate"); }));
 
-    // No speech models: disabled, and the name and tooltip say why.
+    // No microphone: disabled, and the name and tooltip say why.
     {
         const std::lock_guard l(mx);
-        dictation = {{"enabled", true}, {"available", false}, {"reason", "models_missing"}};
+        dictation = {{"enabled", true}, {"available", false}, {"reason", "no_microphone"}};
     }
     w.post([&] { w.main().emit("status", app_status()); });
     bool on = true;
@@ -5510,7 +5525,47 @@ TEST(ShellDictation, DictateInsertsAtTheCaretEscapeDiscardsAndAvailability) {
         });
         return !on;
     }));
-    EXPECT_EQ(uia.by_id(w.hwnd())[L"composer-dictate"].name, L"Dictate: speech recognition is not installed on this computer.");
+    EXPECT_EQ(uia.by_id(w.hwnd())[L"composer-dictate"].name, L"Dictate: no microphone was found.");
+
+    // No speech package (client/speech-models Speech Setup Entry): the button leads to the setup in Settings, the draft
+    // stays, Download starts the host's setup, and the host's events move the state on without recording anything.
+    {
+        const std::lock_guard l(mx);
+        dictation = {{"enabled", true}, {"available", false}, {"reason", "models_missing"}};
+    }
+    w.post([&] { w.main().emit("status", app_status()); });
+    // Polled from this thread: a UI Automation read waits for the window thread, so it cannot run on it.
+    const auto name_becomes = [&](const wchar_t* id, const std::wstring& want) {
+        for (int i = 0; i < 250; ++i) {
+            if (uia.by_id(w.hwnd())[id].name == want) return true;
+            std::this_thread::sleep_for(20ms);
+        }
+        return false;
+    };
+    ASSERT_TRUE(name_becomes(L"composer-dictate", L"Set up speech recognition to dictate"));
+    ASSERT_TRUE(w.invoke("composer-dictate"));
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-speech-download") && w.exists("settings-speech-import"); }));
+    EXPECT_FALSE(w.exists("settings-speech-remove"));
+    EXPECT_EQ(uia.by_id(w.hwnd())[L"settings-speech-state"].name, L"Not installed.");
+    w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
+    EXPECT_TRUE(problems.empty()) << problems.front();
+    ASSERT_TRUE(w.invoke("settings-speech-download"));
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-speech-cancel") && called("speech.install") == 1; }));
+    EXPECT_FALSE(w.exists("settings-speech-download"));
+    w.post([&] { w.main().emit("speech.changed", json{{"state", "downloading"}, {"bytes", 64ll << 20}}); });
+    ASSERT_TRUE(name_becomes(L"settings-speech-state", L"Downloading… 64 MB so far."));
+    {
+        const std::lock_guard l(mx);
+        speech = {{"state", "ready"}, {"installed", true}, {"version", "1"}, {"error", ""}, {"download", true}, {"available_version", "1"}};
+    }
+    w.post([&] { w.main().emit("speech.changed", json{{"state", "ready"}, {"version", "1"}, {"error", ""}}); });
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-speech-remove"); }));
+    EXPECT_EQ(uia.by_id(w.hwnd())[L"settings-speech-state"].name, L"Ready (version 1).");
+    EXPECT_FALSE(w.exists("settings-speech-download")) << "the installed version is the published one";
+    EXPECT_EQ(called("dictation.start"), 2u) << "setup never records";
+    EXPECT_TRUE(w.until([&] { return f.in.svc->store().draft(t).text == "Please: Summarise my unread e-mail from today"; }));
+    w.run([&] { w.main().open("#/threads/" + t); });
+    ASSERT_TRUE(w.until([&] { return w.exists("composer-dictate"); }));
     // policy.dictation.mode off: no button.
     {
         const std::lock_guard l(mx);

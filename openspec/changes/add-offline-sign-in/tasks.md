@@ -11,6 +11,8 @@
 - [x] 2.2 Check the type of the received refresh token and fall back to the normal token with the "Offline sign-in not available" status (D3). Verify with unit tests: an offline token sets the status to active; a normal token keeps the sign-in and shows the status
 - [x] 2.3 Revoke, delete and enter the sign-in required state when the effective policy turns the feature off, without opening the browser (D5). Verify with unit tests: revocation request sent, token deleted, no browser opened, and the next sign-in omits the scope
 - [x] 2.4 Keep an offline session across a long absence and end it on invalid_grant (D4). Verify with unit tests using the fake identity provider and a fake clock: a stored offline token refreshes after 20 days without the browser; invalid_grant deletes it and enters the sign-in required state
+- [x] 2.6 End an offline session when the control plane reports the installation or user as revoked (D7, Offline Session Ends On Revoked Access). Verify with a unit test: an offline token is revoked and deleted and the state is sign-in required; a normal token is kept and no revocation request is sent
+
 - [x] 2.5 Confirm that sign-out revokes and deletes an offline token (existing Sign-Out requirement). Verify with a unit test that inspects the revocation request
 
 ## 3. Control plane
@@ -25,5 +27,5 @@
 
 ## 5. Validation
 
-- [ ] 5.1 Run `npm --prefix control-plane test` and the client tests (`cmake --build --preset test` in client/). Verify: all pass
+- [ ] 5.1 Run `npm --prefix control-plane test` and the client tests (`cmake --build --preset test` in client/). Verify: all pass. Status: partial, 2026-11-12: the client test tree builds and the TokenManagerOfflineSignIn tests pass; the full client and control-plane suites were not rerun
 - [x] 5.2 Run `openspec validate --all --strict`. Verify: it passes with no warnings

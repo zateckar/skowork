@@ -22,7 +22,7 @@ try {
   throw e;
 }
 const port = await cp.listen();
-console.log(`Workbench control plane (${cfg.env}) listening on ${cfg.host}:${port}`);
+console.log(`SkoWork control plane (${cfg.env}) listening on ${cfg.host}:${port}`);
 const report = setupReport(cfg, { consoleBuilt: cp.consoleBuilt, port });
 for (const line of report.info) console.log(line);
 for (const line of report.warnings) console.warn(line);

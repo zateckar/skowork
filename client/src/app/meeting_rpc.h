@@ -5,6 +5,7 @@
 #include "host/rpc.h"
 #include "meeting/dictation.h"
 #include "meeting/meeting_service.h"
+#include "meeting/speech_installer.h"
 
 #include <functional>
 
@@ -15,5 +16,9 @@ void register_meeting_rpc(RpcRegistry& rpc, std::function<meeting::MeetingServic
 
 // client/dictation (add-dictation D1): dictation.start, .stop and .cancel, UI only.
 void register_dictation_rpc(RpcRegistry& rpc, std::function<meeting::DictationService*()> service);
+
+// client/speech-models (tasks 5.2, 5.3): speech.status, .install (download from the built-in source), .import {path},
+// .cancel and .remove {version}, UI only. Settings (task 5.4) calls these; no URL is accepted from the caller.
+void register_speech_rpc(RpcRegistry& rpc, std::function<meeting::SpeechInstaller*()> service);
 
 }  // namespace wb

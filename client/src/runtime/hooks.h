@@ -90,7 +90,9 @@ public:
     virtual void after_model_call(const ModelCallInfo&) {}
     virtual ToolDecision before_tool_call(const ToolCallInfo&) { return ToolDecision::allow(); }
     virtual void after_tool_call(const ToolCallInfo&, const ToolResultInfo&) {}
-    virtual void before_compaction(const RunInfo&) {}
+    // Called once per checkpoint attempt; `idempotency_key` names the source revision (Thread, Run, checkpoint revision and
+    // boundary), so a retry for the same revision carries the same key and a handler can ignore a repeated call.
+    virtual void before_compaction(const RunInfo&, const std::string& /*idempotency_key*/) {}
     virtual void run_end(const RunInfo&, RunState, const std::string& /*reason*/) {}
 };
 
@@ -134,7 +136,7 @@ public:
     void before_model_call(ModelCallInfo& info) const;
     void after_model_call(const ModelCallInfo& info) const;
     void after_tool_call(const ToolCallInfo& call, const ToolResultInfo& result) const;
-    void before_compaction(const RunInfo& run) const;
+    void before_compaction(const RunInfo& run, const std::string& idempotency_key) const;
     void run_end(const RunInfo& run, RunState state, const std::string& reason) const;
 
     std::function<void(const std::string& what)> on_error;

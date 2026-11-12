@@ -183,11 +183,17 @@ void DictateControl::update() {
         auto* l = emplace<ui::Label>(u, shell_.t("composer.transcribing"), TextStyle::caption, Paint::text_secondary, false, id + "-progress");
         l->padding.top = 7;
     } else {
-        const std::u16string label = available || reason.empty() ? shell_.t("composer.dictate") : shell_.t("composer.dictation_off." + reason);
+        // Without a speech package the button leads to its setup in Settings (client/speech-models Speech Setup Entry);
+        // the draft stays with the Thread or Chat.
+        const bool setup = !available && reason == "models_missing";
+        const std::u16string label = setup ? shell_.t("composer.dictation_setup")
+                                     : available || reason.empty() ? shell_.t("composer.dictate")
+                                     : shell_.t("composer.dictation_off." + reason);
         auto* b = emplace<ui::IconButton>(u, id, ui::icon::microphone, label);
-        b->enabled = available && !other && phase == Shell::DictationPhase::idle;
+        b->enabled = setup || (available && !other && phase == Shell::DictationPhase::idle);
         std::weak_ptr<int> alive = alive_;
-        b->on_click = [this, alive] { shell_.start_dictation(owner_, alive, field_); };
+        if (setup) b->on_click = [this] { shell_.navigate("#/settings"); };
+        else b->on_click = [this, alive] { shell_.start_dictation(owner_, alive, field_); };
         focus = b->enabled ? b : nullptr;
     }
     if (tr && had_focus && focus) tr->set_focus(focus);

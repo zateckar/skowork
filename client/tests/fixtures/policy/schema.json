@@ -943,6 +943,53 @@
       ]
     },
     {
+      "path": "speech.download",
+      "owner": "client/speech-models",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "speech.package.hosts",
+      "owner": "client/speech-models",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "string"
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "speech.package.sha256",
+      "owner": "client/speech-models",
+      "type": {
+        "kind": "string"
+      },
+      "default": ""
+    },
+    {
+      "path": "speech.package.url",
+      "owner": "client/speech-models",
+      "type": {
+        "kind": "string"
+      },
+      "default": ""
+    },
+    {
+      "path": "speech.package.version",
+      "owner": "client/speech-models",
+      "type": {
+        "kind": "string"
+      },
+      "default": ""
+    },
+    {
       "path": "storage.max_size_gb",
       "owner": "client/local-storage",
       "type": {
@@ -2278,6 +2325,56 @@
             "default": [
               "powershell"
             ]
+          }
+        }
+      },
+      "speech": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "download": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "x-owner": "client/speech-models",
+            "x-merge": "scalar",
+            "default": "on",
+            "x-guardrail": "max-level"
+          },
+          "package": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "hosts": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "x-owner": "client/speech-models",
+                "x-merge": "union",
+                "default": []
+              },
+              "sha256": {
+                "type": "string",
+                "x-owner": "client/speech-models",
+                "x-merge": "scalar",
+                "default": ""
+              },
+              "url": {
+                "type": "string",
+                "x-owner": "client/speech-models",
+                "x-merge": "scalar",
+                "default": ""
+              },
+              "version": {
+                "type": "string",
+                "x-owner": "client/speech-models",
+                "x-merge": "scalar",
+                "default": ""
+              }
+            }
           }
         }
       },

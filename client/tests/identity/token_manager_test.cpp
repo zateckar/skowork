@@ -268,6 +268,37 @@ TEST(TokenManagerOfflineSignIn, PolicyOffRevokesTheOfflineTokenAndEndsTheSession
     EXPECT_EQ(browser.last_url.find("offline_access"), std::string::npos) << browser.last_url;
 }
 
+TEST(TokenManagerOfflineSignIn, RevokedAccessEndsAnOfflineSessionAndKeepsANormalOne) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    for (const bool offline : {true, false}) {
+        TestStore ts;
+        FakeIdp idp;
+        FakeClock clock;
+        CaptureBrowser browser;
+        idp.up = true;
+        idp.offline = offline;
+        ASSERT_TRUE(ts.store->set_secret("identity.refresh_token", refresh_token_of(offline ? "Offline" : "Refresh", 0)));
+        ts.store->set_setting("identity.bound_subject", "user-1");
+        TokenManager tm(config_for(idp), *ts.store, clock, browser);
+        tm.start();
+        ASSERT_EQ(tm.state(), AuthState::signed_in);
+        const std::string held = ts.store->secret("identity.refresh_token").value_or("");
+
+        EXPECT_EQ(tm.end_offline_session_revoked(), offline);
+        EXPECT_EQ(browser.opened, 0);
+        if (offline) {
+            EXPECT_EQ(tm.state(), AuthState::sign_in_required);
+            EXPECT_FALSE(ts.store->secret("identity.refresh_token").has_value());
+            const auto revocations = idp.revocation_bodies();
+            ASSERT_EQ(revocations.size(), 1u);
+            EXPECT_NE(revocations[0].find(held), std::string::npos) << revocations[0];
+        } else {
+            EXPECT_EQ(tm.state(), AuthState::signed_in);
+            EXPECT_TRUE(idp.revocation_bodies().empty());
+        }
+    }
+}
+
 TEST(TokenManagerOfflineSignIn, PolicyOffAtStartEndsAStoredOfflineTokenBeforeAnyRefresh) {
     WB_REQUIRES_DEV_ENDPOINTS();
     TestStore ts;

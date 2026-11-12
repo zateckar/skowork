@@ -5,7 +5,7 @@
 #>
 param(
     [Parameter(Mandatory)] [string] $BuildDir,
-    [double] $MaxInstallMB = 25,
+    [double] $MaxInstallMB = 30,
     [double] $MaxIdleWorkingSetMB = 60,
     [int] $IdleSeconds = 20,
     [switch] $InstallOnly

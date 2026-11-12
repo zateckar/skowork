@@ -9,12 +9,15 @@
 namespace wb {
 namespace {
 
-constexpr wchar_t kPolicyKey[] = L"SOFTWARE\\Policies\\Workbench";
+// SkoWork names first; the Workbench names of earlier deployments are still read (Machine Configuration Sources).
+constexpr const wchar_t* kPolicyKeys[] = {L"SOFTWARE\\Policies\\SkoWork", L"SOFTWARE\\Policies\\Workbench"};
+constexpr wchar_t kConfigFile[] = L"skowork.machine.json";
+constexpr wchar_t kLegacyConfigFile[] = L"workbench.machine.json";
 
 // Where an administrator sets the values (improve-deployment-guidance); every configuration error names it.
 constexpr char kWhere[] =
-    " Set ControlPlaneUrl and IdpIssuer under HKLM\\SOFTWARE\\Policies\\Workbench, or control_plane_url and "
-    "idp_issuer in workbench.machine.json next to SkoWork.exe (see the README).";
+    " Set ControlPlaneUrl and IdpIssuer under HKLM\\SOFTWARE\\Policies\\SkoWork, or control_plane_url and "
+    "idp_issuer in skowork.machine.json next to SkoWork.exe (see the README).";
 
 Status validate(const MachineConfig& c, const std::string& source, bool from_file = false) {
     std::string missing;
@@ -108,18 +111,29 @@ Result<MachineConfig> load_machine_config_file(const std::filesystem::path& file
 }
 
 Result<MachineConfig> load_machine_config() {
-    if (auto cp = reg_read_string(HKEY_LOCAL_MACHINE, kPolicyKey, L"ControlPlaneUrl")) {
+    for (const wchar_t* key : kPolicyKeys) {
+        auto cp = reg_read_string(HKEY_LOCAL_MACHINE, key, L"ControlPlaneUrl");
+        if (!cp) continue;
         MachineConfig c;
         c.control_plane_url = narrow(*cp);
-        c.idp_issuer = narrow(reg_read_string(HKEY_LOCAL_MACHINE, kPolicyKey, L"IdpIssuer").value_or(L""));
-        if (auto id = reg_read_string(HKEY_LOCAL_MACHINE, kPolicyKey, L"IdpClientId")) c.idp_client_id = narrow(*id);
-        if (auto r = reg_read_string(HKEY_LOCAL_MACHINE, kPolicyKey, L"IdpRedirectUri")) c.idp_redirect_uri = narrow(*r);
-        if (auto s = reg_read_string(HKEY_LOCAL_MACHINE, kPolicyKey, L"IdpScope")) c.idp_scope = narrow(*s);
-        if (auto ch = reg_read_string(HKEY_LOCAL_MACHINE, kPolicyKey, L"Channel")) c.channel = narrow(*ch);
-        if (Status s = validate(c, "HKLM\\SOFTWARE\\Policies\\Workbench"); !s) return s.error();
+        c.idp_issuer = narrow(reg_read_string(HKEY_LOCAL_MACHINE, key, L"IdpIssuer").value_or(L""));
+        if (auto id = reg_read_string(HKEY_LOCAL_MACHINE, key, L"IdpClientId")) c.idp_client_id = narrow(*id);
+        if (auto r = reg_read_string(HKEY_LOCAL_MACHINE, key, L"IdpRedirectUri")) c.idp_redirect_uri = narrow(*r);
+        if (auto s = reg_read_string(HKEY_LOCAL_MACHINE, key, L"IdpScope")) c.idp_scope = narrow(*s);
+        if (auto ch = reg_read_string(HKEY_LOCAL_MACHINE, key, L"Channel")) c.channel = narrow(*ch);
+        if (Status s = validate(c, "HKLM\\" + narrow(key)); !s) return s.error();
         return c;
     }
-    return load_machine_config_file(exe_dir() / L"workbench.machine.json");
+    auto c = load_machine_config_file(exe_dir() / kConfigFile);
+    if (c || c.error().code != "not_found") return c;
+    // No SkoWork file: an earlier deployment's file (or its .txt mistake) beside the executable is used instead.
+    const auto legacy = exe_dir() / kLegacyConfigFile;
+    auto legacy_txt = legacy;
+    legacy_txt += L".txt";
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(legacy, ec) || std::filesystem::is_regular_file(legacy_txt, ec))
+        return load_machine_config_file(legacy);
+    return c;
 }
 
 }  // namespace wb

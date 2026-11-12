@@ -50,6 +50,8 @@ public:
     void tick();
     // {enabled, available, reason, state, started_at}; reason: models_missing, no_microphone, meeting or "".
     json status();
+    // Drops the cached microphone and model checks so that a speech setup shows as ready at once (speech-models: readiness refresh).
+    void refresh_models();
 
 private:
     enum class State { idle, recording, stopped, transcribing };

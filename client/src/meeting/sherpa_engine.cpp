@@ -121,13 +121,14 @@ Result<Paths> model_paths(const fs::path& dir) {
 
 }  // namespace
 
-bool stt_installed() {
+bool stt_installed(const fs::path& package_dir) {
 #ifdef WORKBENCH_DEV_ENDPOINTS
     wchar_t v[32] = {};
     if (::GetEnvironmentVariableW(L"WORKBENCH_STT_ENGINE", v, 32) == 0 || std::wstring(v) == L"test") return true;
 #endif
+    if (package_dir.empty()) return false;
     std::error_code ec;
-    return fs::exists(stt_runtime_dir() / L"sherpa-onnx-c-api.dll", ec) && static_cast<bool>(model_paths(stt_models_dir()));
+    return fs::exists(package_dir / L"sherpa-onnx-c-api.dll", ec) && static_cast<bool>(model_paths(package_dir));
 }
 
 namespace {
@@ -498,20 +499,6 @@ std::wstring env(const wchar_t* name) {
 #endif
 
 }  // namespace
-
-fs::path stt_runtime_dir() { return exe_dir() / L"models" / L"stt"; }
-
-fs::path stt_models_dir() {
-#ifdef WORKBENCH_DEV_ENDPOINTS
-    if (const std::wstring e = env(L"WORKBENCH_STT_MODELS"); !e.empty()) return fs::path(e);
-#endif
-    const fs::path installed = stt_runtime_dir();
-#ifdef WORKBENCH_STT_SOURCE_MODELS
-    std::error_code ec;
-    if (!fs::exists(installed / L"parakeet-tdt-0.6b-v3-int8", ec)) return fs::path(widen(WORKBENCH_STT_SOURCE_MODELS));
-#endif
-    return installed;
-}
 
 Result<std::unique_ptr<SpeechEngine>> make_sherpa_engine(const fs::path& runtime_dir, const fs::path& models_dir, int threads,
                                                          bool force_whisper) {

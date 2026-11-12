@@ -314,6 +314,8 @@ Result<std::unique_ptr<Launched>> Sandbox::launch(const ProcessSpec& spec) {
         for (const char* k : {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"}) extra.emplace_back(k, url);
         extra.emplace_back("NO_PROXY", "");
         extra.emplace_back("no_proxy", "");
+        // Node.js ignores the proxy variables unless told otherwise (add-policy-and-sandbox spike 1.2).
+        extra.emplace_back("NODE_USE_ENV_PROXY", "1");
     }
     const std::wstring env = environment_block(scrubbed_environment(extra));
 

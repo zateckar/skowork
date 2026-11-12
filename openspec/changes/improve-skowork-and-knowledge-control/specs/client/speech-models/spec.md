@@ -20,6 +20,28 @@ The client SHALL allow user-initiated speech package downloads only while policy
 - **WHEN** policy.speech.download is off and speech is not installed
 - **THEN** Download is unavailable with a policy explanation, and Import package remains available
 
+### Requirement: Speech Package Catalog
+The client SHALL take the speech package catalog only from the Policy bundle: policy.speech.package.url (https address of the archive), policy.speech.package.sha256, policy.speech.package.version and policy.speech.package.hosts (further hosts a download may be redirected to). All default to empty. While the address or the digest is empty, Download is unavailable.
+
+#### Scenario: Administrator publishes a package
+- **WHEN** the effective policy names an address and a digest and the user chooses Download
+- **THEN** the client downloads the archive from that address
+
+#### Scenario: No catalog
+- **WHEN** the effective policy has no package address
+- **THEN** Download is unavailable with an explanation that the administrator has not published a speech package
+
+### Requirement: Speech Package Digest
+The client MUST refuse a downloaded or imported archive unless its SHA-256 equals policy.speech.package.sha256.
+
+#### Scenario: Downloaded archive differs from the catalog
+- **WHEN** a download completes and its SHA-256 differs from policy.speech.package.sha256
+- **THEN** the package is not activated and the previous package stays active
+
+#### Scenario: Imported archive differs from the catalog
+- **WHEN** the user imports an archive whose SHA-256 differs from policy.speech.package.sha256
+- **THEN** the import is refused and the previous package stays active
+
 ### Requirement: Compatible Speech Acquisition
 Download and Import package SHALL acquire the complete speech runtime and models compatible with the installed client, with progress, cancellation, retry and actionable network, disk-space and compatibility errors, without administrator rights.
 
@@ -43,11 +65,33 @@ The client MUST verify package authenticity, every required file's integrity and
 - **THEN** setup reports a repairable engine error instead of Ready
 
 ### Requirement: Speech Package Trust Boundary
-Speech acquisition MUST use only the product's authenticated package catalog or a verified offline package. It MUST NOT accept arbitrary package URLs from model output, extracted content or a Tool call, or send identity tokens to package hosts outside the configured control plane.
+Speech acquisition MUST use only the authenticated package catalog of Speech Package Catalog or an offline package verified against it. It MUST NOT accept arbitrary package URLs from model output, extracted content or a Tool call, or send identity tokens to package hosts outside the configured control plane.
 
 #### Scenario: Redirect to a different host
 - **WHEN** a package download redirects to a host outside the authenticated catalog's permitted origins
 - **THEN** acquisition stops without forwarding credentials or activating any downloaded content
+
+### Requirement: Speech Package Location
+The client SHALL load the speech runtime and models only from the activated speech package under the user-private data root (`<data root>\speech\packages\<version>\models\stt`). It MUST NOT resolve speech files beside the executable, from environment variables, or from the source tree, in any build. Development test engines remain compiled only into development builds and load no model files.
+
+#### Scenario: Client without administrator rights
+- **WHEN** a verified package is activated under the data root and the client runs from a folder the user cannot write
+- **THEN** the worker loads the runtime and models from the activated package and reads no speech file from the executable's folder
+
+#### Scenario: No package activated
+- **WHEN** no complete, compatible package exists under the data root
+- **THEN** the worker reports model_missing without searching any other location
+
+### Requirement: Speech Versions And Selection
+Each activated package SHALL occupy its own versioned folder. The client SHALL use the newest complete package whose manifest is compatible with it (schema 1, package skowork-speech, architecture windows-x64). A package that has not finished activation SHALL NOT be selected.
+
+#### Scenario: Failed activation keeps the previous package
+- **WHEN** a newer package fails verification or engine initialization during setup
+- **THEN** its folder is removed and the previously activated package remains the one in use
+
+#### Scenario: Removal while in use
+- **WHEN** the user removes or repairs a package while a capture or transcription uses it
+- **THEN** its files stay in place, the folder is marked for removal, and it is deleted at the next start
 
 ### Requirement: Speech Repair And Removal
 Settings SHALL show the active speech version, languages and disk use, with Verify, Repair and Remove actions. Replacement or removal waits for active capture or transcription to finish or be explicitly cancelled, and follows the footprint budgets of client/desktop-host.

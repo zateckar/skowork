@@ -112,6 +112,11 @@ public:
     void set_offline_sign_in(bool on);
     [[nodiscard]] OfflineStatus offline_sign_in_status() const;
 
+    // The control plane reported this installation or user as revoked (client/identity Offline Session Ends On Revoked
+    // Access): revokes a stored offline token, deletes it and enters sign_in_required. A normal refresh token is kept.
+    // Returns true when an offline session was ended.
+    bool end_offline_session_revoked();
+
     // Discards the access token so that the next call refreshes (revocation message, client/control-channel).
     void drop_access_token();
 

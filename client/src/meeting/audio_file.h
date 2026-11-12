@@ -52,7 +52,7 @@ Result<DecodedTrack> read_track(const std::filesystem::path& file);
 std::filesystem::path path_from_utf8(const std::string& s);
 std::string path_to_utf8(const std::filesystem::path& p);
 
-// The stt worker's methods: "stt.transcribe" {tracks: [paths], language?, fallback_language?} -> {language, segments,
+// The stt worker's methods: "stt.probe" {speech_dir} -> {ready}, "stt.transcribe" {speech_dir, tracks: [paths], language?, fallback_language?} -> {language, segments,
 // engine}; fallback_language is used when the detected language is not supported. Fails with
 // "model_missing" when no speech engine is installed (design D4) and "unsupported_language".
 Result<json> stt_request(const std::string& method, const json& params);

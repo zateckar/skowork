@@ -215,3 +215,13 @@ Control plane and admin console, recorded on 2026-11-10 (tasks 2 to 5 and 7.3 ar
 - `npm --prefix control-plane run admin:build`: passes.
 - `npm --prefix control-plane test`: 304 of 304 pass. The baseline before this change was 276. The 28 new tests are in `test/api-connectors.test.ts`, which runs against a local fake API and never an external host. Round 2 added the 403 (FORBIDDEN, token stays ready) and user-token path tests. `test/mcp.test.ts` (migration test) was extended by the new migration's tables.
 - Not run, and why: 1.1 and 1.2 (the product owner's documents and the organization LLM API are needed), 6.1 to 6.4 (client, built by another agent), 7.1 and the browser part of 7.2 (browser checks), 8.1 to 8.3 (end to end and desktop), 9.1 (archive waits for use-idp-tokens-for-mcp and every task).
+
+Admin console and dev mock, recorded on 2026-11-12 (tasks 7.1, 7.2 and the mock part of 8.1):
+
+- 
+pm --prefix control-plane run check (tsc --noEmit): passes, exit 0.
+- 
+pm --prefix control-plane run admin:build: passes, exit 0.
+- Search for "MCP catalog" in control-plane/admin/src: no match. The remove prompt now reads "from Connectors?".
+- dev/api-mock smoke test on 127.0.0.1:4011: /openapi.json serves OpenAPI 3.1.0 with paths getOrder, createOrder and legacyStatus; POST /orders returns 201 with a new id; GET /orders/ord_1001 returns the seeded order. The request log prints no Authorization value.
+- Not run: the browser check of 7.1 (upload of dev/api-mock/openapi.json, refusal of the "TODO" operation, navigation group in 7.2), the control plane against the mock, and the real-LLM Run of 8.1. The rule check of the mock document was done by reading it, not by the control plane's parser.

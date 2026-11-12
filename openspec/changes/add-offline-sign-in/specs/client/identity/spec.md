@@ -52,6 +52,17 @@ The client SHALL NOT impose its own lifetime on an offline session. The session 
 - **WHEN** the client starts and the identity provider rejects the stored offline token as invalid_grant
 - **THEN** the client deletes the token, enters the sign-in required state and does not open the browser on its own
 
+### Requirement: Offline Session Ends On Revoked Access
+When the control plane reports the installation or its user as revoked (control-plane/identity), the client SHALL revoke the stored offline token at the identity provider, delete it and enter the sign-in required state without opening the browser. A refresh token that is not an offline token is kept.
+
+#### Scenario: Installation revoked
+- **WHEN** registration answers that the installation is revoked and the stored refresh token is an offline token
+- **THEN** the client sends a revocation request for that token, deletes it and shows the sign-in required state
+
+#### Scenario: Normal refresh token
+- **WHEN** registration answers that the installation is revoked and the stored refresh token is not an offline token
+- **THEN** the client keeps the token and sends no revocation request
+
 ### Requirement: Offline Sign-In Policy
 The client SHALL apply policy.identity.offline_sign_in, with values on or off and default on. While it is on, Offline Sign-In Request applies at each sign-in. When the effective policy sets it to off, the client SHALL at the next policy update revoke the stored offline token at the identity provider, delete it and enter the sign-in required state without opening the browser.
 

@@ -14,6 +14,11 @@ constexpr long long kCheckEveryMs = 30 * 1000;
 
 DictationService::DictationService(DictationEnv env) : env_(std::move(env)) {}
 
+void DictationService::refresh_models() {
+    const std::lock_guard lock(mx_);
+    checked_at_ = -1;
+}
+
 DictationService::~DictationService() {
     const std::lock_guard lock(mx_);
     if (state_ == State::recording || state_ == State::stopped) {

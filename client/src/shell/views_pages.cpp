@@ -209,6 +209,7 @@ void PagePane::load() {
         load_automations();
         load_mail();
         load_connectors();
+        load_speech();
         load_knowledge();
         load_meetings();
         load_policy();
@@ -591,6 +592,7 @@ void PagePane::build_settings() {
                 c->emplace<ui::Label>(shell_.ui(), shell_.t("settings.general.dictation_language_hint"), TextStyle::caption,
                                       Paint::text_secondary);
             }
+            build_speech(*c);
             // Account.
             c->emplace<ui::Label>(shell_.ui(), shell_.t("settings.account.title"), TextStyle::body_strong)->role = ui::Role::heading;
             text(*c, shell_.t("settings.account.body"), Paint::text_secondary);

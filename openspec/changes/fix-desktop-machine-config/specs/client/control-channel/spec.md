@@ -17,6 +17,17 @@ The client SHALL use the documented machine registry configuration when its cont
 - **WHEN** the machine registry has a control-plane URL value and an adjacent configuration file also exists
 - **THEN** the client validates and uses only the registry configuration, reporting an error if it is invalid
 
+### Requirement: Machine Configuration Names
+Each machine configuration source SHALL have a SkoWork name and the Workbench name of earlier deployments. The client MUST use the first that exists in this order: the SkoWork registry key, the Workbench registry key, the SkoWork configuration file, the Workbench configuration file.
+
+#### Scenario: Deployment made under the earlier name
+- **WHEN** only the Workbench registry key or only the Workbench configuration file exists
+- **THEN** the client loads its settings from it
+
+#### Scenario: Both names exist
+- **WHEN** a SkoWork configuration file and a Workbench configuration file are both beside the executable and no registry configuration exists
+- **THEN** the client uses only the SkoWork file
+
 ### Requirement: Machine Configuration Encoding
 The client SHALL accept its machine configuration file in UTF-8 with or without a byte-order mark and UTF-16 in either byte order with a byte-order mark.
 

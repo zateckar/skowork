@@ -50,7 +50,7 @@ struct ApprovalResolution {
 };
 
 struct CompactionResult {
-    long long id = 0;  // the thread_compactions record
+    long long id = 0;  // the thread_compactions record, or the event seq of a child Run's checkpoint
     int messages_compacted = 0;
     long long tokens_before = 0, tokens_after = 0;
     std::string summary;
@@ -120,7 +120,8 @@ public:
     // "Compact Thread" (Manual Compaction): the same procedure as automatic compaction, on the caller's thread (it calls
     // the model). Fails with "thread_busy" while a Run of the Thread is running and "nothing_to_compact" when the
     // Thread is too short.
-    Result<CompactionResult> compact_thread(const std::string& thread_id);
+    // `cancel` (optional) lets the caller stop the summary and the checkpoint commit; a cancelled attempt keeps the history.
+    Result<CompactionResult> compact_thread(const std::string& thread_id, const std::shared_ptr<CancelToken>& cancel = nullptr);
 
     // ---- Action items ----
     Status resolve_approval(const std::string& action_id, const ApprovalResolution& resolution);
@@ -215,6 +216,15 @@ private:
     // its open tool batch unanswered.
     Result<CompactionResult> compact(const std::string& thread_id, const std::string& run_id, const std::string& except_run,
                                      const std::string& kind, const RunInfo& info, const std::shared_ptr<CancelToken>& cancel);
+    // A child Run compacts its own isolated history into its own event log; the parent and the Thread are untouched.
+    Result<CompactionResult> compact_run(const std::string& run_id, const RunInfo& info, const std::shared_ptr<CancelToken>& cancel);
+    // The summarising passes over messages[0, b) (BeforeCompaction runs once per idempotency key, before the first pass).
+    struct Summary {
+        std::string text;
+        model::Usage usage;
+    };
+    Result<Summary> summarise(const std::string& thread_id, const std::string& run_id, const RunInfo& info, const ThreadContext& ctx,
+                              size_t b, const std::shared_ptr<CancelToken>& cancel);
     [[nodiscard]] long long context_window(model::Role role);
     [[nodiscard]] int output_limit(model::Role role);
     [[nodiscard]] const RunLimits& limits_for(bool unattended) const { return unattended ? cfg_.unattended : cfg_.attended; }
@@ -244,6 +254,9 @@ private:
     std::recursive_mutex emit_mx_;
     std::mutex context_estimate_mx_;
     std::map<std::string, long long> context_tool_estimates_;
+    // Idempotency keys of the BeforeCompaction calls made by this process (a retry for the same revision does not repeat them).
+    std::mutex hook_mx_;
+    std::set<std::string> hooked_compactions_;
     EventListener listener_;
     std::mutex standalone_mx_;
     std::function<void(const ActionItem&, const std::string&)> standalone_handler_;

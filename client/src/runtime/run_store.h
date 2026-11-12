@@ -142,6 +142,13 @@ public:
     // Gives a record written before boundary tokens were kept its token, once. Returns the token now stored.
     std::string ensure_compaction_nonce(long long id, const std::string& candidate);
 
+    // Child Run compaction: the checkpoint is an event of the child Run's own log ("compaction"), so neither the Thread's
+    // records nor the parent's events change. run_context reads that Run's messages through its latest checkpoint;
+    // add_run_compaction rechecks the same view and revision inside its write transaction, like add_compaction.
+    [[nodiscard]] ThreadContext run_context(const std::string& run_id);
+    Result<long long> add_run_compaction(const std::string& run_id, const json& checkpoint, const ThreadContext& expected,
+                                         const std::function<bool()>& cancelled = {});
+
     // ---- Thread attachments (Large Tool Results) ----
     Result<std::string> add_attachment(const std::string& thread_id, const std::string& run_id, const std::string& call_id,
                                        const std::string& name, std::string_view content, const json& provenance);

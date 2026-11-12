@@ -141,7 +141,18 @@ Result<DecodedTrack> read_track(const std::filesystem::path& file) {
 }
 
 Result<json> stt_request(const std::string& method, const json& params) {
-    if (method != "stt.transcribe") return make_error("unknown_method", "the stt worker has no method " + method);
+    if (method != "stt.transcribe" && method != "stt.probe") return make_error("unknown_method", "the stt worker has no method " + method);
+    // The speech package folder (<data root>\speech\packages\<version>\models\stt) comes with each request from the desktop
+    // host; the worker reads no other location (task 5.6).
+    const std::string speech_dir = jstr(params, "speech_dir");
+    if (method == "stt.probe") {
+        // Readiness: the runtime loads and every model file is present (no recognizer is created).
+        if (speech_dir.empty()) return make_error("model_missing", "The speech-to-text models are not installed.");
+        const std::filesystem::path dir = path_from_utf8(speech_dir);
+        auto probe = make_sherpa_engine(dir, dir, 1);
+        if (!probe) return probe.error();
+        return json{{"ready", true}};
+    }
     const json* paths = jobj(params, "tracks");
     if (!paths || !paths->is_array() || paths->empty()) return make_error("invalid_params", "tracks is a list of files");
     std::unique_ptr<SpeechEngine> engine;
@@ -155,13 +166,15 @@ Result<json> stt_request(const std::string& method, const json& params) {
     if (which == "test") engine = std::make_unique<TestEngine>();
 #endif
     if (!engine) {
+        if (speech_dir.empty()) return make_error("model_missing", "The speech-to-text models are not installed.");
         // Half the cores (Transcription Resource Budget); the worker's Job also caps it at half the machine.
         const int threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency() / 2));
         bool force_whisper = false;
 #ifdef WORKBENCH_DEV_ENDPOINTS
         force_whisper = jstr(params, "asr") == "whisper";
 #endif
-        auto e = make_sherpa_engine(stt_runtime_dir(), stt_models_dir(), threads, force_whisper);
+        const std::filesystem::path dir = path_from_utf8(speech_dir);
+        auto e = make_sherpa_engine(dir, dir, threads, force_whisper);
         if (!e) return e.error();
         engine = std::move(*e);
     }

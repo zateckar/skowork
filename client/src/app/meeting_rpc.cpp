@@ -1,4 +1,5 @@
 #include "app/meeting_rpc.h"
+#include "platform/win.h"
 
 namespace wb {
 
@@ -90,6 +91,46 @@ void register_dictation_rpc(RpcRegistry& rpc, std::function<meeting::DictationSe
         if (!s) return s.error();
         if (Status st = (*s)->cancel(); !st) return st.error();
         return json::object();
+    });
+}
+
+void register_speech_rpc(RpcRegistry& rpc, std::function<meeting::SpeechInstaller*()> service) {
+    const auto svc = [service = std::move(service)]() -> Result<meeting::SpeechInstaller*> {
+        meeting::SpeechInstaller* s = service ? service() : nullptr;
+        if (!s) return make_error("unavailable", "speech setup is not running");
+        return s;
+    };
+    rpc.add("speech.status", RpcExposure::ui, [svc](const json&) -> Result<json> {
+        auto s = svc();
+        if (!s) return s.error();
+        return (*s)->status();
+    });
+    rpc.add("speech.install", RpcExposure::ui, [svc](const json&) -> Result<json> {
+        auto s = svc();
+        if (!s) return s.error();
+        if (Status st = (*s)->start_download(); !st) return st.error();
+        return json{{"started", true}};
+    });
+    rpc.add("speech.import", RpcExposure::ui, [svc](const json& p) -> Result<json> {
+        auto s = svc();
+        if (!s) return s.error();
+        const std::string path = jstr(p, "path");
+        if (path.empty()) return make_error("invalid_params", "path is the package archive to import");
+        if (Status st = (*s)->start_import(widen(path)); !st) return st.error();
+        return json{{"started", true}};
+    });
+    rpc.add("speech.cancel", RpcExposure::ui, [svc](const json&) -> Result<json> {
+        auto s = svc();
+        if (!s) return s.error();
+        (*s)->cancel();
+        return json::object();
+    });
+    rpc.add("speech.remove", RpcExposure::ui, [svc](const json& p) -> Result<json> {
+        auto s = svc();
+        if (!s) return s.error();
+        auto removed = (*s)->remove(jstr(p, "version"));
+        if (!removed) return removed.error();
+        return json{{"removed", *removed}};
     });
 }
 

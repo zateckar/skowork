@@ -478,6 +478,7 @@ TEST(SandboxNoNetwork, ProcessRunsRestrictedWithTheProxy) {
     ASSERT_TRUE(r) << r.error().message;
     EXPECT_NE(r->out.find("HTTPS_PROXY=http://workbench:"), std::string::npos) << r->out;
     EXPECT_NE(r->out.find("NO_PROXY=\n"), std::string::npos) << r->out;
+    EXPECT_NE(r->out.find("NODE_USE_ENV_PROXY=1"), std::string::npos) << r->out;
     s.arguments = L"token";
     r = sb.run(s);
     ASSERT_TRUE(r) << r.error().message;

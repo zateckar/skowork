@@ -44,6 +44,8 @@ workbench_fuzz_target(fuzz_kg_analysis kg_analysis_fuzz.cpp)
 target_link_libraries(fuzz_kg_analysis PRIVATE wb_knowledge_core)
 workbench_fuzz_target(fuzz_meeting_container meeting_container_fuzz.cpp)
 target_link_libraries(fuzz_meeting_container PRIVATE wb_meeting_core)
+workbench_fuzz_target(fuzz_speech_manifest speech_manifest_fuzz.cpp)
+target_link_libraries(fuzz_speech_manifest PRIVATE wb_meeting_core)
 if(WIN32)
   # PDF extraction is Windows-only (pdfium.dll); the target runs with the DLL next to it.
   workbench_fuzz_target(fuzz_pdf pdf_fuzz.cpp)
@@ -103,10 +105,11 @@ if(WORKBENCH_TESTS AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   file(GLOB meeting_container_seeds ${WORKBENCH_FUZZ_CORPUS}/meeting_container/*)
   add_test(NAME fuzz_meeting_container_smoke
            COMMAND fuzz_meeting_container -runs=200000 -seed=1 -max_len=8192 -dict=${WORKBENCH_FUZZ_CORPUS}/meeting_container.dict ${meeting_container_seeds})
+  add_test(NAME fuzz_speech_manifest_smoke COMMAND fuzz_speech_manifest -runs=200000 -seed=1 -max_len=8192)
   set_tests_properties(fuzz_tool_args_smoke fuzz_sse_smoke fuzz_policy_paths_smoke fuzz_html_smoke fuzz_ooxml_smoke fuzz_mcp_smoke
                        fuzz_cdp_smoke fuzz_markdown_smoke fuzz_telemetry_redaction_smoke fuzz_skill_md_smoke fuzz_skill_package_smoke
                        fuzz_graph_parse_smoke fuzz_kg_chunk_smoke fuzz_kg_analysis_smoke fuzz_meeting_container_smoke
-                       PROPERTIES LABELS fuzz TIMEOUT 600)
+                       fuzz_speech_manifest_smoke PROPERTIES LABELS fuzz TIMEOUT 600)
   if(WIN32)
     file(GLOB pdf_seeds ${WORKBENCH_FUZZ_CORPUS}/pdf/*)
     add_test(NAME fuzz_pdf_smoke COMMAND fuzz_pdf -runs=20000 -seed=1 -max_len=16384 ${pdf_seeds})

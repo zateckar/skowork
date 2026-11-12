@@ -21,7 +21,8 @@ struct MachineConfig {
     std::string dev_browser;
 };
 
-// HKLM\SOFTWARE\Policies\Workbench first, then workbench.machine.json next to the executable.
+// HKLM\SOFTWARE\Policies\SkoWork, then the legacy ...\Workbench key, then skowork.machine.json next to the executable,
+// then the legacy workbench.machine.json.
 Result<MachineConfig> load_machine_config();
 Result<MachineConfig> load_machine_config_file(const std::filesystem::path& file);
 

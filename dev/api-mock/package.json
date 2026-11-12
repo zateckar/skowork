@@ -1,0 +1,13 @@
+{
+  "name": "workbench-api-mock",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only fake API with an OpenAPI 3.1 document for API connectors (dev/api-mock). Dependency-free. Never shipped.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}

@@ -94,10 +94,15 @@ Checked and not affected:
 |---|---|
 | The user chooses Sign out | The client revokes its offline token and deletes it (client/identity Sign-Out). |
 | The organization turns the policy off | D5. |
-| An administrator revokes an installation or user in the control plane | The deny list refuses its requests with 403 (control-plane/identity). The offline token stays valid at the identity provider until the realm session is ended. |
+| An administrator revokes an installation or user in the control plane | The deny list refuses its requests with 403 (control-plane/identity). The client then revokes and deletes its offline token (see below). A copy of the token stays valid at the identity provider until the realm session is ended. |
 | An administrator disables the account in the realm | The realm refuses refresh, so the client enters the sign-in required state (existing control-plane/identity rule). |
 
-The second-to-last row is the gap. An installation revoked in the control plane can still obtain access tokens, and those tokens still work at remote MCP servers that accept them. The realm administrator must end the offline session, or disable the account. Closing this gap is an open question.
+The second-to-last row is the gap. An installation revoked in the control plane can still obtain access tokens, and those tokens still work at remote MCP servers that accept them.
+
+**Client-side closure (2026-11-12).** When registration answers that the installation or user is revoked, the client itself revokes its offline token at the identity provider, deletes it and enters the sign-in required state (client/identity Offline Session Ends On Revoked Access). This needs no identity-provider administrator credential in the control plane, so decided question 1 stands. It covers every client that is running or starts again. It does not cover a token copied out of the profile, or a client that never contacts the control plane again: for those the realm administrator still ends the offline session or disables the account.
+
+- *Alternative: the control plane revokes at the identity provider.* Rejected in decided question 1.
+- *Alternative: also end a normal refresh token.* Not needed: it ends with the browser SSO session within the hour-scale realm limits, and keeping it lets the client re-register when access is restored.
 
 ### D8. Unattended runs
 
@@ -123,7 +128,7 @@ To be recorded after task 1.1.
 ## Risks / Trade-offs
 
 - [A stolen profile contains a long-lived offline token] -> The token is encrypted under the DPAPI-protected database key and the profile is readable only by the user (client/local-storage). The realm's idle and maximum limits end it. Sign-out and D5 revoke it.
-- [A revoked installation keeps an offline token] -> The control plane refuses its requests with 403. The realm administrator ends the session or disables the account (D7). Open question 1 covers automation.
+- [A revoked installation keeps an offline token] -> The control plane refuses its requests with 403, and the client then revokes and deletes its own offline token (D7). For a copied token or a client that stays away, the realm administrator ends the session or disables the account.
 - [Realm not configured for offline_access] -> The fallback in D3 keeps the one-hour behaviour and shows the status. The spike (task 1.1) confirms the realm behaviour first.
 - [Unattended runs continue for weeks without a user] -> The existing policy.unattended keys apply. Open question 3 decides whether a further limit is needed.
 - [A copied offline token is used quietly] -> Rotation and reuse detection in the realm (D1) end the session when the original and the copy both refresh.

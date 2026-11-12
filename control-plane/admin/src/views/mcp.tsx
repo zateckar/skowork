@@ -70,7 +70,7 @@ export function Mcp() {
     notify(`${s.id} ${s.enabled ? 'disabled' : 'enabled'}.`, 'mcp-note');
   };
   const remove = async (s: Connector) => {
-    if ((await ask({ title: `Remove ${s.id} from the catalog?`, body: <p>Clients stop using it, its decisions are lost, and every personal access token of it is deleted.</p>, action: 'Remove connector' })) === null) return;
+    if ((await ask({ title: `Remove ${s.id} from Connectors?`, body: <p>Clients stop using it, its decisions are lost, and every personal access token of it is deleted.</p>, action: 'Remove connector' })) === null) return;
     await api('DELETE', s.kind === 'api' ? `${C}/${s.id}` : `${M}/${s.id}`);
     servers.reload();
     notify(`${s.id} removed.`, 'mcp-note');

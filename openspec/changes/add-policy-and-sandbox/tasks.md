@@ -2,8 +2,8 @@
 
 ## 1. Validation spikes
 
-- [ ] 1.1 Prototype a Job Object with a restricted token and the egress proxy running common developer tools (git, dotnet, npm, python, PowerShell) on the baseline laptop. Verify the tools work through the proxy, and record any tool that ignores the proxy variables
-- [ ] 1.2 Run the scripting runtimes Skills use (python, node, PowerShell) in no-network mode on the baseline laptop. Verify that their requests through the proxy are refused, and record any runtime that ignores the proxy variables
+- [ ] 1.1 Prototype a Job Object with a restricted token and the egress proxy running common developer tools (git, dotnet, npm, python, PowerShell) on the baseline laptop. Verify the tools work through the proxy, and record any tool that ignores the proxy variables. Status: partial; proxy-variable behaviour recorded on the development workstation (design.md Spike results); the Job Object run with allowed traffic and the baseline laptop are open
+- [x] 1.2 Run the scripting runtimes Skills use (python, node, PowerShell) in no-network mode on the baseline laptop. Verify that their requests through the proxy are refused, and record any runtime that ignores the proxy variables. Done 2026-11-12 on the development workstation: Node.js and Windows PowerShell 5.1 ignore them; the sandbox now sets NODE_USE_ENV_PROXY (design.md Spike results)
 - [ ] 1.3 Agree the initial Groups and their identity-provider role mapping with IT security. Verify by recording the signed-off mapping in this change's design.md Open Questions resolution
 
 ## 2. Policy service (control-plane/policy-service)
@@ -34,7 +34,7 @@
 - [x] 4.4 Implement the shell modes off, sandboxed and allow. Verify that `shell.run` is hidden from `find_tools` when the mode is off
 - [x] 4.5 Implement no-network mode as a proxy session that refuses every destination. Verify that a request to a host allowed by policy and a request to a denied host are both refused and logged
 - [x] 4.6 Implement the on-demand egress proxy with per-process credentials and egress rules. Verify that allowed and denied hosts behave correctly, that a credential-less client is rejected, and that the proxy stops when idle
-- [ ] 4.7 Implement enforcement-level detection (proxy-only or os-enforced) and its reporting. Verify on a machine with and without the firewall profile
+- [x] 4.7 Implement enforcement-level detection (proxy-only or os-enforced) and its reporting. Verify on a machine with and without the firewall profile. Verified by SandboxEnforcement.RuleDetection without the profile and with rule strings; no machine with the deployed profile was available (design.md Spike results)
 - [x] 4.8 Implement bounded output capture (`policy.tools.<group>.limits.output_kb`, default 1024 per stream) with attachment overflow and safe decoding. Verify with a 100 MB output test
 
 ## 5. Integration

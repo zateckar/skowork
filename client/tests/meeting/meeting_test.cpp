@@ -10,6 +10,7 @@
 #include "meeting/core.h"
 #include "meeting/dictation.h"
 #include "meeting/meeting_service.h"
+#include "meeting/speech_manifest.h"
 #include "scheduler/icu_zone.h"
 #include "scheduler/scheduler.h"
 #include "support/dev_endpoints.h"
@@ -581,12 +582,9 @@ TEST(MeetingAudio, SttWorkerTranscribesWithTheTestEngineAtBelowNormalPriority) {
     auto fr = host.call(WorkerRole::stt, "stt.transcribe", {{"tracks", {remote}}, {"language", "fr"}});
     ASSERT_FALSE(fr);
     EXPECT_EQ(fr.error().code, "unsupported_language");
-    // No models package: the worker reports model_missing (a new worker sees the empty models folder).
+    // No speech package folder in the request: the worker reports model_missing and reads no other location.
     host.stop_all();
-    std::filesystem::create_directories(tmp.path / L"no-models");
-    ::SetEnvironmentVariableW(L"WORKBENCH_STT_MODELS", (tmp.path / L"no-models").c_str());
     auto none = host.call(WorkerRole::stt, "stt.transcribe", {{"tracks", {remote}}, {"engine", "sherpa-onnx"}});
-    ::SetEnvironmentVariableW(L"WORKBENCH_STT_MODELS", nullptr);
     ASSERT_FALSE(none);
     EXPECT_EQ(none.error().code, "model_missing");
 }
@@ -615,6 +613,31 @@ TEST(MeetingCore, SpeakerLabelsFollowDiarizationOverlapAndLanguageVotes) {
 namespace {
 
 std::filesystem::path stt_fixtures() { return std::filesystem::path(WORKBENCH_SOURCE_DIR) / "models" / "stt" / "fixtures"; }
+
+// The speech package folder the sherpa tests pass to the worker: the fetched models and the vendored runtime, hard-linked
+// into a folder next to the test executable. The product reads only the activated package under the data root; this is a
+// test fixture folder named in the request.
+std::string test_speech_dir() {
+    static const std::string dir = [] {
+        namespace fsx = std::filesystem;
+        const auto root = exe_dir() / L"speech-fixture" / L"models" / L"stt";
+        const auto models = fsx::path(WORKBENCH_SOURCE_DIR) / "models" / "stt";
+        const auto runtime = fsx::path(WORKBENCH_SOURCE_DIR) / "third_party" / "sherpa-onnx" / "x64";
+        for (const char* rel : kSpeechRequiredFiles) {
+            const std::string name = rel;
+            const bool is_runtime = name.find(".dll") != std::string::npos;
+            const auto from = (is_runtime ? runtime : models) / widen(name);
+            const auto to = root / widen(name);
+            std::error_code ec;
+            if (fsx::exists(to, ec)) continue;
+            fsx::create_directories(to.parent_path(), ec);
+            fsx::create_hard_link(from, to, ec);
+            if (ec) fsx::copy_file(from, to, fsx::copy_options::overwrite_existing, ec);
+        }
+        return path_to_utf8(root);
+    }();
+    return dir;
+}
 
 bool models_fetched() {
     std::error_code ec;
@@ -672,6 +695,7 @@ struct SttRun {
     }
     Result<json> transcribe(json params) {
         params["engine"] = "sherpa-onnx";
+        params["speech_dir"] = test_speech_dir();
         return host.call(WorkerRole::stt, "stt.transcribe", params);
     }
 };
@@ -2332,7 +2356,6 @@ TEST(DictationSherpa, CzechSpeechBecomesText) {
 TEST(DictationSherpa, ModelsInUnicodePathWorkInWorker) {
     WB_REQUIRES_DEV_ENDPOINTS();
     if (!models_fetched() || !std::filesystem::exists(stt_fixtures() / "parakeet-cs.wav")) GTEST_SKIP() << "speech fixtures not fetched";
-    if (::GetEnvironmentVariableW(L"WORKBENCH_STT_MODELS", nullptr, 0) != 0) GTEST_SKIP() << "model override would bypass the test package";
     TempRoot tmp;
     // Place the isolated fixture next to the test executable so the model hardlinks stay on the same volume.
     // Only assign it to TempRoot after creating a new child of the resolved executable directory.
@@ -2349,8 +2372,9 @@ TEST(DictationSherpa, ModelsInUnicodePathWorkInWorker) {
     ASSERT_FALSE(ec) << ec.message();
     std::filesystem::copy_file(exe_dir() / L"workbench-worker.exe", root / L"workbench-worker.exe", ec);
     ASSERT_FALSE(ec) << ec.message();
+    const auto vendored = std::filesystem::path(WORKBENCH_SOURCE_DIR) / "third_party" / "sherpa-onnx" / "x64";
     for (const auto* dll : {L"sherpa-onnx-c-api.dll", L"onnxruntime.dll"}) {
-        std::filesystem::create_hard_link(exe_dir() / L"models" / L"stt" / dll, models / dll, ec);
+        std::filesystem::create_hard_link(vendored / dll, models / dll, ec);
         if (ec) GTEST_SKIP() << "cannot create runtime hardlink: " << ec.message();
     }
     const auto source = std::filesystem::path(WORKBENCH_SOURCE_DIR) / "models" / "stt";
@@ -2374,7 +2398,8 @@ TEST(DictationSherpa, ModelsInUnicodePathWorkInWorker) {
     const auto speech = concat({silence(0.5), wav16k("parakeet-cs.wav"), silence(0.5)});
     ASSERT_TRUE((*track)->append(speech.data(), speech.size()));
     ASSERT_TRUE((*track)->close());
-    auto result = worker.call(WorkerRole::stt, "stt.transcribe", {{"tracks", {path_to_utf8(path)}}, {"engine", "sherpa-onnx"}, {"language", "cs"}});
+    auto result = worker.call(WorkerRole::stt, "stt.transcribe",
+                              {{"tracks", {path_to_utf8(path)}}, {"engine", "sherpa-onnx"}, {"language", "cs"}, {"speech_dir", path_to_utf8(models)}});
     ASSERT_TRUE(result) << result.error().code << ": " << result.error().message;
     EXPECT_EQ(jstr(*result, "language"), "cs");
     EXPECT_EQ(jstr(*result, "engine").rfind("sherpa-onnx ", 0), 0u);

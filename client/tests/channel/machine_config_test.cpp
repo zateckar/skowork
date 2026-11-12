@@ -12,6 +12,7 @@
 
 namespace {
 std::map<std::wstring, std::wstring> registry;
+std::wstring registry_key = L"SOFTWARE\\Policies\\SkoWork";  // the key the fake registry holds values under
 constexpr char kConfig[] = R"({"control_plane_url":"https://workbench.example.com","idp_issuer":"https://keycloak.example.com/realms/example","idp_client_id":"workbench-desktop"})";
 
 std::string utf16(std::u16string_view text, bool little_endian) {
@@ -38,6 +39,7 @@ protected:
 
     void SetUp() override {
         registry.clear();
+        registry_key = L"SOFTWARE\\Policies\\SkoWork";
         std::filesystem::create_directories(dir);
     }
     void TearDown() override {
@@ -160,9 +162,21 @@ TEST_F(MachineConfig, RegistryRemainsAuthoritativeEvenWhenInvalid) {
     registry.erase(L"IdpIssuer");
     c = wb::load_machine_config();
     ASSERT_FALSE(c);
-    EXPECT_NE(c.error().message.find("HKLM\\SOFTWARE\\Policies\\Workbench"), std::string::npos);
+    EXPECT_NE(c.error().message.find("HKLM\\SOFTWARE\\Policies\\SkoWork"), std::string::npos);
     registry[L"ControlPlaneUrl"] = L"";
     EXPECT_FALSE(wb::load_machine_config());
+}
+
+TEST_F(MachineConfig, LegacyWorkbenchRegistryKeyIsStillRead) {
+    registry_key = L"SOFTWARE\\Policies\\Workbench";
+    registry = {{L"ControlPlaneUrl", L"https://registry.example.com"}, {L"IdpIssuer", L"https://identity.example.com"}};
+    auto c = wb::load_machine_config();
+    ASSERT_TRUE(c) << c.error().message;
+    EXPECT_EQ(c->control_plane_url, "https://registry.example.com");
+    registry.erase(L"IdpIssuer");
+    c = wb::load_machine_config();
+    ASSERT_FALSE(c);
+    EXPECT_NE(c.error().message.find("HKLM\\SOFTWARE\\Policies\\Workbench"), std::string::npos);
 }
 
 TEST_F(MachineConfig, DiscoversBesideExecutableFromOtherWorkingDirectory) {
@@ -172,10 +186,14 @@ TEST_F(MachineConfig, DiscoversBesideExecutableFromOtherWorkingDirectory) {
     std::filesystem::create_directories(cwd);
     const auto exe = install / L"config-probe.exe";
     std::filesystem::copy_file(wb::exe_path(), exe);
-    write_file(cwd / L"workbench.machine.json", "invalid working-directory configuration");
+    write_file(cwd / L"skowork.machine.json", "invalid working-directory configuration");
     const std::u16string units(kConfig, kConfig + sizeof(kConfig) - 1);
-    for (const auto& bytes : {std::string(kConfig), utf16(units, true)}) {
-        write_file(install / L"workbench.machine.json", bytes);
+    // The legacy file name first, alone; then the SkoWork name, which wins over a legacy file with other content.
+    const std::pair<const wchar_t*, std::string> cases[] = {{L"workbench.machine.json", std::string(kConfig)},
+                                                            {L"skowork.machine.json", utf16(units, true)}};
+    for (const auto& [name, bytes] : cases) {
+        write_file(install / name, bytes);
+        if (std::wstring_view(name) == L"skowork.machine.json") write_file(install / L"workbench.machine.json", "{}");
         std::wstring command = L"\"" + exe.wstring() + L"\" --probe-machine-config";
         STARTUPINFOW startup{};
         startup.cb = sizeof(startup);
@@ -201,7 +219,7 @@ namespace wb {
 // Link-time double for this standalone test executable only. All file/path/validation code is production code.
 std::optional<std::wstring> reg_read_string(HKEY root, const std::wstring& key, const std::wstring& name) {
     EXPECT_EQ(root, HKEY_LOCAL_MACHINE);
-    EXPECT_EQ(key, L"SOFTWARE\\Policies\\Workbench");
+    if (key != registry_key) return std::nullopt;
     const auto it = registry.find(name);
     return it == registry.end() ? std::nullopt : std::optional<std::wstring>(it->second);
 }

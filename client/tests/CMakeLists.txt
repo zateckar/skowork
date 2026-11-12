@@ -126,6 +126,13 @@ if(WIN32)
   workbench_warnings(machine_config_tests)
   add_test(NAME machine_config_tests COMMAND machine_config_tests)
 
+  # client/speech-models (tasks 5.2 and 5.3): archive and manifest safety, digest, activation, selection and removal.
+  add_executable(speech_tests meeting/speech_package_test.cpp)
+  target_link_libraries(speech_tests PRIVATE wb_meeting wb_platform wb_base miniz GTest::gtest_main)
+  set_target_properties(speech_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  workbench_warnings(speech_tests)
+  add_test(NAME speech_tests COMMAND speech_tests)
+
   add_executable(win_tests
     platform/crypto_test.cpp
     platform/dpapi_test.cpp

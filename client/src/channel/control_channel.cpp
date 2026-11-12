@@ -169,10 +169,12 @@ Status ControlChannel::ensure_registered() {
     if (!r) {
         if (iequals(r.error().code, "http_403") || iequals(r.error().code, "revoked") || iequals(r.error().code, "denied"))
             set_locked(true);
+        if (iequals(r.error().code, "revoked") || iequals(r.error().code, "denied")) tokens_.end_offline_session_revoked();
         return r.error();
     }
     if (r->revoked) {
         set_locked(true);
+        tokens_.end_offline_session_revoked();
         return make_error("revoked", "installation revoked");
     }
     set_locked(false);

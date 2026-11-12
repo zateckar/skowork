@@ -1,6 +1,6 @@
-# Workbench
+# SkoWork
 
-Workbench is an AI agent for Windows laptops. A central control plane manages identity, policy, LLM access, skills, MCP servers, scheduled tasks and telemetry for the desktop clients.
+SkoWork is an AI agent for Windows laptops. A central control plane manages identity, policy, LLM access, skills, MCP servers, scheduled tasks and telemetry for the desktop clients.
 
 It ships as two artifacts:
 
@@ -83,7 +83,7 @@ docker compose logs control-plane
 The log names the admin console URL and warns about each missing setting:
 
 ```text
-Workbench control plane (production) listening on 0.0.0.0:8080
+SkoWork control plane (production) listening on 0.0.0.0:8080
 admin console: https://workbench.example.com/admin/
 ```
 
@@ -114,6 +114,23 @@ A remote MCP server registered with the authentication **user's sign-in token** 
 
 Discovery that fails with `the server answered HTTP 401` means the server refused the admin's token. Check these three points.
 
+### 7. Speech package (Dictation and meeting capture)
+
+Speech recognition runs on the laptop and needs the speech package, a zip of about 1 GB published with each release (`SkoWork-speech-v<version>-win-x64.zip`, with its SHA-256 in the `.sha256` file beside it). Clients download it from the address you publish in policy; nothing is compiled into the client.
+
+1. Put the zip on an https host the laptops reach: the GitHub release itself, or a mirror inside the organization.
+2. Under **Policies**, set for `everyone` (or a Group):
+
+| Key | Value |
+| --- | --- |
+| `speech.package.url` | The https address of the zip |
+| `speech.package.sha256` | The 64 hex characters from the `.sha256` file |
+| `speech.package.version` | The version in the file name, for example `1` |
+| `speech.package.hosts` | Only when the address redirects to another host. For a GitHub release: `release-assets.githubusercontent.com` and `objects.githubusercontent.com` |
+| `speech.download` | `on` (default). `off` leaves only **Import package** |
+
+The client sends no credentials with the download and activates the package only when its SHA-256 equals the one in policy. A user can also import the same zip from a file; it is checked against the same value. Packages are stored per user under the SkoWork data folder, so no administrator rights are needed.
+
 ### Troubleshooting
 
 | Symptom | Cause |
@@ -128,12 +145,12 @@ Discovery that fails with `the server answered HTTP 401` means the server refuse
 
 ## Connect desktop clients
 
-The client reads its control plane address from **machine configuration** that the organization software distribution sets (Intune, GPO, SCCM). Users cannot change it. Without it, the client shows *Workbench is not configured* together with the missing settings and where they are read from.
+The client reads its control plane address from **machine configuration** that the organization software distribution sets (Intune, GPO, SCCM). Users cannot change it. Without it, the client shows *SkoWork is not configured* together with the missing settings and where they are read from.
 
 The client reads the following registry values first:
 
 ```text
-HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Workbench
+HKEY_LOCAL_MACHINE\SOFTWARE\Policies\SkoWork
   ControlPlaneUrl   REG_SZ  https://workbench.example.com                       (required)
   IdpIssuer         REG_SZ  https://keycloak.example.com/realms/example         (required)
   IdpClientId       REG_SZ  workbench-desktop                                   (default: workbench-desktop)
@@ -145,14 +162,14 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Workbench
 For example, as an administrator:
 
 ```powershell
-$k = 'HKLM:\SOFTWARE\Policies\Workbench'
+$k = 'HKLM:\SOFTWARE\Policies\SkoWork'
 New-Item $k -Force | Out-Null
 Set-ItemProperty $k ControlPlaneUrl 'https://workbench.example.com'
 Set-ItemProperty $k IdpIssuer 'https://keycloak.example.com/realms/example'
 Set-ItemProperty $k IdpClientId 'workbench-desktop'
 ```
 
-If the registry key has no `ControlPlaneUrl`, the client reads `workbench.machine.json` from the folder of `Workbench.exe` instead:
+If the registry key has no `ControlPlaneUrl`, the client reads `skowork.machine.json` from the folder of `SkoWork.exe` instead:
 
 ```json
 {
@@ -162,7 +179,9 @@ If the registry key has no `ControlPlaneUrl`, the client reads `workbench.machin
 }
 ```
 
-Optional keys are `idp_redirect_uri`, `idp_scope` and `channel`. Install the client in a folder users cannot write to, for example `C:\Program Files\Workbench`, so they cannot replace this file. The values must match the server: `ControlPlaneUrl` = `WORKBENCH_PUBLIC_BASE_URL`, `IdpIssuer` = the issuer of `OIDC_DISCOVERY_URL`, and `IdpClientId` = `OIDC_CLIENT_ID`. Both URLs must be https.
+Optional keys are `idp_redirect_uri`, `idp_scope` and `channel`.
+
+Deployments made under the earlier name keep working: when the SkoWork key has no `ControlPlaneUrl`, the client reads `HKLM\SOFTWARE\Policies\Workbench`, and when there is no `skowork.machine.json` it reads `workbench.machine.json`. The package also contains a small `Workbench.exe` that starts `SkoWork.exe`, for existing shortcuts and scripts. Settings, image and identity-provider client names that start with `WORKBENCH_` or `workbench-` are unchanged. Install the client in a folder users cannot write to, for example `C:\Program Files\SkoWork`, so they cannot replace this file. The values must match the server: `ControlPlaneUrl` = `WORKBENCH_PUBLIC_BASE_URL`, `IdpIssuer` = the issuer of `OIDC_DISCOVERY_URL`, and `IdpClientId` = `OIDC_CLIENT_ID`. Both URLs must be https.
 
 ## Desktop client
 
@@ -185,8 +204,8 @@ Pushing a tag such as `v1.2.3` runs [`.github/workflows/release.yml`](.github/wo
 
 - publishes the control plane as `ghcr.io/<owner>/workbench-control-plane:1.2.3` (and `latest` for stable versions), and
 - builds the desktop client and attaches it to a GitHub Release, each zip with a SHA-256 checksum file:
-  - `Workbench-1.2.3-win-x64.zip`: the client;
-  - `Workbench-1.2.3-app-runtime-win-x64.zip`: optional, the Node.js runtime for Local apps. Extract it next to `Workbench.exe`; without it the client works, but Local apps are not available.
+  - `SkoWork-1.2.3-win-x64.zip`: the client;
+  - `SkoWork-1.2.3-app-runtime-win-x64.zip`: optional, the Node.js runtime for Local apps. Extract it next to `SkoWork.exe`; without it the client works, but Local apps are not available.
 
 Tags with a suffix, such as `v1.2.3-rc.1`, are published as pre-releases and do not update `latest`. Code signing is optional: it runs when the repository secrets `WORKBENCH_SIGNING_CERT_PFX_BASE64` and `WORKBENCH_SIGNING_CERT_PASSWORD` are set.
 

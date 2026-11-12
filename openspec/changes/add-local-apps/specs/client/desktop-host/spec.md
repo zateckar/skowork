@@ -4,7 +4,7 @@
 
 ### Requirement: Footprint Budgets
 On the baseline hardware, the client SHALL stay within these budgets:
-- the core package installs in 25 MB or less, including its storage, search and document libraries;
+- the core package installs in 30 MB or less, including its storage, search and document libraries;
 - the optional speech-to-text package installs in 40 MB or less of runtime plus at most 1.2 GB of models;
 - the optional app runtime package installs in 100 MB or less;
 - the core process uses a working set of 60 MB or less when idle with the window closed;

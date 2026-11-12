@@ -482,6 +482,16 @@ bool TokenManager::end_offline_session_if_disabled() {
     return true;
 }
 
+bool TokenManager::end_offline_session_revoked() {
+    const std::lock_guard refresh_lock(refresh_mx_);
+    const auto refresh = store_.secret(kRefreshSecret);
+    if (!refresh || !is_offline_token(*refresh)) return false;
+    // The control plane refused this installation or user: the offline token must not outlive that (design D7).
+    if (Status s = revoke_refresh_token(*refresh); !s) security_event("offline_revoke_failed", s.error().message);
+    enter_sign_in_required("access was revoked by an administrator; sign in again once access is restored", true);
+    return true;
+}
+
 void TokenManager::set_offline_sign_in(bool on) {
     offline_on_ = on;
     if (on) return;

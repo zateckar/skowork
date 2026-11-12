@@ -72,6 +72,7 @@
 #include "skills/sync.h"
 #include "storage/app_store.h"
 #include "storage/data_root.h"
+#include "meeting/speech_installer.h"
 #include "platform/crash.h"
 #include "storage/database.h"
 #include "storage/forget.h"
@@ -231,6 +232,7 @@ struct App {
     void start_knowledge();
     std::unique_ptr<meeting::MeetingService> meeting_svc;
     std::unique_ptr<meeting::DictationService> dictation_svc;
+    std::unique_ptr<meeting::SpeechInstaller> speech_svc;  // client/speech-models: setup, import, removal, probe
     void start_meetings();
     // User messaging (client/user-messaging): the cache in app.db, push handling, Presence and the messages.* tools.
     std::unique_ptr<messaging::MessagingService> messaging_svc;
@@ -1634,6 +1636,13 @@ void App::start_knowledge() {
 // client/meeting-capture (add-meeting-capture): detection, consent and notice Questions in meeting-origin Threads,
 // WASAPI capture with the recording indicator, transcription in the stt worker, the outputs Run, knowledge indexing,
 // the meeting Trigger source and the Meetings section's methods. Nothing opens an audio stream unless policy enables it.
+// The speech package folder the stt worker loads from (<data root>\speech\packages\<version>\models\stt); empty when no
+// complete package is active. The only location the client reads speech files from (task 5.6).
+std::filesystem::path active_speech_path(const std::filesystem::path& data_root) {
+    auto dir = meeting::active_speech_dir(data_root);
+    return dir ? *dir : std::filesystem::path{};
+}
+
 void App::start_meetings() {
     if (!agent || !inbox || !store || !root) return;
     meeting::MeetingEnv env;
@@ -1706,7 +1715,9 @@ void App::start_meetings() {
     env.withdraw = [this](const std::string& action, const std::string& why) { (void)agent->runtime().withdraw_standalone(action, why); };
     env.transcribe = [this](const json& params) -> Result<json> {
         if (!workers) return make_error("unavailable", "no worker host");
-        return workers->call(WorkerRole::stt, "stt.transcribe", params);
+        json p = params;
+        p["speech_dir"] = narrow(active_speech_path(root->root()).wstring());
+        return workers->call(WorkerRole::stt, "stt.transcribe", p);
     };
     env.start_outputs = [this](const std::string& thread, const std::string& meeting_id, const std::string& message,
                                const std::string& preamble) -> Result<std::string> {
@@ -1787,9 +1798,11 @@ void App::start_meetings() {
     };
     de.transcribe = [this](const json& params) -> Result<json> {
         if (!workers) return make_error("unavailable", "no worker host");
-        return workers->call(WorkerRole::stt, "stt.transcribe", params);
+        json p = params;
+        p["speech_dir"] = narrow(active_speech_path(root->root()).wstring());
+        return workers->call(WorkerRole::stt, "stt.transcribe", p);
     };
-    de.models_installed = [] { return meeting::stt_installed(); };
+    de.models_installed = [this] { return meeting::stt_installed(active_speech_path(root->root())); };
     de.microphone_present = [] { return meeting::microphone_present(); };
     de.language = [this] { return inbox ? inbox->store().setting("dictation.language").value_or("auto") : std::string("auto"); };
     de.fallback_language = [this] { return ui_language(); };
@@ -1797,6 +1810,42 @@ void App::start_meetings() {
     dictation_svc = std::make_unique<meeting::DictationService>(std::move(de));
     dictation_svc->remove_leftovers();
     register_dictation_rpc(rpc, [this] { return dictation_svc.get(); });
+
+    // client/speech-models (tasks 5.2 and 5.3): the speech package under the data root. Interrupted setups and removals
+    // deferred while in use are cleared first; the stt worker probes the engine from the installed folder.
+    if (const auto r = meeting::recover_speech_store(root->root()); !r) log::warn(kLog, "speech store: " + r.error().message);
+    meeting::SpeechInstaller::Env se;
+    se.data_root = root->root();
+    // The catalog comes only from the signed Policy bundle (client/speech-models Speech Package Catalog).
+    se.source = [this] {
+        meeting::SpeechSource s;
+        const auto p = policy ? policy->current() : nullptr;
+        if (!p) return s;
+        s.url = p->string("speech.package.url");
+        s.sha256 = to_lower(p->string("speech.package.sha256"));
+        s.version = p->string("speech.package.version");
+        if (const json* h = p->find("speech.package.hosts"); h && h->is_array())
+            for (const auto& x : *h)
+                if (x.is_string()) s.hosts.push_back(x.get<std::string>());
+        return s;
+    };
+    se.download_allowed = [this] {
+        const auto p = policy ? policy->current() : nullptr;
+        return !p || p->string("speech.download", "on") != "off";
+    };
+    se.probe = [this](const std::filesystem::path& dir) -> Status {
+        if (!workers) return make_error("unavailable", "no worker host");
+        auto r = workers->call(WorkerRole::stt, "stt.probe", json{{"speech_dir", narrow(dir.wstring())}});
+        if (!r) return r.error();
+        return {};
+    };
+    se.in_use = [this] {
+        return (meeting_svc && meeting_svc->capturing()) || (dictation_svc && dictation_svc->status()["state"] != "idle");
+    };
+    se.changed = [this](const json& e) { MainThread::post([this, e] { if (ui && ui->is_open()) ui->emit("speech.changed", e); }); };
+    se.activated = [this] { MainThread::post([this] { if (dictation_svc) dictation_svc->refresh_models(); }); };
+    speech_svc = std::make_unique<meeting::SpeechInstaller>(std::move(se));
+    register_speech_rpc(rpc, [this] { return speech_svc.get(); });
 }
 
 // The mail and calendar Trigger kinds exist while the mailbox is connected (client/scheduler: "mail source unavailable").
@@ -2550,6 +2599,7 @@ void App::shutdown() {
         computer_svc.reset();
     }
     tool_egress.reset();
+    speech_svc.reset();  // cancels a running setup and waits for it
     dictation_svc.reset();
     meeting_svc.reset();
     knowledge_svc.reset();

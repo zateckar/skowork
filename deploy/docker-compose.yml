@@ -1,4 +1,4 @@
-# Workbench control plane: production deployment with Docker Compose.
+# SkoWork control plane: production deployment with Docker Compose.
 #
 #   cp .env.example .env      # then fill in every value marked REQUIRED
 #   docker compose up -d

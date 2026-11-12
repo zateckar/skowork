@@ -91,8 +91,8 @@ void HookRegistry::after_model_call(const ModelCallInfo& info) const {
 void HookRegistry::after_tool_call(const ToolCallInfo& call, const ToolResultInfo& result) const {
     each([&](Hook& h) { h.after_tool_call(call, result); });
 }
-void HookRegistry::before_compaction(const RunInfo& run) const {
-    each([&](Hook& h) { h.before_compaction(run); });
+void HookRegistry::before_compaction(const RunInfo& run, const std::string& idempotency_key) const {
+    each([&](Hook& h) { h.before_compaction(run, idempotency_key); });
 }
 void HookRegistry::run_end(const RunInfo& run, RunState state, const std::string& reason) const {
     each([&](Hook& h) { h.run_end(run, state, reason); });

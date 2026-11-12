@@ -1668,14 +1668,16 @@ model::ModelResult<model::ChatResponse> summary_response(const std::string& text
 
 class CompactionHook final : public Hook {
 public:
-    void before_compaction(const RunInfo& run) override {
+    void before_compaction(const RunInfo& run, const std::string& key) override {
         ++calls;
         const std::lock_guard lock(mx);
         runs.push_back(run);
+        keys.push_back(key);
     }
     std::atomic<int> calls{0};
     std::mutex mx;
     std::vector<RunInfo> runs;
+    std::vector<std::string> keys;
 };
 
 }  // namespace
@@ -1887,6 +1889,74 @@ TEST(RuntimeCompaction, CancellationDuringCheckpointWriteRollsBackTheRecord) {
     EXPECT_EQ(checks, 2);
     EXPECT_TRUE(env.rt->store().compactions(thread).empty());
     EXPECT_EQ(env.rt->conversation(thread).size(), 2u);
+}
+
+TEST(RuntimeCompaction, InterruptedCheckpointLeavesReadableHistoryAfterRestart) {
+    Env env;
+    env.start();
+    const auto thread = env.thread();
+    for (int i = 1; i <= 5; ++i) {
+        env.model.push_text("answer " + std::to_string(i));
+        ASSERT_TRUE(env.wait(env.run(thread, "question " + std::to_string(i)), RunState::succeeded));
+    }
+    const auto before = env.rt->conversation(thread);
+    // The process "stops" between the summary call and the commit: the summary arrives, then the compaction is cancelled.
+    env.model.set_responder([](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (req.feature != "compaction") return std::nullopt;
+        req.cancel->cancel();
+        return summary_response("SUMMARY that must not be kept");
+    });
+    auto token = std::make_shared<CancelToken>();
+    const auto result = env.rt->compact_thread(thread, token);
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code, "cancelled");
+
+    // Restart: no checkpoint was committed, so the next start reads the complete history and no summary.
+    env.restart();
+    EXPECT_TRUE(env.rt->store().compactions(thread).empty());
+    EXPECT_TRUE(env.events.of("compaction").empty());
+    const auto after = env.rt->conversation(thread);
+    ASSERT_EQ(after.size(), before.size());
+    for (size_t i = 0; i < before.size(); ++i) EXPECT_EQ(after[i].content, before[i].content);
+    env.model.push_text("after restart");
+    const auto next = env.run(thread, "question 6");
+    ASSERT_TRUE(env.wait(next, RunState::succeeded));
+    const auto req = env.model.requests().back();
+    EXPECT_EQ(req.messages[0].content.find("SUMMARY"), std::string::npos);
+    EXPECT_EQ(req.messages.size(), 1u + 5u * 2u + 1u);
+}
+
+TEST(RuntimeCompaction, BeforeCompactionRunsOncePerRevisionAcrossRetries) {
+    Env env;
+    auto hook = std::make_shared<CompactionHook>();
+    env.extra_hooks.push_back(hook);
+    env.make_runtime();
+    int passes = 0;
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (req.feature != "compaction") return std::nullopt;
+        if (++passes == 1) return model::ModelResult<model::ChatResponse>(failure(model::code::model_unavailable, "down"));
+        return summary_response("SUMMARY: questions 1 and 2 were answered");
+    });
+    env.start();
+    const auto thread = env.thread();
+    for (int i = 1; i <= 5; ++i) {
+        env.model.push_text("answer " + std::to_string(i));
+        ASSERT_TRUE(env.wait(env.run(thread, "question " + std::to_string(i)), RunState::succeeded));
+    }
+    // The first attempt fails after BeforeCompaction ran; the retry for the same revision carries the same key and does not repeat it.
+    const auto failed = env.rt->compact_thread(thread);
+    ASSERT_FALSE(failed);
+    EXPECT_EQ(failed.error().code, "summary_failed");
+    EXPECT_EQ(hook->calls.load(), 1);
+    const auto retried = env.rt->compact_thread(thread);
+    ASSERT_TRUE(retried) << retried.error().message;
+    EXPECT_EQ(hook->calls.load(), 1);
+    {
+        const std::lock_guard lock(hook->mx);
+        ASSERT_EQ(hook->keys.size(), 1u);
+        EXPECT_FALSE(hook->keys[0].empty());
+    }
+    EXPECT_EQ(env.rt->store().compactions(thread).size(), 1u);
 }
 
 TEST(RuntimeCompaction, ContextLengthErrorForcesOneCompactionAndRetriesTheTurn) {
@@ -2300,6 +2370,73 @@ std::vector<RunRecord> children_of(Env& env, const std::string& thread, const st
 }
 
 }  // namespace
+
+// add-agent-runtime Child Run compaction (design D4): a child over its budget compacts its own history in its own log.
+TEST(RuntimeCompaction, ChildRunOverBudgetCompactsItsOwnHistoryAndLeavesTheParentIntact) {
+    RuntimeConfig cfg;
+    cfg.default_context_window = 12000;  // the same tight window as the parent Run test
+    cfg.compaction_keep_messages = 4;
+    Env env(cfg);
+    ToolDef t = make_tool(env, "files.read", Risk::read, "Read a file");
+    t.core = true;
+    t.run = [](ToolContext&, const json& args) { return ToolOutput::success("chunk " + args.dump() + " " + std::string(3000, 'x')); };
+    env.add_tool(t);
+    const auto thread = env.thread();
+    std::mutex mx;
+    std::vector<std::string> parent_before;  // the parent's events when the child first asks to compact
+    std::string parent_id;
+    std::atomic<int> child_reads{0}, child_compactions{0};
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (req.feature == "compaction") {
+            ++child_compactions;
+            const std::lock_guard lock(mx);
+            if (parent_before.empty()) {
+                for (const auto& r : env.rt->runs(thread))
+                    if (r.parent_run_id.empty()) parent_id = r.id;
+                for (const auto& e : env.rt->events(parent_id)) parent_before.push_back(json{{"kind", e.kind}, {"payload", e.payload}}.dump());
+            }
+            return summary_response("SUMMARY: child read chunks so far");
+        }
+        if (!is_subagent(req)) return std::nullopt;
+        const int n = child_reads++;
+        if (n < 8) return model::ModelResult<model::ChatResponse>(calls_response({{"c" + std::to_string(n), "files.read", {{"part", n}}}}));
+        return summary_response("child finished");
+    });
+    env.start();
+    env.model.push_calls({{"d1", "delegate", {{"task", "read all eight parts"}, {"tools", json::array({"files.read"})}}}});
+    env.model.push_text("parent done");
+    const auto id = env.run(thread, "delegate the reading");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    ASSERT_GE(child_compactions.load(), 1);
+
+    const auto children = children_of(env, thread, id);
+    ASSERT_EQ(children.size(), 1u);
+    EXPECT_EQ(children[0].state, RunState::succeeded);
+    bool checkpoint = false;
+    for (const auto& e : env.rt->events(children[0].id))
+        if (e.kind == "compaction") checkpoint = true;
+    EXPECT_TRUE(checkpoint);
+    // The parent's history is unchanged: everything it had before the child compacted is byte-identical, and the Thread has no record.
+    std::vector<std::string> parent_after;
+    for (const auto& e : env.rt->events(id)) parent_after.push_back(json{{"kind", e.kind}, {"payload", e.payload}}.dump());
+    ASSERT_GE(parent_after.size(), parent_before.size());
+    for (size_t i = 0; i < parent_before.size(); ++i) EXPECT_EQ(parent_after[i], parent_before[i]) << "parent event " << i;
+    EXPECT_TRUE(env.rt->store().compactions(thread).empty());
+    for (const auto& m : env.rt->conversation(thread)) EXPECT_EQ(m.content.find("SUMMARY"), std::string::npos);
+
+    // The child's later request carries its summary and its task, and is smaller than its full history.
+    const auto reqs = env.model.side_requests();  // subagent requests are recorded as side requests
+    const model::ChatRequest* last_child = nullptr;
+    bool summarised = false;
+    for (const auto& r : reqs) {
+        if (is_subagent(r)) last_child = &r;
+        if (is_subagent(r) && r.messages[0].content.find("SUMMARY: child read chunks so far") != std::string::npos) summarised = true;
+    }
+    ASSERT_NE(last_child, nullptr);
+    EXPECT_TRUE(summarised);
+    EXPECT_EQ(task_of(*last_child), "read all eight parts");
+    EXPECT_LT(last_child->messages.size(), 2u + 2u * 8u);
+}
 
 TEST(RuntimeSubagents, ParallelDelegationRunsChildRunsConcurrentlyAndReturnsTheirAnswers) {
     Env env;

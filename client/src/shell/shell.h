@@ -860,6 +860,8 @@ public:
     void meetings_changed();
     // Local apps changed (apps.changed): the Apps view loads again.
     void apps_changed();
+    // Speech setup moved on (speech.changed): the speech recognition block of Settings shows the new state.
+    void speech_changed(const json& event);
 
 private:
     void load();
@@ -879,6 +881,9 @@ private:
     // The API connectors of the Connectors section (client/api-connectors): the listing, and the token entry.
     void load_connectors();
     void build_api_connectors(ui::Node& card);
+    // Speech recognition setup (client/speech-models): the package state and its Download, Import and Remove actions.
+    void load_speech();
+    void build_speech(ui::Node& card);
     void build_knowledge(ui::Node& card);
     void load_knowledge();
     void find_knowledge(bool entities);
@@ -935,6 +940,8 @@ private:
     std::u16string mail_exclusion_;  // the exclusion being typed, kept across rebuilds
     json connectors_ = nullptr;      // GET api/v1/connectors: this user's connectors (never a token)
     std::string connector_editing_;  // the connector whose token field is open
+    json speech_ = nullptr;          // speech.status
+    long long speech_bytes_ = 0;     // bytes downloaded so far (speech.changed)
     connectors::TokenDraft connector_token_;  // the token being typed; taken (and cleared) when it is sent
     json knowledge_ = nullptr;                                                // knowledge.status
     json knowledge_items_ = nullptr, knowledge_entities_ = nullptr;          // the last item and entity searches
