@@ -216,6 +216,7 @@ context: |
   43 add-api-connectors               [Managed]
   44 improve-meeting-capture-quality  [Hardening, Knowledge]
   45 keep-client-unit-tests-local     [Hardening]
+  46 pin-speech-build-assets          [Hardening]
 
 rules:
   proposal:
