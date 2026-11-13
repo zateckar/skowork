@@ -14,7 +14,7 @@
 namespace wb::meeting {
 namespace {
 
-constexpr std::wstring_view kPurpose = L"workbench-meeting-audio";
+constexpr std::wstring_view kPurpose = L"skowork-meeting-audio";
 
 // Echo evidence for each local segment against the other track (improve-meeting-capture-quality D1).
 void attach_echo_evidence(json& result, const std::vector<TrackAudio>& tracks) {
@@ -156,12 +156,12 @@ Result<json> stt_request(const std::string& method, const json& params) {
     const json* paths = jobj(params, "tracks");
     if (!paths || !paths->is_array() || paths->empty()) return make_error("invalid_params", "tracks is a list of files");
     std::unique_ptr<SpeechEngine> engine;
-#ifdef WORKBENCH_DEV_ENDPOINTS
-    // Development builds keep the deterministic test engine unless a request or WORKBENCH_STT_ENGINE asks for sherpa-onnx.
+#ifdef SKOWORK_DEV_ENDPOINTS
+    // Development builds keep the deterministic test engine unless a request or SKOWORK_STT_ENGINE asks for sherpa-onnx.
     std::string which = jstr(params, "engine");
     if (which.empty()) {
         wchar_t v[32] = {};
-        which = ::GetEnvironmentVariableW(L"WORKBENCH_STT_ENGINE", v, 32) > 0 ? narrow(v) : "test";
+        which = ::GetEnvironmentVariableW(L"SKOWORK_STT_ENGINE", v, 32) > 0 ? narrow(v) : "test";
     }
     if (which == "test") engine = std::make_unique<TestEngine>();
 #endif
@@ -170,7 +170,7 @@ Result<json> stt_request(const std::string& method, const json& params) {
         // Half the cores (Transcription Resource Budget); the worker's Job also caps it at half the machine.
         const int threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency() / 2));
         bool force_whisper = false;
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
         force_whisper = jstr(params, "asr") == "whisper";
 #endif
         const std::filesystem::path dir = path_from_utf8(speech_dir);

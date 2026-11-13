@@ -65,7 +65,7 @@ TEST(LoopbackListener, AcceptsOnlyLoopbackHttpRedirects) {
     EXPECT_TRUE(LoopbackListener::is_loopback_redirect("http://127.0.0.1:4200/cb"));
     EXPECT_FALSE(LoopbackListener::is_loopback_redirect("https://localhost:4200/cb"));
     EXPECT_FALSE(LoopbackListener::is_loopback_redirect("http://example.com:4200/cb"));
-    EXPECT_FALSE(LoopbackListener::is_loopback_redirect("com.example.workbench:/oauth2redirect"));
+    EXPECT_FALSE(LoopbackListener::is_loopback_redirect("com.example.skowork:/oauth2redirect"));
 }
 
 TEST(LoopbackListener, DeliversTheRedirectOnceAndStopsListening) {

@@ -214,7 +214,7 @@ export class TaskDispatch {
   groupMembers(group: string): string[] {
     const rows = this.#db
       .prepare(
-        `SELECT user_name FROM group_members WHERE workbench_group = ?
+        `SELECT user_name FROM group_members WHERE skowork_group = ?
          UNION
          SELECT DISTINCT user_name FROM installations WHERE revoked_at IS NULL AND EXISTS (SELECT 1 FROM json_each(groups) g WHERE g.value = ?)`,
       )

@@ -34,7 +34,7 @@ The knowledge graph (add-knowledge-graph) keeps everything in the encrypted kg.d
 - **One file of a shared folder:** when the user unshares it, it stays out of the rule until they share it again.
 - **Policy turns sharing off:** nothing more is published, and existing shares are left to the server, which stops returning them (D2).
 - **No requests while nothing is shared:** with nothing shared and sharing off, the client sends no request to team knowledge.
-- **Team passages:** a passage is cited as `workbench-team://<owner>/<item id>`. Its provenance is `{source_kind: team, owner, groups, trusted: false}`. Team passages take turns with local ones before reranking. knowledge.search only queries team knowledge when the `sources` filter is empty or contains `team`.
+- **Team passages:** a passage is cited as `skowork-team://<owner>/<item id>`. Its provenance is `{source_kind: team, owner, groups, trusted: false}`. Team passages take turns with local ones before reranking. knowledge.search only queries team knowledge when the `sources` filter is empty or contains `team`.
 - **Notes:** notes are chunked in the host (they are typed by the user, not read from files). The notes Source lists every note, whether indexed or not.
 - **Tombstones:** a tombstone is keyed by the item's Source, id and version (the file's size and modification time, or the note's content hash) and the normalised subject, predicate and object.
 

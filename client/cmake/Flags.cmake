@@ -1,7 +1,7 @@
 # Compiler and linker flags (add-client-foundation design D9).
 
-option(WORKBENCH_WERROR "Treat warnings as errors (off only in the Clang fuzz job, whose warning set differs)" ON)
-set(WORKBENCH_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion $<$<BOOL:${WORKBENCH_WERROR}>:-Werror>)
+option(SKOWORK_WERROR "Treat warnings as errors (off only in the Clang fuzz job, whose warning set differs)" ON)
+set(SKOWORK_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion $<$<BOOL:${SKOWORK_WERROR}>:-Werror>)
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O2 -g -DNDEBUG")
@@ -10,7 +10,7 @@ set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -DNDEBUG")
 add_compile_options(-ffunction-sections -fdata-sections -fstack-protector-strong -D_GLIBCXX_ASSERTIONS
                     $<$<CONFIG:Release>:-D_FORTIFY_SOURCE=3>)
 
-if(WORKBENCH_SANITIZE)
+if(SKOWORK_SANITIZE)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
   add_link_options(-fsanitize=address,undefined)
 elseif(WIN32)
@@ -30,10 +30,10 @@ if(WIN32)
                    $<$<CONFIG:Release>:-s>)
 endif()
 
-if(WORKBENCH_DEV_ENDPOINTS)
-  add_compile_definitions(WORKBENCH_DEV_ENDPOINTS=1)
+if(SKOWORK_DEV_ENDPOINTS)
+  add_compile_definitions(SKOWORK_DEV_ENDPOINTS=1)
 endif()
 
-function(workbench_warnings target)
-  target_compile_options(${target} PRIVATE ${WORKBENCH_WARNINGS})
+function(skowork_warnings target)
+  target_compile_options(${target} PRIVATE ${SKOWORK_WARNINGS})
 endfunction()

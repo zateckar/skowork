@@ -33,7 +33,7 @@ void open_new_file(State& s) {
     // Names sort chronologically: creation time, then a sequence number for files opened in the same millisecond.
     static unsigned seq = 0;
     char name[64];
-    std::snprintf(name, sizeof name, "workbench-%013lld-%04u.log", unix_millis_now(), seq++ % 10000);
+    std::snprintf(name, sizeof name, "skowork-%013lld-%04u.log", unix_millis_now(), seq++ % 10000);
     s.current = s.opt.dir / name;
     s.out.open(s.current, std::ios::app | std::ios::binary);
     s.current_size = 0;

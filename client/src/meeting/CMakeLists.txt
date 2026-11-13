@@ -4,7 +4,7 @@
 # links; wb_meeting is the rest of the Windows part (WASAPI capture, the probe, the indicator, the store, the service).
 add_library(wb_meeting_core STATIC core.cpp speech_manifest.cpp)
 target_link_libraries(wb_meeting_core PUBLIC wb_base)
-workbench_warnings(wb_meeting_core)
+skowork_warnings(wb_meeting_core)
 
 
 if(WIN32)
@@ -13,15 +13,15 @@ if(WIN32)
   add_library(wb_meeting_audio STATIC audio_file.cpp sherpa_engine.cpp)
   target_link_libraries(wb_meeting_audio PUBLIC wb_meeting_core wb_platform wb_base)
   target_include_directories(wb_meeting_audio SYSTEM PRIVATE ${TP}/sherpa-onnx/include)
-  workbench_warnings(wb_meeting_audio)
+  skowork_warnings(wb_meeting_audio)
 
   # Acquisition, verification, activation and removal of the speech package under the data root (task 5.2 and 5.3).
   add_library(wb_speech_package STATIC speech_package.cpp speech_installer.cpp)
   target_link_libraries(wb_speech_package PUBLIC wb_meeting_core wb_platform wb_base PRIVATE miniz bcrypt)
 
-  workbench_warnings(wb_speech_package)
+  skowork_warnings(wb_speech_package)
 
   add_library(wb_meeting STATIC capture.cpp meeting_store.cpp meeting_service.cpp dictation.cpp)
   target_link_libraries(wb_meeting PUBLIC wb_meeting_audio wb_speech_package wb_storage wb_platform wb_base mmdevapi ole32 oleaut32 uuid)
-  workbench_warnings(wb_meeting)
+  skowork_warnings(wb_meeting)
 endif()

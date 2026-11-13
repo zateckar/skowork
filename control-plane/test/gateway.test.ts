@@ -218,7 +218,7 @@ describe('gateway', () => {
   it('records the Run identifier, the installation and the Groups in the audit', async () => {
     const t = await h.token('audited2');
     await h.call('POST', '/llm/v1/chat/completions', t, { model: 'main', messages: [{ role: 'user', content: 'hi' }] },
-      { 'x-workbench-run': 'run_abc', 'x-workbench-installation': 'inst-42' });
+      { 'x-skowork-run': 'run_abc', 'x-skowork-installation': 'inst-42' });
     const row = h.cp.db.prepare("SELECT * FROM llm_usage WHERE user_name = 'audited2' AND endpoint = 'chat'").get() as any;
     assert.equal(row.run_id, 'run_abc');
     assert.equal(row.installation_id, 'inst-42');
@@ -397,7 +397,7 @@ describe('gateway at telemetry level content', () => {
 
 describe('gateway budgets across a restart', () => {
   it('keeps the used budget in SQLite, so a restarted gateway still rejects', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'workbench-gw-'));
+    const dir = mkdtempSync(join(tmpdir(), 'skowork-gw-'));
     const dbPath = join(dir, 'cp.db');
     const up = await fakeUpstream();
     const setup = (c: Config) => {

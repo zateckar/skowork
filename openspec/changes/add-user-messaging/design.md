@@ -26,7 +26,7 @@ The control plane already keeps a push connection per installation (WebSocket wi
   - Sync: on every connect, and when a push shows a gap or an unknown Chat, the service lists the Chats, fetches `messages?after=` the newest cached seq per Chat, drops Chats no longer listed (unless they hold queued messages), reports dirty read positions, then sends the outbox.
   - Outbox: a message written offline is stored pending with a random client message id and sent once, in the order written, when connected; the server's idempotent id makes a retry after a lost reply harmless. A permanent refusal (too large, not a member) marks the message failed in the view; offline, timeouts, 429, 5xx and 401 leave it queued.
   - Read position: opening a Chat reports the last message as read; sending a message also moves the own read position, as the server does.
-  - Own Presence: the app polls GetLastInputInfo every 30 s on the host tick and the service sends PUT /presence (active or idle, with X-Workbench-Installation) only when the state changes; busy is sent on reconnect while set.
+  - Own Presence: the app polls GetLastInputInfo every 30 s on the host tick and the service sends PUT /presence (active or idle, with X-Skowork-Installation) only when the state changes; busy is sent on reconnect while set.
   - Tools: messages.read and messages.send take a `chat` id or a `user`; messages.send with only `user` opens the direct Chat first. Each message in a tool result carries its own provenance (source kind message, the sender, untrusted).
   - Unread: the host status carries messaging.unread; the navigation entry shows the count, and the tray icon gets a red dot and a tooltip line while it is above zero.
 
@@ -38,13 +38,13 @@ The control plane already keeps a push connection per installation (WebSocket wi
 - [Message content is personal data] → Retention deletes old messages; content is never in audit logs, telemetry or the console; access is limited to members.
 - [Agent sends a message the user did not intend] → messages.send is an external-risk tool that needs approval by default; the approval shows recipient Chat and text.
 - [A message contains instructions for the recipient's agent] → Message content is untrusted data with the sender as provenance.
-- [Directory leaks who uses Workbench] → Only signed-in employees can query it, and it shows only names and Presence.
+- [Directory leaks who uses Skowork] → Only signed-in employees can query it, and it shows only names and Presence.
 
 ## API (implemented in tasks 1.1-1.2)
 
 All under `/api/v1/messaging` with the user's access token; every call answers 403 MESSAGING_OFF when policy.messaging.mode is off.
 - `GET /directory?q=` → `{users: [{user_name, display_name, presence}]}` (at most 50).
-- `PUT /presence` `{state?: active|idle, busy?: bool}` (state needs the `X-Workbench-Installation` header) → `{presence, busy}`.
+- `PUT /presence` `{state?: active|idle, busy?: bool}` (state needs the `X-Skowork-Installation` header) → `{presence, busy}`.
 - `GET /chats` → `{chats: [{id, kind, name, members: [{user_name, display_name, presence}], last_seq, read_seq, unread, last_message, created_at}]}`, newest activity first.
 - `POST /chats` `{kind: direct, user}` or `{kind: team, name, members: [...]}`; `PATCH /chats/{id}` `{name}`; `POST /chats/{id}/members` `{users}`; `DELETE /chats/{id}/members/me`.
 - `GET /chats/{id}/messages?after=<seq>&limit=` → `{messages: [{id, chat, seq, sender, sender_name, text, at}]}`; `POST /chats/{id}/messages` `{id, text}` (id 8-64 of `[A-Za-z0-9_-]`, idempotent); `POST /chats/{id}/read` `{seq}`.

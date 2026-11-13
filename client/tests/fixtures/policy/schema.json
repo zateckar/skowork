@@ -1325,8 +1325,8 @@
   ],
   "schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "urn:workbench:policy:document:v1",
-    "title": "Workbench Group policy document",
+    "$id": "urn:skowork:policy:document:v1",
+    "title": "Skowork Group policy document",
     "type": "object",
     "additionalProperties": false,
     "properties": {

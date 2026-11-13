@@ -112,7 +112,7 @@ TEST(PolicyDecide, RuleSourceNamesTheGroup) {
 }
 
 TEST(PolicyDecide, SharedToolSimulationFixtures) {
-    std::ifstream input(WORKBENCH_TOOL_DECISIONS_FIXTURE);
+    std::ifstream input(SKOWORK_TOOL_DECISIONS_FIXTURE);
     ASSERT_TRUE(input);
     json cases;
     input >> cases;
@@ -193,8 +193,8 @@ TEST(PolicyPaths, Rules) {
     r.read = {"C:\\Users\\a\\Documents\\**"};
     r.write = {"D:\\DEV\\**"};
     r.deny = {"**\\.ssh\\**", "**\\*.pfx"};
-    r.workspace = "C:\\Data\\Workbench\\workspace";
-    r.data_root = "C:\\Data\\Workbench";
+    r.workspace = "C:\\Data\\Skowork\\workspace";
+    r.data_root = "C:\\Data\\Skowork";
     r.grants = {{"E:\\Shared", false}, {"E:\\Mine", true}};
     EXPECT_TRUE(check_path("C:\\Users\\a\\Documents\\x.docx", Access::read, r).allowed);
     EXPECT_FALSE(check_path("C:\\Users\\a\\Documents\\x.docx", Access::write, r).allowed);
@@ -203,9 +203,9 @@ TEST(PolicyPaths, Rules) {
     EXPECT_FALSE(ssh.allowed);
     EXPECT_EQ(ssh.rule, "filesystem.deny[\"**\\\\.ssh\\\\**\"]");
     EXPECT_FALSE(check_path("D:\\DEV\\cert.PFX", Access::write, r).allowed);
-    EXPECT_TRUE(check_path("C:\\Data\\Workbench\\workspace\\out.txt", Access::write, r).allowed);
-    EXPECT_FALSE(check_path("C:\\Data\\Workbench\\app.db", Access::read, r).allowed);
-    EXPECT_EQ(check_path("C:\\Data\\Workbench\\app.db", Access::read, r).rule, "data-root");
+    EXPECT_TRUE(check_path("C:\\Data\\Skowork\\workspace\\out.txt", Access::write, r).allowed);
+    EXPECT_FALSE(check_path("C:\\Data\\Skowork\\app.db", Access::read, r).allowed);
+    EXPECT_EQ(check_path("C:\\Data\\Skowork\\app.db", Access::read, r).rule, "data-root");
     EXPECT_TRUE(check_path("E:\\Shared\\a.txt", Access::read, r).allowed);
     EXPECT_FALSE(check_path("E:\\Shared\\a.txt", Access::write, r).allowed);
     EXPECT_TRUE(check_path("E:\\Mine\\a.txt", Access::write, r).allowed);
@@ -219,7 +219,7 @@ TEST(PolicyPaths, Rules) {
     PathRules none;
     none.workspace = r.workspace;
     none.data_root = r.data_root;
-    EXPECT_TRUE(check_path("C:\\Data\\Workbench\\workspace\\a", Access::write, none).allowed);
+    EXPECT_TRUE(check_path("C:\\Data\\Skowork\\workspace\\a", Access::write, none).allowed);
     EXPECT_FALSE(check_path("C:\\Users\\a\\Documents\\x.docx", Access::read, none).allowed);
 }
 
@@ -252,8 +252,8 @@ TEST(PolicyEgress, HostsMustBeAsciiNamesOrAddresses) {
 }
 
 TEST(PolicySchema, ClientDefaultsMatchTheGeneratedSchema) {
-    std::ifstream in(WORKBENCH_POLICY_FIXTURE, std::ios::binary);
-    ASSERT_TRUE(in) << "missing " << WORKBENCH_POLICY_FIXTURE << "; run npm run policy:schema in control-plane";
+    std::ifstream in(SKOWORK_POLICY_FIXTURE, std::ios::binary);
+    ASSERT_TRUE(in) << "missing " << SKOWORK_POLICY_FIXTURE << "; run npm run policy:schema in control-plane";
     std::stringstream ss;
     ss << in.rdbuf();
     const auto fixture = parse_json(ss.str());

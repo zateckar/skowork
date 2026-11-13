@@ -27,7 +27,7 @@ public:
 };
 
 struct TempDir {
-    std::filesystem::path path = std::filesystem::path(local_appdata()) / L"workbench-test" / widen(random_urlsafe(6));
+    std::filesystem::path path = std::filesystem::path(local_appdata()) / L"skowork-test" / widen(random_urlsafe(6));
     TempDir() { std::filesystem::create_directories(path); }
     ~TempDir() {
         std::error_code ec;
@@ -127,7 +127,7 @@ struct FakeIdp {
 IdentityConfig config_for(const FakeIdp& idp) {
     IdentityConfig cfg;
     cfg.issuer = idp.issuer();
-    cfg.client_id = "workbench-desktop";
+    cfg.client_id = "skowork-desktop";
     cfg.redirect_uri = "https://app.test/callback";  // not a loopback redirect: no listener in these tests
     return cfg;
 }
@@ -144,7 +144,7 @@ TEST(TokenManagerOffline, SessionSurvivesADayWithoutTheIdentityProvider) {
     ts.store->set_setting("identity.bound_subject", "user-1");
     IdentityConfig cfg;
     cfg.issuer = idp.issuer();
-    cfg.client_id = "workbench-desktop";
+    cfg.client_id = "skowork-desktop";
     TokenManager tm(cfg, *ts.store, clock, browser);
     tm.start();
     EXPECT_EQ(tm.state(), AuthState::signed_in);
@@ -179,7 +179,7 @@ TEST(TokenManagerOffline, RefusedRefreshAfterTheOutageEndsTheSession) {
     ts.store->set_setting("identity.bound_subject", "user-1");
     IdentityConfig cfg;
     cfg.issuer = idp.issuer();
-    cfg.client_id = "workbench-desktop";
+    cfg.client_id = "skowork-desktop";
     TokenManager tm(cfg, *ts.store, clock, browser);
     tm.start();
     clock.advance(std::chrono::hours(24));

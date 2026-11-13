@@ -113,7 +113,7 @@ void MeetingService::start() {
             (void)store_->put(m);
 
         }
-        for (auto m : store_->in_states({"offered", "notice"})) decline(m, "SkoWork restarted");
+        for (auto m : store_->in_states({"offered", "notice"})) decline(m, "Skowork restarted");
     }
     policy_changed();
     if (!env_.background) return;
@@ -142,7 +142,7 @@ void MeetingService::stop() {
     if (ticker_.joinable()) ticker_.join();
     if (transcriber_.joinable()) transcriber_.join();
     const std::lock_guard lock(mx_);
-    finish_capture(false, "SkoWork stopped");
+    finish_capture(false, "Skowork stopped");
 }
 
 Config MeetingService::config() {

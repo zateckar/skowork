@@ -157,7 +157,7 @@ TrayState compute_tray_state(bool connected, bool paused, int action_items, int 
 }
 
 std::wstring tray_tooltip(TrayState s, int action_items, int active_runs, bool content_telemetry, int unread_messages) {
-    std::wstring t = L"SkoWork";
+    std::wstring t = L"Skowork";
     switch (s) {
     case TrayState::disconnected: t += L" – disconnected"; break;
     case TrayState::idle: t += L" – ready"; break;
@@ -238,8 +238,8 @@ bool Tray::confirm_quit() {
     if (runs == 0) return true;
     const std::wstring text = std::to_wstring(runs) +
                               (runs == 1 ? L" task is still running." : L" tasks are still running.") +
-                              L"\n\nQuitting stops them. Quit SkoWork anyway?";
-    return ::MessageBoxW(owner_, text.c_str(), L"Quit SkoWork", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 |
+                              L"\n\nQuitting stops them. Quit Skowork anyway?";
+    return ::MessageBoxW(owner_, text.c_str(), L"Quit Skowork", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 |
                                                                      MB_SETFOREGROUND) == IDYES;
 }
 

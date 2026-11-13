@@ -358,7 +358,7 @@ PathRules path_rules(const EffectivePolicy* policy, const std::string& workspace
     for (auto& g : grants) g.folder = final_folder(g.folder);
     r.grants = std::move(grants);
     if (!policy) return r;
-    const std::vector<std::pair<std::string, std::string>> extra = {{"WORKBENCH_DATA", r.data_root}};
+    const std::vector<std::pair<std::string, std::string>> extra = {{"SKOWORK_DATA", r.data_root}};
     auto load = [&](const char* key, std::vector<std::string>& out) {
         for (const auto& g : policy->strings(key)) {
             std::string e = expand_environment(g, extra);

@@ -119,7 +119,7 @@ int main(int argc, char** argv) {
 
     const std::filesystem::path dir = !reuse.empty() ? std::filesystem::path(widen(reuse))
                                       : !keep.empty() ? std::filesystem::path(widen(keep))
-                                                      : std::filesystem::path(local_appdata()) / L"workbench-test" / widen("kgbench-" + random_urlsafe(6));
+                                                      : std::filesystem::path(local_appdata()) / L"skowork-test" / widen("kgbench-" + random_urlsafe(6));
     auto root = DataRoot::open(dir);
     if (!root) return std::fprintf(stderr, "data root: %s\n", root.error().message.c_str()), 1;
     KeyStore keys(root->keys());

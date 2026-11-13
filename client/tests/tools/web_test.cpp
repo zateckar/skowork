@@ -29,7 +29,7 @@ std::string get(const std::wstring& p) {
 }
 
 struct WebFixture {
-    std::filesystem::path root = std::filesystem::path(local_appdata()) / L"workbench-test" / widen(random_urlsafe(6));
+    std::filesystem::path root = std::filesystem::path(local_appdata()) / L"skowork-test" / widen(random_urlsafe(6));
     std::shared_ptr<const policy::EffectivePolicy> current;
     WebToolEnv env;
     std::vector<std::pair<std::string, size_t>> extracted;  // kind, size

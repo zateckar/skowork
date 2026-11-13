@@ -10,7 +10,7 @@ if ($manifest.schema -ne 1 -or $manifest.package -ne 'skowork-speech' -or $manif
 }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $out = (Resolve-Path -LiteralPath $OutDir).Path
-$archive = Join-Path $out ("SkoWork-speech-v{0}-win-x64.zip" -f $manifest.version)
+$archive = Join-Path $out ("Skowork-speech-v{0}-win-x64.zip" -f $manifest.version)
 if (Test-Path -LiteralPath $archive) { throw "Speech artifact already exists: $archive" }
 $pending = Join-Path $out ('.speech-' + [Guid]::NewGuid().ToString('N') + '.tmp')
 $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)

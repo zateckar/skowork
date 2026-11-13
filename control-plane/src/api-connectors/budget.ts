@@ -19,7 +19,7 @@ export function checkSchemaBudget(db: Db, connectorId: string, groups: string[],
         `SELECT COALESCE(SUM(o.schema_bytes), 0) AS n FROM api_operations o
          JOIN mcp_servers s ON s.id = o.connector_id
          JOIN mcp_assignments a ON a.server_id = s.id
-         WHERE o.status = 'selected' AND o.usable = 1 AND s.enabled = 1 AND o.connector_id <> ? AND a.workbench_group = ?`,
+         WHERE o.status = 'selected' AND o.usable = 1 AND s.enabled = 1 AND o.connector_id <> ? AND a.skowork_group = ?`,
       )
       .get(connectorId, group) as { n: number }).n;
     if (others + mine > GROUP_SCHEMA_BUDGET_BYTES) {

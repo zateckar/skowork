@@ -7,4 +7,4 @@ add_library(wb_model STATIC
   image.cpp
   model_client.cpp)
 target_link_libraries(wb_model PUBLIC wb_identity wb_platform wb_base windowscodecs ole32 oleaut32 uuid)
-workbench_warnings(wb_model)
+skowork_warnings(wb_model)

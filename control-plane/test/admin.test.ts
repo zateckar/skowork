@@ -113,7 +113,7 @@ test('admin: the audit viewer filters and exports, and the export is audited', a
     assert.equal(all.length, 4);
     const jsonl = await fetch(`${h.base}/api/v1/admin/audit/export?format=jsonl&action=identity.admin-role.grant`, { headers: { authorization: `Bearer ${t.auditor}` } });
     assert.equal(jsonl.status, 200);
-    assert.match(jsonl.headers.get('content-disposition') ?? '', /attachment; filename="workbench-audit-.*\.jsonl"/);
+    assert.match(jsonl.headers.get('content-disposition') ?? '', /attachment; filename="skowork-audit-.*\.jsonl"/);
     const lines = (await jsonl.text()).trim().split('\n').map((l) => JSON.parse(l));
     assert.deepEqual(lines.map((l) => l.details.user).sort(), ['auditor1', 'council1', 'owner1', 'reviewer1']);
     const csv = await (await fetch(`${h.base}/api/v1/admin/audit/export?format=csv&action=identity.admin-role.grant`, { headers: { authorization: `Bearer ${t.auditor}` } })).text();
@@ -178,7 +178,7 @@ test('admin: individual-level access needs a security-auditor and a reason, and 
     const { installation_id } = await register(h, dev7);
     const sent = await fetch(`${h.base}/api/v1/telemetry/v1/crashes`, {
       method: 'POST', body: new Uint8Array([1, 2, 3, 4]),
-      headers: { authorization: `Bearer ${dev7}`, 'content-type': 'application/octet-stream', 'x-workbench-crash-id': 'crash-0001', 'x-workbench-crash-installation_id': installation_id },
+      headers: { authorization: `Bearer ${dev7}`, 'content-type': 'application/octet-stream', 'x-skowork-crash-id': 'crash-0001', 'x-skowork-crash-installation_id': installation_id },
     });
     assert.equal(sent.status, 202);
     assert.equal((await h.call('GET', '/api/v1/admin/individual/crashes/crash-0001', t.auditor)).status, 400);

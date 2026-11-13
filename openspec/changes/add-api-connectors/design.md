@@ -10,7 +10,7 @@ Facts from the repository on 2026-11-10:
 - **Control-plane MCP code.** control-plane/src/mcp and its catalog spec (control-plane/mcp-catalog). Entries are assigned to Groups, versioned, audited and delivered in the Policy bundle.
 - **No API connectors exist.** Nothing in client/ or control-plane/ reads OpenAPI.
 - **In-flight base.** use-idp-tokens-for-mcp (7/8) replaces the audience token with the user's identity-provider token and changes Catalog Entry Rules and Entry Delivered In The Policy Bundle. This change modifies those requirements after that change, so the text it starts from is the text in use-idp-tokens-for-mcp/specs.
-- **Secrets.** LLM connection credentials are encrypted with a server key derived from WORKBENCH_SECRET_KEY (control-plane/llm-gateway, Server Key From A Passphrase). API keys reuse that key.
+- **Secrets.** LLM connection credentials are encrypted with a server key derived from SKOWORK_SECRET_KEY (control-plane/llm-gateway, Server Key From A Passphrase). API keys reuse that key.
 
 ## Goals / Non-Goals
 
@@ -126,7 +126,7 @@ Facts from the repository on 2026-11-10:
 - **Alternatives considered:**
   - Allow only public addresses. Rejected for the reason above.
   - Block all private ranges and allow only a host list. Host lists are needed later for connector hosts, but they do not replace the registration.
-- **Setting:** HTTP to a loopback address is allowed only when the server setting apiConnectors.allowLoopbackHttp (WORKBENCH_API_ALLOW_LOOPBACK_HTTP) is on. The setting is forced off in production. It stands for the development mode named above, so that tests can use a local fake API.
+- **Setting:** HTTP to a loopback address is allowed only when the server setting apiConnectors.allowLoopbackHttp (SKOWORK_API_ALLOW_LOOPBACK_HTTP) is on. The setting is forced off in production. It stands for the development mode named above, so that tests can use a local fake API.
 
 ### D11. Personal access tokens: per user and connector, held by the control plane
 - **Choice (decided 2026-11-10):**

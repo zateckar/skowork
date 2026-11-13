@@ -1,4 +1,4 @@
-// The native Workbench window (add-native-ui, client/work-inbox): navigation, the Thread list, the open Thread with its
+// The native Skowork window (add-native-ui, client/work-inbox): navigation, the Thread list, the open Thread with its
 // feed and composer, the Activity rail, banners, the status bar, and the Status, Settings and About views. It
 // implements the host's AppWindow interface: open(route), close(), is_open() and emit(event, data)
 // with the host events status, navigate, run.event and inbox.changed (design D5). The window and everything in it

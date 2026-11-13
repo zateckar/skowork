@@ -88,11 +88,11 @@ std::optional<AppEntry> parse_app_entry(const std::string& entry) {
 
 const std::map<std::string, std::string>& builtin_notices() {
     static const std::map<std::string, std::string> n = {
-        {"en", "Heads-up: I am recording the audio of this meeting with SkoWork to create a transcript and notes for "
+        {"en", "Heads-up: I am recording the audio of this meeting with Skowork to create a transcript and notes for "
                "myself. The recording stays on my computer and is deleted after transcription. Tell me if you object."},
-        {"cs", "Upozornění: zvuk této schůzky nahrávám pomocí SkoWork kvůli přepisu a poznámkám pro vlastní potřebu. "
+        {"cs", "Upozornění: zvuk této schůzky nahrávám pomocí Skowork kvůli přepisu a poznámkám pro vlastní potřebu. "
                "Nahrávka zůstává v mém počítači a po přepisu se smaže. Pokud nesouhlasíte, dejte mi prosím vědět."},
-        {"de", "Hinweis: Ich zeichne den Ton dieser Besprechung mit SkoWork auf, um ein Transkript und Notizen für mich "
+        {"de", "Hinweis: Ich zeichne den Ton dieser Besprechung mit Skowork auf, um ein Transkript und Notizen für mich "
                "zu erstellen. Die Aufnahme bleibt auf meinem Computer und wird nach der Transkription gelöscht. Sagen Sie "
                "mir bitte, wenn Sie nicht einverstanden sind."},
     };

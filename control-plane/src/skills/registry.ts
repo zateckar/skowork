@@ -367,7 +367,7 @@ export class SkillRegistry {
     const self = mode === 'self-approval';
     const key = await this.keys.current();
     const signature = await new SignJWT({ name: r.name, version: r.version, digest: r.digest, scope: r.scope })
-      .setProtectedHeader({ alg: 'ES256', kid: key.kid, typ: 'workbench-skill+jwt' })
+      .setProtectedHeader({ alg: 'ES256', kid: key.kid, typ: 'skowork-skill+jwt' })
       .setIssuedAt()
       .sign(key.key);
     const now = nowIso();
@@ -478,7 +478,7 @@ export class SkillRegistry {
       .all(since) as unknown as VersionRow[])
       .filter((r) => this.#sees(u, r))
       .map((r) => ({ name: r.name, version: r.version, scope: r.scope, digest: r.digest, revoked_at: r.ended_at, reason: r.revoke_reason }));
-    return { skills, revocations, keys_url: '/.well-known/workbench-skill-keys.json' };
+    return { skills, revocations, keys_url: '/.well-known/skowork-skill-keys.json' };
   }
 
   /** Content by digest: for users who may see a published version with it, its author, and reviewers. */

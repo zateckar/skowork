@@ -1,4 +1,4 @@
-// Notification-area icon (client/desktop-host Tray Presence, App Icon). The icon is the Workbench icon from the
+// Notification-area icon (client/desktop-host Tray Presence, App Icon). The icon is the Skowork icon from the
 // executable's resources with a dot in the state's colour (improve-window-frame D4); without the resource it is a disc
 // in that colour. The tooltip carries the detail.
 #pragma once

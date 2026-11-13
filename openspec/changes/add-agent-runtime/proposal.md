@@ -2,7 +2,7 @@
 
 ## Why
 
-Workbench needs an agent: a loop that plans with the on-premise LLM, calls tools, pauses for the user when needed, and keeps running in the background. Today nothing talks to the model. This change adds that runtime, plus the client and gateway path to the LLM, and keeps model keys and quotas central.
+Skowork needs an agent: a loop that plans with the on-premise LLM, calls tools, pauses for the user when needed, and keeps running in the background. Today nothing talks to the model. This change adds that runtime, plus the client and gateway path to the LLM, and keeps model keys and quotas central.
 
 ## What Changes
 

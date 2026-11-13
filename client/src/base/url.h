@@ -22,7 +22,7 @@ struct Url {
     [[nodiscard]] std::string path_and_query() const;  // path[?query]
 };
 
-// Parses absolute URLs (http, https, ws, wss) and private-use URIs like "com.example.workbench:/oauth2redirect?..."
+// Parses absolute URLs (http, https, ws, wss) and private-use URIs like "com.example.skowork:/oauth2redirect?..."
 std::optional<Url> parse_url(std::string_view s);
 
 std::string url_encode(std::string_view s);  // RFC 3986 unreserved kept, everything else %XX

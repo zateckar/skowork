@@ -59,7 +59,7 @@ Verdict decide(const EffectivePolicy* policy, const CallFacts& call, const ToolF
     if (!policy) {
         if (call.own_data && call.risk == "read") return {Decision::allow, "fail-closed", "fail-closed", "no valid policy; reading the client's own data only", 0};
         return {Decision::deny, "fail-closed", "fail-closed",
-                "no valid policy is in force; SkoWork must refresh its policy from the control plane before it can do this", 0};
+                "no valid policy is in force; Skowork must refresh its policy from the control plane before it can do this", 0};
     }
     Builder b{policy, {}};
     b.v.policy_version = policy->version();

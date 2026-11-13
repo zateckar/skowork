@@ -3,7 +3,7 @@
 ## 1. Validation spikes
 
 - [ ] 1.1 Load 20 public agentskills.io / Claude skills with a prototype parser. Verify that every skill parses and that unknown frontmatter is preserved
-- [ ] 1.2 Prototype the GitLab-backed registry: create a repository, tag a version and serve it through the registry API with a Workbench token. Verify that clients need no GitLab credentials
+- [ ] 1.2 Prototype the GitLab-backed registry: create a repository, tag a version and serve it through the registry API with a Skowork token. Verify that clients need no GitLab credentials
 
 ## 2. Client skill loading (client/skills)
 

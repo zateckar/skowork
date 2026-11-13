@@ -75,7 +75,7 @@ The native window (add-native-ui) draws everything itself with Direct2D, so colo
 
 ### D6. Message header and actions
 - **Choice:**
-  - A message header shows an avatar with the sender's initials (in the Thread feed, the user's are taken from the messaging name, else the sign-in user name), the sender, the time, and at the end the icon buttons Copy and Fork from here (Fork only on stored messages). The agent's avatar is the Workbench mark (an accent circle with "S").
+  - A message header shows an avatar with the sender's initials (in the Thread feed, the user's are taken from the messaging name, else the sign-in user name), the sender, the time, and at the end the icon buttons Copy and Fork from here (Fork only on stored messages). The agent's avatar is the Skowork mark (an accent circle with "S").
   - In Chats, the user's own messages sit on an accent-tinted surface and the others on the alternate surface. Each has an avatar, the sender and the time.
   - The Chat header actions are icon-and-text buttons in a wrapping row: Rename, Add members, Save as note, Leave.
   - Glyphs (Segoe Fluent Icons): Copy E8C8, Fork EA3C, Rename E8AC, Add members E8FA, Save as note E70B, Leave F3B1, Chat E8BD; the Save as note periods Last 24 hours E8BF, Last 7 days E8C0, Everything E81C.
@@ -106,7 +106,7 @@ The native window (add-native-ui) draws everything itself with Direct2D, so colo
 
 ## Risks / Trade-offs
 
-- [Golden images change everywhere] → They are regenerated once with WORKBENCH_UPDATE_GOLDEN=1, and the new images are reviewed by eye.
+- [Golden images change everywhere] → They are regenerated once with SKOWORK_UPDATE_GOLDEN=1, and the new images are reviewed by eye.
 - [Users who liked the Windows accent] → Not asked for. A theme setting can follow if requested.
 - [Selection conflicts with clicks on links and buttons] → A press on an interactive child is left to that child; selection starts only on text.
 

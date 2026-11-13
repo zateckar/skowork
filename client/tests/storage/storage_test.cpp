@@ -29,7 +29,7 @@ using namespace wb;
 namespace {
 
 std::filesystem::path temp_root() {
-    return std::filesystem::path(local_appdata()) / L"workbench-test" / widen(random_urlsafe(6));
+    return std::filesystem::path(local_appdata()) / L"skowork-test" / widen(random_urlsafe(6));
 }
 
 // kg.db as a client from before the evidence schema creates and migrates it.
@@ -2428,7 +2428,7 @@ TEST(DataRoot, DeleteEverythingReturnsToFirstRun) {
     auto root = DataRoot::open(t.path);
     ASSERT_TRUE(root);
     write_file(root->file("app.db"), 100);
-    write_file(root->logs() / "workbench-1.log", 100);
+    write_file(root->logs() / "skowork-1.log", 100);
     write_file(root->cache() / "x.bin", 100);
     write_file(root->keys(), 10);
     ASSERT_TRUE(root->wipe());

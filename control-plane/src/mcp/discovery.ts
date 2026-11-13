@@ -72,7 +72,7 @@ export async function discoverTools(url: string, opts: { token?: string; timeout
   };
 
   const init = await post(
-    { jsonrpc: '2.0', id: nextId++, method: 'initialize', params: { protocolVersion: protocol, capabilities: {}, clientInfo: { name: 'workbench-catalog-discovery', version: '1.0' } } },
+    { jsonrpc: '2.0', id: nextId++, method: 'initialize', params: { protocolVersion: protocol, capabilities: {}, clientInfo: { name: 'skowork-catalog-discovery', version: '1.0' } } },
     true,
   );
   if (typeof init.protocolVersion !== 'string') throw new DiscoveryError('the server did not complete the MCP handshake');

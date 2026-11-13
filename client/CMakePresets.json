@@ -12,39 +12,39 @@
       "name": "debug",
       "inherits": "base",
       "displayName": "Debug (UBSan trap, dev endpoints)",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "WORKBENCH_DEV_ENDPOINTS": "ON" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "SKOWORK_DEV_ENDPOINTS": "ON" }
     },
     {
       "name": "test",
       "inherits": "base",
       "displayName": "Optimised build with dev endpoints, for end-to-end tests against the mocks",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "WORKBENCH_DEV_ENDPOINTS": "ON" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "SKOWORK_DEV_ENDPOINTS": "ON" }
     },
     {
       "name": "release",
       "inherits": "base",
       "displayName": "Release",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "WORKBENCH_TESTS": "ON", "WORKBENCH_CHANNEL": "stable" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "SKOWORK_TESTS": "ON", "SKOWORK_CHANNEL": "stable" }
     },
     {
       "name": "sanitize",
       "inherits": "base",
       "displayName": "Portable libraries under ASan/UBSan (Linux)",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "WORKBENCH_SANITIZE": "ON" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "SKOWORK_SANITIZE": "ON" }
     },
     {
       "name": "fuzz",
       "inherits": "base",
       "displayName": "Fuzz targets (Linux, AFL++ GCC plugin: set CC/CXX to afl-gcc-fast/afl-g++-fast)",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "WORKBENCH_FUZZ": "ON", "WORKBENCH_TESTS": "OFF",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "SKOWORK_FUZZ": "ON", "SKOWORK_TESTS": "OFF",
                           "CMAKE_C_COMPILER": "afl-gcc-fast", "CMAKE_CXX_COMPILER": "afl-g++-fast" }
     },
     {
       "name": "fuzz-libfuzzer",
       "inherits": "base",
       "displayName": "Fuzz targets under libFuzzer with ASan/UBSan (Linux, Clang; the CI fuzz job)",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "WORKBENCH_FUZZ": "ON", "WORKBENCH_TESTS": "OFF",
-                          "WORKBENCH_SANITIZE": "ON", "WORKBENCH_WERROR": "OFF",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "SKOWORK_FUZZ": "ON", "SKOWORK_TESTS": "OFF",
+                          "SKOWORK_SANITIZE": "ON", "SKOWORK_WERROR": "OFF",
                           "CMAKE_C_COMPILER": "clang", "CMAKE_CXX_COMPILER": "clang++" }
     }
   ],

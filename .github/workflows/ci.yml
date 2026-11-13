@@ -66,7 +66,7 @@ jobs:
     env:
       PUBLISH: ${{ needs.version.outputs.publish }}
       VERSION: ${{ needs.version.outputs.version }}
-      HAS_SIGNING_CERT: ${{ secrets.WORKBENCH_SIGNING_CERT_PFX_BASE64 != '' }}
+      HAS_SIGNING_CERT: ${{ secrets.SKOWORK_SIGNING_CERT_PFX_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain cache
@@ -97,16 +97,16 @@ jobs:
         run: |
           g++ --version | Select-Object -First 1
           # The published dev build reports its version and the dev channel.
-          $publish = if ($env:PUBLISH -eq 'true') { @("-DWORKBENCH_VERSION=$env:VERSION", '-DWORKBENCH_CHANNEL=dev') } else { @() }
-          cmake --preset release -DWORKBENCH_TESTS=OFF '-DWORKBENCH_COMMIT=${{ github.sha }}' @publish
+          $publish = if ($env:PUBLISH -eq 'true') { @("-DSKOWORK_VERSION=$env:VERSION", '-DSKOWORK_CHANNEL=dev') } else { @() }
+          cmake --preset release -DSKOWORK_TESTS=OFF '-DSKOWORK_COMMIT=${{ github.sha }}' @publish
           cmake --build --preset release
           ./tools/check-manifests.ps1 -BuildDir build/release
       - name: Sign executables (dev build, when a code-signing certificate is configured)
         if: env.PUBLISH == 'true' && env.HAS_SIGNING_CERT == 'true'
         shell: pwsh
         env:
-          SIGNING_CERT: ${{ secrets.WORKBENCH_SIGNING_CERT_PFX_BASE64 }}
-          SIGNING_PASSWORD: ${{ secrets.WORKBENCH_SIGNING_CERT_PASSWORD }}
+          SIGNING_CERT: ${{ secrets.SKOWORK_SIGNING_CERT_PFX_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.SKOWORK_SIGNING_CERT_PASSWORD }}
         working-directory: client
         run: ./tools/sign.ps1 -BuildDir build/release
       - name: Package and footprint check
@@ -190,7 +190,7 @@ jobs:
       - name: Admin console builds
         run: npm run admin:build
       - name: Container image builds
-        run: docker build -t workbench-control-plane:ci .
+        run: docker build -t skowork-control-plane:ci .
 
   graph-mock:
     name: Graph mock (dev/graph-mock)
@@ -214,8 +214,8 @@ jobs:
         run: npm run build:sea
       - name: Container image builds and is ready within 5 seconds
         run: |
-          docker build -t workbench-graph-mock:ci .
-          docker run -d --name graph-mock -p 4810:4810 -p 4811:4811 workbench-graph-mock:ci
+          docker build -t skowork-graph-mock:ci .
+          docker run -d --name graph-mock -p 4810:4810 -p 4811:4811 skowork-graph-mock:ci
           for i in $(seq 1 50); do curl -sf http://127.0.0.1:4811/_mock/health && exit 0; sleep 0.1; done
           docker logs graph-mock; exit 1
 
@@ -240,14 +240,14 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/workbench-control-plane
+          images: ghcr.io/${{ github.repository_owner }}/skowork-control-plane
           # Never `latest`: that tag belongs to the stable releases (release.yml).
           flavor: latest=false
           tags: |
             type=raw,value=${{ needs.version.outputs.version }}
             type=raw,value=main
           labels: |
-            org.opencontainers.image.title=SkoWork control plane
+            org.opencontainers.image.title=Skowork control plane
             org.opencontainers.image.version=${{ needs.version.outputs.version }}
       - uses: docker/build-push-action@v6
         with:
@@ -281,16 +281,16 @@ jobs:
           notes=$(cat <<EOF
           Dev build $VERSION of main at ${GITHUB_SHA::12}, replaced by every change on main that passes CI. Channel: dev.
 
-          Desktop client: \`SkoWork-$VERSION-win-x64.zip\` (checksum in the \`.sha256\` file).
-          Optional app runtime for Local apps: \`SkoWork-$VERSION-app-runtime-win-x64.zip\`, extracted next to SkoWork.exe.
-          Control plane image: \`ghcr.io/${GITHUB_REPOSITORY_OWNER}/workbench-control-plane:$VERSION\` (also \`:main\`).
+          Desktop client: \`Skowork-$VERSION-win-x64.zip\` (checksum in the \`.sha256\` file).
+          Optional app runtime for Local apps: \`Skowork-$VERSION-app-runtime-win-x64.zip\`, extracted next to Skowork.exe.
+          Control plane image: \`ghcr.io/${GITHUB_REPOSITORY_OWNER}/skowork-control-plane:$VERSION\` (also \`:main\`).
           EOF
           )
           gh release delete dev --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
           # A `dev` tag left without its release would pin the new release to the old commit.
           gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/dev" 2>/dev/null || true
           gh release create dev dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
-            --title "SkoWork $VERSION (dev)" --notes "$notes"
+            --title "Skowork $VERSION (dev)" --notes "$notes"
 # Not in CI on purpose (design D12): the client end-to-end tests and the control plane's real-LLM tests use the
 # organization Keycloak test realm and the organization LLM API from a developer's .env. They run locally only; the API key
 # is never stored as a repository or Actions secret.

@@ -44,7 +44,7 @@ The native window (add-native-ui) is a standard WS_OVERLAPPEDWINDOW with the sys
   - The content fills the window from the top edge; there is no TitleBar row. (The first version had a 40-DIP full-width title bar. On review the product owner pointed at File Explorer, which has none: its tabs sit in the title bar.)
   - WindowButtons, a toolkit node, holds three CaptionButton elements, 46 by 40 DIPs, with the Segoe Fluent Icons glyphs Minimize E921, Maximize E922, Restore E923 and Close E8BB. Close turns red (#C42B1C with white) on hover. The glyphs are dimmed while the window is inactive. It floats at the window's top-right corner above the content and the modal layer, so a dialog never covers it.
   - CaptionSpace, a toolkit node, ends a pane's header row. It takes the width of the window buttons only while its row reaches the window's right edge within the caption band, so whichever pane is at the top-right (the Thread, the Activity rail, a page, a Chat, or the list on a narrow window) keeps its toolbar clear of the buttons. It decides after layout and asks for one more layout pass when that changes; the row's right edge does not depend on its width, so this settles at once.
-  - The navigation pane starts with the Workbench mark (an Emerald rounded square with an Electric Green "S", BrandMark) and the name, 40 DIPs high; on a compact navigation pane only the mark. The pane headings sit in the same band.
+  - The navigation pane starts with the Skowork mark (an Emerald rounded square with an Electric Green "S", BrandMark) and the name, 40 DIPs high; on a compact navigation pane only the mark. The pane headings sit in the same band.
   - The caption buttons are not in the Tab order, as in other Windows apps: the keyboard reaches what they do through the window menu (Alt+Space) and Win+Arrow keys. Node::system_keyboard tells the accessibility check so. UI Automation exposes them as buttons with the Invoke pattern. Invoking one posts WM_SYSCOMMAND (SC_MINIMIZE, SC_MAXIMIZE or SC_RESTORE, SC_CLOSE). Their names come from the strings, and Maximize is renamed "Restore down" while maximised.
   - The modal layer dims the whole content. The caption band still answers HTCAPTION outside the dialog, so the window can be moved while a dialog is open.
   - Window::Options.custom_frame turns this on. It is on by default, and the hidden-window tests keep it.
@@ -53,7 +53,7 @@ The native window (add-native-ui) is a standard WS_OVERLAPPEDWINDOW with the sys
 
 ### D4. Icon
 - **Choice:**
-  - client/src/app/workbench.ico holds PNG images at 16, 20, 24, 32, 40, 48, 64 and 256 pixels: an Emerald (#0E3A2F) rounded square with an Electric Green (#78FAAE) bold "S".
+  - client/src/app/skowork.ico holds PNG images at 16, 20, 24, 32, 40, 48, 64 and 256 pixels: an Emerald (#0E3A2F) rounded square with an Electric Green (#78FAAE) bold "S".
   - client/tools/make-icon.ps1 makes the file with System.Drawing, so the icon can be made again.
   - The resource script carries it as ICON 1. The window class loads it, and the window sets its large and small icons for its DPI (again after a DPI change).
   - The tray loads the icon at the small-icon size and draws on it:
@@ -73,14 +73,14 @@ The native window (add-native-ui) is a standard WS_OVERLAPPEDWINDOW with the sys
 
 ## Acceptance (2026-11-02, demo client, dark theme, 4K monitor, taskbar on the right)
 
-- The window shows the Workbench title bar: the mark, the title, and Minimize, Maximize and Close on the navigation pane's colour. Windows paints no caption of its own.
+- The window shows the Skowork title bar: the mark, the title, and Minimize, Maximize and Close on the navigation pane's colour. Windows paints no caption of its own.
 - Invoking title-bar-maximize through UI Automation maximised the window. The button was then named "Restore down" and showed the Restore glyph, and the title bar stayed fully on screen. Invoking it again restored the window and the name went back to "Maximize".
-- Workbench.exe carries the icon (ExtractAssociatedIcon gives the mark), and its own manifest is kept. The taskbar button shows the mark. The tray shows the mark with the green idle dot.
+- Skowork.exe carries the icon (ExtractAssociatedIcon gives the mark), and its own manifest is kept. The taskbar button shows the mark. The tray shows the mark with the green idle dot.
 - Not checked: Snap layouts on hovering Maximize. This needs a by-hand hover. The button answers HTMAXBUTTON, which is what Windows offers Snap layouts on (checked by UiWindow.FrameHitTesting and UiWindow.OwnTitleBarWithNamedButtons, since replaced by UiWindow.WindowButtonsAndCaptionBand).
 
 ## Acceptance of the revision (2026-11-02, demo client, dark theme)
 
-- No title bar row. The navigation pane, the list and the reading pane reach the top edge, and their top rows form the caption band. The navigation pane starts with the mark and "Workbench". Minimize, Maximize and Close sit in the top-right corner over the rightmost pane, and that pane's header keeps clear of them (CaptionSpace). This matches the File Explorer layout of the example.
+- No title bar row. The navigation pane, the list and the reading pane reach the top edge, and their top rows form the caption band. The navigation pane starts with the mark and "Skowork". Minimize, Maximize and Close sit in the top-right corner over the rightmost pane, and that pane's header keeps clear of them (CaptionSpace). This matches the File Explorer layout of the example.
 - Dialogs dim the content but not the window buttons (New Chat dialog screenshot).
 - Invoking title-bar-maximize through UI Automation maximised the window to the work area. The button was renamed "Restore down" and stayed at the screen's top-right. Invoking it again restored the window and the name "Maximize".
 - Tests: UiWindow.FrameHitTesting, UiWindow.WindowButtonsAndCaptionBand (a heading in the band is HTCAPTION, New thread is HTCLIENT, the buttons answer HTMINBUTTON, HTMAXBUTTON and HTCLOSE) and UiWindow.CaptionSpaceKeepsTheCornerClear. Golden images regenerated and reviewed.

@@ -16,7 +16,7 @@ using namespace wb;
 namespace {
 
 std::filesystem::path temp_dir(const char* tag) {
-    auto d = std::filesystem::temp_directory_path() / ("workbench-" + std::string(tag) + "-" + random_urlsafe(6));
+    auto d = std::filesystem::temp_directory_path() / ("skowork-" + std::string(tag) + "-" + random_urlsafe(6));
     std::filesystem::create_directories(d);
     return d;
 }
@@ -43,7 +43,7 @@ TEST(Log, NoTokenShapedStringsAreWritten) {
     const std::string refresh = random_urlsafe(48);
     log::info("test", "access token " + jwt);
     log::info("test", "Authorization: Bearer " + jwt);
-    log::warn("test", "refresh_token=" + refresh + "&client_id=workbench-desktop");
+    log::warn("test", "refresh_token=" + refresh + "&client_id=skowork-desktop");
     log::error("test", "{\"access_token\":\"" + jwt + "\",\"token_type\":\"Bearer\"}");
     log::info("test", "control plane connected");
     log::shutdown();

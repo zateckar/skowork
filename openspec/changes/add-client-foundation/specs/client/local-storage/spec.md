@@ -11,14 +11,14 @@ The client SHALL store all persistent user data under a single data root inside 
 
 #### Scenario: Default data root
 - **WHEN** no storage policy is set
-- **THEN** all databases, logs, skills, browser profile and caches are created under the user's local application data folder in a Workbench directory
+- **THEN** all databases, logs, skills, browser profile and caches are created under the user's local application data folder in a Skowork directory
 
 #### Scenario: Policy override
 - **WHEN** policy.storage.root points to another folder inside the user's profile
 - **THEN** the client uses that folder as the data root on next start
 
 ### Requirement: Owner-Only Access
-The client SHALL restrict file-system access to its data root to the owning user and the local SYSTEM account. SYSTEM is the one accepted exception, because profile backup needs it. The client MUST remove inherited permissions that would grant access to any other account. The default for policy.storage.root is the Workbench folder in the user's local application data.
+The client SHALL restrict file-system access to its data root to the owning user and the local SYSTEM account. SYSTEM is the one accepted exception, because profile backup needs it. The client MUST remove inherited permissions that would grant access to any other account. The default for policy.storage.root is the Skowork folder in the user's local application data.
 
 #### Scenario: Another user reads the data root
 - **WHEN** a different non-administrator user tries to open a file in the data root
@@ -53,7 +53,7 @@ The client SHALL write user data transactionally, so that a crash or power loss 
 The client SHALL let the user permanently delete selected data from the client: a Thread, a Source, an individual indexed item, or everything. Deletion MUST cascade to derived data such as indexes, embeddings, knowledge-graph facts and caches.
 
 #### Scenario: Delete everything
-- **WHEN** the user chooses "Delete all my Workbench data" and confirms
+- **WHEN** the user chooses "Delete all my Skowork data" and confirms
 - **THEN** the client removes every file under its data root except the minimal configuration needed to start
 - **AND** it restarts in a first-run state
 

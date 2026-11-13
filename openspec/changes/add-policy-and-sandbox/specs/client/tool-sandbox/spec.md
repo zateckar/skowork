@@ -29,7 +29,7 @@ The client SHALL apply limits to each containment group: memory, CPU rate, numbe
 - **THEN** the command is terminated after 15 minutes
 
 ### Requirement: Reduced Privileges
-The client SHALL run sandboxed child processes with a restricted token. The token removes administrative group membership and privileges beyond the minimum needed. The process environment contains no Workbench access tokens or other secrets, except a per-process egress proxy credential.
+The client SHALL run sandboxed child processes with a restricted token. The token removes administrative group membership and privileges beyond the minimum needed. The process environment contains no Skowork access tokens or other secrets, except a per-process egress proxy credential.
 
 #### Scenario: Token not inherited
 - **WHEN** a sandboxed shell command prints its environment
@@ -80,12 +80,12 @@ For sandboxed processes that have network access, the client SHALL provide a loo
 - **THEN** the proxy rejects the request
 
 ### Requirement: Enforcement Limits Disclosure
-The client SHALL show administrators the enforcement level achieved for each Group's network policy, both in policy simulation results and in telemetry. A process that bypasses the proxy can be blocked only by operating-system firewall rules deployed outside Workbench. The levels are:
+The client SHALL show administrators the enforcement level achieved for each Group's network policy, both in policy simulation results and in telemetry. A process that bypasses the proxy can be blocked only by operating-system firewall rules deployed outside Skowork. The levels are:
 - `proxy-only`: network policy is applied only to traffic that uses the proxy;
 - `os-enforced`: operating-system firewall rules also block traffic that bypasses the proxy.
 
 #### Scenario: No OS firewall profile
-- **WHEN** no operating-system firewall profile for Workbench child processes is detected on the machine
+- **WHEN** no operating-system firewall profile for Skowork child processes is detected on the machine
 - **THEN** the client reports the network enforcement level as `proxy-only`
 
 ### Requirement: Output Capture Limits

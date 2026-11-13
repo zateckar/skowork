@@ -2,11 +2,11 @@
 
 ## Why
 
-Every other Workbench capability needs four foundations: a resident, lightweight Windows client; private per-user storage; an identity from the organization identity provider that the control plane trusts; and a managed connection from each client to the control plane. Without these, nothing can be centrally managed or safely store user data, so they come first.
+Every other Skowork capability needs four foundations: a resident, lightweight Windows client; private per-user storage; an identity from the organization identity provider that the control plane trusts; and a managed connection from each client to the control plane. Without these, nothing can be centrally managed or safely store user data, so they come first.
 
 ## What Changes
 
-- Add the Workbench desktop host:
+- Add the Skowork desktop host:
   - a tray-resident, per-user C++/Win32 process that starts at logon;
   - a WebView2 UI window opened on demand;
   - a local API restricted to the current user;

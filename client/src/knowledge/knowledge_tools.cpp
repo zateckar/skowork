@@ -33,7 +33,7 @@ json item_provenance(const std::string& source, const std::string& ref) {
 json fact_json(const FactRow& f) {
     return {{"fact", f.text},
             {"stated", iso(f.created_at)},
-            {"provenance", {{"source_kind", "user"}, {"source_id", f.thread_id.empty() ? "" : "workbench://thread/" + f.thread_id}, {"trusted", true}}}};
+            {"provenance", {{"source_kind", "user"}, {"source_id", f.thread_id.empty() ? "" : "skowork://thread/" + f.thread_id}, {"trusted", true}}}};
 }
 
 ToolOutput untrusted(json body, const std::string& what) {

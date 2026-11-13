@@ -1,6 +1,6 @@
 // client/core-tools image.generate (add-image-generation design D3, D4): images from a text prompt through
 // client/model-access, stored as Thread attachments with the tool as provenance and shown to the user in the feed.
-// Risk class read: the prompt goes only to the organization gateway and nothing outside Workbench changes.
+// Risk class read: the prompt goes only to the organization gateway and nothing outside Skowork changes.
 #pragma once
 
 #include "model/model_client.h"

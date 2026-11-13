@@ -129,8 +129,8 @@ export class Registry {
     }
     return {
       $schema: 'https://json-schema.org/draft/2020-12/schema',
-      $id: `urn:workbench:policy:${opts.guardrail ? 'guardrail' : 'document'}:v${this.version}`,
-      title: opts.guardrail ? 'Workbench org guardrail document' : 'Workbench Group policy document',
+      $id: `urn:skowork:policy:${opts.guardrail ? 'guardrail' : 'document'}:v${this.version}`,
+      title: opts.guardrail ? 'Skowork org guardrail document' : 'Skowork Group policy document',
       ...root,
     };
   }

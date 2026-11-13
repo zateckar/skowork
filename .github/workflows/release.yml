@@ -62,12 +62,12 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/workbench-control-plane
+          images: ghcr.io/${{ github.repository_owner }}/skowork-control-plane
           tags: |
             type=raw,value=${{ needs.version.outputs.version }}
             type=raw,value=latest,enable=${{ needs.version.outputs.prerelease == 'false' }}
           labels: |
-            org.opencontainers.image.title=SkoWork control plane
+            org.opencontainers.image.title=Skowork control plane
             org.opencontainers.image.version=${{ needs.version.outputs.version }}
       - uses: docker/build-push-action@v6
         with:
@@ -85,7 +85,7 @@ jobs:
     runs-on: windows-latest
     needs: [version, policy-coverage]
     env:
-      HAS_SIGNING_CERT: ${{ secrets.WORKBENCH_SIGNING_CERT_PFX_BASE64 != '' }}
+      HAS_SIGNING_CERT: ${{ secrets.SKOWORK_SIGNING_CERT_PFX_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v4
       - name: Install WinLibs (pinned, verified)
@@ -103,7 +103,7 @@ jobs:
         shell: pwsh
         working-directory: client
         run: |
-          cmake --preset release -DWORKBENCH_TESTS=OFF '-DWORKBENCH_VERSION=${{ needs.version.outputs.version }}' '-DWORKBENCH_COMMIT=${{ github.sha }}'
+          cmake --preset release -DSKOWORK_TESTS=OFF '-DSKOWORK_VERSION=${{ needs.version.outputs.version }}' '-DSKOWORK_COMMIT=${{ github.sha }}'
           cmake --build --preset release
           ./tools/check-manifests.ps1 -BuildDir build/release
           ./tools/check-footprint.ps1 -BuildDir build/release
@@ -111,8 +111,8 @@ jobs:
         if: env.HAS_SIGNING_CERT == 'true'
         shell: pwsh
         env:
-          SIGNING_CERT: ${{ secrets.WORKBENCH_SIGNING_CERT_PFX_BASE64 }}
-          SIGNING_PASSWORD: ${{ secrets.WORKBENCH_SIGNING_CERT_PASSWORD }}
+          SIGNING_CERT: ${{ secrets.SKOWORK_SIGNING_CERT_PFX_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.SKOWORK_SIGNING_CERT_PASSWORD }}
         working-directory: client
         run: ./tools/sign.ps1 -BuildDir build/release
       - name: Package
@@ -144,13 +144,13 @@ jobs:
           path: dist
       - uses: softprops/action-gh-release@v2
         with:
-          name: SkoWork ${{ needs.version.outputs.version }}
+          name: Skowork ${{ needs.version.outputs.version }}
           prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
           files: |
             dist/*.zip
             dist/*.zip.sha256
           body: |
-            Desktop client: `SkoWork-${{ needs.version.outputs.version }}-win-x64.zip` (checksum in the `.sha256` file).
-            Optional app runtime for Local apps: `SkoWork-${{ needs.version.outputs.version }}-app-runtime-win-x64.zip`, extracted next to SkoWork.exe.
-            Optional speech runtime and models: `SkoWork-speech-v1-win-x64.zip` (checksum in the `.sha256` file), downloaded by clients from the address and SHA-256 set in policy (speech.package.*), or imported in SkoWork's speech setup.
-            Control plane image: `ghcr.io/${{ github.repository_owner }}/workbench-control-plane:${{ needs.version.outputs.version }}`.
+            Desktop client: `Skowork-${{ needs.version.outputs.version }}-win-x64.zip` (checksum in the `.sha256` file).
+            Optional app runtime for Local apps: `Skowork-${{ needs.version.outputs.version }}-app-runtime-win-x64.zip`, extracted next to Skowork.exe.
+            Optional speech runtime and models: `Skowork-speech-v1-win-x64.zip` (checksum in the `.sha256` file), downloaded by clients from the address and SHA-256 set in policy (speech.package.*), or imported in Skowork's speech setup.
+            Control plane image: `ghcr.io/${{ github.repository_owner }}/skowork-control-plane:${{ needs.version.outputs.version }}`.

@@ -1,9 +1,9 @@
-# Calls a Workbench local API method over the named pipe (JSON-RPC 2.0, 4-byte little-endian length-prefixed).
-#   ./workbench-pipe.ps1 -Method app.status [-Params '{"minutes":15}'] [-PipeName Workbench-<SID>]
+# Calls a Skowork local API method over the named pipe (JSON-RPC 2.0, 4-byte little-endian length-prefixed).
+#   ./skowork-pipe.ps1 -Method app.status [-Params '{"minutes":15}'] [-PipeName Skowork-<SID>]
 param(
     [Parameter(Mandatory)] [string] $Method,
     [string] $Params = '{}',
-    [string] $PipeName = "Workbench-$([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)",
+    [string] $PipeName = "Skowork-$([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)",
     [int] $TimeoutMs = 5000
 )
 $ErrorActionPreference = 'Stop'

@@ -16,6 +16,6 @@ The client SHALL version its storage schema and migrate existing data forward au
 The client SHALL let the user permanently delete selected data from the client: a Thread, a Source, an individual indexed item, or everything. Deletion MUST cascade to derived data such as indexes, embeddings, knowledge-graph facts and caches.
 
 #### Scenario: Delete everything
-- **WHEN** the user chooses "Delete all my Workbench data" and confirms
+- **WHEN** the user chooses "Delete all my Skowork data" and confirms
 - **THEN** the client removes every file under its data root except the minimal configuration needed to start
 - **AND** it restarts in a first-run state

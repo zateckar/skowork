@@ -42,7 +42,7 @@ Out of scope:
 - **Forward reference:** client/meeting-capture (change 13) provides the Source meetings. Until it lands, that Source is empty.
 - **New code:**
   - the client knowledge module and `kg.db` schema;
-  - the indexer role of `workbench-worker.exe`;
+  - the indexer role of `skowork-worker.exe`;
   - plain-text and code readers and chunkers. These parse untrusted input and are fuzzed.
 - **Network:** with directory enrichment on, Microsoft Graph user lookups through the existing Graph platform connection of client/mail-calendar; no new hosts.
 - **Artifacts:** none. Knowledge needs no local ML model.

@@ -240,7 +240,7 @@ void InboxService::notify(const std::string& kind, const std::string& thread_id,
     if (!env_.notify || !notification_enabled(kind) || is_focused(thread_id)) return;
     const auto entry = store_.entry(thread_id);
     const ToastTexts& t = texts(env_.language ? env_.language() : "en");
-    std::string title = entry && !entry->title.empty() ? entry->title : "SkoWork";
+    std::string title = entry && !entry->title.empty() ? entry->title : "Skowork";
     std::string body;
     if (kind == "completed") {
         body = t.finished;

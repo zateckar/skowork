@@ -125,7 +125,7 @@ const devOn = (c: { apiConnectors: { allowLoopbackHttp: boolean }; mcpCatalog: {
 async function setup(h: Harness) {
   const admin = await h.token('admin1');
   for (const u of ['dev1', 'dev2']) {
-    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: u, workbench_group: 'developers' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: u, skowork_group: 'developers' });
   }
   return { admin, dev1: await h.token('dev1'), dev2: await h.token('dev2') };
 }
@@ -444,7 +444,7 @@ test('api connectors: a non-member cannot call, an unselected operation is refus
   const h = await startHarness(devOn);
   try {
     const { admin, dev1, dev2 } = await setup(h);
-    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'outsider', workbench_group: 'sales' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'outsider', skowork_group: 'sales' });
     await createConnector(h, admin, fake);
     await upload(h, admin, 'orders-api', docText(DOC));
     await h.call('PUT', `${ADMIN}/orders-api/operations`, admin, { operations: [{ key: 'GET /orders/{id}', selected: true }] });
@@ -835,7 +835,7 @@ test('api connectors: a personal access token is refused on a connector that doe
     assert.equal(wrong.status, 400);
     const none = await h.call('PUT', '/api/v1/connectors/nope/token', dev1, { token: USER_TOKEN });
     assert.equal(none.status, 404);
-    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'outsider', workbench_group: 'sales' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'outsider', skowork_group: 'sales' });
     const outsider = await h.call('PUT', '/api/v1/connectors/orders-api/token', await h.token('outsider'), { token: USER_TOKEN });
     assert.equal(outsider.status, 404, 'a connector outside the user\'s Groups is not visible to set a token on');
     // The settings of a user-pat connector need help text (task 7.3, API side).
@@ -1004,8 +1004,8 @@ test('api connectors: two Groups receive the connector once, and a user in neith
   const h = await startHarness(devOn);
   try {
     const { admin } = await setup(h);
-    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'sales1', workbench_group: 'sales' });
-    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'nobody1', workbench_group: 'other' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'sales1', skowork_group: 'sales' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'nobody1', skowork_group: 'other' });
     await createConnector(h, admin, fake, { groups: ['developers', 'sales'] });
     await upload(h, admin, 'orders-api', docText(DOC));
     await h.call('PUT', `${ADMIN}/orders-api/operations`, admin, { operations: [{ key: 'GET /orders/{id}', selected: true }] });

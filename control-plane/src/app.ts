@@ -116,7 +116,7 @@ export function createControlPlane(
     res.json({
       discovery_url: cfg.identity.discoveryUrl,
       client_id: cfg.identity.allowedClients[0] ?? '',
-      redirect_uri: process.env.WORKBENCH_ADMIN_REDIRECT_URI ?? process.env.OIDC_REDIRECT_URI ?? '',
+      redirect_uri: process.env.SKOWORK_ADMIN_REDIRECT_URI ?? process.env.OIDC_REDIRECT_URI ?? '',
       scope: process.env.OIDC_SCOPE ?? 'openid profile email',
     });
   });

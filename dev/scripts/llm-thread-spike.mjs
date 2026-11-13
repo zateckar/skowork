@@ -58,7 +58,7 @@ async function chat(messages) {
   return { ttft: Math.round(ttft), prompt: usage?.prompt_tokens ?? 0, cached: usage?.prompt_tokens_details?.cached_tokens ?? 0 };
 }
 
-const basePrompt = 'You are SkoWork, a helpful assistant. Answer in one short word.';
+const basePrompt = 'You are Skowork, a helpful assistant. Answer in one short word.';
 const stable = '- User: test.user\n- Time zone: W. Europe Standard Time (UTC+01:00)\n- Documents: C:/Users/test/Documents';
 const history = [];
 console.log(`mode=${mode} model=${model} turns=${turns} ≈${perTurn} tokens per Turn`);

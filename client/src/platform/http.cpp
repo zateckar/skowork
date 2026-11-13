@@ -6,6 +6,8 @@
 
 #include <winhttp.h>
 
+#include <algorithm>
+
 namespace wb {
 namespace {
 
@@ -79,12 +81,12 @@ void CancelToken::detach() {
 }
 
 namespace {
-#ifdef WORKBENCH_DEV_ENDPOINTS
-// Debug and test builds: WORKBENCH_DEV_PROXY=http://127.0.0.1:3128 sends non-loopback requests through
+#ifdef SKOWORK_DEV_ENDPOINTS
+// Debug and test builds: SKOWORK_DEV_PROXY=http://127.0.0.1:3128 sends non-loopback requests through
 // dev/scripts/dev-proxy.mjs, for machines that block outbound connections from unsigned local builds.
 std::wstring dev_proxy() {
     wchar_t buf[256];
-    const DWORD n = ::GetEnvironmentVariableW(L"WORKBENCH_DEV_PROXY", buf, 256);
+    const DWORD n = ::GetEnvironmentVariableW(L"SKOWORK_DEV_PROXY", buf, 256);
     std::wstring v = n > 0 && n < 256 ? std::wstring(buf, n) : std::wstring{};
     if (v.rfind(L"http://", 0) == 0) v = v.substr(7);
     while (!v.empty() && v.back() == L'/') v.pop_back();
@@ -94,7 +96,7 @@ std::wstring dev_proxy() {
 }  // namespace
 
 HttpClient::HttpClient(std::wstring user_agent) {
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
     if (const std::wstring proxy = dev_proxy(); !proxy.empty())
         session_ = ::WinHttpOpen(user_agent.c_str(), WINHTTP_ACCESS_TYPE_NAMED_PROXY, proxy.c_str(), L"<local>", 0);
     else
@@ -118,7 +120,7 @@ bool HttpClient::url_allowed(std::string_view url) {
     const auto u = parse_url(url);
     if (!u) return false;
     if (u->scheme == "https" || u->scheme == "wss") return true;
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
     if ((u->scheme == "http" || u->scheme == "ws") && u->is_loopback()) return true;
 #endif
     return false;
@@ -207,8 +209,14 @@ Result<HttpResponse> HttpClient::send(const HttpRequest& req) {
         const bool stream_body = req.on_chunk && (!req.stream_success_only || (status >= 200 && status < 300));
         std::string buf(16 * 1024, '\0');
         for (;;) {
+            // A synchronous WinHttpReadData waits until its buffer is full or the body ends, which holds back SSE
+            // keep-alives and small deltas (fix-long-thread-model-calls D8). Read only what is available.
+            DWORD avail = 0;
+            if (!::WinHttpQueryDataAvailable(r.get(), &avail)) return map_error(::GetLastError(), req.cancel.get());
+            if (avail == 0) break;
             DWORD got = 0;
-            if (!::WinHttpReadData(r.get(), buf.data(), static_cast<DWORD>(buf.size()), &got))
+            const DWORD want = std::min<DWORD>(avail, static_cast<DWORD>(buf.size()));
+            if (!::WinHttpReadData(r.get(), buf.data(), want, &got))
                 return map_error(::GetLastError(), req.cancel.get());
             if (got == 0) break;
             const std::string_view chunk(buf.data(), got);
@@ -224,7 +232,7 @@ Result<HttpResponse> HttpClient::send(const HttpRequest& req) {
 }
 
 HttpClient& http() {
-    static HttpClient client(L"Workbench");
+    static HttpClient client(L"Skowork");
     return client;
 }
 

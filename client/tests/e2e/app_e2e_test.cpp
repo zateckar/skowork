@@ -1,4 +1,4 @@
-// Workbench.exe end to end (client/desktop-host): single instance with argument hand-off, sign-in through the system
+// Skowork.exe end to end (client/desktop-host): single instance with argument hand-off, sign-in through the system
 // browser and the loopback redirect, no listening sockets outside sign-in, no process for the window, and no tokens
 // in the logs.
 #include "e2e_support.h"
@@ -40,7 +40,7 @@ struct AppProcess {
     DWORD pid = 0;
 };
 
-AppProcess launch(const std::wstring& args, const wchar_t* executable = L"SkoWork.exe") {
+AppProcess launch(const std::wstring& args, const wchar_t* executable = L"Skowork.exe") {
     const auto exe = exe_dir() / executable;
     std::wstring cmd = L"\"" + exe.wstring() + L"\" " + args;
     STARTUPINFOW si{};
@@ -52,9 +52,9 @@ AppProcess launch(const std::wstring& args, const wchar_t* executable = L"SkoWor
 }
 
 struct Instance {
-    std::wstring pipe_short = L"workbench-e2e-" + widen(random_urlsafe(6));
+    std::wstring pipe_short = L"skowork-e2e-" + widen(random_urlsafe(6));
     std::wstring pipe = L"\\\\.\\pipe\\" + pipe_short;
-    std::filesystem::path dir = std::filesystem::temp_directory_path() / L"workbench-test" / widen("app-" + random_urlsafe(6));
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / L"skowork-test" / widen("app-" + random_urlsafe(6));
     AppProcess main;
 
     std::wstring common_args() const {
@@ -181,7 +181,7 @@ TEST(AppE2E, LegacyLauncherHandsOverToExistingInstance) {
     ASSERT_TRUE(ui);
     ASSERT_FALSE(jbool(*ui, "open"));
 
-    AppProcess legacy = launch(a.common_args(), L"Workbench-legacy.exe");
+    AppProcess legacy = launch(a.common_args(), L"Skowork-legacy.exe");
     ASSERT_TRUE(legacy.process);
     DWORD code = 99;
     ASSERT_TRUE(exited_within(legacy, 10000, &code));
@@ -198,7 +198,7 @@ TEST(AppE2E, LegacyLauncherHandsOverToExistingInstance) {
 }
 
 TEST(AppE2E, SignInCompletesThroughTheLoopbackRedirect) {
-    WORKBENCH_REQUIRE_STACK();
+    SKOWORK_REQUIRE_STACK();
     Instance a;
     a.write_config(stack_config());
     // First start without a session opens the system browser; single sign-on (or the user) completes it.
@@ -246,18 +246,18 @@ TEST(AppE2E, NoListeningSocketsAndNoProcessForTheWindow) {
     std::this_thread::sleep_for(1500ms);  // anything the window started would be running by now
     // The native window is drawn by the client itself (client/desktop-host On-Demand UI Window): no new process.
     for (const auto& [pid, name] : child_processes(a.main.pid))
-        if (!before.contains(pid)) EXPECT_EQ(name, L"workbench-worker.exe") << "process started with the window";
+        if (!before.contains(pid)) EXPECT_EQ(name, L"skowork-worker.exe") << "process started with the window";
     auto closed = a.call("dev.ui", {{"action", "close"}});
     ASSERT_TRUE(closed);
     EXPECT_FALSE(jbool(*closed, "open"));
     EXPECT_TRUE(process_alive(a.main.pid)) << "the client keeps running in the tray";
     EXPECT_EQ(listening(a.main.pid), 0);
 }
-// add-agent-runtime 6.1-6.3: the agent runtime in Workbench.exe. A message sent over the (development) pipe API starts
+// add-agent-runtime 6.1-6.3: the agent runtime in Skowork.exe. A message sent over the (development) pipe API starts
 // a Run against the real gateway and model; the Run context gives the model today's date; while the control plane is
-// unreachable a new Run is refused with the reason (needs WORKBENCH_E2E_CP_UPSTREAM for the outage part).
+// unreachable a new Run is refused with the reason (needs SKOWORK_E2E_CP_UPSTREAM for the outage part).
 TEST(AppE2E, AgentRunThroughTheLocalApi) {
-    WORKBENCH_REQUIRE_STACK();
+    SKOWORK_REQUIRE_STACK();
     Instance a;
     a.write_config(stack_config());
     ASSERT_TRUE(a.start());
@@ -301,7 +301,7 @@ TEST(AppE2E, AgentRunThroughTheLocalApi) {
     EXPECT_EQ(jstr((*list)["threads"].at(0), "id"), thread);
 
     if (!cp_proxy()) {
-        std::printf("[ SKIPPED part ] outage check: set WORKBENCH_E2E_CP_UPSTREAM to run it through the proxy\n");
+        std::printf("[ SKIPPED part ] outage check: set SKOWORK_E2E_CP_UPSTREAM to run it through the proxy\n");
         return;
     }
     cp_proxy()->set_down(true);
@@ -318,7 +318,7 @@ TEST(AppE2E, AgentRunThroughTheLocalApi) {
 // policy-changed push, a tool call it allowed is now decided as approve, and simulation shows the same result. The
 // test uses its own Groups (e2e-developers, e2e-pilot) and tool id, so it does not disturb the dev stack's policy.
 TEST(AppE2E, PilotRolloutReachesTheClientAndMatchesSimulation) {
-    WORKBENCH_REQUIRE_STACK();
+    SKOWORK_REQUIRE_STACK();
     auto admin = admin_token();
     ASSERT_TRUE(admin) << admin.error().message;
     const std::string user = user_name_of(*admin);
@@ -326,7 +326,7 @@ TEST(AppE2E, PilotRolloutReachesTheClientAndMatchesSimulation) {
     const std::string tool = "e2e.rollout.probe";
     const auto members = [&](const char* method) {
         for (const char* g : {"e2e-developers", "e2e-pilot"})
-            (void)cp_call(method, "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"workbench_group", g}});
+            (void)cp_call(method, "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"skowork_group", g}});
     };
     const auto publish = [&](const char* decision, const json& rollout) {
         auto d = cp_call("PUT", group + "/draft", *admin,
@@ -410,8 +410,8 @@ struct NodeServer {
     NodeServer() {
         wchar_t node[MAX_PATH];
         if (::SearchPathW(nullptr, L"node.exe", nullptr, MAX_PATH, node, nullptr) == 0) return;
-        const std::filesystem::path script = std::filesystem::path(WORKBENCH_MCP_TEST_SERVER_DIR) / "server.mjs";
-        if (!std::filesystem::exists(std::filesystem::path(WORKBENCH_MCP_TEST_SERVER_DIR) / "node_modules")) return;
+        const std::filesystem::path script = std::filesystem::path(SKOWORK_MCP_TEST_SERVER_DIR) / "server.mjs";
+        if (!std::filesystem::exists(std::filesystem::path(SKOWORK_MCP_TEST_SERVER_DIR) / "node_modules")) return;
         SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
         HANDLE r = nullptr, w = nullptr;
         ::CreatePipe(&r, &w, &sa, 0);
@@ -447,7 +447,7 @@ struct NodeServer {
 }  // namespace
 
 TEST(AppE2E, DeveloperSearchesJiraEditsAFileAndRunsABuild) {
-    WORKBENCH_REQUIRE_STACK();
+    SKOWORK_REQUIRE_STACK();
     NodeServer jira;
     if (jira.url.empty()) GTEST_SKIP() << "node or dev/mcp-test-server/node_modules missing (npm ci there)";
     auto admin = admin_token();
@@ -463,7 +463,7 @@ TEST(AppE2E, DeveloperSearchesJiraEditsAFileAndRunsABuild) {
         ~Cleanup() { f(); }
     } cleanup{[&] {
         (void)cp_call("DELETE", catalog + "/e2e-jira", *admin);
-        (void)cp_call("DELETE", "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"workbench_group", group_name}});
+        (void)cp_call("DELETE", "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"skowork_group", group_name}});
     }};
     // The catalog entry: discovery runs against the mock with the administrator's identity-provider token.
     auto created = cp_call("POST", catalog, *admin,
@@ -482,7 +482,7 @@ TEST(AppE2E, DeveloperSearchesJiraEditsAFileAndRunsABuild) {
     ASSERT_EQ(draft.first, 200) << draft.second.dump();
     auto published = cp_call("POST", group + "/publish", *admin, {{"reason", "e2e 5.1 (add-core-tools-and-mcp)"}});
     ASSERT_EQ(published.first, 200) << published.second.dump();
-    (void)cp_call("POST", "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"workbench_group", group_name}});
+    (void)cp_call("POST", "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"skowork_group", group_name}});
 
     Instance a;
     a.write_config(stack_config());
@@ -584,11 +584,11 @@ TEST(AppE2E, DeveloperSearchesJiraEditsAFileAndRunsABuild) {
 }
 
 // add-work-inbox 8.1 (and the toast part of 6.1): a user-started Run in a Thread raises an Approval while the window
-// is closed; Windows shows a Workbench toast (needs the AUMID registration under HKCU); the toast's click handling opens
+// is closed; Windows shows a Skowork toast (needs the AUMID registration under HKCU); the toast's click handling opens
 // the window on that Thread, whose Approval carries its provenance; once approved the Run completes, and with the
 // window closed again the Thread becomes unread. The physical click on the toast is checked by hand.
 TEST(AppE2E, BackgroundApprovalRaisesAToastThatOpensTheThread) {
-    WORKBENCH_REQUIRE_STACK();
+    SKOWORK_REQUIRE_STACK();
     Instance a;
     a.write_config(stack_config());
     ASSERT_TRUE(a.start());  // --background: the window is closed
@@ -629,7 +629,7 @@ TEST(AppE2E, BackgroundApprovalRaisesAToastThatOpensTheThread) {
         EXPECT_GE(jint(toasts, "history"), 1) << toasts.dump();
     } else {
         // Windows takes the toast but drops it when the user turned notifications off; the rest still runs.
-        std::printf("[ SKIPPED part ] Action Center check: Windows notifications are %s for Workbench\n", jstr(toasts, "setting").c_str());
+        std::printf("[ SKIPPED part ] Action Center check: Windows notifications are %s for Skowork\n", jstr(toasts, "setting").c_str());
     }
     EXPECT_FALSE(jbool(toasts, "window_open"));
     auto entry = a.call("inbox.entry", {{"thread_id", thread}});
@@ -675,7 +675,7 @@ TEST(AppE2E, BackgroundApprovalRaisesAToastThatOpensTheThread) {
 // stack has one user, so the user's Groups are under the k floor: the dashboards with populated Groups are covered
 // by the control-plane tests.
 TEST(AppE2E, PilotRehearsalMetadataTelemetryAndAuditedAccess) {
-    WORKBENCH_REQUIRE_STACK();
+    SKOWORK_REQUIRE_STACK();
     auto admin = admin_token();
     ASSERT_TRUE(admin) << admin.error().message;
     const std::string user = user_name_of(*admin);
@@ -787,9 +787,9 @@ TEST(AppE2E, PilotRehearsalMetadataTelemetryAndAuditedAccess) {
 // add-image-generation 4.1: a user asks for an image in a Thread; the agent finds and calls image.generate on the real
 // image model through the gateway; the Thread feed lists the stored image under the tool card, the window can read it,
 // and the gateway's usage audit has exactly one image request for the Run. Reads the dev stack's control-plane
-// database (dev/.stack/workbench.db, or WORKBENCH_E2E_CP_DB) for the audit.
+// database (dev/.stack/skowork.db, or SKOWORK_E2E_CP_DB) for the audit.
 TEST(AppE2E, ImageRequestedInAThreadAppearsInTheFeed) {
-    WORKBENCH_REQUIRE_STACK();
+    SKOWORK_REQUIRE_STACK();
     Instance a;
     a.write_config(stack_config());
     ASSERT_TRUE(a.start());
@@ -846,8 +846,8 @@ TEST(AppE2E, ImageRequestedInAThreadAppearsInTheFeed) {
     // The gateway's usage audit: one image request for this Run, one image.
     std::string db_path = [] {
         char buf[1024];
-        const DWORD n = ::GetEnvironmentVariableA("WORKBENCH_E2E_CP_DB", buf, sizeof buf);
-        return n > 0 && n < sizeof buf ? std::string(buf, n) : std::string(WORKBENCH_DEV_STACK_DIR "/workbench.db");
+        const DWORD n = ::GetEnvironmentVariableA("SKOWORK_E2E_CP_DB", buf, sizeof buf);
+        return n > 0 && n < sizeof buf ? std::string(buf, n) : std::string(SKOWORK_DEV_STACK_DIR "/skowork.db");
     }();
     sqlite3* db = nullptr;
     ASSERT_EQ(sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr), SQLITE_OK) << db_path;
@@ -871,7 +871,7 @@ TEST(AppE2E, ImageRequestedInAThreadAppearsInTheFeed) {
 // provenance. The overlay is up while the agent acts; the stop hotkey cancels a second Run; the tool outcomes are in the
 // Telemetry viewer. Sends real input: run it in an unlocked session nobody is using at that moment.
 TEST(AppE2E, ComputerUseFillsAndSavesAFormWithApprovalOverlayAndStop) {
-    WORKBENCH_REQUIRE_STACK();
+    SKOWORK_REQUIRE_STACK();
     auto admin = admin_token();
     ASSERT_TRUE(admin) << admin.error().message;
     const std::string user = user_name_of(*admin);
@@ -880,7 +880,7 @@ TEST(AppE2E, ComputerUseFillsAndSavesAFormWithApprovalOverlayAndStop) {
     struct Cleanup {
         std::function<void()> f;
         ~Cleanup() { f(); }
-    } cleanup{[&] { (void)cp_call("DELETE", "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"workbench_group", group_name}}); }};
+    } cleanup{[&] { (void)cp_call("DELETE", "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"skowork_group", group_name}}); }};
     auto draft = cp_call("PUT", group + "/draft", *admin,
                          {{"document", {{"tools", {{"computer", {{"mode", "allow"}, {"perception", "tree_and_vision"}}},
                                                    {"risk", {{"read", "allow"}, {"external", "allow"}, {"destructive", "approve"}}}}}}},
@@ -889,7 +889,7 @@ TEST(AppE2E, ComputerUseFillsAndSavesAFormWithApprovalOverlayAndStop) {
     ASSERT_EQ(draft.first, 200) << draft.second.dump();
     auto published = cp_call("POST", group + "/publish", *admin, {{"reason", "e2e 5.1 (add-computer-use)"}});
     ASSERT_EQ(published.first, 200) << published.second.dump();
-    (void)cp_call("POST", "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"workbench_group", group_name}});
+    (void)cp_call("POST", "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"skowork_group", group_name}});
 
     // The line-of-business form.
     const std::string title = "Order entry " + random_urlsafe(5);
@@ -960,7 +960,7 @@ TEST(AppE2E, ComputerUseFillsAndSavesAFormWithApprovalOverlayAndStop) {
 
     const auto settle = [&](const std::string& run, int seconds, std::atomic<bool>* overlay_seen = nullptr) {
         return until("runs.get", {{"run_id", run}}, [&](const json& x) {
-            if (overlay_seen && ::FindWindowW(L"WorkbenchComputerOverlay", nullptr)) *overlay_seen = true;
+            if (overlay_seen && ::FindWindowW(L"SkoworkComputerOverlay", nullptr)) *overlay_seen = true;
             const std::string s = jstr(x, "state");
             return s == "succeeded" || s == "failed" || s == "cancelled" || s == "interrupted";
         }, seconds);
@@ -1004,7 +1004,7 @@ TEST(AppE2E, ComputerUseFillsAndSavesAFormWithApprovalOverlayAndStop) {
     const std::string run2 = jstr(*second, "run_id");
     bool pressed = false;
     for (int i = 0; i < 3000 && !pressed; ++i) {
-        if (::FindWindowW(L"WorkbenchComputerOverlay", nullptr)) {
+        if (::FindWindowW(L"SkoworkComputerOverlay", nullptr)) {
             INPUT in[6] = {};
             const WORD vks[3] = {VK_CONTROL, VK_MENU, VK_END};
             for (int k = 0; k < 3; ++k) {
@@ -1022,8 +1022,8 @@ TEST(AppE2E, ComputerUseFillsAndSavesAFormWithApprovalOverlayAndStop) {
     ASSERT_TRUE(pressed) << "the agent never took control in the second Run";
     r = settle(run2, 30);
     EXPECT_EQ(jstr(r, "state"), "cancelled") << r.dump();
-    for (int i = 0; i < 50 && ::FindWindowW(L"WorkbenchComputerOverlay", nullptr); ++i) std::this_thread::sleep_for(100ms);
-    EXPECT_EQ(::FindWindowW(L"WorkbenchComputerOverlay", nullptr), nullptr) << "the overlay is gone after the stop";
+    for (int i = 0; i < 50 && ::FindWindowW(L"SkoworkComputerOverlay", nullptr); ++i) std::this_thread::sleep_for(100ms);
+    EXPECT_EQ(::FindWindowW(L"SkoworkComputerOverlay", nullptr), nullptr) << "the overlay is gone after the stop";
 
     // Telemetry: each computer tool call with its outcome, metadata only.
     json view = until("telemetry.view", json::object(), [&run](const json& v) {
@@ -1049,7 +1049,7 @@ TEST(AppE2E, ComputerUseFillsAndSavesAFormWithApprovalOverlayAndStop) {
 // by the real model through vision alone. The order code exists only as pixels; the Confirm button is a painted
 // rectangle. The model must take a screenshot, read the code through the vision role and click the right pixels.
 TEST(AppE2E, ComputerUseOperatesACustomDrawnApplicationThroughVision) {
-    WORKBENCH_REQUIRE_STACK();
+    SKOWORK_REQUIRE_STACK();
     auto admin = admin_token();
     ASSERT_TRUE(admin) << admin.error().message;
     const std::string user = user_name_of(*admin);
@@ -1058,7 +1058,7 @@ TEST(AppE2E, ComputerUseOperatesACustomDrawnApplicationThroughVision) {
     struct Cleanup {
         std::function<void()> f;
         ~Cleanup() { f(); }
-    } cleanup{[&] { (void)cp_call("DELETE", "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"workbench_group", group_name}}); }};
+    } cleanup{[&] { (void)cp_call("DELETE", "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"skowork_group", group_name}}); }};
     auto draft = cp_call("PUT", group + "/draft", *admin,
                          {{"document", {{"tools", {{"computer", {{"mode", "allow"}, {"perception", "tree_and_vision"}}},
                                                    {"risk", {{"read", "allow"}, {"external", "allow"}, {"destructive", "approve"}}}}}}},
@@ -1066,7 +1066,7 @@ TEST(AppE2E, ComputerUseOperatesACustomDrawnApplicationThroughVision) {
                           {"reason", "e2e 2.5 (add-computer-use)"}});
     ASSERT_EQ(draft.first, 200) << draft.second.dump();
     ASSERT_EQ(cp_call("POST", group + "/publish", *admin, {{"reason", "e2e 2.5 (add-computer-use)"}}).first, 200);
-    (void)cp_call("POST", "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"workbench_group", group_name}});
+    (void)cp_call("POST", "/api/v1/admin/identity/group-members", *admin, {{"user_name", user}, {"skowork_group", group_name}});
 
     const std::string title = "Dispatch board " + random_urlsafe(5);
     const int code = 1000 + static_cast<int>(random_bytes(2)[0]) * 31 % 9000;

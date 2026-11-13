@@ -122,7 +122,7 @@ TEST(McpProtocol, CatalogEntriesAreValidated) {
 TEST(McpProtocol, InitializeHandshakeMessages) {
     const json p = initialize_params("2025-03-26", "1.2.3");
     EXPECT_EQ(p["protocolVersion"], "2025-03-26");
-    EXPECT_EQ(p["clientInfo"]["name"], "Workbench");
+    EXPECT_EQ(p["clientInfo"]["name"], "Skowork");
     EXPECT_EQ(initialize_params("", "1")["protocolVersion"], kDefaultProtocolVersion);
     auto info = parse_initialize(json{{"protocolVersion", "2025-06-18"}, {"capabilities", {{"tools", json::object()}}}, {"serverInfo", {{"name", "s"}}}});
     ASSERT_TRUE(info.ok());

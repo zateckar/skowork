@@ -14,7 +14,7 @@ test('policy editor finds an unset computer tool and preserves a custom rule', {
   const h = await startHarness((cfg) => { cfg.mcpCatalog.allowInsecureHttp = true; });
   const idp = await fakeIdp(h);
   h.cfg.identity.discoveryUrl = idp.url;
-  process.env.WORKBENCH_ADMIN_REDIRECT_URI = `${h.base}/admin/`;
+  process.env.SKOWORK_ADMIN_REDIRECT_URI = `${h.base}/admin/`;
   let b: Browser | undefined;
   try {
     const admin = await h.token('admin1');
@@ -95,6 +95,6 @@ test('policy editor finds an unset computer tool and preserves a custom rule', {
     await idp.close();
     await h.close();
     await mcp.close();
-    delete process.env.WORKBENCH_ADMIN_REDIRECT_URI;
+    delete process.env.SKOWORK_ADMIN_REDIRECT_URI;
   }
 });

@@ -116,7 +116,7 @@ export class Messaging {
     this.enter(user);
     if (body.state !== undefined) {
       if (body.state !== 'active' && body.state !== 'idle') throw new ApiError(400, 'INVALID_REQUEST', 'state must be active or idle.');
-      if (!installation) throw new ApiError(400, 'INVALID_REQUEST', 'The X-Workbench-Installation header is required with state.');
+      if (!installation) throw new ApiError(400, 'INVALID_REQUEST', 'The X-Skowork-Installation header is required with state.');
       this.#db
         .prepare(
           `INSERT INTO presence_reports (installation_id, user_name, idle, at) VALUES (?, ?, ?, ?)
@@ -400,7 +400,7 @@ const body = (req: Request) => (req.body && typeof req.body === 'object' ? (req.
 export function messagingRoutes(m: Messaging): Router {
   const r = Router();
   r.get('/directory', wrap((req) => m.directory(req.user!, str(req.query.q))));
-  r.put('/presence', wrap((req) => m.setPresence(req.user!, req.header('x-workbench-installation') ?? undefined, body(req))));
+  r.put('/presence', wrap((req) => m.setPresence(req.user!, req.header('x-skowork-installation') ?? undefined, body(req))));
   r.get('/chats', wrap((req) => m.chats(req.user!)));
   r.post('/chats', wrap((req) => m.createChat(req.user!, body(req))));
   r.patch('/chats/:id', wrap((req) => m.renameChat(req.user!, String(req.params.id), body(req))));

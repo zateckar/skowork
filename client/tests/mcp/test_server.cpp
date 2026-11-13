@@ -50,7 +50,7 @@ int main() {
         if (method == "initialize") {
             reply({{"jsonrpc", "2.0"}, {"id", id}, {"result", {{"protocolVersion", params.value("protocolVersion", "2025-06-18")},
                                                                {"capabilities", {{"tools", json::object()}}},
-                                                               {"serverInfo", {{"name", "workbench-test-server"}, {"version", "1.0"}}}}}});
+                                                               {"serverInfo", {{"name", "skowork-test-server"}, {"version", "1.0"}}}}}});
         } else if (method == "tools/list") {
             const std::string cursor = params.value("cursor", "");
             json tools = json::array();
@@ -99,7 +99,7 @@ int main() {
                 std::_Exit(3);
             } else if (name == "env") {
                 result = text("MODE=" + env("MODE") + " PROXY=" + (env("HTTPS_PROXY").empty() ? "no" : "yes") +
-                              " SECRET=" + (env("WORKBENCH_TEST_SECRET").empty() ? "no" : "yes"));
+                              " SECRET=" + (env("SKOWORK_TEST_SECRET").empty() ? "no" : "yes"));
             } else {
                 reply({{"jsonrpc", "2.0"}, {"id", id}, {"error", {{"code", -32602}, {"message", "unknown tool " + name}}}});
                 continue;

@@ -92,7 +92,7 @@ bool LineFramer::feed(std::string_view chunk, std::vector<std::string>& out) {
 json initialize_params(const std::string& protocol_version, const std::string& client_version) {
     return {{"protocolVersion", protocol_version.empty() ? std::string(kDefaultProtocolVersion) : protocol_version},
             {"capabilities", json::object()},
-            {"clientInfo", {{"name", "Workbench"}, {"version", client_version}}}};
+            {"clientInfo", {{"name", "Skowork"}, {"version", client_version}}}};
 }
 
 Result<ServerInfo> parse_initialize(const json& result) {

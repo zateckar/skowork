@@ -25,7 +25,7 @@
 
 namespace wb::skills {
 
-inline constexpr const char* kSkillSignatureTyp = "workbench-skill+jwt";
+inline constexpr const char* kSkillSignatureTyp = "skowork-skill+jwt";
 
 struct SyncEnv {
     std::filesystem::path data_dir;  // <data root>/skills
@@ -33,14 +33,14 @@ struct SyncEnv {
     std::function<Result<json>()> fetch_list;
     // GET /api/v1/skills/content/{digest}: the package bytes.
     std::function<Result<std::string>(const std::string& digest)> fetch_content;
-    // GET /.well-known/workbench-skill-keys.json.
+    // GET /.well-known/skowork-skill-keys.json.
     std::function<Result<json>()> fetch_keys;
     // POST /api/v1/skills/usage with {skills: [{name, installs, runs, failures}]}.
     std::function<Status(const json& body)> post_usage;
     // Lower-case hex SHA-256.
     std::function<std::string(std::string_view bytes)> sha256_hex;
     // The payload of a compact JWS when its ES256 signature verifies with one of `keys` and its typ is
-    // workbench-skill+jwt; an error otherwise.
+    // skowork-skill+jwt; an error otherwise.
     std::function<Result<json>(const std::string& jws, const json& keys)> verify_jws;
     // policy.skills.install_from (default [org, group, shared]) and policy.skills.auto_update (default true).
     std::function<std::vector<std::string>()> install_from;

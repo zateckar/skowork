@@ -54,7 +54,7 @@ export class GraphMock {
   constructor(opts: MockOptions = {}) {
     this.host = opts.host ?? '127.0.0.1';
     this.fixturesName = opts.fixtures ?? 'default';
-    this.state = new MockState(loadFixtures(this.fixturesName), opts.seed ?? 'workbench', opts.anchor);
+    this.state = new MockState(loadFixtures(this.fixturesName), opts.seed ?? 'skowork', opts.anchor);
   }
 
   async init(): Promise<void> {

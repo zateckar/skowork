@@ -194,7 +194,7 @@ Status ComputerService::begin_control(const std::string& run_id, const std::stri
     const Hotkey hk = hotkey();
     const std::string title = env_.thread_title ? env_.thread_title(thread_id) : std::string{};
     const std::wstring banner = env_.banner ? env_.banner(title, hk.text)
-                                            : widen("SkoWork is controlling this window for \"" + title + "\". Press " + hk.text + " to stop.");
+                                            : widen("Skowork is controlling this window for \"" + title + "\". Press " + hk.text + " to stop.");
     ControlSession* session = nullptr;
     {
         const std::lock_guard lock(ctl_mx_);
@@ -285,8 +285,8 @@ ToolOutput ComputerService::act(ToolContext& ctx, const std::string& tool, const
     {
         const std::lock_guard lock(rs->mx);
         if (rs->interrupted)
-            return question("user_input", "You used the mouse or keyboard while SkoWork was operating \"" + w.title +
-                                              "\". Should SkoWork continue controlling the desktop?");
+            return question("user_input", "You used the mouse or keyboard while Skowork was operating \"" + w.title +
+                                              "\". Should Skowork continue controlling the desktop?");
     }
     if (ctx.cancelled()) return ToolOutput::failure("The task was cancelled.");
     if (Status s = begin_control(ctx.run_id, ctx.thread_id, w); !s) return ToolOutput::failure(tool + " cannot take control: " + s.error().message);
@@ -301,8 +301,8 @@ ToolOutput ComputerService::act(ToolContext& ctx, const std::string& tool, const
             const std::lock_guard lock(rs->mx);
             rs->interrupted = true;
         }
-        out = question("user_input", "You used the mouse or keyboard while SkoWork was operating \"" + w.title +
-                                         "\", so it stopped. Should SkoWork continue controlling the desktop?");
+        out = question("user_input", "You used the mouse or keyboard while Skowork was operating \"" + w.title +
+                                         "\", so it stopped. Should Skowork continue controlling the desktop?");
     }
     // The overlay stays a moment, so it does not flicker between consecutive actions.
     unsigned long long gen = 0;
@@ -342,12 +342,12 @@ ToolOutput ComputerService::resume(ToolContext& ctx, const json&, const json& st
     }
     if (kind == "surface")
         return ToolOutput::failure("No input was sent: Windows showed " + jstr(state, "surface") +
-                                   ", which SkoWork cannot operate. The user handled it and chose Continue; observe the window again.");
+                                   ", which Skowork cannot operate. The user handled it and chose Continue; observe the window again.");
     if (kind == "elevated")
-        return ToolOutput::failure("No input was sent: the window runs as administrator, which SkoWork cannot operate. The user did "
+        return ToolOutput::failure("No input was sent: the window runs as administrator, which Skowork cannot operate. The user did "
                                    "the step and chose Continue; observe the window again.");
     if (kind == "password")
-        return ToolOutput::success("SkoWork does not type passwords or credentials. The user entered the value and chose Continue; "
+        return ToolOutput::success("Skowork does not type passwords or credentials. The user entered the value and chose Continue; "
                                    "observe the window again.");
     return ToolOutput::success("The user chose Continue.");
 }
@@ -513,11 +513,11 @@ Result<ComputerService::Target> ComputerService::resolve(RunState& rs, const jso
 
 std::optional<ToolOutput> ComputerService::reachable(ToolContext&, const std::string& tool, const WindowInfo& w) {
     if (auto surface = env_.unreachable_surface ? env_.unreachable_surface() : unreachable_desktop())
-        return question("surface", "Windows shows " + *surface + ", which SkoWork cannot operate. Please complete that step yourself, "
+        return question("surface", "Windows shows " + *surface + ", which Skowork cannot operate. Please complete that step yourself, "
                                    "then choose Continue.", {{"surface", *surface}, {"tool", tool}});
     if (auto refusal = scope_refusal(w)) return ToolOutput::failure(tool + " refused by policy: " + *refusal + ". No input was sent.");
     if (env_.elevated ? env_.elevated(w.pid) : runs_elevated(w.pid))
-        return question("elevated", "\"" + w.title + "\" (" + w.process + ") runs as administrator, which SkoWork cannot operate. "
+        return question("elevated", "\"" + w.title + "\" (" + w.process + ") runs as administrator, which Skowork cannot operate. "
                                     "Please do this step yourself, then choose Continue.", {{"tool", tool}});
     return std::nullopt;
 }
@@ -847,7 +847,7 @@ ToolOutput ComputerService::type(ToolContext& ctx, const json& args) {
     auto t = resolve(*rs, args, "", false);
     if (!t) return ToolOutput::failure(t.error().message);
     const auto password = [&] {
-        return question("password", "SkoWork does not type passwords or credentials. Please enter the value in \"" + t->window.title +
+        return question("password", "Skowork does not type passwords or credentials. Please enter the value in \"" + t->window.title +
                                         "\" yourself, then choose Continue.");
     };
     if (is_credential_process(t->window.process) || (t->el && is_credential_element(t->el->info, t->window.process))) return password();

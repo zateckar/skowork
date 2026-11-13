@@ -62,7 +62,7 @@ export function adminConsoleRoutes(db: Db, audit: Audit, telemetry: TelemetryIng
       details: { filter: f, format, events: rows.length },
     });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    res.setHeader('Content-Disposition', `attachment; filename="workbench-audit-${stamp}.${format}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="skowork-audit-${stamp}.${format}"`);
     if (format === 'jsonl') {
       res.type('application/x-ndjson').send(rows.map((x) => JSON.stringify(x)).join('\n') + (rows.length ? '\n' : ''));
       return;

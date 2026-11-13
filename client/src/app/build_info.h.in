@@ -2,7 +2,7 @@
 #pragma once
 
 namespace wb {
-inline constexpr char kVersion[] = "@WORKBENCH_VERSION@";
-inline constexpr char kChannel[] = "@WORKBENCH_CHANNEL@";
-inline constexpr char kCommit[] = "@WORKBENCH_COMMIT@";
+inline constexpr char kVersion[] = "@SKOWORK_VERSION@";
+inline constexpr char kChannel[] = "@SKOWORK_CHANNEL@";
+inline constexpr char kCommit[] = "@SKOWORK_COMMIT@";
 }  // namespace wb

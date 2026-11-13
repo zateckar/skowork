@@ -7,7 +7,7 @@ Defines how the control plane relays messages between users: the user directory,
 ## ADDED Requirements
 
 ### Requirement: User Directory
-The control plane SHALL list the users who have signed in to Workbench at least once and whose effective policy.messaging.mode is on, with user name, display name and Presence, searchable by name. Users on the deny list MUST NOT be listed. policy.messaging.mode takes the values on and off, default on.
+The control plane SHALL list the users who have signed in to Skowork at least once and whose effective policy.messaging.mode is on, with user name, display name and Presence, searchable by name. Users on the deny list MUST NOT be listed. policy.messaging.mode takes the values on and off, default on.
 
 #### Scenario: Find a colleague
 - **WHEN** alice searches the directory for "bob"
@@ -21,7 +21,7 @@ The control plane SHALL list the users who have signed in to Workbench at least 
 The control plane SHALL keep each user's Presence as one of online, away, busy and offline. A user is offline while none of their installations has an open push connection, busy while they have set busy, away while every connected installation reports the user idle, and online otherwise. Presence changes are sent to the members of the user's Chats within 5 seconds.
 
 #### Scenario: Going offline
-- **WHEN** bob closes Workbench on his only laptop
+- **WHEN** bob closes Skowork on his only laptop
 - **THEN** alice, who shares a Chat with bob, sees bob as offline within 5 seconds of the push connection closing
 
 ### Requirement: Chats

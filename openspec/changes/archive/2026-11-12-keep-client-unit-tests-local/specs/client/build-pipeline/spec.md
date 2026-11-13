@@ -5,7 +5,7 @@ Define which client checks run in GitHub Actions and which unit-test suites rema
 ## ADDED Requirements
 
 ### Requirement: Local Client Unit Tests
-Client unit tests SHALL be built and executed locally only. GitHub Actions CI and tagged-release workflows SHALL configure client product builds with WORKBENCH_TESTS=OFF and SHALL NOT execute client CTest suites. Local CMake presets, test sources and test commands SHALL remain available.
+Client unit tests SHALL be built and executed locally only. GitHub Actions CI and tagged-release workflows SHALL configure client product builds with SKOWORK_TESTS=OFF and SHALL NOT execute client CTest suites. Local CMake presets, test sources and test commands SHALL remain available.
 
 #### Scenario: GitHub Actions builds the client
 - **WHEN** a pull request, main push or version tag triggers a client product build

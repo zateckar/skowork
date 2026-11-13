@@ -24,7 +24,7 @@ namespace fs = std::filesystem;
 namespace {
 
 struct TempDir {
-    fs::path path = fs::path(local_appdata()) / L"workbench-test" / widen(random_urlsafe(6));
+    fs::path path = fs::path(local_appdata()) / L"skowork-test" / widen(random_urlsafe(6));
     TempDir() { fs::create_directories(path); }
     ~TempDir() {
         std::error_code ec;

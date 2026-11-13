@@ -2,7 +2,7 @@
 // organization Keycloak test realm, calls the local control-plane gateway (dev-stack.ps1), which forwards to the real
 // organization LLM API from .env. Local only, never in CI.
 //
-// WORKBENCH_E2E_RECORD=<dir> writes the raw gateway responses (streams as .sse, bodies as .json) for the unit-test
+// SKOWORK_E2E_RECORD=<dir> writes the raw gateway responses (streams as .sse, bodies as .json) for the unit-test
 // fixtures under client/tests/model/fixtures.
 #include "e2e_support.h"
 #include "base/sse.h"
@@ -108,9 +108,9 @@ public:
         }
         return result;
     }
-    // Writes the last response to <WORKBENCH_E2E_RECORD>/<name>.sse|.json.
+    // Writes the last response to <SKOWORK_E2E_RECORD>/<name>.sse|.json.
     void save(const std::string& name) {
-        const std::string dir = env_var("WORKBENCH_E2E_RECORD");
+        const std::string dir = env_var("SKOWORK_E2E_RECORD");
         if (dir.empty()) return;
         const std::lock_guard lock(mx);
         std::filesystem::create_directories(widen(dir));
@@ -130,7 +130,7 @@ private:
 
 struct ModelE2E : ::testing::Test {
     void SetUp() override {
-        WORKBENCH_REQUIRE_STACK();
+        SKOWORK_REQUIRE_STACK();
         auto s = e2e::shared_session();
         ASSERT_TRUE(s) << s.error().message;
         auth = std::make_unique<model::TokenManagerAuth>((*s)->tm);

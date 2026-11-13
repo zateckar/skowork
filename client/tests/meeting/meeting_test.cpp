@@ -562,7 +562,7 @@ TEST(MeetingAudio, SttWorkerTranscribesWithTheTestEngineAtBelowNormalPriority) {
     const std::string remote = write(L"remote.skau", TrackKind::remote, concat({tone(1.0, 8000), silence(1.0), tone(1.0, 2000), silence(0.5)}));
     const std::string local = write(L"local.skau", TrackKind::local, concat({silence(2.2), tone(0.5, 3000)}));
     WorkerHost::Options o;
-    o.worker_exe = exe_dir() / L"workbench-worker.exe";
+    o.worker_exe = exe_dir() / L"skowork-worker.exe";
     WorkerHost host(o);
     auto r = host.call(WorkerRole::stt, "stt.transcribe", {{"tracks", {remote, local}}, {"language", "cs"}});
     ASSERT_TRUE(r) << r.error().code << ": " << r.error().message;
@@ -612,7 +612,7 @@ TEST(MeetingCore, SpeakerLabelsFollowDiarizationOverlapAndLanguageVotes) {
 
 namespace {
 
-std::filesystem::path stt_fixtures() { return std::filesystem::path(WORKBENCH_SOURCE_DIR) / "models" / "stt" / "fixtures"; }
+std::filesystem::path stt_fixtures() { return std::filesystem::path(SKOWORK_SOURCE_DIR) / "models" / "stt" / "fixtures"; }
 
 // The speech package folder the sherpa tests pass to the worker: the fetched models and the vendored runtime, hard-linked
 // into a folder next to the test executable. The product reads only the activated package under the data root; this is a
@@ -621,8 +621,8 @@ std::string test_speech_dir() {
     static const std::string dir = [] {
         namespace fsx = std::filesystem;
         const auto root = exe_dir() / L"speech-fixture" / L"models" / L"stt";
-        const auto models = fsx::path(WORKBENCH_SOURCE_DIR) / "models" / "stt";
-        const auto runtime = fsx::path(WORKBENCH_SOURCE_DIR) / "third_party" / "sherpa-onnx" / "x64";
+        const auto models = fsx::path(SKOWORK_SOURCE_DIR) / "models" / "stt";
+        const auto runtime = fsx::path(SKOWORK_SOURCE_DIR) / "third_party" / "sherpa-onnx" / "x64";
         for (const char* rel : kSpeechRequiredFiles) {
             const std::string name = rel;
             const bool is_runtime = name.find(".dll") != std::string::npos;
@@ -641,7 +641,7 @@ std::string test_speech_dir() {
 
 bool models_fetched() {
     std::error_code ec;
-    return std::filesystem::exists(std::filesystem::path(WORKBENCH_SOURCE_DIR) / "models" / "stt" / "parakeet-tdt-0.6b-v3-int8" / "encoder.int8.onnx", ec) &&
+    return std::filesystem::exists(std::filesystem::path(SKOWORK_SOURCE_DIR) / "models" / "stt" / "parakeet-tdt-0.6b-v3-int8" / "encoder.int8.onnx", ec) &&
            std::filesystem::exists(stt_fixtures() / "whisper-1.wav", ec);
 }
 
@@ -682,7 +682,7 @@ struct SttRun {
     TempRoot tmp;
     WorkerHost host{[] {
         WorkerHost::Options o;
-        o.worker_exe = exe_dir() / L"workbench-worker.exe";
+        o.worker_exe = exe_dir() / L"skowork-worker.exe";
         o.idle_exit_seconds = 600;
         return o;
     }()};
@@ -978,9 +978,9 @@ TEST(MeetingCapture, DISABLED_TestToneInAnotherAppStaysOutOfTheMeetingTrack) {
 // Echo fixtures (improve-meeting-capture-quality spike 1.3): a separate process plays fixture speech with pauses through
 // the default output, standing in for the meeting app; its process-loopback track is the remote track and the default
 // communications microphone the local track, while the user speaks in the pauses as told. Both tracks are written as
-// WAV to WORKBENCH_ECHO_OUT (default client/build/echo-fixtures) under WORKBENCH_ECHO_LABEL, then transcribed with the
+// WAV to SKOWORK_ECHO_OUT (default client/build/echo-fixtures) under SKOWORK_ECHO_LABEL, then transcribed with the
 // sherpa-onnx engine and printed. It plays audio aloud and records the microphone, so it is run by hand:
-//   set WORKBENCH_ECHO_LABEL=speakers  (or headset)
+//   set SKOWORK_ECHO_LABEL=speakers  (or headset)
 //   win_tests --gtest_also_run_disabled_tests --gtest_filter=MeetingEcho.DISABLED_RecordLoudspeakerFixture
 TEST(MeetingEcho, DISABLED_RecordLoudspeakerFixture) {
     WB_REQUIRES_DEV_ENDPOINTS();
@@ -989,18 +989,18 @@ TEST(MeetingEcho, DISABLED_RecordLoudspeakerFixture) {
         wchar_t v[512] = {};
         return ::GetEnvironmentVariableW(n, v, 512) ? std::wstring(v) : std::wstring(d);
     };
-    const std::wstring label = env(L"WORKBENCH_ECHO_LABEL", L"speakers");
+    const std::wstring label = env(L"SKOWORK_ECHO_LABEL", L"speakers");
     const std::filesystem::path out =
-        std::filesystem::path(env(L"WORKBENCH_ECHO_OUT", (std::filesystem::path(WORKBENCH_SOURCE_DIR) / "build" / "echo-fixtures").wstring().c_str())) / label;
+        std::filesystem::path(env(L"SKOWORK_ECHO_OUT", (std::filesystem::path(SKOWORK_SOURCE_DIR) / "build" / "echo-fixtures").wstring().c_str())) / label;
     std::filesystem::create_directories(out);
     // The remote side: five utterances, each followed by a pause for the user's turn (the script is given to the user).
     const auto program = concat({silence(5.0), wav16k("parakeet-en.wav"), silence(6.0), wav16k("whisper-0.wav"), silence(7.0),
                                  wav16k("parakeet-de.wav"), silence(5.0), wav16k("whisper-1.wav"), silence(7.0),
                                  wav16k("parakeet-cs.wav"), silence(4.0)});
     write_wav(out / L"program.wav", program, 16000);
-    // WORKBENCH_ECHO_PLAYER: a player taking the WAV as its argument (for example one that plays on a chosen device);
+    // SKOWORK_ECHO_PLAYER: a player taking the WAV as its argument (for example one that plays on a chosen device);
     // without it the default output device plays it.
-    const std::wstring player = env(L"WORKBENCH_ECHO_PLAYER", L"");
+    const std::wstring player = env(L"SKOWORK_ECHO_PLAYER", L"");
     std::wstring cmd = player.empty()
         ? L"powershell.exe -NoProfile -NonInteractive -Command \"(New-Object Media.SoundPlayer '" + (out / L"program.wav").wstring() + L"').PlaySync()\""
         : player + L" \"" + (out / L"program.wav").wstring() + L"\"";
@@ -1062,7 +1062,7 @@ TEST(MeetingEcho, DISABLED_RecordLoudspeakerFixture) {
 // made them (client/build/echo-fixtures, not committed: they hold the user's voice). "speakers": loudspeakers with the
 // headset microphone on the desk; "headset": worn. Skipped where they are absent.
 TEST(MeetingEcho, EvidenceOnTheSpikeRecordings) {
-    const auto root = std::filesystem::path(WORKBENCH_SOURCE_DIR) / "build" / "echo-fixtures";
+    const auto root = std::filesystem::path(SKOWORK_SOURCE_DIR) / "build" / "echo-fixtures";
     std::error_code ec;
     if (!std::filesystem::exists(root / "speakers" / "segments.json", ec)) GTEST_SKIP() << "no spike 1.3 recordings on this machine";
     for (const char* label : {"speakers", "headset"}) {
@@ -2370,14 +2370,14 @@ TEST(DictationSherpa, ModelsInUnicodePathWorkInWorker) {
     const auto models = root / L"models" / L"stt";
     std::filesystem::create_directories(models, ec);
     ASSERT_FALSE(ec) << ec.message();
-    std::filesystem::copy_file(exe_dir() / L"workbench-worker.exe", root / L"workbench-worker.exe", ec);
+    std::filesystem::copy_file(exe_dir() / L"skowork-worker.exe", root / L"skowork-worker.exe", ec);
     ASSERT_FALSE(ec) << ec.message();
-    const auto vendored = std::filesystem::path(WORKBENCH_SOURCE_DIR) / "third_party" / "sherpa-onnx" / "x64";
+    const auto vendored = std::filesystem::path(SKOWORK_SOURCE_DIR) / "third_party" / "sherpa-onnx" / "x64";
     for (const auto* dll : {L"sherpa-onnx-c-api.dll", L"onnxruntime.dll"}) {
         std::filesystem::create_hard_link(vendored / dll, models / dll, ec);
         if (ec) GTEST_SKIP() << "cannot create runtime hardlink: " << ec.message();
     }
-    const auto source = std::filesystem::path(WORKBENCH_SOURCE_DIR) / "models" / "stt";
+    const auto source = std::filesystem::path(SKOWORK_SOURCE_DIR) / "models" / "stt";
     for (const auto* name : {L"silero_vad.onnx", L"parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx",
                              L"parakeet-tdt-0.6b-v3-int8/decoder.int8.onnx", L"parakeet-tdt-0.6b-v3-int8/joiner.int8.onnx",
                              L"parakeet-tdt-0.6b-v3-int8/tokens.txt", L"whisper-small-int8/small-encoder.int8.onnx",
@@ -2390,7 +2390,7 @@ TEST(DictationSherpa, ModelsInUnicodePathWorkInWorker) {
         if (ec) GTEST_SKIP() << "cannot create model hardlink: " << ec.message();
     }
     WorkerHost::Options options;
-    options.worker_exe = root / L"workbench-worker.exe";
+    options.worker_exe = root / L"skowork-worker.exe";
     WorkerHost worker(options);
     const auto path = tmp.path / L"input.skau";
     auto track = TrackWriter::create(path, TrackKind::local, 16000, 0);

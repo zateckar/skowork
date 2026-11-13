@@ -104,7 +104,7 @@ namespace wb {
 namespace {
 
 constexpr char kLog[] = "app";
-constexpr wchar_t kWindowClass[] = L"WorkbenchHost";
+constexpr wchar_t kWindowClass[] = L"SkoworkHost";
 constexpr UINT_PTR kTickTimer = 1;
 constexpr char kInstallationIdKey[] = "installation.id";
 constexpr std::uint64_t kDefaultQuotaBytes = 10ull * 1024 * 1024 * 1024;  // policy.storage.max_bytes default
@@ -117,7 +117,7 @@ std::string new_installation_id() {
     return h.substr(0, 8) + "-" + h.substr(8, 4) + "-" + h.substr(12, 4) + "-" + h.substr(16, 4) + "-" + h.substr(20);
 }
 
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
 // Development sign-in for end-to-end tests: records the authorize URL instead of opening a browser; the test
 // completes the flow and calls the loopback redirect URI like the browser would.
 class DevRecordLauncher final : public BrowserLauncher {
@@ -598,7 +598,7 @@ void App::register_rpc() {
         return json{{"ok", true}};
     });
     // Policy visibility, "why denied" and folder grants (client/policy-enforcement). The UI only in release builds.
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
     constexpr RpcExposure kPolicyEx = RpcExposure::ui_and_pipe;
 #else
     constexpr RpcExposure kPolicyEx = RpcExposure::ui;
@@ -653,7 +653,7 @@ void App::register_rpc() {
         if (Status s = policy->refresh(); !s) return s.error();
         return policy->status();
     });
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
     // How the policy in force would decide a tool call, without running it (end-to-end tests of rollouts).
     rpc.add("policy.evaluate", RpcExposure::ui_and_pipe,[this](const json& p) -> Result<json> {
         if (!enforcer) return make_error("unavailable", "the agent runtime is not running");
@@ -693,11 +693,11 @@ void App::register_rpc() {
         if (!folder) return folder.error();
         std::vector<std::string> grantable;
         for (const auto& g : cur->strings("filesystem.grantable"))
-            grantable.push_back(policy::expand_environment(g, {{"WORKBENCH_DATA", root ? narrow(root->root().wstring()) : std::string{}}}));
+            grantable.push_back(policy::expand_environment(g, {{"SKOWORK_DATA", root ? narrow(root->root().wstring()) : std::string{}}}));
         // The client's data root is never grantable (Filesystem Defaults).
         const auto data_root = root ? policy::canonicalize(narrow(root->root().wstring())) : Result<std::string>(std::string{});
         if (!data_root || (!data_root->empty() && policy::path_within(*folder, *data_root)))
-            return make_error("policy_denied", "the SkoWork data folder cannot be granted");
+            return make_error("policy_denied", "the Skowork data folder cannot be granted");
         if (Status s = grants->grant(*folder, jbool(p, "write"), grantable); !s) return s.error();
         return json{{"folder", *folder}, {"write", jbool(p, "write")}};
     });
@@ -712,7 +712,7 @@ void App::register_rpc() {
         log::set_verbose_until(std::chrono::system_clock::now() + std::chrono::minutes(minutes));
         return json{{"verbose_minutes", minutes}};
     });
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
     // Test hooks for end-to-end tests (development builds only).
     rpc.add("dev.worker", RpcExposure::ui_and_pipe, [this](const json& p) -> Result<json> {
         const std::string r = jstr(p, "role");
@@ -799,7 +799,7 @@ bool App::start_storage() {
     }
     pending_remote_removals = static_cast<int>(pending->entries.size());
     log::init(log::Options{root->logs()});
-    log::info(kLog, std::string("SkoWork ") + kVersion + " (" + kChannel + ", " + kCommit + ") starting");
+    log::info(kLog, std::string("Skowork ") + kVersion + " (" + kChannel + ", " + kCommit + ") starting");
     KeyStore keys(root->keys());
     if (Status s = keys.load(); !s) {
         storage_error = "key store: " + s.error().message;
@@ -846,7 +846,7 @@ void App::start_telemetry(KeyStore& keys) {
         CallOptions o;
         o.content_type = "application/octet-stream";
         for (const char* k : {"id", "process", "exception_code", "module", "installation_id"})
-            o.headers.emplace_back(std::string("x-workbench-crash-") + k, jstr(meta, k));
+            o.headers.emplace_back(std::string("x-skowork-crash-") + k, jstr(meta, k));
         return cp->call("POST", base + "/v1/crashes", dump, o);
     };
     env.installation_id = [this] { return channel ? channel->installation_id() : std::string{}; };
@@ -895,7 +895,7 @@ void App::start_identity_and_channel() {
     ic.client_id = cfg.idp_client_id;
     ic.redirect_uri = cfg.idp_redirect_uri;
     ic.scope = cfg.idp_scope;
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
     if (cfg.dev_browser == "record") launcher = std::make_unique<DevRecordLauncher>();
 #endif
     if (!launcher) launcher = std::make_unique<SystemBrowserLauncher>();
@@ -1076,7 +1076,7 @@ json App::policy_summary() {
     if (grants)
         for (const auto& g : grants->list()) j["grants"].push_back({{"folder", g.folder}, {"write", g.write}});
     if (!p) {
-        j["explanation"] = "No valid policy is in force. Only your own Threads can be read until SkoWork refreshes its policy.";
+        j["explanation"] = "No valid policy is in force. Only your own Threads can be read until Skowork refreshes its policy.";
         return j;
     }
     const auto val = [&](const char* key) { const json* v = p->find(key); return v ? *v : json(); };
@@ -1103,7 +1103,7 @@ std::optional<std::string> App::run_start_blocked() const {
     if (!tokens || tokens->state() != AuthState::signed_in) return "not signed in";
     if (!channel || channel->services().gateway.empty()) return "not registered with the control plane";
     if (channel->locked()) return "locked";
-    if (channel->version_blocked()) return "this version is below the required minimum; update SkoWork";
+    if (channel->version_blocked()) return "this version is below the required minimum; update Skowork";
     if (!channel->connected()) return "disconnected from the control plane";
     return std::nullopt;
 }
@@ -1168,7 +1168,7 @@ void App::start_agent() {
         };
         ye.fetch_keys = [this]() -> Result<json> {
             if (!cp) return make_error("unavailable", "not registered with the control plane");
-            return cp->call_json("GET", "/.well-known/workbench-skill-keys.json");
+            return cp->call_json("GET", "/.well-known/skowork-skill-keys.json");
         };
         ye.post_usage = [this, skills_base](const json& body) -> Status {
             if (skills_base().empty() || !cp) return make_error("unavailable", "not registered with the control plane");
@@ -1317,7 +1317,7 @@ void App::start_agent() {
     });
     {
         tools::SandboxExtractorOptions xo;
-        xo.worker_exe = exe_dir() / L"workbench-worker.exe";
+        xo.worker_exe = exe_dir() / L"skowork-worker.exe";
         xo.sandbox = tool_sandbox.get();
         xo.crash_dir = [this] { return crash_dir(); };
         xo.on_crash = [this](const std::filesystem::path& d, const std::string& p) { on_crash(d, p); };
@@ -1334,7 +1334,7 @@ void App::start_agent() {
         }
         relay_run_event(e);
     });
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
     agent->register_rpc(rpc, /*expose_on_pipe=*/true);
     inbox->register_rpc(rpc, /*expose_on_pipe=*/true);
     inbox->register_dev_rpc(rpc);
@@ -1360,7 +1360,7 @@ void App::start_messaging() {
     me.api = [this](const std::string& method, const std::string& path, const json& body, bool installation) -> Result<json> {
         if (!cp || !channel || !channel->connected()) return make_error("offline", "The control plane is not connected.");
         CallOptions o;
-        if (installation) o.headers.emplace_back("X-Workbench-Installation", channel->installation_id());
+        if (installation) o.headers.emplace_back("X-Skowork-Installation", channel->installation_id());
         auto r = cp->call(method, "/api/v1/messaging/" + path, body.is_null() ? std::string{} : body.dump(), o);
         if (!r) return r.error();
         auto j = parse_json(r->body);
@@ -1417,7 +1417,7 @@ void App::start_mail() {
         const auto m = policy::most_specific(p->find("tools.rules"), tool);
         return !m || m->decision != policy::Decision::deny;
     };
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
     me.dev_build = true;
 #endif
     me.extract = attachment_extract;
@@ -1430,7 +1430,7 @@ void App::start_mail() {
     me.interaction_required = [this] {
         pool.post([this] {
             if (inbox)
-                (void)inbox->raise("mail", "Your mailbox needs you to sign in again before SkoWork can use mail and calendar.",
+                (void)inbox->raise("mail", "Your mailbox needs you to sign in again before Skowork can use mail and calendar.",
                                    {"Connect", "Not now"}, "");
         });
     };
@@ -1749,7 +1749,7 @@ void App::start_meetings() {
         if (!k) return;
         std::vector<knowledge::Turn> t;
         for (const auto& x : turns) t.push_back({jstr(x, "speaker"), jstr(x, "text"), m.started_at + jint(x, "start_ms")});
-        k->meeting_transcript(m.id, m.title, m.started_at, t, m.thread_id.empty() ? std::string{} : "workbench://thread/" + m.thread_id);
+        k->meeting_transcript(m.id, m.title, m.started_at, t, m.thread_id.empty() ? std::string{} : "skowork://thread/" + m.thread_id);
     };
     env.knowledge_removed = [this](const std::string& id) {
         if (auto* k = knowledge_live.load()) k->meeting_removed(id);
@@ -2249,7 +2249,7 @@ std::string App::ui_language() {
 // client/core-tools (add-core-tools-and-mcp): file tools on the path API of client/policy-enforcement.
 void App::register_core_tools(const std::string& workspace) {
     tools::SandboxExtractorOptions xo;
-    xo.worker_exe = exe_dir() / L"workbench-worker.exe";
+    xo.worker_exe = exe_dir() / L"skowork-worker.exe";
     xo.sandbox = tool_sandbox.get();
     xo.crash_dir = [this] { return crash_dir(); };
     xo.on_crash = [this](const std::filesystem::path& d, const std::string& p) { on_crash(d, p); };
@@ -2472,7 +2472,7 @@ void App::start_computer() {
     computer_svc = std::move(c);
 }
 
-// client/local-apps (add-local-apps): the app manager with the bundled runtime package next to Workbench.exe.
+// client/local-apps (add-local-apps): the app manager with the bundled runtime package next to Skowork.exe.
 void App::create_apps() {
     if (!root || local_apps) return;
     apps::AppsEnv ae;
@@ -2627,7 +2627,7 @@ void App::shutdown() {
         log::shutdown();
         // Clears the wipe intent only after the wipe succeeded; otherwise the next start completes it first.
         if (Status s = WithdrawalOutbox(root->file("withdrawals.dpapi")).finish_interrupted_wipe([this] { return root->wipe(); }); !s)
-            ::OutputDebugStringA(("SkoWork wipe failed: " + s.error().message).c_str());
+            ::OutputDebugStringA(("Skowork wipe failed: " + s.error().message).c_str());
     } else {
         log::info(kLog, "stopped");
         log::shutdown();
@@ -2669,7 +2669,7 @@ LaunchArgs parse_launch_args(const std::vector<std::wstring>& args) {
         const bool has_next = i + 1 < args.size();
         if (a == L"--background") la.background = true;
         else if (a == L"--route" && has_next) la.route = narrow(args[++i]);
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
         else if (a == L"--data-root" && has_next) la.data_root = args[++i];
         else if (a == L"--pipe-name" && has_next) la.pipe_name = args[++i];
         else if (a == L"--config" && has_next) la.config_file = args[++i];
@@ -2705,7 +2705,7 @@ int run_app(HINSTANCE inst, const std::vector<std::wstring>& args) {
     wc.hInstance = inst;
     wc.lpszClassName = kWindowClass;
     ::RegisterClassExW(&wc);
-    app.hwnd = ::CreateWindowExW(WS_EX_TOOLWINDOW, kWindowClass, L"SkoWork host", WS_POPUP, 0, 0, 0, 0, nullptr,
+    app.hwnd = ::CreateWindowExW(WS_EX_TOOLWINDOW, kWindowClass, L"Skowork host", WS_POPUP, 0, 0, 0, 0, nullptr,
                                  nullptr, inst, nullptr);
     MainThread::init(app.hwnd);
 
@@ -2719,8 +2719,8 @@ int run_app(HINSTANCE inst, const std::vector<std::wstring>& args) {
     app.tray = std::make_unique<Tray>(app.hwnd, std::move(cb));
 
     if (!app.start_storage()) {
-        const std::wstring msg = L"SkoWork cannot use its data folder:\n\n" + widen(app.storage_error);
-        ::MessageBoxW(nullptr, msg.c_str(), L"SkoWork", MB_OK | MB_ICONERROR);
+        const std::wstring msg = L"Skowork cannot use its data folder:\n\n" + widen(app.storage_error);
+        ::MessageBoxW(nullptr, msg.c_str(), L"Skowork", MB_OK | MB_ICONERROR);
         app.tray.reset();
         app.pipe.reset();
         g_app = nullptr;
@@ -2732,7 +2732,7 @@ int run_app(HINSTANCE inst, const std::vector<std::wstring>& args) {
         if (!reg.ok) log::warn(kLog, "per-user registration could not be written");
     }
     WorkerHost::Options wopt;
-    wopt.worker_exe = exe_dir() / L"workbench-worker.exe";
+    wopt.worker_exe = exe_dir() / L"skowork-worker.exe";
     wopt.crash_dir = [&app] { return app.crash_dir(); };
     wopt.on_crash = [&app](const std::filesystem::path& d, const std::string& p) { app.on_crash(d, p); };
     app.workers = std::make_unique<WorkerHost>(std::move(wopt));

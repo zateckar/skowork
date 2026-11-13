@@ -18,7 +18,7 @@ TEST(Url, ParsesHttpsWithDefaults) {
 }
 
 TEST(Url, ExplicitPortAndLoopback) {
-    auto u = parse_url("http://localhost:8180/realms/workbench");
+    auto u = parse_url("http://localhost:8180/realms/skowork");
     ASSERT_TRUE(u);
     EXPECT_EQ(u->port, 8180);
     EXPECT_TRUE(u->is_loopback());
@@ -36,9 +36,9 @@ TEST(Url, ExplicitPortAndLoopback) {
 }
 
 TEST(Url, PrivateUseRedirectUri) {
-    auto u = parse_url("com.example.workbench:/oauth2redirect?code=abc&state=xyz");
+    auto u = parse_url("com.example.skowork:/oauth2redirect?code=abc&state=xyz");
     ASSERT_TRUE(u);
-    EXPECT_EQ(u->scheme, "com.example.workbench");
+    EXPECT_EQ(u->scheme, "com.example.skowork");
     EXPECT_EQ(u->path, "/oauth2redirect");
     const auto q = parse_query(u->query);
     EXPECT_EQ(q.find("code")->second, "abc");
@@ -53,8 +53,8 @@ TEST(Url, RejectsGarbage) {
 TEST(Url, EncodeDecode) {
     EXPECT_EQ(url_encode("a b&c=d/é"), "a%20b%26c%3Dd%2F%C3%A9");
     EXPECT_EQ(url_decode("a%20b+c%2"), "a b c%2");
-    EXPECT_EQ(form_encode({{"grant_type", "authorization_code"}, {"redirect_uri", "com.example.workbench:/x"}}),
-              "grant_type=authorization_code&redirect_uri=com.example.workbench%3A%2Fx");
+    EXPECT_EQ(form_encode({{"grant_type", "authorization_code"}, {"redirect_uri", "com.example.skowork:/x"}}),
+              "grant_type=authorization_code&redirect_uri=com.example.skowork%3A%2Fx");
 }
 
 TEST(Url, Join) {

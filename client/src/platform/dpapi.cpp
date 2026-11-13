@@ -8,7 +8,7 @@ namespace wb {
 namespace {
 
 std::wstring entropy_for(std::wstring_view purpose) {
-    return L"Workbench/" + std::wstring(purpose) + L"/" + current_user_sid();
+    return L"Skowork/" + std::wstring(purpose) + L"/" + current_user_sid();
 }
 
 DATA_BLOB blob_of(const void* p, size_t n) {
@@ -22,7 +22,7 @@ Result<bytes> dpapi_protect(const bytes& plain, std::wstring_view purpose) {
     DATA_BLOB in = blob_of(plain.data(), plain.size());
     DATA_BLOB entropy = blob_of(ent.data(), ent.size() * sizeof(wchar_t));
     DATA_BLOB out{};
-    if (!::CryptProtectData(&in, L"Workbench", &entropy, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out))
+    if (!::CryptProtectData(&in, L"Skowork", &entropy, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out))
         return make_error("dpapi", "CryptProtectData: " + error_text(::GetLastError()));
     bytes blob(out.pbData, out.pbData + out.cbData);
     ::LocalFree(out.pbData);

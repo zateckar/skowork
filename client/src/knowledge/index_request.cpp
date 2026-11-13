@@ -1,5 +1,5 @@
 // The index worker's requests (add-knowledge-graph design D7): reading plain-text and source files and chunking every
-// kind of content run in workbench-worker.exe --role index, at below-normal priority under its memory budget.
+// kind of content run in skowork-worker.exe --role index, at below-normal priority under its memory budget.
 #include "knowledge/core.h"
 
 #include <cstdio>

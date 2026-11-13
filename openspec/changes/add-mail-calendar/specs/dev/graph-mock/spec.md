@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Provides a local, deterministic stand-in for the subset of Microsoft Graph v1.0 that Workbench uses. Development, automated tests and demos can then exercise mail and calendar features without any real mailbox.
+Provides a local, deterministic stand-in for the subset of Microsoft Graph v1.0 that Skowork uses. Development, automated tests and demos can then exercise mail and calendar features without any real mailbox.
 
 ## ADDED Requirements
 

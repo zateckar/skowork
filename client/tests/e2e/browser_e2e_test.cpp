@@ -48,7 +48,7 @@ struct Outcome {
 
 struct BrowserE2E : ::testing::Test {
     void SetUp() override {
-        WORKBENCH_REQUIRE_STACK();
+        SKOWORK_REQUIRE_STACK();
         if (!browser::find_chrome()) GTEST_SKIP() << "Google Chrome is not installed";
         auto s = e2e::shared_session();
         ASSERT_TRUE(s) << s.error().message;
@@ -210,11 +210,11 @@ TEST_F(BrowserE2E, AmazonSearch) {
 }
 
 // Task 1.1: a page behind the organization identity provider (OAuth) raises the sign-in hand-over. Chrome reaches the
-// organization host through WORKBENCH_DEV_PROXY here, because this workstation blocks unsigned processes (the egress proxy)
+// organization host through SKOWORK_DEV_PROXY here, because this workstation blocks unsigned processes (the egress proxy)
 // from organization hosts; the request interception still applies the egress rules.
 TEST_F(BrowserE2E, CompanyIdentityProviderSignInIsHandedOver) {
-    const std::string dev_proxy = env_var("WORKBENCH_DEV_PROXY");
-    if (dev_proxy.empty()) GTEST_SKIP() << "set WORKBENCH_DEV_PROXY";
+    const std::string dev_proxy = env_var("SKOWORK_DEV_PROXY");
+    if (dev_proxy.empty()) GTEST_SKIP() << "set SKOWORK_DEV_PROXY";
     const std::string issuer = e2e::env()->issuer;
     const std::string idp = browser::url_host(issuer);
     e2e::TempStore ts;

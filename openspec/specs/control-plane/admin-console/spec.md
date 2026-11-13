@@ -35,7 +35,7 @@ The admin console SHALL be usable at window widths from 1280 px: cards wrap to f
 - **THEN** the console asks for confirmation, and nothing is revoked if the admin cancels
 
 ### Requirement: Console Entry Point
-The control plane SHALL serve the admin console at `/admin/`. When the console is built, a request for the root path `/` SHALL be redirected to `/admin/` with its query string unchanged, so a sign-in response sent to the root completes the sign-in. When WORKBENCH_ADMIN_REDIRECT_URI is not set, the console SHALL use `<console origin>/admin/` as its sign-in redirect URI.
+The control plane SHALL serve the admin console at `/admin/`. When the console is built, a request for the root path `/` SHALL be redirected to `/admin/` with its query string unchanged, so a sign-in response sent to the root completes the sign-in. When SKOWORK_ADMIN_REDIRECT_URI is not set, the console SHALL use `<console origin>/admin/` as its sign-in redirect URI.
 
 #### Scenario: Open the root path
 - **WHEN** an admin opens `https://<control plane>/` in a browser
@@ -46,15 +46,15 @@ The control plane SHALL serve the admin console at `/admin/`. When the console i
 - **THEN** the browser is redirected to `https://<control plane>/admin/?state=s&code=c`, and the console exchanges the code for a token
 
 #### Scenario: Default redirect URI
-- **WHEN** WORKBENCH_ADMIN_REDIRECT_URI is not set and an admin signs in from `https://cp.example.com/admin/`
+- **WHEN** SKOWORK_ADMIN_REDIRECT_URI is not set and an admin signs in from `https://cp.example.com/admin/`
 - **THEN** the authorization request uses `https://cp.example.com/admin/` as its redirect URI
 
 ### Requirement: Deployment Setup Report
-At startup, the control plane SHALL log where the admin console is served, or a warning that its build is missing. It SHALL log one warning, naming the setting and its effect, for each missing setting among OIDC_CLIENT_ID, WORKBENCH_PUBLIC_BASE_URL, WORKBENCH_BOOTSTRAP_ADMINS, WORKBENCH_SECRET_KEY and an LLM upstream. A warning MUST NOT stop the control plane.
+At startup, the control plane SHALL log where the admin console is served, or a warning that its build is missing. It SHALL log one warning, naming the setting and its effect, for each missing setting among OIDC_CLIENT_ID, SKOWORK_PUBLIC_BASE_URL, SKOWORK_BOOTSTRAP_ADMINS, SKOWORK_SECRET_KEY and an LLM upstream. A warning MUST NOT stop the control plane.
 
 #### Scenario: Only the guarded settings
-- **WHEN** the control plane starts in production with only OIDC_DISCOVERY_URL and WORKBENCH_TELEMETRY_SECRET set
-- **THEN** it starts, logs the console URL, and logs warnings naming OIDC_CLIENT_ID, WORKBENCH_PUBLIC_BASE_URL, WORKBENCH_BOOTSTRAP_ADMINS, WORKBENCH_SECRET_KEY and OPENAI_BASE_URL
+- **WHEN** the control plane starts in production with only OIDC_DISCOVERY_URL and SKOWORK_TELEMETRY_SECRET set
+- **THEN** it starts, logs the console URL, and logs warnings naming OIDC_CLIENT_ID, SKOWORK_PUBLIC_BASE_URL, SKOWORK_BOOTSTRAP_ADMINS, SKOWORK_SECRET_KEY and OPENAI_BASE_URL
 
 #### Scenario: Complete setup
 - **WHEN** every checked setting is present

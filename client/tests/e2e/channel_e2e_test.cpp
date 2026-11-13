@@ -83,7 +83,7 @@ struct Client {
 
 struct ChannelE2E : ::testing::Test {
     void SetUp() override {
-        WORKBENCH_REQUIRE_STACK();
+        SKOWORK_REQUIRE_STACK();
         auto t = admin_token();
         ASSERT_TRUE(t) << t.error().message;
         admin = *t;
@@ -105,7 +105,7 @@ TEST_F(ChannelE2E, RegistersConnectsAndAppearsOnlineWithGroups) {
     // Groups come from role mappings and direct membership (control-plane/identity Groups And Admin Roles).
     const std::string me = user_name_of(admin);
     auto [ms, mb] = cp_call("POST", "/api/v1/admin/identity/group-members", admin,
-                            json{{"user_name", me}, {"workbench_group", "e2e-developers"}});
+                            json{{"user_name", me}, {"skowork_group", "e2e-developers"}});
     ASSERT_EQ(ms, 200) << mb.dump();
     Client c;
     c.channel->start();
@@ -127,7 +127,7 @@ TEST_F(ChannelE2E, RegistersConnectsAndAppearsOnlineWithGroups) {
         EXPECT_NE(std::find(groups.begin(), groups.end(), json("everyone")), groups.end()) << i.dump();
     }
     EXPECT_TRUE(found) << list.dump();
-    cp_call("DELETE", "/api/v1/admin/identity/group-members", admin, json{{"user_name", me}, {"workbench_group", "e2e-developers"}});
+    cp_call("DELETE", "/api/v1/admin/identity/group-members", admin, json{{"user_name", me}, {"skowork_group", "e2e-developers"}});
 }
 
 TEST_F(ChannelE2E, PolicyChangedPushIsHandledAndAckedWithinFiveSeconds) {
@@ -184,7 +184,7 @@ TEST_F(ChannelE2E, PushToAnOfflineInstallationIsDeliveredOnReconnect) {
 }
 
 TEST_F(ChannelE2E, ThirtySecondBlipNeverEntersTheDisconnectedState) {
-    if (!cp_proxy()) GTEST_SKIP() << "set WORKBENCH_E2E_CP_UPSTREAM to run blip tests through a proxy";
+    if (!cp_proxy()) GTEST_SKIP() << "set SKOWORK_E2E_CP_UPSTREAM to run blip tests through a proxy";
     Client c;
     c.channel->start();
     ASSERT_TRUE(wait_for([&] { return c.channel->connected(); }, 10s));
@@ -202,7 +202,7 @@ TEST_F(ChannelE2E, ThirtySecondBlipNeverEntersTheDisconnectedState) {
 }
 
 TEST_F(ChannelE2E, OutageLongerThanSixtySecondsIsReportedAsDisconnected) {
-    if (!cp_proxy()) GTEST_SKIP() << "set WORKBENCH_E2E_CP_UPSTREAM to run blip tests through a proxy";
+    if (!cp_proxy()) GTEST_SKIP() << "set SKOWORK_E2E_CP_UPSTREAM to run blip tests through a proxy";
     Client c;
     c.channel->start();
     ASSERT_TRUE(wait_for([&] { return c.channel->connected(); }, 10s));
@@ -239,7 +239,7 @@ TEST_F(ChannelE2E, RevokedInstallationIsLocked) {
 }
 
 TEST_F(ChannelE2E, AuthRenewKeepsThePushConnectionOpenPastTokenExpiry) {
-    if (!slow_tests_enabled()) GTEST_SKIP() << "waits past a real access token's expiry; set WORKBENCH_E2E_SLOW=1";
+    if (!slow_tests_enabled()) GTEST_SKIP() << "waits past a real access token's expiry; set SKOWORK_E2E_SLOW=1";
     Client c;
     c.channel->start();
     ASSERT_TRUE(wait_for([&] { return c.channel->connected(); }, 10s));

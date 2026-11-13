@@ -29,7 +29,7 @@ public:
     sys_clock::time_point t = sys_clock::time_point(std::chrono::seconds(1'800'000'000));
 };
 
-std::filesystem::path worker_exe() { return exe_dir() / L"workbench-worker.exe"; }
+std::filesystem::path worker_exe() { return exe_dir() / L"skowork-worker.exe"; }
 
 bool process_alive(unsigned long pid) {
     unique_handle h(::OpenProcess(SYNCHRONIZE, FALSE, pid));
@@ -53,7 +53,7 @@ TEST(Tray, IconReflectsEachState) {
     wc.cbSize = sizeof wc;
     wc.lpfnWndProc = ::DefWindowProcW;
     wc.hInstance = ::GetModuleHandleW(nullptr);
-    wc.lpszClassName = L"WorkbenchTrayTest";
+    wc.lpszClassName = L"SkoworkTrayTest";
     ::RegisterClassExW(&wc);
     HWND hwnd = ::CreateWindowExW(0, wc.lpszClassName, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, wc.hInstance, nullptr);
     ASSERT_NE(hwnd, nullptr);
@@ -109,7 +109,7 @@ TEST(Tray, UnreadMessagesBadgeAndTooltip) {
     wc.cbSize = sizeof wc;
     wc.lpfnWndProc = ::DefWindowProcW;
     wc.hInstance = ::GetModuleHandleW(nullptr);
-    wc.lpszClassName = L"WorkbenchTrayUnreadTest";
+    wc.lpszClassName = L"SkoworkTrayUnreadTest";
     ::RegisterClassExW(&wc);
     HWND hwnd = ::CreateWindowExW(0, wc.lpszClassName, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, wc.hInstance, nullptr);
     ASSERT_NE(hwnd, nullptr);
@@ -174,21 +174,21 @@ TEST(BackgroundGate, PresentationDefersAndResumesAutomatically) {
 }
 
 TEST(Registration, WritesAndRepairsForAMovedExecutable) {
-    const std::wstring base = L"Software\\WorkbenchTest\\" + widen(random_urlsafe(6));
+    const std::wstring base = L"Software\\SkoworkTest\\" + widen(random_urlsafe(6));
     RegistrationPaths p;
     p.run_key = base + L"\\Run";
-    p.aumid_key = base + L"\\AppUserModelId\\Workbench.Client";
-    auto first = ensure_registration(L"C:\\Old\\Workbench.exe", p);
+    p.aumid_key = base + L"\\AppUserModelId\\Skowork.Client";
+    auto first = ensure_registration(L"C:\\Old\\Skowork.exe", p);
     EXPECT_TRUE(first.ok);
     EXPECT_TRUE(first.run_repaired);
     // The AUMID of the toast notifications (add-work-inbox design D6).
-    EXPECT_EQ(reg_read_string(HKEY_CURRENT_USER, p.aumid_key, L"DisplayName"), L"SkoWork");
-    auto again = ensure_registration(L"C:\\Old\\Workbench.exe", p);
+    EXPECT_EQ(reg_read_string(HKEY_CURRENT_USER, p.aumid_key, L"DisplayName"), L"Skowork");
+    auto again = ensure_registration(L"C:\\Old\\Skowork.exe", p);
     EXPECT_FALSE(again.run_repaired);
-    auto moved = ensure_registration(L"D:\\New Place\\Workbench.exe", p);
+    auto moved = ensure_registration(L"D:\\New Place\\Skowork.exe", p);
     EXPECT_TRUE(moved.run_repaired);
-    EXPECT_EQ(reg_read_string(HKEY_CURRENT_USER, p.run_key, p.run_value), L"\"D:\\New Place\\Workbench.exe\" --background");
-    reg_delete_tree(HKEY_CURRENT_USER, L"Software\\WorkbenchTest");
+    EXPECT_EQ(reg_read_string(HKEY_CURRENT_USER, p.run_key, p.run_value), L"\"D:\\New Place\\Skowork.exe\" --background");
+    reg_delete_tree(HKEY_CURRENT_USER, L"Software\\SkoworkTest");
 }
 
 TEST(Workers, IdleWorkerExitsAndIsRestartedOnDemand) {
@@ -250,7 +250,7 @@ TEST(LaunchArgs, BackgroundAndRoute) {
     auto c = parse_launch_args({L"--route", L"#/about"});
     EXPECT_EQ(c.route, "#/about");
     // Sign-in redirects arrive on the loopback listener, never as launch arguments.
-    auto d = parse_launch_args({L"com.example.workbench:/oauth2redirect?code=c&state=s"});
+    auto d = parse_launch_args({L"com.example.skowork:/oauth2redirect?code=c&state=s"});
     EXPECT_FALSE(d.background);
     EXPECT_TRUE(d.route.empty());
 }

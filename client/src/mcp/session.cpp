@@ -91,7 +91,7 @@ void StdioTransport::reader() {
                 }
                 case Message::Kind::request:
                     if (m.method == "ping") (void)send(make_result(m.id, json::object()));
-                    else (void)send(make_error_response(m.id, -32601, "method not supported by Workbench"));
+                    else (void)send(make_error_response(m.id, -32601, "method not supported by Skowork"));
                     break;
                 case Message::Kind::notification: break;  // logging and list_changed are not used
                 case Message::Kind::invalid: {

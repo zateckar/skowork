@@ -24,7 +24,7 @@ describe('user messaging', () => {
       inst[u] = (await register(h, tok[u]!)).installation_id;
     }
     // carol's Group switches messaging off.
-    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'carol', workbench_group: 'quiet' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'carol', skowork_group: 'quiet' });
     await h.call('PUT', '/api/v1/admin/policy/groups/quiet/draft', admin, { document: { messaging: { mode: 'off' } }, priority: 10, reason: 'test' });
     await h.call('POST', '/api/v1/admin/policy/groups/quiet/publish', admin, { reason: 'test' });
     tok.carol = await h.token('carol');
@@ -117,11 +117,11 @@ describe('user messaging', () => {
     await push.alice.opened;
     const seen = (p: string) => push.bob!.waitFor((m) => m.type === 'presence-changed' && m.payload.user_name === 'alice' && m.payload.presence === p, 5000);
     await seen('online');
-    await call('alice', 'PUT', '/presence', { state: 'idle' }, { 'x-workbench-installation': inst.alice! });
+    await call('alice', 'PUT', '/presence', { state: 'idle' }, { 'x-skowork-installation': inst.alice! });
     await seen('away');
     assert.equal((await call('alice', 'PUT', '/presence', { busy: true })).body.presence, 'busy');
     await seen('busy');
-    await call('alice', 'PUT', '/presence', { busy: false, state: 'active' }, { 'x-workbench-installation': inst.alice! });
+    await call('alice', 'PUT', '/presence', { busy: false, state: 'active' }, { 'x-skowork-installation': inst.alice! });
     await seen('online');
     const started = Date.now();
     push.alice.close();

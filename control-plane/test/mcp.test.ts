@@ -14,7 +14,7 @@ const BASE = '/api/v1/admin/mcp';
 
 async function setup(h: Harness) {
   const admin = await h.token('admin1');
-  const assign = (user: string, group: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: user, workbench_group: group });
+  const assign = (user: string, group: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: user, skowork_group: group });
   return { admin, assign };
 }
 
@@ -285,7 +285,7 @@ test('identity-provider tokens only: no token exchange, no token keys, and re-di
     const { admin } = await setup(h);
     const dev = await h.token('dev1');
     assert.equal((await h.call('POST', '/api/v1/identity/token-exchange', dev, { audience: 'api://jira-corp' })).status, 404);
-    assert.equal((await h.call('GET', '/.well-known/workbench-token-keys.json', null)).status, 404);
+    assert.equal((await h.call('GET', '/.well-known/skowork-token-keys.json', null)).status, 404);
     assert.equal((await h.call('POST', '/api/v1/admin/identity/token-keys/rotate', admin)).status, 404);
 
     const old = await h.call('POST', `${BASE}/servers`, admin, { id: 'jira-corp', owner: 'it', kind: 'remote', url: mcp.url, auth: 'audience-token' });

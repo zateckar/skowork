@@ -28,7 +28,7 @@ Facts from the code on 2026-11-10 (main at 0c70d92):
 ## Decisions
 
 ### D1. The gateway sends headers and keep-alives before the first token
-For a streamed chat request the gateway sends `200` and the SSE headers as soon as it has picked a backend. It then writes an SSE comment line (`: keep-alive`) every `WORKBENCH_LLM_KEEPALIVE_MS` (default 15 s) until upstream data arrives, and also later whenever the upstream is idle for that long.
+For a streamed chat request the gateway sends `200` and the SSE headers as soon as it has picked a backend. It then writes an SSE comment line (`: keep-alive`) every `SKOWORK_LLM_KEEPALIVE_MS` (default 15 s) until upstream data arrives, and also later whenever the upstream is idle for that long.
 
 **Failover stays possible.** Keep-alives are not upstream bytes, so failover to another backend stays possible until the first upstream byte is forwarded. Backend Failover is reworded around "first upstream byte".
 
@@ -41,11 +41,11 @@ For a streamed chat request the gateway sends `200` and the SSE headers as soon 
 
 ### D2. Stream time limits replace the total request timeout
 The gateway has three limits:
-- `WORKBENCH_LLM_FIRST_TOKEN_TIMEOUT_MS`, default 180 s: from the upstream request to the first upstream byte.
-- `WORKBENCH_LLM_STREAM_IDLE_MS`, default 120 s: between upstream chunks.
-- `WORKBENCH_LLM_STREAM_MAX_MS`, default 20 min: a backstop.
+- `SKOWORK_LLM_FIRST_TOKEN_TIMEOUT_MS`, default 180 s: from the upstream request to the first upstream byte.
+- `SKOWORK_LLM_STREAM_IDLE_MS`, default 120 s: between upstream chunks.
+- `SKOWORK_LLM_STREAM_MAX_MS`, default 20 min: a backstop.
 
-`requestTimeoutMs` keeps bounding only non-streamed requests. For a streamed request, `WORKBENCH_LLM_FIRST_TOKEN_TIMEOUT_MS` bounds the response headers and the first byte, and the body read is not tied to any request timeout.
+`requestTimeoutMs` keeps bounding only non-streamed requests. For a streamed request, `SKOWORK_LLM_FIRST_TOKEN_TIMEOUT_MS` bounds the response headers and the first byte, and the body read is not tied to any request timeout.
 
 **Alternatives considered**
 - *Only raise `requestTimeoutMs`:* it still cuts long reasoning answers, and it does not separate "slow to start" from "stalled".
@@ -116,6 +116,15 @@ Both values are stored in the gateway audit entry, which is how acceptance check
 **Alternatives considered**
 - *Measure on the client only:* the client cannot see cached tokens unless the gateway forwards usage details. Forwarding them is unchanged by this change.
 
+### D8. The client reads a stream as data arrives
+Found on 2026-11-13 on the release client: every attempt to build a Local app failed with `TIMEOUT (timeout)`, the client's own WinHTTP receive timeout, after about 1–2 minutes (two attempts of 60 s). The cause was in `HttpClient::send`: it called synchronous `WinHttpReadData` with a 16 KB buffer and no `WinHttpQueryDataAvailable`. A synchronous read then waits until the buffer is full or the response ends, so keep-alives and small deltas never reached the SSE parser. A long silent stretch, such as the model reasoning before a large `files.write`, ended in TIMEOUT. A loopback probe confirmed it: keep-alives sent every 3 s were delivered all together at the end of the response, after 33 s. With `WinHttpQueryDataAvailable` first, each one arrived within milliseconds.
+
+The client now calls `WinHttpQueryDataAvailable` before each read and reads at most what is available, capped at the buffer size. A zero result from it ends the body, like a zero-byte read.
+
+**Alternatives considered**
+- *Asynchronous WinHTTP with callbacks:* more code for the same effect. Synchronous reads on the Run's worker thread are the existing model.
+- *A smaller buffer:* still holds back anything shorter than the buffer.
+
 ## Risks / Trade-offs
 
 - **[Risk] Prefix caching is off on the upstream vLLM, or LiteLLM strips `cached_tokens`.** → **Mitigation:** spike 1.1 checks it before anything else. Without caching, D1–D3 still remove the timeouts, but long Threads stay slow. The finding is recorded here, and the upstream owner is asked to enable `--enable-prefix-caching`.
@@ -177,6 +186,6 @@ The script simulates a Thread that grows by about 6.7k tokens per Turn (a user m
 
 - **Tests (2026-11-10):**
   - Control plane: `npm test`, 262 of 262 pass, including 11 new gateway stream tests.
-  - Client: `win_tests`, 690 of 690 pass; `base_tests`, 46 pass. Six shell tests had expected the old product name "Workbench" where the UI says "SkoWork"; their assertions were updated in this change.
+  - Client: `win_tests`, 690 of 690 pass; `base_tests`, 46 pass. Six shell tests had expected a product-name spelling that differed from the UI; their assertions were updated in this change.
 - **4.2 Unprompted time mentions:** 0 of 5. Five ordinary prompts (a thank-you note, an explanation, tips, a translation, a summary) went to the primary model with the "Current time:" line, and no answer mentioned the date or time.
 - **4.1 End to end:** pending. It needs the desktop client signed in at the organization IdP against the local control plane. Spike 1.3 already covers the upstream half: with the new layout the time to the first token stayed below 1 s up to 93k tokens.

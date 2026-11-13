@@ -30,7 +30,7 @@ inline std::filesystem::path graph_mock_node() {
     return buf;
 }
 
-inline std::filesystem::path graph_mock_dir() { return std::filesystem::path(WORKBENCH_GRAPH_MOCK_DIR); }
+inline std::filesystem::path graph_mock_dir() { return std::filesystem::path(SKOWORK_GRAPH_MOCK_DIR); }
 
 // node is on PATH and `npm ci` ran in dev/graph-mock.
 inline bool graph_mock_ready() {
@@ -113,7 +113,7 @@ struct GraphMockProcess {
                 {"mail.graph_base_url", graph + "/v1.0"},
                 {"mail.oauth.authority", graph},
                 {"mail.oauth.tenant_id", "mock-tenant"},
-                {"mail.oauth.client_id", "workbench-dev"}};
+                {"mail.oauth.client_id", "skowork-dev"}};
     }
 };
 
@@ -177,7 +177,7 @@ struct MailDb {
         EXPECT_TRUE(opened);
         store = std::make_unique<wb::AppStore>(std::move(*opened));
     }
-    std::filesystem::path path = std::filesystem::path(wb::local_appdata()) / L"workbench-test" / wb::widen(wb::random_urlsafe(6));
+    std::filesystem::path path = std::filesystem::path(wb::local_appdata()) / L"skowork-test" / wb::widen(wb::random_urlsafe(6));
     std::unique_ptr<wb::db_key> key;
     std::filesystem::path file;
     std::unique_ptr<wb::AppStore> store;

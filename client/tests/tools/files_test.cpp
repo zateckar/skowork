@@ -37,7 +37,7 @@ std::string s(const std::filesystem::path& p) { return narrow(p.wstring()); }
 // A data root with a workspace, a permitted docs folder (readable), an out folder (writable), a secret folder
 // inside docs that policy denies, and a folder outside every rule.
 struct FileFixture {
-    std::filesystem::path root = std::filesystem::path(local_appdata()) / L"workbench-test" / widen(random_urlsafe(6));
+    std::filesystem::path root = std::filesystem::path(local_appdata()) / L"skowork-test" / widen(random_urlsafe(6));
     std::filesystem::path data = root / L"data", ws = data / L"workspace", docs = root / L"docs", out = root / L"out",
                           outside = root / L"outside";
     policy::PathRules rules;

@@ -22,7 +22,7 @@ using namespace std::chrono_literals;
 namespace {
 
 constexpr char kLog[] = "browser";
-constexpr char kProxyUser[] = "workbench";
+constexpr char kProxyUser[] = "skowork";
 
 std::string stale_message(const std::string& ref) {
     return "stale reference " + ref + ": the page changed since the snapshot. Take a new snapshot with browser.snapshot "
@@ -568,7 +568,7 @@ Result<std::string> BrowserService::object_for(const std::shared_ptr<Process>& p
         world = 0;
         if (auto tree = cdp.call("Page.getFrameTree", json::object(), tab->session, 10s)) {
             const std::string frame = jstr((*tree)["frameTree"]["frame"], "id");
-            if (auto w = cdp.call("Page.createIsolatedWorld", {{"frameId", frame}, {"worldName", "workbench"}}, tab->session, 10s))
+            if (auto w = cdp.call("Page.createIsolatedWorld", {{"frameId", frame}, {"worldName", "skowork"}}, tab->session, 10s))
                 world = jint(*w, "executionContextId");
         }
         const std::lock_guard lock(tab->mx);
@@ -806,7 +806,7 @@ ToolOutput BrowserService::screenshot(ToolContext& ctx, const json& args) {
     if (!img) return ToolOutput::failure("The screenshot could not be prepared: " + img.error().message);
     if (policy_bool("tools.browser.retain_screenshots", false)) {
         // Kept only when policy allows it, encrypted for the current user (design D7).
-        auto blob = dpapi_protect(*png, L"workbench-screenshot");
+        auto blob = dpapi_protect(*png, L"skowork-screenshot");
         if (blob) {
             const auto dir = env_.data_root / L"screenshots" / widen(ctx.run_id);
             std::error_code ec;

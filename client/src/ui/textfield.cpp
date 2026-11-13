@@ -17,7 +17,7 @@
 namespace wb::ui {
 
 namespace {
-constexpr wchar_t kProp[] = L"WorkbenchTextField";
+constexpr wchar_t kProp[] = L"SkoworkTextField";
 constexpr float kPadX = 10.f, kPadY = 6.f;
 
 // UI Automation's Name property, for dynamic annotation of the child window ({C3A6921B-4A99-44F1-BCA6-61187052C431}).

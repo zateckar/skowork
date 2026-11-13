@@ -2,7 +2,7 @@
 
 ## Why
 
-On 2026-11-05 the product owner reported that a remote MCP server could not be enabled: discovery failed with "the server answered HTTP 401". The server trusts only the organization identity provider (Keycloak). The control plane, however, presented a token it had signed itself (add-core-tools-and-mcp D6): during discovery a service token for the subject workbench-catalog-discovery, and on clients a token from its own token exchange.
+On 2026-11-05 the product owner reported that a remote MCP server could not be enabled: discovery failed with "the server answered HTTP 401". The server trusts only the organization identity provider (Keycloak). The control plane, however, presented a token it had signed itself (add-core-tools-and-mcp D6): during discovery a service token for the subject skowork-catalog-discovery, and on clients a token from its own token exchange.
 
 Organization rule (stated 2026-11-05): every application trusts only the central identity provider. No application issues identities to other applications. Control-plane-signed tokens therefore cannot be accepted by MCP servers, now or later.
 
@@ -38,4 +38,4 @@ Out of scope:
   - client/src/mcp and client/src/app: the token source of remote servers.
 - **Tests:** control-plane MCP tests (discovery presents the administrator's token, no exchange endpoint), client MCP tests (the user token is presented and refreshed after a 401), the MCP test server checks the issuer instead of a per-server audience.
 - **Data:** a migration rewrites stored entries from audience-token to user-token and deletes the exchanged-token signing keys.
-- **Operations:** a remote MCP server must accept the identity provider's access tokens of the Workbench client, which the desktop client and the admin console share; see design.md D3.
+- **Operations:** a remote MCP server must accept the identity provider's access tokens of the Skowork client, which the desktop client and the admin console share; see design.md D3.

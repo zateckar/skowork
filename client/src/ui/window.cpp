@@ -18,7 +18,7 @@
 namespace wb::ui {
 
 namespace {
-constexpr wchar_t kClass[] = L"WorkbenchNativeWindow";
+constexpr wchar_t kClass[] = L"SkoworkNativeWindow";
 constexpr UINT_PTR kTooltipTimer = 1;
 constexpr UINT kTooltipDelayMs = 600;
 constexpr UINT kLayoutMessage = WM_APP + 0x40;
@@ -55,7 +55,7 @@ Result<std::unique_ptr<Window>> Window::create(const Options& o) {
     wc.lpfnWndProc = proc;
     wc.hInstance = ::GetModuleHandleW(nullptr);
     wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
-    // The Workbench icon of the executable (client/desktop-host App Icon); none in the test programs.
+    // The Skowork icon of the executable (client/desktop-host App Icon); none in the test programs.
     wc.hIcon = static_cast<HICON>(::LoadImageW(wc.hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON, ::GetSystemMetrics(SM_CXICON),
                                                ::GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR | LR_SHARED));
     wc.hIconSm = static_cast<HICON>(::LoadImageW(wc.hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON, ::GetSystemMetrics(SM_CXSMICON),

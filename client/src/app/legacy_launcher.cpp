@@ -10,7 +10,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (length == 0 || length >= capacity) return 1;
     size_t directory = length;
     while (directory > 0 && executable[directory - 1] != L'\\' && executable[directory - 1] != L'/') --directory;
-    constexpr wchar_t name[] = L"SkoWork.exe";
+    constexpr wchar_t name[] = L"Skowork.exe";
     constexpr size_t name_length = sizeof(name) / sizeof(name[0]) - 1;
     if (directory == 0 || directory + name_length >= capacity) return 1;
     std::wmemcpy(executable + directory, name, name_length + 1);
@@ -36,8 +36,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION child{};
     if (!::CreateProcessW(executable, command, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &child)) {
-        ::MessageBoxW(nullptr, L"SkoWork could not be started. Check that SkoWork.exe is installed next to this shortcut.",
-                      L"SkoWork", MB_OK | MB_ICONERROR);
+        ::MessageBoxW(nullptr, L"Skowork could not be started. Check that Skowork.exe is installed next to this shortcut.",
+                      L"Skowork", MB_OK | MB_ICONERROR);
         return 1;
     }
     ::CloseHandle(child.hThread);

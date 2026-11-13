@@ -25,7 +25,7 @@ std::shared_ptr<const policy::EffectivePolicy> policy_with(json telemetry, long 
 }
 
 struct Rig {
-    std::filesystem::path dir = std::filesystem::temp_directory_path() / L"workbench-test" / widen("tel-" + random_urlsafe(6));
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / L"skowork-test" / widen("tel-" + random_urlsafe(6));
     db_key key{};
     FakeClock clock;
     std::shared_ptr<const policy::EffectivePolicy> pol;
@@ -143,7 +143,7 @@ TEST(TelemetryService, BufferedOfflineThenSentInOrderAndAcknowledged) {
     const auto d = decode_logs(rig.bodies[0]);
     ASSERT_TRUE(d);
     bool inst = false;
-    for (const auto& [k, v] : d->resource) inst |= k == "workbench.installation_id" && std::get<std::string>(v) == "inst-1";
+    for (const auto& [k, v] : d->resource) inst |= k == "skowork.installation_id" && std::get<std::string>(v) == "inst-1";
     EXPECT_TRUE(inst);
     // Sent records stay visible in the viewer for 30 days, then go.
     EXPECT_EQ(jstr(rig.svc->view(5)["records"][0], "state"), "sent");

@@ -9,15 +9,14 @@
 namespace wb {
 namespace {
 
-// SkoWork names first; the Workbench names of earlier deployments are still read (Machine Configuration Sources).
-constexpr const wchar_t* kPolicyKeys[] = {L"SOFTWARE\\Policies\\SkoWork", L"SOFTWARE\\Policies\\Workbench"};
+// The Skowork names only (Machine Configuration Names; rename-to-skowork D2).
+constexpr const wchar_t* kPolicyKeys[] = {L"SOFTWARE\\Policies\\Skowork"};
 constexpr wchar_t kConfigFile[] = L"skowork.machine.json";
-constexpr wchar_t kLegacyConfigFile[] = L"workbench.machine.json";
 
 // Where an administrator sets the values (improve-deployment-guidance); every configuration error names it.
 constexpr char kWhere[] =
-    " Set ControlPlaneUrl and IdpIssuer under HKLM\\SOFTWARE\\Policies\\SkoWork, or control_plane_url and "
-    "idp_issuer in skowork.machine.json next to SkoWork.exe (see the README).";
+    " Set ControlPlaneUrl and IdpIssuer under HKLM\\SOFTWARE\\Policies\\Skowork, or control_plane_url and "
+    "idp_issuer in skowork.machine.json next to Skowork.exe (see the README).";
 
 Status validate(const MachineConfig& c, const std::string& source, bool from_file = false) {
     std::string missing;
@@ -103,7 +102,7 @@ Result<MachineConfig> load_machine_config_file(const std::filesystem::path& file
     c.idp_redirect_uri = jstr(*j, "idp_redirect_uri", c.idp_redirect_uri);
     c.idp_scope = jstr(*j, "idp_scope", c.idp_scope);
     c.channel = jstr(*j, "channel", c.channel);
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
     c.dev_browser = jstr(*j, "dev_browser");
 #endif
     if (Status s = validate(c, source, true); !s) return s.error();
@@ -124,16 +123,7 @@ Result<MachineConfig> load_machine_config() {
         if (Status s = validate(c, "HKLM\\" + narrow(key)); !s) return s.error();
         return c;
     }
-    auto c = load_machine_config_file(exe_dir() / kConfigFile);
-    if (c || c.error().code != "not_found") return c;
-    // No SkoWork file: an earlier deployment's file (or its .txt mistake) beside the executable is used instead.
-    const auto legacy = exe_dir() / kLegacyConfigFile;
-    auto legacy_txt = legacy;
-    legacy_txt += L".txt";
-    std::error_code ec;
-    if (std::filesystem::is_regular_file(legacy, ec) || std::filesystem::is_regular_file(legacy_txt, ec))
-        return load_machine_config_file(legacy);
-    return c;
+    return load_machine_config_file(exe_dir() / kConfigFile);
 }
 
 }  // namespace wb

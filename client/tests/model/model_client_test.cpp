@@ -88,8 +88,8 @@ TEST(ModelStreaming, RequestShapeAuthAndRunAttribution) {
     const Recorded rec = rig.gateway.request(0);
     EXPECT_EQ(rec.url, "https://gateway.example/llm/v1/chat/completions");
     EXPECT_EQ(rec.header("Authorization"), "Bearer token-1");
-    EXPECT_EQ(rec.header("X-Workbench-Run"), "run-1");
-    EXPECT_EQ(rec.header("X-Workbench-Installation"), "inst-1");
+    EXPECT_EQ(rec.header("X-Skowork-Run"), "run-1");
+    EXPECT_EQ(rec.header("X-Skowork-Installation"), "inst-1");
     const json body = rec.json_body();
     EXPECT_EQ(body["model"], "small");  // roles only, never an upstream model id
     EXPECT_TRUE(body["stream"].get<bool>());
@@ -794,7 +794,7 @@ TEST(ModelImages, OneRequestWithTheImageRoleReturnsTheDecodedImages) {
     const Recorded sent = rig.gateway.request(0);
     EXPECT_EQ(sent.url, "https://gateway.example/llm/v1/images/generations");
     EXPECT_EQ(sent.json_body(), (json{{"model", "image"}, {"prompt", "a red car"}, {"n", 2}, {"size", "1536x1024"}}));
-    EXPECT_EQ(sent.header("X-Workbench-Run"), "run-7");
+    EXPECT_EQ(sent.header("X-Skowork-Run"), "run-7");
     EXPECT_EQ(rig.usage.role_total(Role::image).requests, 1);
     EXPECT_EQ(parse_role("image"), Role::image);
 }

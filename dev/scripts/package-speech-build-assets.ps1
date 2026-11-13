@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $client = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../../client')).Path
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $out = (Resolve-Path -LiteralPath $OutDir).Path
-$archive = Join-Path $out "SkoWork-speech-build-assets-v$Version-win-x64.zip"
+$archive = Join-Path $out "Skowork-speech-build-assets-v$Version-win-x64.zip"
 if (Test-Path -LiteralPath $archive) { throw "Build bundle already exists: $archive" }
 $work = Join-Path $out ('.speech-inputs-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null

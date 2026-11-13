@@ -32,7 +32,7 @@ public:
         const auto path = parent / absolute.filename();
         const auto digest = sha256(to_lower(narrow(path.wstring())));
         if (digest.size() != 32) return;
-        mutex_.reset(::CreateMutexW(nullptr, FALSE, widen("Global\\SkoWorkWithdrawal-" + base64url_encode(digest)).c_str()));
+        mutex_.reset(::CreateMutexW(nullptr, FALSE, widen("Global\\SkoworkWithdrawal-" + base64url_encode(digest)).c_str()));
         if (!mutex_) return;
         const auto result = ::WaitForSingleObject(mutex_.get(), 30000);
         acquired_ = result == WAIT_OBJECT_0 || result == WAIT_ABANDONED;

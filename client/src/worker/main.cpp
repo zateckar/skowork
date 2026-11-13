@@ -1,4 +1,4 @@
-// workbench-worker.exe: runs CPU-heavy or risky background work for the core process (client/desktop-host Worker
+// skowork-worker.exe: runs CPU-heavy or risky background work for the core process (client/desktop-host Worker
 // Process Lifetime). Requests arrive as length-prefixed JSON frames on stdin; replies go to stdout. The worker
 // exits after `--idle-exit` seconds without a request, and when stdin closes.
 #include "base/json.h"

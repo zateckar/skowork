@@ -1,4 +1,4 @@
-Speech models distributed with SkoWork
+Speech models distributed with Skowork
 
 NVIDIA Parakeet-TDT-0.6B-v3, converted to the sherpa-onnx int8 format:
 https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3

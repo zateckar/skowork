@@ -70,7 +70,7 @@ std::string web_error(const Error& e, const std::string& url) {
 ToolDef web_fetch_tool(WebToolEnv env) {
     auto e = std::make_shared<WebToolEnv>(std::move(env));
     std::shared_ptr<HttpClient> own;
-    if (!e->client) own = std::make_shared<HttpClient>(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Workbench/1.0");
+    if (!e->client) own = std::make_shared<HttpClient>(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Skowork/1.0");
     ToolDef t;
     t.id = "web.fetch";
     t.description = "Fetch a web page or file over HTTP(S) with GET. format \"text\" (default) returns readable text: HTML as "

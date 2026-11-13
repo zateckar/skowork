@@ -24,12 +24,12 @@ llm.handler = (path, body, res) =>
 const h = await startHarness((c) => (c.gateway.upstreams = [{ name: 'primary', baseUrl: llm.url, apiKey: 'sk-seed-0000abcd', maxConcurrent: 0 }]));
 const idp = await fakeIdp(h);
 h.cfg.identity.discoveryUrl = idp.url;
-process.env.WORKBENCH_ADMIN_REDIRECT_URI = `${h.base}/admin/`;
+process.env.SKOWORK_ADMIN_REDIRECT_URI = `${h.base}/admin/`;
 
 // Seed: two Groups with members, a published policy, registered installations with heartbeats.
 const admin = await h.token('admin1');
 for (const [u, g] of [['alice', 'engineering'], ['bob', 'engineering'], ['carol', 'sales']] as const)
-  await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: u, workbench_group: g });
+  await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: u, skowork_group: g });
 await h.call('PUT', '/api/v1/admin/policy/groups/engineering/draft', admin, { document: { network: { egress_allow: ['*.example.com', 'github.com'] }, tools: { shell: { mode: 'sandboxed' }, computer: { mode: 'allow' }, rules: { 'computer.*': 'approve' } } }, priority: 10, reason: 'seed' });
 await h.call('POST', '/api/v1/admin/policy/groups/engineering/publish', admin, { reason: 'seed' });
 for (const u of ['alice', 'bob', 'carol']) {

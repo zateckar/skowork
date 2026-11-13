@@ -6,7 +6,7 @@
 The client SHALL let the user permanently delete selected data: a Thread, a Source, an indexed item, or everything. Deletion MUST cascade to derived indexes, embeddings, knowledge facts, summaries and caches. Shared content follows the withdrawal rules of client/knowledge-graph and control-plane/team-knowledge. Pending remote cleanup retains only the minimal encrypted withdrawal records defined by Pending Shared Data Removal, never the forgotten content.
 
 #### Scenario: Delete everything
-- **WHEN** the user chooses Delete all my SkoWork data and confirms
+- **WHEN** the user chooses Delete all my Skowork data and confirms
 - **THEN** the client removes all local content and derived data, retaining only minimal startup configuration and any pending shared-data withdrawal records
 - **AND** it restarts in a first-run state that identifies any remote removal still pending
 

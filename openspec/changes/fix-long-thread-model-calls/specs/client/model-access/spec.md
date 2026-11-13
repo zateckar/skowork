@@ -17,6 +17,10 @@ The client SHALL request every chat completion as a stream, including the summar
 - **WHEN** the gateway sends only keep-alive comments for 90 seconds before the first token
 - **THEN** the request is not aborted, and no text is passed to the caller until the first token arrives
 
+#### Scenario: Small chunks are not held back
+- **WHEN** the stream delivers only small chunks, such as 14-byte keep-alives or single-token deltas, with gaps of several seconds
+- **THEN** each chunk is handed to the stream parser when it arrives, not when a read buffer fills or the response ends
+
 ### Requirement: Retries With Backoff
 The client SHALL retry requests that fail with RATE_LIMIT or MODEL_UNAVAILABLE up to 3 times, and requests that fail with TIMEOUT once. Retries use jittered exponential backoff and honour any retry delay the gateway sends. MODEL_UNAVAILABLE with reason "role not granted" is not retried. AUTH_EXPIRED triggers one token refresh and then one retry. Other errors are not retried.
 

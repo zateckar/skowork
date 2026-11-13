@@ -43,7 +43,7 @@ if ($pin.schema -ne 1 -or $pin.url -notmatch '^https://github\.com/zateckar/skow
 $fixtures = @('fixtures/parakeet-en.wav', 'fixtures/parakeet-de.wav', 'fixtures/parakeet-es.wav',
     'fixtures/parakeet-fr.wav', 'fixtures/whisper-0.wav', 'fixtures/whisper-1.wav')
 $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
-$work = Join-Path $tempRoot ('workbench-stt-' + [Guid]::NewGuid().ToString('N'))
+$work = Join-Path $tempRoot ('skowork-stt-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
     if ($ArchivePath) { $archive = (Resolve-Path -LiteralPath $ArchivePath).Path }
@@ -96,6 +96,6 @@ try {
 } finally {
     $resolvedWork = [IO.Path]::GetFullPath($work)
     if ([IO.Path]::GetDirectoryName($resolvedWork) -ne $tempRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) -or
-        [IO.Path]::GetFileName($resolvedWork) -notmatch '^workbench-stt-[a-f0-9]{32}$') { throw 'Unsafe temporary cleanup path' }
+        [IO.Path]::GetFileName($resolvedWork) -notmatch '^skowork-stt-[a-f0-9]{32}$') { throw 'Unsafe temporary cleanup path' }
     Remove-Item -LiteralPath $resolvedWork -Recurse -Force
 }

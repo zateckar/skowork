@@ -11,7 +11,7 @@ namespace wb {
 struct LaunchArgs {
     bool background = false;                // started at logon: no window
     std::string route;                      // SPA route to open, e.g. "#/about"
-    // Development builds only (WORKBENCH_DEV_ENDPOINTS): isolate a test instance.
+    // Development builds only (SKOWORK_DEV_ENDPOINTS): isolate a test instance.
     std::optional<std::wstring> data_root;
     std::optional<std::wstring> pipe_name;
     std::optional<std::wstring> config_file;

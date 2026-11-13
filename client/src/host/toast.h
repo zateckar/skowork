@@ -28,14 +28,14 @@ public:
 
     // Returns false when Windows refused the toast (no AUMID registration, notifications off); the reason is logged.
     bool show(const ToastContent& content);
-    // Removes every Workbench toast from the Action Center (at quit).
+    // Removes every Skowork toast from the Action Center (at quit).
     void clear();
 
-    // Development endpoints (e2e tests): the Thread ids of the toasts shown, how many Workbench toasts Windows keeps
+    // Development endpoints (e2e tests): the Thread ids of the toasts shown, how many Skowork toasts Windows keeps
     // in the Action Center (-1 when unavailable), and the click handling of a toast for `thread_id`.
     [[nodiscard]] std::vector<std::string> shown_threads() const;
     [[nodiscard]] int history_count();
-    // Windows' notification setting for Workbench: "enabled", "disabled_for_application", "disabled_for_user",
+    // Windows' notification setting for Skowork: "enabled", "disabled_for_application", "disabled_for_user",
     // "disabled_by_group_policy", "disabled_by_manifest" or "unavailable".
     [[nodiscard]] std::string setting();
     void activate(const std::string& thread_id);

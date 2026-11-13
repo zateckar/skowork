@@ -367,7 +367,7 @@ void KnowledgeService::index_note(const std::string& id, int priority) {
     auto chunks = chunk_text("md", trim(n->title).empty() ? n->text : "# " + trim(n->title) + "\n\n" + n->text);
     for (auto& c : chunks) c.at = n->updated_at;
     if (chunks.empty()) chunks.push_back({{}, title, n->updated_at});
-    ItemInput in{"notes", id, title, "workbench://note/" + id, hash, n->created_at, n->updated_at, priority, std::move(chunks), true};
+    ItemInput in{"notes", id, title, "skowork://note/" + id, hash, n->created_at, n->updated_at, priority, std::move(chunks), true};
     {
         // A note can be edited, excluded or deleted while its chunks are being prepared.
         const std::lock_guard lock(store_->db().mutex());
@@ -396,7 +396,7 @@ void KnowledgeService::index_thread(const std::string& id, int priority) {
         const long long at = jint(m, "at");
         if (!first) first = at;
         last = std::max(last, at);
-        turns.push_back({{"speaker", role == "user" ? "User" : "SkoWork"}, {"text", text}, {"at", at}});
+        turns.push_back({{"speaker", role == "user" ? "User" : "Skowork"}, {"text", text}, {"at", at}});
     }
     if (turns.empty()) {
         store_->remove_item("threads", id);
@@ -409,7 +409,7 @@ void KnowledgeService::index_thread(const std::string& id, int priority) {
         store_->touch_source("threads", 0, r.error().message);
         return;
     }
-    ItemInput in{"threads", id, jstr(*data, "title", "Thread"), "workbench://thread/" + id, hash, first, last, priority,
+    ItemInput in{"threads", id, jstr(*data, "title", "Thread"), "skowork://thread/" + id, hash, first, last, priority,
                  chunks_from_json(r->value("chunks", json::array())), true};
     put_eligible(in);
 }
@@ -2293,7 +2293,7 @@ void KnowledgeService::search_team(const std::string& query, const SearchOptions
         x.owner = jstr(p, "owner");
         x.team_item = jstr(p, "item_id");
         x.text = jstr(p, "text");
-        x.ref = "workbench-team://" + x.owner + "/" + x.team_item;
+        x.ref = "skowork-team://" + x.owner + "/" + x.team_item;
         x.date = parse_iso8601_ms(jstr(p, "updated_at")).value_or(0);
         x.score = p.value("score", 0.0);
         for (const auto& g : p.value("groups", json::array()))
@@ -3464,7 +3464,7 @@ json KnowledgeService::entity_profile(long long id, const KnowledgeFilter& filte
         json fact = {{"id", f.id},
                      {"text", f.text},
                      {"stated", iso(f.created_at)},
-                     {"provenance", {{"source_kind", "user"}, {"source_id", f.thread_id.empty() ? "" : "workbench://thread/" + f.thread_id}, {"trusted", true}}}};
+                     {"provenance", {{"source_kind", "user"}, {"source_id", f.thread_id.empty() ? "" : "skowork://thread/" + f.thread_id}, {"trusted", true}}}};
         // A corrected fact names the item it was corrected in (design D5).
         if (!f.item_source.empty())
             if (const auto it = store_->item(f.item_source, f.item_ext_id))
@@ -3834,7 +3834,7 @@ json KnowledgeService::browse(const std::string& source, const std::string& quer
                 if (excluded_notes.count(sid) || excluded_item("notes", sid)) continue;
                 const auto it = store_->item("notes", sid);
                 const auto share = store_->share("notes", sid);
-                json row = {{"id", it ? it->id : 0}, {"note_id", n.id}, {"source", "notes"}, {"title", title}, {"ref", "workbench://note/" + sid},
+                json row = {{"id", it ? it->id : 0}, {"note_id", n.id}, {"source", "notes"}, {"title", title}, {"ref", "skowork://note/" + sid},
                             {"date", iso(n.updated_at)}, {"size", n.text.size()},
                             {"pending", !it || it->hash != note_hash(n) || store_->item_pending(it->id, config().extraction) > 0}, {"shared", is_shared(share)}};
                 if (share) row["sharing"] = share_json(*share);

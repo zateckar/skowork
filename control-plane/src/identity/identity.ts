@@ -230,12 +230,12 @@ export class IdentityService {
     const set = new Set<string>([EVERYONE]);
     if (idpRoles.length) {
       const placeholders = idpRoles.map(() => '?').join(',');
-      for (const r of this.#db.prepare(`SELECT workbench_group FROM role_mappings WHERE idp_role IN (${placeholders})`).all(...idpRoles) as { workbench_group: string }[]) {
-        set.add(r.workbench_group);
+      for (const r of this.#db.prepare(`SELECT skowork_group FROM role_mappings WHERE idp_role IN (${placeholders})`).all(...idpRoles) as { skowork_group: string }[]) {
+        set.add(r.skowork_group);
       }
     }
-    for (const r of this.#db.prepare('SELECT workbench_group FROM group_members WHERE user_name = ? COLLATE NOCASE').all(userName) as { workbench_group: string }[]) {
-      set.add(r.workbench_group);
+    for (const r of this.#db.prepare('SELECT skowork_group FROM group_members WHERE user_name = ? COLLATE NOCASE').all(userName) as { skowork_group: string }[]) {
+      set.add(r.skowork_group);
     }
     return [...set].sort();
   }
@@ -312,7 +312,7 @@ export function requireUser(identity: IdentityService) {
       sendError(res, 401, 'UNAUTHORIZED', 'A bearer access token is required.');
       return;
     }
-    const installationId = typeof req.body?.installation_id === 'string' ? req.body.installation_id : (req.header('x-workbench-installation') ?? null);
+    const installationId = typeof req.body?.installation_id === 'string' ? req.body.installation_id : (req.header('x-skowork-installation') ?? null);
     const r = await identity.authenticate(token, { installationId, ip: clientIp(req), path: req.path });
     if (!r.ok) {
       res.setHeader('WWW-Authenticate', 'Bearer error="invalid_token"');

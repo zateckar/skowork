@@ -2,7 +2,7 @@
 
 ## Context
 
-The README and add-client-foundation D10 promise `HKLM\SOFTWARE\Policies\Workbench` first when `ControlPlaneUrl` exists, then `workbench.machine.json` beside `Workbench.exe`. `exe_dir()` already uses `GetModuleFileNameW`, and production startup calls that loader. `load_machine_config_file` currently reads binary bytes directly into the UTF-8 JSON parser. Missing/open failures share a generic message, while parse and validation errors name only the basename. The user reports Windows Notepad and the generic unconfigured banner; that alone cannot identify the deployment's precise failure.
+The README and add-client-foundation D10 promise `HKLM\SOFTWARE\Policies\Skowork` first when `ControlPlaneUrl` exists, then `skowork.machine.json` beside `Skowork.exe`. `exe_dir()` already uses `GetModuleFileNameW`, and production startup calls that loader. `load_machine_config_file` currently reads binary bytes directly into the UTF-8 JSON parser. Missing/open failures share a generic message, while parse and validation errors name only the basename. The user reports Windows Notepad and the generic unconfigured banner; that alone cannot identify the deployment's precise failure.
 
 ## Decisions
 
@@ -18,10 +18,10 @@ Keep registry selection and the exact filename unchanged. Error messages include
 
 A dedicated Windows test executable links the real channel loader, path resolution, HTTP URL validation and loopback validation. A link-time registry reader double supplies deterministic absent/valid/invalid registry values without modifying machine or user registry. Copy that test executable into a unique temporary Unicode directory and run its probe mode with a different working directory and adjacent JSON; no development-only config argument is used. Test the release preset with development endpoints disabled. Alternatives: testing only an explicit file path misses source discovery, and launching the resident production app would modify the user's profile and registration.
 
-### D4: SkoWork names first, Workbench names still read
-- **Choice (user, 2026-11-12):** the registry key is `HKLM\SOFTWARE\Policies\SkoWork` and the file is `skowork.machine.json`. The client still reads `HKLM\SOFTWARE\Policies\Workbench` and `workbench.machine.json`, in the order the spec gives, because one deployment already uses them. Errors name the SkoWork locations, or the legacy source when that one was selected.
-- **Alternatives:** rename without a fallback (breaks the existing deployment); keep the Workbench names (improve-skowork-and-knowledge-control D2 keeps internal contracts, but these two names are typed by administrators and shown in the README, so they are visible identity).
-- **Unchanged:** the default client id `workbench-desktop`, `WORKBENCH_*` settings, data roots and pipe names stay as improve-skowork-and-knowledge-control decided.
+### D4: Skowork names only
+- **Choice (user, 2026-11-12):** the registry key is `HKLM\SOFTWARE\Policies\Skowork` and the file is `skowork.machine.json`. The client originally also read the names that one existing deployment used before the product was renamed.
+- **Superseded (user, 2026-11-13, rename-to-skowork D2):** the user chose to rename everything and remove that fallback. The client reads only the Skowork key and file. The existing deployment must move its registry values and configuration file to the Skowork names; see rename-to-skowork D5.
+- **Unchanged:** errors name the Skowork locations.
 
 ## Risks
 

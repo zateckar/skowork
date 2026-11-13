@@ -22,7 +22,7 @@ namespace wb::model {
 struct ModelClientConfig {
     // The gateway base URL (control-channel services().gateway, for example https://host/llm/v1). Empty: not registered.
     std::function<std::string()> gateway_url;
-    std::function<std::string()> installation_id;  // X-Workbench-Installation, optional
+    std::function<std::string()> installation_id;  // X-Skowork-Installation, optional
 
     // policy.llm.timeouts (defaults 10 s and 60 s). When set, the providers are asked before every request, so a
     // changed policy applies to the next request (Request Timeouts); a non-positive answer keeps the fixed value.

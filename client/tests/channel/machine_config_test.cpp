@@ -12,8 +12,8 @@
 
 namespace {
 std::map<std::wstring, std::wstring> registry;
-std::wstring registry_key = L"SOFTWARE\\Policies\\SkoWork";  // the key the fake registry holds values under
-constexpr char kConfig[] = R"({"control_plane_url":"https://workbench.example.com","idp_issuer":"https://keycloak.example.com/realms/example","idp_client_id":"workbench-desktop"})";
+std::wstring registry_key = L"SOFTWARE\\Policies\\Skowork";  // the key the fake registry holds values under
+constexpr char kConfig[] = R"({"control_plane_url":"https://skowork.example.com","idp_issuer":"https://keycloak.example.com/realms/example","idp_client_id":"skowork-desktop"})";
 
 std::string utf16(std::u16string_view text, bool little_endian) {
     std::string out = little_endian ? "\xff\xfe" : "\xfe\xff";
@@ -34,12 +34,12 @@ void write_file(const std::filesystem::path& path, const std::string& bytes) {
 
 class MachineConfig : public testing::Test {
 protected:
-    std::filesystem::path dir = std::filesystem::temp_directory_path() / ("workbench-config-" + wb::random_urlsafe(8));
-    std::filesystem::path file = dir / L"workbench.machine.json";
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / ("skowork-config-" + wb::random_urlsafe(8));
+    std::filesystem::path file = dir / L"skowork.machine.json";
 
     void SetUp() override {
         registry.clear();
-        registry_key = L"SOFTWARE\\Policies\\SkoWork";
+        registry_key = L"SOFTWARE\\Policies\\Skowork";
         std::filesystem::create_directories(dir);
     }
     void TearDown() override {
@@ -53,9 +53,9 @@ TEST_F(MachineConfig, ReadmeExampleAndDefaults) {
     write_file(file, kConfig);
     const auto c = wb::load_machine_config_file(file);
     ASSERT_TRUE(c) << c.error().message;
-    EXPECT_EQ(c->control_plane_url, "https://workbench.example.com");
+    EXPECT_EQ(c->control_plane_url, "https://skowork.example.com");
     EXPECT_EQ(c->idp_issuer, "https://keycloak.example.com/realms/example");
-    EXPECT_EQ(c->idp_client_id, "workbench-desktop");
+    EXPECT_EQ(c->idp_client_id, "skowork-desktop");
     EXPECT_EQ(c->idp_redirect_uri, "http://localhost:4200/auth/callback");
     EXPECT_EQ(c->idp_scope, "openid profile email");
     EXPECT_EQ(c->channel, "stable");
@@ -64,7 +64,7 @@ TEST_F(MachineConfig, ReadmeExampleAndDefaults) {
     write_file(file, j.dump());
     const auto defaults = wb::load_machine_config_file(file);
     ASSERT_TRUE(defaults) << defaults.error().message;
-    EXPECT_EQ(defaults->idp_client_id, "workbench-desktop");
+    EXPECT_EQ(defaults->idp_client_id, "skowork-desktop");
 }
 
 TEST_F(MachineConfig, WindowsEditorEncodingsPreserveUnicode) {
@@ -143,7 +143,7 @@ TEST_F(MachineConfig, ValidatesUrlsAndRedirect) {
         EXPECT_EQ(c.error().code, "config");
         EXPECT_NE(c.error().message.find(wb::narrow(file.wstring())), std::string::npos);
     }
-#ifndef WORKBENCH_DEV_ENDPOINTS
+#ifndef SKOWORK_DEV_ENDPOINTS
     auto j = wb::json::parse(kConfig);
     j["control_plane_url"] = "http://localhost:8080";
     write_file(file, j.dump());
@@ -162,25 +162,13 @@ TEST_F(MachineConfig, RegistryRemainsAuthoritativeEvenWhenInvalid) {
     registry.erase(L"IdpIssuer");
     c = wb::load_machine_config();
     ASSERT_FALSE(c);
-    EXPECT_NE(c.error().message.find("HKLM\\SOFTWARE\\Policies\\SkoWork"), std::string::npos);
+    EXPECT_NE(c.error().message.find("HKLM\\SOFTWARE\\Policies\\Skowork"), std::string::npos);
     registry[L"ControlPlaneUrl"] = L"";
     EXPECT_FALSE(wb::load_machine_config());
 }
 
-TEST_F(MachineConfig, LegacyWorkbenchRegistryKeyIsStillRead) {
-    registry_key = L"SOFTWARE\\Policies\\Workbench";
-    registry = {{L"ControlPlaneUrl", L"https://registry.example.com"}, {L"IdpIssuer", L"https://identity.example.com"}};
-    auto c = wb::load_machine_config();
-    ASSERT_TRUE(c) << c.error().message;
-    EXPECT_EQ(c->control_plane_url, "https://registry.example.com");
-    registry.erase(L"IdpIssuer");
-    c = wb::load_machine_config();
-    ASSERT_FALSE(c);
-    EXPECT_NE(c.error().message.find("HKLM\\SOFTWARE\\Policies\\Workbench"), std::string::npos);
-}
-
 TEST_F(MachineConfig, DiscoversBesideExecutableFromOtherWorkingDirectory) {
-    const auto install = dir / L"Workbench \u017delu\u0165ou\u010dk\u00fd \u6d4b\u8bd5";
+    const auto install = dir / L"Skowork \u017delu\u0165ou\u010dk\u00fd \u6d4b\u8bd5";
     const auto cwd = dir / L"other";
     std::filesystem::create_directories(install);
     std::filesystem::create_directories(cwd);
@@ -188,12 +176,10 @@ TEST_F(MachineConfig, DiscoversBesideExecutableFromOtherWorkingDirectory) {
     std::filesystem::copy_file(wb::exe_path(), exe);
     write_file(cwd / L"skowork.machine.json", "invalid working-directory configuration");
     const std::u16string units(kConfig, kConfig + sizeof(kConfig) - 1);
-    // The legacy file name first, alone; then the SkoWork name, which wins over a legacy file with other content.
-    const std::pair<const wchar_t*, std::string> cases[] = {{L"workbench.machine.json", std::string(kConfig)},
-                                                            {L"skowork.machine.json", utf16(units, true)}};
-    for (const auto& [name, bytes] : cases) {
-        write_file(install / name, bytes);
-        if (std::wstring_view(name) == L"skowork.machine.json") write_file(install / L"workbench.machine.json", "{}");
+    // The executable-relative file is used in each supported encoding, and the working-directory file is ignored.
+    const std::string cases[] = {std::string(kConfig), utf16(units, true)};
+    for (const auto& bytes : cases) {
+        write_file(install / L"skowork.machine.json", bytes);
         std::wstring command = L"\"" + exe.wstring() + L"\" --probe-machine-config";
         STARTUPINFOW startup{};
         startup.cb = sizeof(startup);
@@ -228,9 +214,9 @@ std::optional<std::wstring> reg_read_string(HKEY root, const std::wstring& key, 
 int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--probe-machine-config") {
         const auto c = wb::load_machine_config();
-        return c && c->control_plane_url == "https://workbench.example.com" &&
+        return c && c->control_plane_url == "https://skowork.example.com" &&
                        c->idp_issuer == "https://keycloak.example.com/realms/example" &&
-                       c->idp_client_id == "workbench-desktop" && c->channel == "stable" ? 0 : 1;
+                       c->idp_client_id == "skowork-desktop" && c->channel == "stable" ? 0 : 1;
     }
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

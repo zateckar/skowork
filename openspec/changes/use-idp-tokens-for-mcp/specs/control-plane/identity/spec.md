@@ -2,12 +2,12 @@
 
 ## Purpose
 
-Removes the control plane's own tokens for MCP servers. Every token a Workbench component presents to another service is issued by the organization identity provider.
+Removes the control plane's own tokens for MCP servers. Every token a Skowork component presents to another service is issued by the organization identity provider.
 
 ## ADDED Requirements
 
 ### Requirement: Identity Provider Tokens Only
-The control plane SHALL NOT issue access tokens or identity assertions for other services. When a Workbench component authenticates to another service on behalf of a user, it MUST present that user's access token from the organization identity provider, accepted under Identity Provider Trust.
+The control plane SHALL NOT issue access tokens or identity assertions for other services. When a Skowork component authenticates to another service on behalf of a user, it MUST present that user's access token from the organization identity provider, accepted under Identity Provider Trust.
 
 #### Scenario: No token exchange
 - **WHEN** a client asks the control plane for a token for another service

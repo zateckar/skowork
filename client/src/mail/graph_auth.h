@@ -71,7 +71,7 @@ public:
     [[nodiscard]] bool listener_active() const;
     [[nodiscard]] int listener_port() const;
     [[nodiscard]] const MailConfig& config() const { return cfg_; }
-    // Login hint for the identity provider (the Workbench user's principal name).
+    // Login hint for the identity provider (the Skowork user's principal name).
     void set_login_hint(std::string hint) { login_hint_ = std::move(hint); }
     void set_sign_in_timeout(std::chrono::milliseconds t) { timeout_ = t; }
     void on_state_changed(std::function<void(GraphAuthState)> fn);

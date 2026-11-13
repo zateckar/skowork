@@ -16,7 +16,7 @@ const base = env.OPENAI_BASE_URL.replace(/\/+$/, '');
 const model = process.argv[2] ?? env.OPENAI_MODEL;
 
 // The production system prompt (client/src/runtime/types.h) plus the fixed sentence of design D2.
-const BASE_PROMPT = 'You are SkoWork, an assistant that works for the user on their computer. Use the tools you have; ' +
+const BASE_PROMPT = 'You are Skowork, an assistant that works for the user on their computer. Use the tools you have; ' +
   'call find_tools to discover more. Ask the user with ask_user when you need a decision. ' +
   'Delegate independent pieces of work to subagents with delegate. When an answer uses a passage ' +
   'that knowledge.search returned, write that passage\'s number in square brackets after the ' +

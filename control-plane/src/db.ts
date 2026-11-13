@@ -33,8 +33,8 @@ const migrations: string[] = [
     created_at TEXT NOT NULL,
     UNIQUE (kind, value)
   );
-  CREATE TABLE role_mappings (idp_role TEXT NOT NULL, workbench_group TEXT NOT NULL, PRIMARY KEY (idp_role, workbench_group));
-  CREATE TABLE group_members (user_name TEXT NOT NULL, workbench_group TEXT NOT NULL, PRIMARY KEY (user_name, workbench_group));
+  CREATE TABLE role_mappings (idp_role TEXT NOT NULL, skowork_group TEXT NOT NULL, PRIMARY KEY (idp_role, skowork_group));
+  CREATE TABLE group_members (user_name TEXT NOT NULL, skowork_group TEXT NOT NULL, PRIMARY KEY (user_name, skowork_group));
   CREATE TABLE admin_roles (user_name TEXT NOT NULL, role TEXT NOT NULL, PRIMARY KEY (user_name, role));
   CREATE TABLE installations (
     id TEXT PRIMARY KEY,
@@ -170,8 +170,8 @@ const migrations: string[] = [
   );
   CREATE TABLE mcp_assignments (
     server_id TEXT NOT NULL REFERENCES mcp_servers (id) ON DELETE CASCADE,
-    workbench_group TEXT NOT NULL,
-    PRIMARY KEY (server_id, workbench_group)
+    skowork_group TEXT NOT NULL,
+    PRIMARY KEY (server_id, skowork_group)
   );
   -- status: baseline (first snapshot), pending (appeared later, awaits review), included, excluded.
   CREATE TABLE mcp_tools (

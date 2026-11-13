@@ -8,15 +8,15 @@ The target system:
 
 ```
 ┌──────────────────────── Windows laptop (one per user session) ───────────────────────┐
-│ Workbench.exe  (C++20/Win32, tray, per-user, non-elevated)                           │
+│ Skowork.exe  (C++20/Win32, tray, per-user, non-elevated)                           │
 │   host ─ identity ─ control-channel ─ local-storage      (this change)               │
 │   agent-runtime ─ model-access ─ policy-enforcement      (changes 2-3)               │
 │   tools: core / browser / computer / mail / knowledge / mcp / skills / tasks         │
 │   UI: WebView2 window (on demand) ⇄ host via WebView2 messaging                      │
 │   Local API: named pipe, current-user ACL                                            │
-│ workbench-worker.exe  (role = stt | index | extract | sandbox-exec), Job Objects     │
+│ skowork-worker.exe  (role = stt | index | extract | sandbox-exec), Job Objects     │
 │ Chrome (dedicated profile, CDP over pipe) · stdio MCP servers (sandboxed)            │
-│ Data root: %LOCALAPPDATA%\Workbench  (encrypted SQLite DBs, DPAPI-protected keys)    │
+│ Data root: %LOCALAPPDATA%\Skowork  (encrypted SQLite DBs, DPAPI-protected keys)    │
 └──────────────┬───────────────────────────────────────────────────────────────────────┘
                │ HTTPS + WSS (TLS, internal CA); Keycloak OAuth → JWT
 ┌──────────────▼──────────────── Control plane (Node.js + TypeScript, Express, SQLite) ─┐
@@ -82,13 +82,13 @@ Small, well-scoped pieces of MIT/Apache code may be borrowed with attribution af
 - **Spike 1.5** confirms that the toolchain covers the platform APIs the roadmap needs.
 
 ### D3. Process model
-- **Workbench.exe** is a single process holding the host, runtime, tools, storage and network. Most work is I/O-bound and waits on the LLM, so one process with a thread pool keeps idle RAM minimal.
-- **`workbench-worker.exe`** runs CPU-heavy or risky work in a separate process. Its roles are `stt` (speech-to-text, the only local ML), `index` (knowledge chunking and index writes; embeddings and reranking come from the gateway), `extract` (document text extraction) and `sandbox-exec` (sandboxed execution). Each worker runs in a Job Object with kill-on-close and memory limits, and exits when idle. A worker crash never takes down the core.
+- **Skowork.exe** is a single process holding the host, runtime, tools, storage and network. Most work is I/O-bound and waits on the LLM, so one process with a thread pool keeps idle RAM minimal.
+- **`skowork-worker.exe`** runs CPU-heavy or risky work in a separate process. Its roles are `stt` (speech-to-text, the only local ML), `index` (knowledge chunking and index writes; embeddings and reranking come from the gateway), `extract` (document text extraction) and `sandbox-exec` (sandboxed execution). Each worker runs in a Job Object with kill-on-close and memory limits, and exits when idle. A worker crash never takes down the core.
 - **Alternative considered:** one process doing everything. Rejected because ML memory would not be returned to the OS, and a crash in a native ML library would kill the agent.
 
 ### D4. UI technology
 - **Superseded (2026-10-23):** the product owner replaced this decision with a native Win32 UI drawn with Direct2D and DirectWrite (add-native-ui). The text below records the original decision.
-- **Choice:** a WebView2 single-page app (Svelte and TypeScript), embedded as a resource and served on the virtual origin `https://app.workbench.local` (D12). The host and UI communicate through WebView2 web messages with a typed JSON protocol.
+- **Choice:** a WebView2 single-page app (Svelte and TypeScript), embedded as a resource and served on the virtual origin `https://app.skowork.local` (D12). The host and UI communicate through WebView2 web messages with a typed JSON protocol.
 - **Why:** WebView2 ships with Windows 11, so it adds nothing to the install. The UI process exists only while the window is open, so closing the window frees its RAM.
 - **Alternatives considered:**
   - WinUI 3: needs the Windows App SDK runtime, and its tooling is heavier.
@@ -96,7 +96,7 @@ Small, well-scoped pieces of MIT/Apache code may be borrowed with attribution af
   - Qt: licensing cost and size.
 
 ### D5. Local API on a named pipe
-- **Choice:** the pipe `\\.\pipe\Workbench-<user SID>`, with a DACL that grants only the user SID, and `PIPE_REJECT_REMOTE_CLIENTS`. The protocol is length-prefixed JSON-RPC 2.0. The single-instance hand-off uses the same pipe.
+- **Choice:** the pipe `\\.\pipe\Skowork-<user SID>`, with a DACL that grants only the user SID, and `PIPE_REJECT_REMOTE_CLIENTS`. The protocol is length-prefixed JSON-RPC 2.0. The single-instance hand-off uses the same pipe.
 - **Why:** a localhost TCP port can be reached by other users on the same machine and by DNS-rebinding attacks from browsers. A pipe has OS-enforced access control.
 
 ### D6. Storage
@@ -138,11 +138,11 @@ Small, well-scoped pieces of MIT/Apache code may be borrowed with attribution af
   - JWT validation with keys from the issuer's JWKS, cached. An unknown `kid` forces a reload, at most once per 60 s.
   - It checks `iss`, that `aud` contains a configured audience, that `azp` is in the allowed clients (defaults: the desktop client id for both), a lifetime of at most 10 minutes and 30 s of skew.
   - Groups are the union of `role_mappings` (Keycloak role → Group, many-to-many), direct `group_members` assignments and the implicit Group `everyone`.
-  - Admin roles are assigned in the control plane (`admin_roles` table). `WORKBENCH_BOOTSTRAP_ADMINS` lists user names that always hold platform-admin, so a fresh installation can be administered.
+  - Admin roles are assigned in the control plane (`admin_roles` table). `SKOWORK_BOOTSTRAP_ADMINS` lists user names that always hold platform-admin, so a fresh installation can be administered.
 - **Development and tests:** the organization Keycloak test realm from `.env`; there is no identity-provider mock (user decision, 2026-10-22). Automated tests cannot type a password, so the end-to-end suite needs one interactive sign-in (see D12, End-to-end tests).
 - **Alternatives considered:**
   - Kerberos/Negotiate (the original D7): fragile, as above.
-  - Private-use URI scheme redirect (`com.example.workbench:/…`): would avoid a listening socket, but the organization client only accepts `http://localhost:4200/*`.
+  - Private-use URI scheme redirect (`com.example.skowork:/…`): would avoid a listening socket, but the organization client only accepts `http://localhost:4200/*`.
   - Embedded WebView2 sign-in: RFC 8252 discourages embedded user agents, and it would not share the browser's SSO session.
   - Device authorization grant: needs a code to be typed, which is poor UX for a resident app.
   - Long-lived offline tokens (`offline_access`): they would outlive the SSO session and the client does not request them.
@@ -169,7 +169,7 @@ These are estimates for the baseline hardware, to be confirmed in spike 1.3. The
 
 | Package | Contents | Estimated installed size | Budget |
 |---|---|---|---|
-| Core | `Workbench.exe` and `workbench-worker.exe`, about 10 MB; SQLite3MultipleCiphers with sqlite-vec, linked in, about 2 MB; `WebView2Loader.dll`, about 0.2 MB; PDFium, about 5 MB; embedded SPA, about 2 MB | about 19 MB | ≤ 25 MB |
+| Core | `Skowork.exe` and `skowork-worker.exe`, about 10 MB; SQLite3MultipleCiphers with sqlite-vec, linked in, about 2 MB; `WebView2Loader.dll`, about 0.2 MB; PDFium, about 5 MB; embedded SPA, about 2 MB | about 19 MB | ≤ 25 MB |
 | Speech-to-text runtime (optional) | ONNX Runtime CPU, about 15 MB; sherpa-onnx, about 5 MB | about 20 MB | ≤ 40 MB |
 | Speech-to-text models (optional) | Parakeet-TDT-0.6B-v3 int8, about 640 MB; Whisper small int8 ONNX fallback, about 357 MB; VAD and diarization, about 27 MB | about 1.02 GB (as built, add-meeting-capture D1) | ≤ 1.2 GB |
 
@@ -188,7 +188,7 @@ RAM: the core process idles at about 30–40 MB. The index worker runs no model 
   - undefined behaviour: `-fsanitize=undefined -fsanitize-trap=all` in debug builds (trap mode needs no runtime library on MinGW);
   - linker: `-Wl,--dynamicbase,--nxcompat,--high-entropy-va`.
 - **Code layout for testability:** parsers and other platform-independent code (JSON, HTTP and Graph payloads, MCP, CDP, document extractors, SKILL.md, path globbing) live in libraries that use no Win32 headers.
-- **Client test execution (user decision, 2026-11-12):** owned by client/build-pipeline, introduced by keep-client-unit-tests-local. Client unit tests, including portable sanitizer unit suites, run locally. Existing debug, release and sanitizer test presets remain available; GitHub Actions product builds override `WORKBENCH_TESTS=OFF`.
+- **Client test execution (user decision, 2026-11-12):** owned by client/build-pipeline, introduced by keep-client-unit-tests-local. Client unit tests, including portable sanitizer unit suites, run locally. Existing debug, release and sanitizer test presets remain available; GitHub Actions product builds override `SKOWORK_TESTS=OFF`.
 - **Sanitizers and fuzzing:** MinGW GCC has no AddressSanitizer or libFuzzer runtime. Local Linux sanitizer builds run the portable unit tests under `-fsanitize=address,undefined`. The separate Linux CI parser fuzz job remains automated with libFuzzer and sanitizers; fuzz targets retain the portable `LLVMFuzzerTestOneInput` entry point.
 - **CI on every merge request:**
   - Windows release product compilation with warnings as errors, manifest and footprint checks; the debug build with UBSan traps and `-fanalyzer` remains local;
@@ -208,13 +208,13 @@ RAM: the core process idles at about 30–40 MB. The index worker runs no model 
 These are the contracts that the client and the control plane are built against. Later changes extend them in their own design.md.
 
 **Layout:**
-- `client/`: CMake project. `src/base` (portable: JSON, base64url, URL, JWT parsing, time, logging redaction), `src/platform` (Win32 RAII, WinHTTP HTTP and WebSocket, DPAPI, BCrypt, registry, named pipe), `src/storage`, `src/identity`, `src/channel`, `src/host` (tray, window, local API), `src/app` (wiring, `Workbench.exe`), `src/worker` (`workbench-worker.exe`), `ui/` (Svelte SPA, built with npm and embedded as resources), `tests/` (GoogleTest, vendored).
+- `client/`: CMake project. `src/base` (portable: JSON, base64url, URL, JWT parsing, time, logging redaction), `src/platform` (Win32 RAII, WinHTTP HTTP and WebSocket, DPAPI, BCrypt, registry, named pipe), `src/storage`, `src/identity`, `src/channel`, `src/host` (tray, window, local API), `src/app` (wiring, `Skowork.exe`), `src/worker` (`skowork-worker.exe`), `ui/` (Svelte SPA, built with npm and embedded as resources), `tests/` (GoogleTest, vendored).
 - `control-plane/`: one Node.js (22+) TypeScript package. `src/server.ts` (Express app and `ws` push server), `src/<module>/` per capability (identity, fleet, gateway, policy and so on), `src/db.ts` (`node:sqlite` with numbered SQL migrations applied at start), `admin/` (React and Vite admin console, built into `dist/admin` and served by the same process), `test/` (`node:test` with an in-memory database and locally signed test tokens; tests that need the real Keycloak or LLM are tagged and run locally only), `Dockerfile`. Runtime dependencies stay few: express, ws and jose.
 - `dev/graph-mock`: Microsoft Graph mock (add-mail-calendar), the only mock, because there is no access to a real tenant.
 - `.github/workflows/`: `ci.yml` (every push and pull request; publishes the dev build on `main`, D9) and `release.yml` (version tags `v*`).
 - `evals/`: the agent eval suite (add-agent-runtime).
 
-**Machine configuration** (client/control-channel Control-Plane Discovery, client/identity Identity Provider Configuration): read first from `HKLM\SOFTWARE\Policies\Workbench` (values `ControlPlaneUrl`, `IdpIssuer`, `IdpClientId`, `IdpRedirectUri`, `IdpScope`, `Channel`), then from `workbench.machine.json` next to the executable, which the distribution system or the zip package places there. User-writable locations are never read. Builds with `WORKBENCH_DEV_ENDPOINTS` (the debug and test presets, never release) also accept `http://` URLs whose host is a loopback address, so tests can run against the local control plane without certificates; release builds refuse them (client/identity Server Identity Verification).
+**Machine configuration** (client/control-channel Control-Plane Discovery, client/identity Identity Provider Configuration): read first from `HKLM\SOFTWARE\Policies\Skowork` (values `ControlPlaneUrl`, `IdpIssuer`, `IdpClientId`, `IdpRedirectUri`, `IdpScope`, `Channel`), then from `skowork.machine.json` next to the executable, which the distribution system or the zip package places there. User-writable locations are never read. Builds with `SKOWORK_DEV_ENDPOINTS` (the debug and test presets, never release) also accept `http://` URLs whose host is a loopback address, so tests can run against the local control plane without certificates; release builds refuse them (client/identity Server Identity Verification).
 
 **Control-plane HTTP API** (all under the base URL; JSON; bearer access token unless noted):
 - `POST /api/v1/fleet/register` → `{installation_id, heartbeat_interval_s, min_version, revoked, services: {gateway, policy, skills, telemetry, tasks, mcp, push}, server_time}`. The request carries `installation_id, machine_name, version, channel, commit, os_build, hardware_class`. The user identity comes only from the access token (`preferred_username`); a `user_principal` in the body is ignored, so a client cannot register under another user's name. `min_version` is `"0.0.0"` (no minimum) when none is set for the channel.
@@ -233,22 +233,22 @@ These are the contracts that the client and the control plane are built against.
 - **Revocation internals (control-plane/fleet-registry Installation Revocation):** revoking an installation writes an installation deny-list entry. Revoking a user writes a user deny-list entry, blocks re-registration and closes every push connection of that user with close code 4403. The deny list is read from SQLite on every request; it is small and indexed.
 
 ### D12. Client host implementation
-- **UI serving:** the SPA build (`client/ui/dist`) is packed by `tools/uipack` into one `ui.pak` blob and linked into `Workbench.exe` as an RCDATA resource. WebView2 requests to `https://app.workbench.local/*` are answered from that blob through `WebResourceRequested`, with a strict CSP (`script-src 'self'`, `connect-src 'none'`), so no UI file exists on disk and nothing can be swapped under the installed app. Navigation away from the origin, new windows and permission requests are refused. Web messages are accepted only from the app origin; each request `{id, method, params}` runs on the thread pool and the reply `{id, result|error}` is posted back on the main thread. Host events go out as `{event, data}`.
+- **UI serving:** the SPA build (`client/ui/dist`) is packed by `tools/uipack` into one `ui.pak` blob and linked into `Skowork.exe` as an RCDATA resource. WebView2 requests to `https://app.skowork.local/*` are answered from that blob through `WebResourceRequested`, with a strict CSP (`script-src 'self'`, `connect-src 'none'`), so no UI file exists on disk and nothing can be swapped under the installed app. Navigation away from the origin, new windows and permission requests are refused. Web messages are accepted only from the app origin; each request `{id, method, params}` runs on the thread pool and the reply `{id, result|error}` is posted back on the main thread. Host events go out as `{event, data}`.
   - **Alternative considered:** `SetVirtualHostNameToFolderMapping` over an installed folder. Rejected because it needs the files on disk, and a user-writable copy could be altered.
 - **Tray state precedence:** action-required, then paused, then disconnected, then running, then idle. What the user must act on comes first. Icons are drawn at runtime, so the package carries no image assets.
-- **Workers:** `workbench-worker.exe --role <role> --idle-exit <s>` talks length-prefixed JSON over its stdin and stdout and inherits only those two handles. The Job Object sets kill-on-close and `JOB_OBJECT_LIMIT_PROCESS_MEMORY` to the role's budget. The limit caps committed private memory, which bounds the private working set. When the job reports the limit, the host terminates the worker, and the job fails with `resource_limit`. The worker keeps its own idle timer and exits after 60 s without a request. If a worker idles out between the host's check and a new request, the host restarts it and retries once.
+- **Workers:** `skowork-worker.exe --role <role> --idle-exit <s>` talks length-prefixed JSON over its stdin and stdout and inherits only those two handles. The Job Object sets kill-on-close and `JOB_OBJECT_LIMIT_PROCESS_MEMORY` to the role's budget. The limit caps committed private memory, which bounds the private working set. When the job reports the limit, the host terminates the worker, and the job fails with `resource_limit`. The worker keeps its own idle timer and exits after 60 s without a request. If a worker idles out between the host's check and a new request, the host restarts it and retries once.
 - **Background gate:** one `BackgroundGate` holds the pause deadline, the battery-saver and presentation inputs, and `policy.ui.background_on_battery`. Producers ask it before each unit of work and block on it while held. Inputs are polled every 5 s: `GetSystemPowerStatus` (`SystemStatusFlag`) and `SHQueryUserNotificationState` (busy, D3D full screen, presentation mode). That costs nothing measurable and needs no power-notification registration.
-- **Logs:** files are named `workbench-<ms>-<seq>.log`, so the file name gives the order. Rotation deletes by that order, never the file being written. Redaction runs before a line reaches the file in every mode.
-- **Development hooks (debug and test presets only, `WORKBENCH_DEV_ENDPOINTS`):**
+- **Logs:** files are named `skowork-<ms>-<seq>.log`, so the file name gives the order. Rotation deletes by that order, never the file being written. Redaction runs before a line reaches the file in every mode.
+- **Development hooks (debug and test presets only, `SKOWORK_DEV_ENDPOINTS`):**
   - The command line accepts `--data-root`, `--pipe-name`, `--config` and `--no-register`, so tests run isolated instances next to a real one.
   - `dev_browser: "record"` in the machine configuration records the authorize URL instead of opening the browser.
-  - `WORKBENCH_DEV_PROXY=http://127.0.0.1:3128` sends non-loopback requests through `dev/scripts/dev-proxy.mjs`, an HTTP CONNECT tunnel run by Node. Managed workstations can block outbound connections from unsigned executables, which includes local builds of `Workbench.exe` and `e2e_tests.exe` (seen 2026-10-22: `connect` fails with WSAEACCES while signed `node.exe` connects). TLS stays end to end; the tunnel only forwards bytes.
+  - `SKOWORK_DEV_PROXY=http://127.0.0.1:3128` sends non-loopback requests through `dev/scripts/dev-proxy.mjs`, an HTTP CONNECT tunnel run by Node. Managed workstations can block outbound connections from unsigned executables, which includes local builds of `Skowork.exe` and `e2e_tests.exe` (seen 2026-10-22: `connect` fails with WSAEACCES while signed `node.exe` connects). TLS stays end to end; the tunnel only forwards bytes.
   - The pipe offers `dev.*` methods for worker, power-state and window checks.
   - Release builds compile none of this.
 - **End-to-end tests:** `client/tests/e2e` runs against the organization Keycloak test realm (`OIDC_*` from the repository `.env`) and the real control plane started from the repository (`dev/scripts/dev-stack.ps1 -BootstrapAdmins <your Keycloak user name>`; everything stays inside the repository or the temp folder, nothing is installed elsewhere). They run locally only, never in CI.
   - Sign-in goes through the system browser and the loopback redirect, as for a user. A test cannot type a password, so the first sign-in of a run may need the developer at the browser; later sign-ins complete on the browser's SSO session within seconds. Tests that keep their session share one signed-in token manager; tests that end a session (sign-out, revocation, refresh-token reuse) sign in on their own.
-  - The real realm offers no second user and no test controls, so: a data root bound to another user is simulated by presetting the bound subject; a session ended at the identity provider is simulated by revoking its refresh token at the revocation endpoint; tests that need a real 5-minute token to expire (401 retry, auth-renew past expiry) run only with `WORKBENCH_E2E_SLOW=1`, and need a synchronized workstation clock: the local control plane checks Keycloak's absolute `exp` with 30 s of skew, while the client times its refresh from `expires_in`. On 2026-10-22 the development workstation ran about 130 s fast (Windows Time stopped), and the auth-renew test failed because the control plane closed the connection before the refresh was due. Production control planes run with synchronized time. Multi-user and expired-token cases are covered by the control plane's own tests with locally signed tokens.
-  - For network-blip tests, the control plane listens on another port behind an in-test TCP proxy that can drop all connections (`-CpPort 8081 -PublicBaseUrl http://127.0.0.1:8080`, `WORKBENCH_E2E_CP_UPSTREAM=8081`).
+  - The real realm offers no second user and no test controls, so: a data root bound to another user is simulated by presetting the bound subject; a session ended at the identity provider is simulated by revoking its refresh token at the revocation endpoint; tests that need a real 5-minute token to expire (401 retry, auth-renew past expiry) run only with `SKOWORK_E2E_SLOW=1`, and need a synchronized workstation clock: the local control plane checks Keycloak's absolute `exp` with 30 s of skew, while the client times its refresh from `expires_in`. On 2026-10-22 the development workstation ran about 130 s fast (Windows Time stopped), and the auth-renew test failed because the control plane closed the connection before the refresh was due. Production control planes run with synchronized time. Multi-user and expired-token cases are covered by the control plane's own tests with locally signed tokens.
+  - For network-blip tests, the control plane listens on another port behind an in-test TCP proxy that can drop all connections (`-CpPort 8081 -PublicBaseUrl http://127.0.0.1:8080`, `SKOWORK_E2E_CP_UPSTREAM=8081`).
 
 ## Spike results
 

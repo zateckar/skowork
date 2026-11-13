@@ -403,7 +403,7 @@ export class Gateway {
 
   #record(user: User, req: Request, endpoint: string, role: string | null, upstream: string | null, usage: Usage, outcome: string, started: number, content: unknown,
     images = 0, ttft: number | null = null, answeredBy: string | null = null, fallback: string | null = null) {
-    this.#insertUsage(user, req.header('x-workbench-installation')?.slice(0, 128) ?? null, req.header('x-workbench-run')?.slice(0, 128) ?? null,
+    this.#insertUsage(user, req.header('x-skowork-installation')?.slice(0, 128) ?? null, req.header('x-skowork-run')?.slice(0, 128) ?? null,
       endpoint, role, upstream, usage, outcome, started, content, images, ttft, answeredBy, fallback);
   }
 
@@ -480,7 +480,7 @@ export class Gateway {
       const upstream = models[role];
       if (!upstream) continue;
       const cap = this.#capability(upstream);
-      const entry: Record<string, unknown> = { id: role, object: 'model', owned_by: 'workbench' };
+      const entry: Record<string, unknown> = { id: role, object: 'model', owned_by: 'skowork' };
       if (isChat(role)) {
         Object.assign(entry, { kind: 'chat', context_window: cap.context_window, max_output_tokens: cap.max_output_tokens ?? 4096,
           tools: Boolean(cap.tools), images: Boolean(cap.images), reasoning: Boolean(cap.reasoning) });

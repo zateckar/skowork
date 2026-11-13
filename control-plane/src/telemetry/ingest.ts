@@ -114,8 +114,8 @@ export class TelemetryIngest {
     this.#audit = audit;
     this.#levelOf = levelOf;
     this.#limiter = new RateLimiter(cfg.batchesPerMinute, cfg.batchBurst);
-    this.#pseudonymKey = Buffer.from(hkdfSync('sha256', cfg.secret, 'workbench-telemetry', 'pseudonym', 32));
-    this.#crashKey = Buffer.from(hkdfSync('sha256', cfg.secret, 'workbench-telemetry', 'crash-dumps', 32));
+    this.#pseudonymKey = Buffer.from(hkdfSync('sha256', cfg.secret, 'skowork-telemetry', 'pseudonym', 32));
+    this.#crashKey = Buffer.from(hkdfSync('sha256', cfg.secret, 'skowork-telemetry', 'crash-dumps', 32));
   }
 
   /** Test seam for the forwarding target. */
@@ -149,10 +149,10 @@ export class TelemetryIngest {
     return false;
   }
 
-  /** POST /api/v1/telemetry/v1/crashes: one minidump, metadata in x-workbench-crash-* headers (design D4). */
+  /** POST /api/v1/telemetry/v1/crashes: one minidump, metadata in x-skowork-crash-* headers (design D4). */
   handleCrash(req: Request, res: Response): void {
     const user = req.user!;
-    const h = (k: string) => String(req.headers[`x-workbench-crash-${k}`] ?? '').slice(0, 128);
+    const h = (k: string) => String(req.headers[`x-skowork-crash-${k}`] ?? '').slice(0, 128);
     const body = req.body;
     if (!(body instanceof Uint8Array) || body.length === 0) return sendError(res, 400, 'INVALID_REQUEST', 'The request body is empty.');
     if (body.length > this.#cfg.maxCrashBytes) return sendError(res, 413, 'PAYLOAD_TOO_LARGE', 'The crash dump is too large.');
@@ -201,8 +201,8 @@ export class TelemetryIngest {
     } catch (e) {
       return sendError(res, 400, 'INVALID_REQUEST', `The OTLP payload is malformed: ${e instanceof OtlpError ? e.message : 'decode error'}.`);
     }
-    const installation = batch.resource.get('workbench.installation_id');
-    if (typeof installation !== 'string' || !installation) return sendError(res, 400, 'INVALID_REQUEST', 'The batch names no installation (workbench.installation_id).');
+    const installation = batch.resource.get('skowork.installation_id');
+    if (typeof installation !== 'string' || !installation) return sendError(res, 400, 'INVALID_REQUEST', 'The batch names no installation (skowork.installation_id).');
 
     const wait = this.#limiter.take(installation);
     if (wait > 0) {

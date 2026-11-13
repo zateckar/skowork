@@ -1,4 +1,4 @@
-// SkoWork admin console shell (control-plane/admin-console): sign-in, and the views the admin's roles allow
+// Skowork admin console shell (control-plane/admin-console): sign-in, and the views the admin's roles allow
 // (the server returns them with /me; design D6). Views are addressed as #/<view>.
 import { useEffect, useState, type ReactNode } from 'react';
 import { api, ApiError, init, signIn, signOut } from './auth.ts';
@@ -40,7 +40,7 @@ const TITLES: Record<string, string> = {
 };
 
 const PURPOSES: Record<string, string> = {
-  dashboards: 'Adoption and usage of SkoWork per Group.',
+  dashboards: 'Adoption and usage of Skowork per Group.',
   identity: 'Who gets tokens, who belongs to which Group, and who holds an administrator role.',
   fleet: 'Installed clients, their versions and policies. Revoke a machine or a user, or set the minimum version.',
   policy: 'Write, publish, roll out and roll back the policy of the organization and of each Group.',
@@ -118,7 +118,7 @@ export function App() {
   if (state === 'signed-out')
     return (
       <Centered>
-        <h1>SkoWork admin</h1>
+        <h1>Skowork admin</h1>
         <button className="primary" data-testid="sign-in" onClick={() => void signIn()}>Sign in with organization account</button>
       </Centered>
     );
@@ -139,7 +139,7 @@ export function App() {
   return (
     <div className="shell">
       <header>
-        <strong className="brand">SkoWork admin</strong>
+        <strong className="brand">Skowork admin</strong>
         <span className="me" data-testid="me">
           <span>{me!.display_name} <small>({me!.admin_roles.join(', ')})</small></span>
           <button onClick={() => void signOut()}>Sign out</button>

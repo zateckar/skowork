@@ -209,13 +209,13 @@ TEST(TelemetryOtlp, EncodesLogRecordsThatDecodeBack) {
     recs.push_back(*make_record(Event::client_footprint, 1700000000002, {{Attr::process_working_set_mb, 42.5}}, Level::metadata, r));
     recs.push_back(*make_record(Event::sandbox_enforcement, 1700000000003, {{Attr::network_enforcement, "proxy-only"}}, Level::metadata, r));
     ResourceInfo res;
-    res.attrs = {{Res::service_version, "0.1.0"}, {Res::workbench_installation_id, "inst-1"}};
+    res.attrs = {{Res::service_version, "0.1.0"}, {Res::skowork_installation_id, "inst-1"}};
     const std::string bytes = encode_logs(res, recs, "0.1.0");
     const auto b = decode_logs(bytes);
     ASSERT_TRUE(b);
-    EXPECT_EQ(b->scope_name, "workbench.client");
+    EXPECT_EQ(b->scope_name, "skowork.client");
     ASSERT_EQ(b->resource.size(), 2u);
-    EXPECT_EQ(b->resource[1].first, "workbench.installation_id");
+    EXPECT_EQ(b->resource[1].first, "skowork.installation_id");
     EXPECT_EQ(std::get<std::string>(b->resource[1].second), "inst-1");
     ASSERT_EQ(b->logs.size(), 3u);
     EXPECT_EQ(b->logs[0].event_name, "run.finished");

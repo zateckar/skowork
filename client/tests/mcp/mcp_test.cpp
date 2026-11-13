@@ -38,17 +38,17 @@ fs::path find_node() {
     return buf;
 }
 
-fs::path reference_server() { return fs::path(WORKBENCH_MCP_TEST_SERVER_DIR) / "server.mjs"; }
+fs::path reference_server() { return fs::path(SKOWORK_MCP_TEST_SERVER_DIR) / "server.mjs"; }
 
 bool reference_server_ready() {
     std::error_code ec;
-    return !find_node().empty() && fs::exists(fs::path(WORKBENCH_MCP_TEST_SERVER_DIR) / "node_modules" / "@modelcontextprotocol" / "sdk", ec);
+    return !find_node().empty() && fs::exists(fs::path(SKOWORK_MCP_TEST_SERVER_DIR) / "node_modules" / "@modelcontextprotocol" / "sdk", ec);
 }
 
 // A token as the identity provider issues it (decoded, not verified, by the test server).
 std::string fake_jwt(const std::string& sub, long long exp = 4102444800LL) {
     const json header = {{"alg", "ES256"}, {"typ", "JWT"}};
-    const json payload = {{"iss", "https://idp.test/realms/workbench"}, {"azp", "workbench"}, {"sub", sub}, {"exp", exp}};
+    const json payload = {{"iss", "https://idp.test/realms/skowork"}, {"azp", "skowork"}, {"sub", sub}, {"exp", exp}};
     return base64url_encode(header.dump()) + "." + base64url_encode(payload.dump()) + ".c2ln";
 }
 
@@ -83,7 +83,7 @@ struct Registry {
 };
 
 struct McpFixture {
-    fs::path root = fs::path(local_appdata()) / L"workbench-test" / widen(random_urlsafe(6));
+    fs::path root = fs::path(local_appdata()) / L"skowork-test" / widen(random_urlsafe(6));
     sandbox::EgressProxy proxy{[](const std::string&) { return policy::RuleVerdict{false, "test", "no network in tests"}; },
                                [](const sandbox::EgressProxy::Owner&, const std::string&, const policy::RuleVerdict&) {}};
     sandbox::Sandbox box{&proxy};
@@ -220,14 +220,14 @@ TEST(McpStdio, TalksToTheReferenceServerInTheSandbox) {
     sandbox::ProcessSpec spec;
     spec.executable = find_node().wstring();
     spec.arguments = L"\"" + reference_server().wstring() + L"\" --stdio";
-    spec.working_dir = narrow(fs::path(WORKBENCH_MCP_TEST_SERVER_DIR).wstring());
+    spec.working_dir = narrow(fs::path(SKOWORK_MCP_TEST_SERVER_DIR).wstring());
     spec.limits = sandbox::limits_for(nullptr, "mcp");
     spec.tool = "mcp:reference";
     auto proc = f.box.start(spec);
     ASSERT_TRUE(proc.ok()) << proc.error().message;
     auto session = Session::open(std::make_unique<StdioTransport>(std::move(*proc)), "2025-06-18", "test", std::chrono::seconds(30));
     ASSERT_TRUE(session.ok()) << session.error().message;
-    EXPECT_EQ((*session)->info().name, "workbench-mock-jira");
+    EXPECT_EQ((*session)->info().name, "skowork-mock-jira");
     EXPECT_TRUE((*session)->info().has_tools);
     auto tools = (*session)->list_tools(std::chrono::seconds(10));
     ASSERT_TRUE(tools.ok()) << tools.error().message;
@@ -276,9 +276,9 @@ TEST(McpManager, LocalServerToolsAreNamespacedFilteredAndClassified) {
     EXPECT_EQ(page.provenance->source_id, "local-tool/get_page#page://7");
     EXPECT_FALSE(page.provenance->trusted);
     // The catalog environment reaches the server; the client's own environment does not; network goes to the proxy.
-    ::SetEnvironmentVariableW(L"WORKBENCH_TEST_SECRET", L"x");
+    ::SetEnvironmentVariableW(L"SKOWORK_TEST_SECRET", L"x");
     auto env = f.call("mcp:local-tool/env", json::object());
-    ::SetEnvironmentVariableW(L"WORKBENCH_TEST_SECRET", nullptr);
+    ::SetEnvironmentVariableW(L"SKOWORK_TEST_SECRET", nullptr);
     EXPECT_EQ(env.content, "MODE=ro PROXY=yes SECRET=no");
 }
 
@@ -435,11 +435,11 @@ TEST(McpManager, UnlistedServerIsUnavailable) {
 // ---- 3.2 Streamable HTTP with the user's identity-provider token ------------------------------------------------------
 
 TEST(McpHttp, RemoteServerGetsTheUsersToken) {
-#ifndef WORKBENCH_DEV_ENDPOINTS
+#ifndef SKOWORK_DEV_ENDPOINTS
   GTEST_SKIP() << "the test server listens on loopback http, which only debug and test builds accept";
 #endif
     if (!reference_server_ready()) GTEST_SKIP() << "node or dev/mcp-test-server/node_modules missing (npm install there)";
-    ChildProcess server(find_node(), L"\"" + reference_server().wstring() + L"\" --http 0 --issuer https://idp.test/realms/workbench");
+    ChildProcess server(find_node(), L"\"" + reference_server().wstring() + L"\" --http 0 --issuer https://idp.test/realms/skowork");
     const auto j = parse_json(server.first_line);
     ASSERT_TRUE(j.has_value()) << server.first_line;
     const std::string url = jstr(*j, "listening");
@@ -466,7 +466,7 @@ TEST(McpHttp, RemoteServerGetsTheUsersToken) {
 }
 
 TEST(McpHttp, TokenIsRefreshedOnceAfter401) {
-#ifndef WORKBENCH_DEV_ENDPOINTS
+#ifndef SKOWORK_DEV_ENDPOINTS
   GTEST_SKIP() << "the test server listens on loopback http, which only debug and test builds accept";
 #endif
     if (!reference_server_ready()) GTEST_SKIP() << "node or dev/mcp-test-server/node_modules missing (npm install there)";
@@ -485,7 +485,7 @@ TEST(McpHttp, TokenIsRefreshedOnceAfter401) {
 }
 
 TEST(McpHttp, RefusedTokenAndBlockedEgressAreReported) {
-#ifndef WORKBENCH_DEV_ENDPOINTS
+#ifndef SKOWORK_DEV_ENDPOINTS
   GTEST_SKIP() << "the test server listens on loopback http, which only debug and test builds accept";
 #endif
     if (!reference_server_ready()) GTEST_SKIP() << "node or dev/mcp-test-server/node_modules missing (npm install there)";

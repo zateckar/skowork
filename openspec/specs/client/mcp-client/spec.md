@@ -34,7 +34,7 @@ Each local MCP server SHALL run in its own client/tool-sandbox containment group
 - **THEN** it keeps running until it has been idle for policy.mcp.idle_timeout_minutes
 
 ### Requirement: Remote Server Authentication
-The client SHALL authenticate to each remote MCP server with an audience-scoped token obtained from control-plane/identity for that server, and MUST NOT send the general Workbench access token to MCP servers.
+The client SHALL authenticate to each remote MCP server with an audience-scoped token obtained from control-plane/identity for that server, and MUST NOT send the general Skowork access token to MCP servers.
 
 #### Scenario: Token scoped to server
 - **WHEN** the client calls a remote MCP server

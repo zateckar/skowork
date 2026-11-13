@@ -84,7 +84,7 @@ std::string describe_limit(LimitHit l, const Limits& limits, std::chrono::millis
 std::chrono::milliseconds effective_wall(const ProcessSpec& spec);
 
 // The environment a sandboxed process starts with: an allowlist of the client's variables plus `extra`. Nothing else
-// is inherited, so no Workbench token or secret reaches the child.
+// is inherited, so no Skowork token or secret reaches the child.
 std::vector<std::pair<std::string, std::string>> scrubbed_environment(const std::vector<std::pair<std::string, std::string>>& extra);
 
 // Decodes captured console output to UTF-8: UTF-8 as is, UTF-16LE when it looks like it, otherwise the OEM code page.

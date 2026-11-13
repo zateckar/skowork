@@ -29,4 +29,4 @@ Out of scope:
 
 - **Roadmap:** 15, after improve-usability. Depends on add-agent-runtime (llm-gateway) and add-telemetry-and-admin (admin-console), and is archived after them.
 - **Code:** control-plane/src/gateway (connections store, discovery, routing), control-plane/src/config.ts (bootstrap), control-plane/admin (Connections view, model pickers).
-- **Data:** a new table of connections and discovered models in the control-plane database; credentials encrypted with a server key from WORKBENCH_SECRET_KEY (development: a generated key file in the data folder).
+- **Data:** a new table of connections and discovered models in the control-plane database; credentials encrypted with a server key from SKOWORK_SECRET_KEY (development: a generated key file in the data folder).

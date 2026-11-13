@@ -410,9 +410,9 @@ TEST(KnowledgeCore, ChunkersSplitDocumentsCodeTranscriptsAndThreads) {
     EXPECT_EQ(tc[1].at, t0 + 180'000);
 
     // Thread messages, packed message by message.
-    const auto tm = chunk_messages({{"User", "Kolik stojí licence?", t0}, {"Workbench", "48 000 EUR.", t0 + 1}});
+    const auto tm = chunk_messages({{"User", "Kolik stojí licence?", t0}, {"Skowork", "48 000 EUR.", t0 + 1}});
     ASSERT_EQ(tm.size(), 1u);
-    EXPECT_EQ(tm[0].text, "User: Kolik stojí licence?\n\nWorkbench: 48 000 EUR.");
+    EXPECT_EQ(tm[0].text, "User: Kolik stojí licence?\n\nSkowork: 48 000 EUR.");
 }
 
 TEST(KnowledgeCore, MailQuotedHistoryIsStripped) {
@@ -1637,7 +1637,7 @@ TEST(KnowledgeExtraction, OffSendsNothingOnStoresFactsWithProvenanceAndBudget) {
                                {{"Petr", "Dobrý den, začneme.", start},
                                 {"Petr", "Od pondělí vede projekt Phoenix Jana Nováková.", start + 40'000},
                                 {"Jana", "Děkuji, první milník je v prosinci.", start + 200'000}},
-                               "workbench://meeting/meet-1");
+                               "skowork://meeting/meet-1");
     kg.idle();
     EXPECT_EQ(kg.svc->store().counts("meetings").chunks, 2);  // two windows of about two minutes
     EXPECT_EQ(kg.gw.chat_calls, 0);                            // Extraction disabled: no requests
@@ -2994,7 +2994,7 @@ TEST(KnowledgeChangeReports, RevisionsRecordLostSupportDurablyAndGoWithTheirItem
 
     // A large change withdraws its findings in steps before the switch; its report still counts them.
     auto& store = kg.svc->store();
-    ItemInput large{"threads", "large", "Large", "workbench://thread/large", "l1", 100, 100, 1, {}, false};
+    ItemInput large{"threads", "large", "Large", "skowork://thread/large", "l1", 100, 100, 1, {}, false};
     for (int n = 0; n < 2100; ++n) large.chunks.push_back({"", "Passage " + std::to_string(n) + ".", 0});
     const auto large_id = store.put_item(large, 200);
     ASSERT_TRUE(large_id);
@@ -3801,7 +3801,7 @@ TEST(KnowledgeRetrieval, DISABLED_SourceListScale) {
 INSERT INTO entities(id,type,name,key) VALUES(1,'project','Project','project'),(2,'topic','Topic','topic');
 WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
  INSERT INTO items(id,source,ext_id,title,ref,updated_at)
- SELECT x,'threads','thread-'||x,'Thread '||x,'workbench://thread/thread-'||x,x FROM n;
+ SELECT x,'threads','thread-'||x,'Thread '||x,'skowork://thread/thread-'||x,x FROM n;
 INSERT INTO chunks(id,item_id,ord,text) SELECT id,id,0,'Indexed source passage' FROM items;
 WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000)
  INSERT INTO relations(subject,predicate,object,confidence,chunk_id) SELECT 1,'fact-'||x,2,1,((x-1)%10000)+1 FROM n;
@@ -3846,7 +3846,7 @@ WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000)
 INSERT INTO entities(id,type,name,key) VALUES(1001,'date','2026','2026');
 WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
  INSERT INTO items(id,source,ext_id,title,ref,updated_at)
- SELECT x,'threads','thread-'||x,'Thread '||x,'workbench://thread/thread-'||x,x FROM n;
+ SELECT x,'threads','thread-'||x,'Thread '||x,'skowork://thread/thread-'||x,x FROM n;
 INSERT INTO chunks(id,item_id,ord,text) SELECT id,id,0,'Indexed source passage' FROM items;
 INSERT INTO knowledge_revisions(id,item_id,sequence,source_hash,indexed_at,current) SELECT id,id,1,'hash',1,1 FROM items;
 INSERT INTO knowledge_evidence(id,revision_id,chunk_id,excerpt,precision) SELECT id,id,id,'Indexed source passage','passage' FROM items;
@@ -3901,7 +3901,7 @@ TEST(KnowledgeRetrieval, HiddenSearchCandidatesDoNotCrowdOutVisibleResults) {
     auto& store = kg.svc->store();
     for (int i = 0; i < 37; ++i) {
         const auto id = "candidate-" + std::to_string(i);
-        ItemInput in{"threads", id, "Candidate " + std::to_string(i), "workbench://thread/" + id,
+        ItemInput in{"threads", id, "Candidate " + std::to_string(i), "skowork://thread/" + id,
                      "hash", 100, 100, 1, {{"", "uniqueneedle", 0}}, false};
         ASSERT_TRUE(store.put_item(in, 100));
     }
@@ -3958,7 +3958,7 @@ TEST(KnowledgeRetrieval, RerankFallbackCitationsAndGraphExpansion) {
     for (const auto& p : r.passages) {
         EXPECT_EQ(p.source, "threads");
         EXPECT_FALSE(p.title.empty());
-        EXPECT_EQ(p.ref.rfind("workbench://thread/", 0), 0u);
+        EXPECT_EQ(p.ref.rfind("skowork://thread/", 0), 0u);
         EXPECT_GT(p.date, 0);
     }
     // With the reranker the order is the reranker's.
@@ -3973,7 +3973,7 @@ TEST(KnowledgeRetrieval, RerankFallbackCitationsAndGraphExpansion) {
     auto off = kg.svc->search("licence linka", {});
     EXPECT_FALSE(off.semantic);
     ASSERT_EQ(off.passages.size(), 5u);
-    for (const auto& p : off.passages) EXPECT_EQ(p.ref.rfind("workbench://thread/", 0), 0u);
+    for (const auto& p : off.passages) EXPECT_EQ(p.ref.rfind("skowork://thread/", 0), 0u);
     kg.gw.offline = false;
     // Graph expansion: a passage that mentions a query entity is found without sharing a word with the query.
     kg.add_thread("plan", {{"user", "Harmonogram na čtvrté čtvrtletí."}});
@@ -4003,7 +4003,7 @@ TEST(KnowledgeTools, CitationOpensOnlyIndexedFiles) {
     ASSERT_TRUE((*open)(json{{"ref", plan}}));
     EXPECT_EQ(opened, std::vector<std::string>{plan});
     EXPECT_EQ((*open)(json{{"ref", "C:\\Windows\\System32\\calc.exe"}}).error().code, "not_found");
-    EXPECT_EQ((*open)(json{{"ref", "workbench://thread/t1"}}).error().code, "not_found");
+    EXPECT_EQ((*open)(json{{"ref", "skowork://thread/t1"}}).error().code, "not_found");
     EXPECT_EQ(opened.size(), 1u);
 }
 
@@ -4046,7 +4046,7 @@ TEST(KnowledgeTools, ProvenanceInjectedInstructionRememberAndGraphTools) {
     ASSERT_EQ(profile["facts"].size(), 1u);
     EXPECT_EQ(profile["facts"][0]["text"], "prefers meeting summaries in Czech");
     EXPECT_EQ(profile["facts"][0]["provenance"]["source_kind"], "user");
-    EXPECT_EQ(profile["facts"][0]["provenance"]["source_id"], "workbench://thread/thread-42");
+    EXPECT_EQ(profile["facts"][0]["provenance"]["source_id"], "skowork://thread/thread-42");
     // A later search on the same subject returns the fact as user-stated.
     const json again = json::parse(tool(tools, "knowledge.search").run(ctx, {{"query", "meeting summaries"}}).content);
     ASSERT_EQ(again["user_facts"].size(), 1u);
@@ -4773,7 +4773,7 @@ TEST(KnowledgeNotes, NoteFoundByKnowledgeSearchEditedDeletedAndPolicy) {
     ASSERT_FALSE(body["results"].empty());
     EXPECT_EQ(body["results"][0]["source"], "notes");
     EXPECT_EQ(body["results"][0]["provenance"]["source_kind"], "notes");
-    EXPECT_EQ(body["results"][0]["ref"], "workbench://note/" + std::to_string(*id));
+    EXPECT_EQ(body["results"][0]["ref"], "skowork://note/" + std::to_string(*id));
     EXPECT_NE(jstr(body["results"][0], "passage").find("1 March"), std::string::npos);
     EXPECT_FALSE(body.contains("team_note"));  // no team knowledge configured
     // Edited: indexed again; the browse list shows it.

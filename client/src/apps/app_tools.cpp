@@ -25,9 +25,9 @@ const json kAppRef = {{"type", "string"}, {"description", "The app id from apps.
 constexpr const char* kHowTo =
     "The app's server is the entry file (server.js) run by the bundled Node.js runtime with built-in modules only "
     "(node:http, node:fs, node:path, node:sqlite and the like): no npm packages, no network, no child processes, files "
-    "of its own folder only. It must call http.createServer(handler).listen(process.env.WORKBENCH_APP_PIPE). Keep static "
+    "of its own folder only. It must call http.createServer(handler).listen(process.env.SKOWORK_APP_PIPE). Keep static "
     "files in public/ and data in data.db (node:sqlite). The app is served under /<app-id>/, so pages use relative URLs. "
-    "Pages read data of the MCP tools in mcp_tools with fetch('_workbench/mcp/<server>/<tool>', {method: 'POST', headers: "
+    "Pages read data of the MCP tools in mcp_tools with fetch('_skowork/mcp/<server>/<tool>', {method: 'POST', headers: "
     "{'content-type': 'application/json'}, body: JSON.stringify(args)}), which returns {result} or {error}. Write the files "
     "with files.write into the folder, then call apps.open.";
 

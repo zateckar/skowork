@@ -10,7 +10,7 @@ namespace wb::computer {
 
 namespace {
 
-constexpr wchar_t kClass[] = L"WorkbenchComputerOverlay";
+constexpr wchar_t kClass[] = L"SkoworkComputerOverlay";
 constexpr COLORREF kKey = RGB(255, 0, 255);     // transparent
 constexpr COLORREF kFrame = RGB(255, 140, 0);   // the target frame
 constexpr COLORREF kBanner = RGB(32, 32, 32);
@@ -98,7 +98,7 @@ void ControlSession::run(std::promise<Status>* ready) {
     const int vx = ::GetSystemMetrics(SM_XVIRTUALSCREEN), vy = ::GetSystemMetrics(SM_YVIRTUALSCREEN);
     const int vw = ::GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = ::GetSystemMetrics(SM_CYVIRTUALSCREEN);
     HWND hwnd = ::CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClass,
-                                  L"SkoWork computer use", WS_POPUP, vx, vy, vw, vh, nullptr, nullptr, inst, this);
+                                  L"Skowork computer use", WS_POPUP, vx, vy, vw, vh, nullptr, nullptr, inst, this);
     if (!hwnd) {
         ::UnregisterHotKey(nullptr, kHotkeyId);
         return fail(make_error("overlay", "the overlay window could not be created"));

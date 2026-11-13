@@ -26,7 +26,7 @@ using namespace std::chrono_literals;
 namespace {
 
 struct TempDir {
-    std::filesystem::path path = std::filesystem::path(local_appdata()) / L"workbench-test" / widen("browser-" + random_urlsafe(6));
+    std::filesystem::path path = std::filesystem::path(local_appdata()) / L"skowork-test" / widen("browser-" + random_urlsafe(6));
     ~TempDir() {
         std::error_code ec;
         for (int i = 0; i < 20; ++i) {  // Chrome may hold profile files for a moment after exit
@@ -93,7 +93,7 @@ TEST(BrowserChrome, FindsAChromeOfASupportedVersion) {
 }
 
 TEST(BrowserChrome, PolicyKeysBlockDebugging) {
-    const std::wstring key = L"Software\\Workbench-test\\ChromePolicy-" + widen(random_urlsafe(6));
+    const std::wstring key = L"Software\\Skowork-test\\ChromePolicy-" + widen(random_urlsafe(6));
     EXPECT_TRUE(read_chrome_policy(key).allowed);
     HKEY h = nullptr;
     ASSERT_EQ(::RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_ALL_ACCESS, nullptr, &h, nullptr), ERROR_SUCCESS);
@@ -110,7 +110,7 @@ TEST(BrowserChrome, PolicyKeysBlockDebugging) {
     EXPECT_FALSE(st.allowed);
     EXPECT_EQ(st.policy, "DeveloperToolsAvailability");
     ::RegCloseKey(h);
-    ::RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Workbench-test");
+    ::RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Skowork-test");
     // This machine's own Chrome policy, for the record (task 1.1).
     const auto real = read_chrome_policy();
     std::printf("machine Chrome policy: debugging %s %s\n", real.allowed ? "allowed" : "blocked", real.policy.c_str());
@@ -629,7 +629,7 @@ TEST(BrowserTools, VisibleForTheUserHeadlessForUnattendedRunsWhenPolicyAllows) {
 
 TEST(BrowserTools, ChromePolicyWithdrawsTheTools) {
     REQUIRE_CHROME();
-    const std::wstring key = L"Software\\Workbench-test\\ChromePolicy-" + widen(random_urlsafe(6));
+    const std::wstring key = L"Software\\Skowork-test\\ChromePolicy-" + widen(random_urlsafe(6));
     HKEY h = nullptr;
     ASSERT_EQ(::RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_ALL_ACCESS, nullptr, &h, nullptr), ERROR_SUCCESS);
     DWORD zero = 0;
@@ -639,7 +639,7 @@ TEST(BrowserTools, ChromePolicyWithdrawsTheTools) {
     f.env.chrome_policy_key = key;
     f.make();
     const auto st = f.service->state();
-    ::RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Workbench-test");
+    ::RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Skowork-test");
     EXPECT_EQ(st.state, "blocked");
     EXPECT_EQ(st.policy, "RemoteDebuggingAllowed");
     EXPECT_EQ(st.reason, "Browser use blocked by Chrome policy RemoteDebuggingAllowed");

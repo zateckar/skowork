@@ -3,5 +3,5 @@
 if(WIN32)
   add_library(wb_api_connectors STATIC connectors.cpp)
   target_link_libraries(wb_api_connectors PUBLIC wb_policy wb_runtime wb_platform wb_base)
-  workbench_warnings(wb_api_connectors)
+  skowork_warnings(wb_api_connectors)
 endif()

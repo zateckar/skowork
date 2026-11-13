@@ -7,7 +7,7 @@ Different user groups (standard users, power users, developers) need different L
 ## What Changes
 
 - Add the control-plane policy service:
-  - map identity-provider roles and direct assignments to Workbench Groups (control-plane/identity);
+  - map identity-provider roles and direct assignments to Skowork Groups (control-plane/identity);
   - hold policy documents per Group with priorities and an org guardrail layer;
   - compile the effective policy per user;
   - sign, version and expire policy bundles;

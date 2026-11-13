@@ -10,7 +10,7 @@
 
 ## 2. Repository and build
 
-- [ ] 2.1 Create the `client/` CMake solution for GCC/MinGW with presets (debug, release, sanitize, fuzz) and vendored, pinned third-party sources with a manifest of versions, hashes and licences. Verify a clean offline CI build produces a signed `Workbench.exe` with no non-system DLL dependencies except `WebView2Loader.dll`
+- [ ] 2.1 Create the `client/` CMake solution for GCC/MinGW with presets (debug, release, sanitize, fuzz) and vendored, pinned third-party sources with a manifest of versions, hashes and licences. Verify a clean offline CI build produces a signed `Skowork.exe` with no non-system DLL dependencies except `WebView2Loader.dll`
 - [x] 2.2 Create the `control-plane/` Node.js TypeScript service (Express, node:sqlite with migrations, `ws`) with the Identity and Fleet modules, a React admin console shell served by the same process, a Dockerfile, and `dev/scripts/dev-stack.ps1`, which runs it from the repository. Verify that `npm test` passes locally and in CI
 - [ ] 2.3 Add CI quality gates (GCC warnings as errors and hardening flags, clang-tidy, `-fanalyzer`, a Linux job running the portable libraries' unit tests under ASan/UBSan and an AFL++ fuzz smoke run, footprint check). Verify a deliberate budget violation fails the pipeline
 - [x] 2.4 Add GitHub Actions release workflows that publish two artifacts for a version tag: the control plane as a container image and the desktop client as a zip package with its checksum. Verify a tag build produces both

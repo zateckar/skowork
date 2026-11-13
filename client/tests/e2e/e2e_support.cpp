@@ -78,8 +78,8 @@ std::string& skip_reason() {
 
 const std::optional<Env>& env() {
     static const std::optional<Env> e = []() -> std::optional<Env> {
-        // WORKBENCH_E2E_LOG=<dir>: client diagnostic logs (verbose) for the test process.
-        if (const std::string dir = setting("WORKBENCH_E2E_LOG"); !dir.empty()) {
+        // SKOWORK_E2E_LOG=<dir>: client diagnostic logs (verbose) for the test process.
+        if (const std::string dir = setting("SKOWORK_E2E_LOG"); !dir.empty()) {
             log::Options o;
             o.dir = widen(dir);
             log::init(o);
@@ -94,7 +94,7 @@ const std::optional<Env>& env() {
         x.client_id = setting("OIDC_CLIENT_ID");
         x.redirect_uri = setting("OIDC_REDIRECT_URI", "http://localhost:4200/auth/callback");
         x.scope = setting("OIDC_SCOPE", "openid profile email");
-        x.cp = setting("WORKBENCH_E2E_CP", "http://localhost:8080");
+        x.cp = setting("SKOWORK_E2E_CP", "http://localhost:8080");
         if (discovery_url.empty() || x.client_id.empty()) return fail("OIDC_DISCOVERY_URL / OIDC_CLIENT_ID not set (.env)");
         (void)cp_proxy();
         auto d = get(discovery_url);
@@ -111,7 +111,7 @@ const std::optional<Env>& env() {
     return e;
 }
 
-bool slow_tests_enabled() { return !setting("WORKBENCH_E2E_SLOW").empty(); }
+bool slow_tests_enabled() { return !setting("SKOWORK_E2E_SLOW").empty(); }
 
 IdentityConfig desktop_config() {
     IdentityConfig c;
@@ -123,7 +123,7 @@ IdentityConfig desktop_config() {
 }
 
 TempStore::TempStore() {
-    root_ = std::filesystem::temp_directory_path() / L"workbench-test" / widen("e2e-" + random_urlsafe(6));
+    root_ = std::filesystem::temp_directory_path() / L"skowork-test" / widen("e2e-" + random_urlsafe(6));
     auto r = DataRoot::open(root_);
     if (!r) throw std::runtime_error("data root: " + r.error().message);
     KeyStore keys(r->keys());
@@ -144,7 +144,7 @@ TempStore::~TempStore() {
 Status sign_in(TokenManager& tokens, std::chrono::seconds timeout) {
     static std::once_flag hint;
     std::call_once(hint, [] {
-        std::printf("\n>>> Workbench e2e: complete the sign-in in your browser if it asks (later sign-ins are automatic).\n\n");
+        std::printf("\n>>> Skowork e2e: complete the sign-in in your browser if it asks (later sign-ins are automatic).\n\n");
         std::fflush(stdout);
     });
     if (Status s = tokens.begin_sign_in(); !s) return s;
@@ -236,9 +236,9 @@ struct WsaInit {
 
 TcpProxy* cp_proxy() {
     static TcpProxy* p = []() -> TcpProxy* {
-        const std::string upstream = setting("WORKBENCH_E2E_CP_UPSTREAM");
+        const std::string upstream = setting("SKOWORK_E2E_CP_UPSTREAM");
         if (upstream.empty()) return nullptr;
-        const auto cp = parse_url(setting("WORKBENCH_E2E_CP", "http://localhost:8080"));
+        const auto cp = parse_url(setting("SKOWORK_E2E_CP", "http://localhost:8080"));
         return new TcpProxy(cp->port, std::atoi(upstream.c_str()));
     }();
     return p;

@@ -12,7 +12,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $bin = Join-Path $BuildDir 'bin'
-$files = 'SkoWork.exe', 'Workbench-legacy.exe', 'workbench-worker.exe', 'pdfium.dll' | ForEach-Object { Get-Item (Join-Path $bin $_) }
+$files = 'Skowork.exe', 'Skowork-legacy.exe', 'skowork-worker.exe', 'pdfium.dll' | ForEach-Object { Get-Item (Join-Path $bin $_) }
 $installMB = ($files | Measure-Object Length -Sum).Sum / 1MB
 $failures = @()
 Write-Host ("Install size: {0:N2} MB (budget {1} MB)" -f $installMB, $MaxInstallMB)
@@ -27,7 +27,7 @@ if ($InstallOnly) {
 # user's real profile. A GitHub-hosted runner is disposable, so its own profile is an acceptable release measurement.
 $cachePath = Join-Path $BuildDir 'CMakeCache.txt'
 $hasDevEndpoints = (Test-Path -LiteralPath $cachePath) -and
-    [bool](Select-String -LiteralPath $cachePath -Pattern '^WORKBENCH_DEV_ENDPOINTS:BOOL=ON$' -Quiet)
+    [bool](Select-String -LiteralPath $cachePath -Pattern '^SKOWORK_DEV_ENDPOINTS:BOOL=ON$' -Quiet)
 $hostedRunner = $env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted'
 if (!$hasDevEndpoints -and !$hostedRunner) {
     throw 'Cannot safely measure idle memory: this release build ignores isolation arguments. Use -InstallOnly locally or measure on a disposable GitHub-hosted runner.'
@@ -35,16 +35,16 @@ if (!$hasDevEndpoints -and !$hostedRunner) {
 if (!$hasDevEndpoints) { Write-Host 'Measuring the release binary in the disposable GitHub-hosted runner profile.' }
 
 # Idle working set: an isolated instance (own data root and pipe, no control plane), window closed.
-$root = Join-Path ([IO.Path]::GetTempPath()) ("workbench-footprint-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$root = Join-Path ([IO.Path]::GetTempPath()) ("skowork-footprint-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory $root | Out-Null
-$exe = Join-Path $bin 'SkoWork.exe'
-$p = Start-Process $exe -ArgumentList '--background', '--no-register', '--data-root', "`"$root\data`"", '--pipe-name', 'workbench-footprint', '--config', "`"$root\none.json`"" -PassThru -WindowStyle Hidden
+$exe = Join-Path $bin 'Skowork.exe'
+$p = Start-Process $exe -ArgumentList '--background', '--no-register', '--data-root', "`"$root\data`"", '--pipe-name', 'skowork-footprint', '--config', "`"$root\none.json`"" -PassThru -WindowStyle Hidden
 try {
     $samples = @()
     for ($i = 0; $i -lt $IdleSeconds; $i++) {
         Start-Sleep 1
         $p.Refresh()
-        if ($p.HasExited) { throw "SkoWork.exe exited with code $($p.ExitCode)" }
+        if ($p.HasExited) { throw "Skowork.exe exited with code $($p.ExitCode)" }
         $samples += $p.WorkingSet64 / 1MB
     }
     $cpu = $p.TotalProcessorTime.TotalSeconds

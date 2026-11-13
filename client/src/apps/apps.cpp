@@ -21,7 +21,7 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr const char* kLog = "apps";
-constexpr const char* kPipe = "workbench-app";
+constexpr const char* kPipe = "skowork-app";
 
 std::optional<std::string> read_file(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
@@ -78,7 +78,7 @@ bool valid_tool_id(const std::string& t) {
 
 // The starter files apps.create writes: a server for public/ and a small JSON API on data.db, and a page that uses it
 // with relative URLs (the app is served under /<app-id>/).
-constexpr const char* kStarterServer = R"JS(// A SkoWork Local app: built-in Node.js modules only, no network, files in this folder only.
+constexpr const char* kStarterServer = R"JS(// A Skowork Local app: built-in Node.js modules only, no network, files in this folder only.
 // The client serves this app to the user alone under /<app-id>/, so pages use relative URLs.
 const http = require('node:http');
 const fs = require('node:fs');
@@ -117,7 +117,7 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': types[path.extname(file)] || 'application/octet-stream' });
     res.end(data);
   });
-}).listen(process.env.WORKBENCH_APP_PIPE);
+}).listen(process.env.SKOWORK_APP_PIPE);
 )JS";
 
 constexpr const char* kStarterPage = R"HTML(<!doctype html>
@@ -135,7 +135,7 @@ constexpr const char* kStarterPage = R"HTML(<!doctype html>
 <ul id="notes"></ul>
 <script>
 // Relative URLs: the app lives under /<app-id>/. Data of a confirmed MCP tool:
-//   fetch('_workbench/mcp/<server>/<tool>', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(args) })
+//   fetch('_skowork/mcp/<server>/<tool>', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(args) })
 fetch('api/notes').then((r) => r.json()).then((notes) => {
   for (const n of notes) {
     const li = document.createElement('li');
@@ -592,7 +592,7 @@ Status AppManager::start_locked(std::unique_lock<std::mutex>& lock, const std::s
     spec.limits.memory_mb = env_.memory_mb;
     spec.limits.processes = 1;
     spec.limits.cpu_percent = 50;
-    spec.env = {{"WORKBENCH_APP_PIPE", kPipe}, {"NODE_OPTIONS", ""}};
+    spec.env = {{"SKOWORK_APP_PIPE", kPipe}, {"NODE_OPTIONS", ""}};
     spec.run_id = "app:" + id;
     spec.tool = "app:" + id;
     const auto pending = std::make_shared<Starting>();
@@ -615,7 +615,7 @@ Status AppManager::start_locked(std::unique_lock<std::mutex>& lock, const std::s
             r.reset();  // terminates and joins
             const std::string tail = logs(id, 2000);
             result = make_error("start", "The app did not start its server. It must call "
-                                         "http.createServer(...).listen(process.env.WORKBENCH_APP_PIPE). Log:\n" + tail);
+                                         "http.createServer(...).listen(process.env.SKOWORK_APP_PIPE). Log:\n" + tail);
         }
     }
 

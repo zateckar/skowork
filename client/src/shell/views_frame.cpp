@@ -122,7 +122,7 @@ void NavPane::rebuild() {
     const Route& r = shell_.route();
     const bool inbox_route = r.name == RouteName::inbox || r.name == RouteName::thread || r.name == RouteName::chat;
 
-    // The Workbench mark and name in the caption band, as File Explorer's tabs (improve-window-frame D3): the window moves
+    // The Skowork mark and name in the caption band, as File Explorer's tabs (improve-window-frame D3): the window moves
     // from here.
     auto* brand = emplace<Node>("nav-brand");
     brand->axis = ui::Axis::row;

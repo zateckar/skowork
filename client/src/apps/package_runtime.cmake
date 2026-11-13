@@ -1,6 +1,6 @@
 # The app runtime package (client/local-apps App Runtime, add-local-apps 2.6): node.exe and its LICENSE from
 # client/runtime/node (dev/scripts/fetch-node-runtime.ps1) and app-host.js, laid out as runtime/node next to
-# Workbench.exe. Fails when the package exceeds its budget of 100 MB.
+# Skowork.exe. Fails when the package exceeds its budget of 100 MB.
 #   cmake -DSRC_RUNTIME=<client/runtime/node> -DAPP_HOST=<app-host.js> -DDEST=<bin/runtime/node> -P package_runtime.cmake
 file(MAKE_DIRECTORY "${DEST}")
 file(COPY_FILE "${APP_HOST}" "${DEST}/app-host.js" ONLY_IF_DIFFERENT)

@@ -9,4 +9,4 @@ add_library(wb_storage STATIC
   agent_skills.cpp
   schema.cpp)
 target_link_libraries(wb_storage PUBLIC wb_platform sqlite3mc)
-workbench_warnings(wb_storage)
+skowork_warnings(wb_storage)

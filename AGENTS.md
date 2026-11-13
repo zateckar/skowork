@@ -1,4 +1,4 @@
-# Workbench — working rules
+# Skowork — working rules
 
 This repository is **spec-driven with OpenSpec**. The specification is the source of truth and always comes before implementation.
 

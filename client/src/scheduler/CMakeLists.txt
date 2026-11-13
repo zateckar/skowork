@@ -9,4 +9,4 @@ add_library(wb_scheduler STATIC
   mail_sources.cpp
   skill_triggers.cpp)
 target_link_libraries(wb_scheduler PUBLIC wb_runtime wb_storage wb_platform wb_base)
-workbench_warnings(wb_scheduler)
+skowork_warnings(wb_scheduler)

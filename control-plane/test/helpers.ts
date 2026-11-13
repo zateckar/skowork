@@ -7,8 +7,8 @@ import WebSocket from 'ws';
 import { loadConfig, type Config } from '../src/config.ts';
 import { createControlPlane, type ControlPlane } from '../src/app.ts';
 
-export const TEST_ISSUER = 'https://idp.test/realms/workbench';
-export const CLIENT_ID = 'workbench-desktop-test';
+export const TEST_ISSUER = 'https://idp.test/realms/skowork';
+export const CLIENT_ID = 'skowork-desktop-test';
 
 export interface Issuer {
   sign(claims?: Record<string, unknown>, opts?: { lifetimeS?: number; issuedAgoS?: number; issuer?: string }): Promise<string>;
@@ -57,12 +57,12 @@ export interface Harness {
 export async function startHarness(patch: (c: Config) => void = () => {}): Promise<Harness> {
   const issuer = await makeIssuer();
   const cfg = loadConfig({
-    WORKBENCH_ENV: 'test',
-    WORKBENCH_DB: ':memory:',
+    SKOWORK_ENV: 'test',
+    SKOWORK_DB: ':memory:',
     OIDC_CLIENT_ID: CLIENT_ID,
-    WORKBENCH_TEST_ISSUER: TEST_ISSUER,
-    WORKBENCH_TEST_ISSUER_JWKS: JSON.stringify(issuer.jwks),
-    WORKBENCH_BOOTSTRAP_ADMINS: 'admin1',
+    SKOWORK_TEST_ISSUER: TEST_ISSUER,
+    SKOWORK_TEST_ISSUER_JWKS: JSON.stringify(issuer.jwks),
+    SKOWORK_BOOTSTRAP_ADMINS: 'admin1',
   });
   patch(cfg);
   const cp = createControlPlane(cfg, () => {});

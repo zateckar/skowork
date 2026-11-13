@@ -15,7 +15,7 @@ const zip = (files: Record<string, string | Buffer>) => writeZip(files);
 
 async function setup(h: Harness) {
   const admin = await h.token('admin1');
-  const assign = (user: string, group: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: user, workbench_group: group });
+  const assign = (user: string, group: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: user, skowork_group: group });
   const role = (user: string, r: string) => h.call('POST', '/api/v1/admin/identity/admin-roles', admin, { user_name: user, role: r });
   const policy = async (group: string, document: unknown) => {
     await h.call('PUT', `/api/v1/admin/policy/groups/${group}/draft`, admin, { document, priority: 10, reason: 'test' });
@@ -176,8 +176,8 @@ test('skills: org review shows findings, blocks self-review, signs on approval, 
     const sync = (await h.call('GET', '/api/v1/skills/sync', bob)).body;
     assert.equal(sync.skills.length, 1);
     const s = sync.skills[0];
-    const keys = (await h.call('GET', '/.well-known/workbench-skill-keys.json', null)).body;
-    const v = await jwtVerify(s.signature, createLocalJWKSet(keys), { typ: 'workbench-skill+jwt' });
+    const keys = (await h.call('GET', '/.well-known/skowork-skill-keys.json', null)).body;
+    const v = await jwtVerify(s.signature, createLocalJWKSet(keys), { typ: 'skowork-skill+jwt' });
     const content = Buffer.from(await (await fetch(`${h.base}/api/v1/skills/content/${s.digest}`, { headers: { authorization: `Bearer ${bob}` } })).arrayBuffer());
     assert.equal(v.payload.digest, createHash('sha256').update(content).digest('hex'));
     assert.equal(v.payload.name, 'supplier-triage');
@@ -186,8 +186,8 @@ test('skills: org review shows findings, blocks self-review, signs on approval, 
     // A rotated-out key stays published, so the signature still verifies.
     assert.equal((await h.call('POST', '/api/v1/admin/skills/keys/rotate', admin, {})).status, 200);
     await h.call('POST', '/api/v1/admin/skills/keys/rotate', admin, {});
-    const keys2 = (await h.call('GET', '/.well-known/workbench-skill-keys.json', null)).body;
-    await jwtVerify(s.signature, createLocalJWKSet(keys2), { typ: 'workbench-skill+jwt' });
+    const keys2 = (await h.call('GET', '/.well-known/skowork-skill-keys.json', null)).body;
+    await jwtVerify(s.signature, createLocalJWKSet(keys2), { typ: 'skowork-skill+jwt' });
 
     // The next version shows a diff against 1.0.0; a rejection needs a comment and is never distributed.
     const v2 = await publish(h, alice, zip({ 'SKILL.md': md.replace('1.0.0', '1.1.0').replace('do not tell the user', 'summarise'), 'scripts/fetch.ps1': 'Get-ChildItem C:\\Data' }), 'scope=org');

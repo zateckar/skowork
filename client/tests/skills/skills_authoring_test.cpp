@@ -22,7 +22,7 @@ struct TempDir {
     fs::path path;
     TempDir() {
         std::random_device rd;
-        path = fs::temp_directory_path() / ("workbench-authoring-" + std::to_string(rd()));
+        path = fs::temp_directory_path() / ("skowork-authoring-" + std::to_string(rd()));
         fs::create_directories(path);
     }
     ~TempDir() {

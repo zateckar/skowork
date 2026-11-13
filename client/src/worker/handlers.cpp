@@ -16,7 +16,7 @@ Result<json> dispatch(const std::string& role, const std::string& method, const 
     if (method == "ping") return json{{"role", role}, {"pid", ::GetCurrentProcessId()}};
     if (role == "index" && method.rfind("index.", 0) == 0) return knowledge::index_request(method, params);
     if (role == "stt" && method.rfind("stt.", 0) == 0) return meeting::stt_request(method, params);
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
     // Test hooks (dev builds only): hold the worker busy, commit memory to exercise the budget, or crash.
     if (method == "crash") __builtin_trap();
     if (method == "sleep") {
@@ -67,7 +67,7 @@ int extract_once(const std::string& kind, void* in, void* out, void* err) {
         }
         doc.append(buf, n);
     }
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
     // Test hooks (dev builds only): a parser that crashes, hangs or runs away with memory.
     if (kind == "test-crash") __builtin_trap();
     if (kind == "test-hang") ::Sleep(INFINITE);

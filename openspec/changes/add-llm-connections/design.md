@@ -2,16 +2,16 @@
 
 ## Context
 
-Today `control-plane/src/config.ts` builds the upstream list from WORKBENCH_LLM_UPSTREAMS or OPENAI_BASE_URL/OPENAI_KEY, and the model capabilities are the constant `defaultCapabilities`. The gateway resolves a role through policy.llm.models to a model id and sends it to the configured upstreams. The product owner decided on 2026-10-31 that connections are managed in the console.
+Today `control-plane/src/config.ts` builds the upstream list from SKOWORK_LLM_UPSTREAMS or OPENAI_BASE_URL/OPENAI_KEY, and the model capabilities are the constant `defaultCapabilities`. The gateway resolves a role through policy.llm.models to a model id and sends it to the configured upstreams. The product owner decided on 2026-10-31 that connections are managed in the console.
 
 ## Decisions
 
 ### D1. Storage and encryption
-- **Choice:** tables `llm_connections` (id, name, base_url, credential_enc, credential_hint, enabled, max_concurrent, position, status, status_detail, checked_at) and `llm_models` (connection_id, model_id, kind, context_window, max_output_tokens, tools, images, reasoning, dimension, last_seen, missing). The credential is encrypted with AES-256-GCM under a key from WORKBENCH_SECRET_KEY (base64, 32 bytes). Development without it generates a key file `secret.key` next to the database with owner-only permissions; production refuses to start without WORKBENCH_SECRET_KEY once a connection exists.
+- **Choice:** tables `llm_connections` (id, name, base_url, credential_enc, credential_hint, enabled, max_concurrent, position, status, status_detail, checked_at) and `llm_models` (connection_id, model_id, kind, context_window, max_output_tokens, tools, images, reasoning, dimension, last_seen, missing). The credential is encrypted with AES-256-GCM under a key from SKOWORK_SECRET_KEY (base64, 32 bytes). Development without it generates a key file `secret.key` next to the database with owner-only permissions; production refuses to start without SKOWORK_SECRET_KEY once a connection exists.
 - **Alternatives considered:** storing the credential in the policy (signed bundles reach clients: never); an external secret store (none is available in the target environment yet; the column format allows moving later).
 
 ### D2. Bootstrap from environment
-- **Choice:** at start, if `llm_connections` is empty and OPENAI_BASE_URL is set, insert `primary` with OPENAI_KEY, and WORKBENCH_LLM_UPSTREAMS entries the same way. Afterwards the environment is ignored for upstreams, so console edits are not overwritten by a restart. The code defaults for capabilities seed `llm_models` rows for known ids.
+- **Choice:** at start, if `llm_connections` is empty and OPENAI_BASE_URL is set, insert `primary` with OPENAI_KEY, and SKOWORK_LLM_UPSTREAMS entries the same way. Afterwards the environment is ignored for upstreams, so console edits are not overwritten by a restart. The code defaults for capabilities seed `llm_models` rows for known ids.
 - **Alternatives considered:** environment always wins (console edits lost on restart); no bootstrap (an empty gateway after upgrade).
 
 ### D3. Routing
@@ -24,7 +24,7 @@ Today `control-plane/src/config.ts` builds the upstream list from WORKBENCH_LLM_
 ## Risks / Trade-offs
 
 - [A console bug or a compromised admin account exposes credentials] → Credentials are write-only in every API, encrypted at rest, and every change is audited; only platform-admins can manage connections.
-- [Losing WORKBENCH_SECRET_KEY makes stored credentials unreadable] → The gateway reports those connections as failing with "credential cannot be decrypted"; the admin re-enters the credential.
+- [Losing SKOWORK_SECRET_KEY makes stored credentials unreadable] → The gateway reports those connections as failing with "credential cannot be decrypted"; the admin re-enters the credential.
 - [Discovery hits a slow upstream on save] → 10 s timeout; saving never waits longer, and status shows "checking".
 
 ## Acceptance notes (2026-11-01)

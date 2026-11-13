@@ -3,13 +3,13 @@
 import { parseArgs } from 'node:util';
 import { GraphMock } from './mock.ts';
 
-const HELP = `dev/graph-mock - a local Microsoft Graph v1.0 subset for Workbench development and tests. It holds only fixture data and never delivers mail.
+const HELP = `dev/graph-mock - a local Microsoft Graph v1.0 subset for Skowork development and tests. It holds only fixture data and never delivers mail.
 
 Usage: graph-mock [options]
   --port <n>          Graph and OAuth port (default 4810; 0 picks a free port)
   --control-port <n>  control API port (default 4811; 0 picks a free port)
   --host <addr>       bind address (default 127.0.0.1; the container image uses 0.0.0.0)
-  --seed <text>       seed for the identifiers (default workbench)
+  --seed <text>       seed for the identifiers (default skowork)
   --fixtures <name>   "default" or a path to a fixture JSON file
   --anchor <iso>      the date-time fixture times are relative to (default: the fixture set's anchor)
   --help              this text
@@ -32,7 +32,7 @@ Endpoints
     POST /oauth/config {access_token_lifetime_s, refresh_token_lifetime_s}, POST /oauth/revoke {user}
 
 Client policy for development builds: mail.auth = "mock", mail.graph_base_url = "<graph>/v1.0",
-mail.oauth = {authority: "<graph>", tenant_id: "mock-tenant", client_id: "workbench-dev"}.
+mail.oauth = {authority: "<graph>", tenant_id: "mock-tenant", client_id: "skowork-dev"}.
 `;
 
 async function main(): Promise<void> {

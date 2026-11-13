@@ -122,9 +122,9 @@ Result<Paths> model_paths(const fs::path& dir) {
 }  // namespace
 
 bool stt_installed(const fs::path& package_dir) {
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
     wchar_t v[32] = {};
-    if (::GetEnvironmentVariableW(L"WORKBENCH_STT_ENGINE", v, 32) == 0 || std::wstring(v) == L"test") return true;
+    if (::GetEnvironmentVariableW(L"SKOWORK_STT_ENGINE", v, 32) == 0 || std::wstring(v) == L"test") return true;
 #endif
     if (package_dir.empty()) return false;
     std::error_code ec;
@@ -156,7 +156,7 @@ struct HotwordFiles {
     bool write(const std::string& tokens_file, const std::vector<std::string>& terms) {
         wchar_t tmp[MAX_PATH + 1] = {};
         if (::GetTempPathW(MAX_PATH + 1, tmp) == 0) return false;
-        const std::wstring stem = L"workbench-stt-" + std::to_wstring(::GetCurrentProcessId()) + L"-" + std::to_wstring(::GetTickCount64());
+        const std::wstring stem = L"skowork-stt-" + std::to_wstring(::GetCurrentProcessId()) + L"-" + std::to_wstring(::GetTickCount64());
         hotwords = fs::path(tmp) / (stem + L".hotwords");
         vocab = fs::path(tmp) / (stem + L".bpe.vocab");
         std::ifstream in(fs::path(widen(tokens_file)), std::ios::binary);
@@ -467,14 +467,14 @@ private:
     std::vector<std::string> hotwords_;
 };
 
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
 std::wstring env(const wchar_t* name);
 #endif
 
-// Development builds: WORKBENCH_STT_TRACE=<file> appends each stage with the process's private bytes (budget tuning).
+// Development builds: SKOWORK_STT_TRACE=<file> appends each stage with the process's private bytes (budget tuning).
 void trace(const char* stage) {
-#ifdef WORKBENCH_DEV_ENDPOINTS
-    static const std::wstring file = env(L"WORKBENCH_STT_TRACE");
+#ifdef SKOWORK_DEV_ENDPOINTS
+    static const std::wstring file = env(L"SKOWORK_STT_TRACE");
     if (file.empty()) return;
     PROCESS_MEMORY_COUNTERS m{};
     ::GetProcessMemoryInfo(::GetCurrentProcess(), &m, sizeof m);
@@ -488,7 +488,7 @@ void trace(const char* stage) {
 #endif
 }
 
-#ifdef WORKBENCH_DEV_ENDPOINTS
+#ifdef SKOWORK_DEV_ENDPOINTS
 std::wstring env(const wchar_t* name) {
     const DWORD n = ::GetEnvironmentVariableW(name, nullptr, 0);
     if (n == 0) return {};

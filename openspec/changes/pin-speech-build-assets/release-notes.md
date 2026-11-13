@@ -1,8 +1,8 @@
-Pinned speech build inputs for SkoWork. This release is retained independently of the rolling dev release and must not be overwritten.
+Pinned speech build inputs for Skowork. This release is retained independently of the rolling dev release and must not be overwritten.
 
 The bundle preserves all 13 model/runtime files from client/tools/speech-manifest.json at source commit 757992e05debf4e16d5a6107094feb615ea65ebf, with their license notices. It also includes the six existing Parakeet and Whisper development recordings. It is a build input; product speech packages exclude those recordings.
 
-- Archive: SkoWork-speech-build-assets-v1-win-x64.zip
+- Archive: Skowork-speech-build-assets-v1-win-x64.zip
 - Bytes: 1097703495
 - SHA-256: 7529e35b097060faa17b4fc1fd94faeed07e7d537d123c07dd24cae5d67a1914
 

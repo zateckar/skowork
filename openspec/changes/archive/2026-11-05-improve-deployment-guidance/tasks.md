@@ -6,7 +6,7 @@
 
 ## 2. Client
 
-- [x] 2.1 Machine-configuration errors name the registry key and `workbench.machine.json`
+- [x] 2.1 Machine-configuration errors name the registry key and `skowork.machine.json`
 
 ## 3. Deployment and documentation
 

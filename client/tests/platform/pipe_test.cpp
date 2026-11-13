@@ -12,7 +12,7 @@
 using namespace wb;
 
 namespace {
-std::wstring unique_pipe() { return L"\\\\.\\pipe\\workbench-test-" + widen(random_urlsafe(8)); }
+std::wstring unique_pipe() { return L"\\\\.\\pipe\\skowork-test-" + widen(random_urlsafe(8)); }
 }  // namespace
 
 TEST(Pipe, EchoAndSingleOwner) {

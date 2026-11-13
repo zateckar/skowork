@@ -22,7 +22,7 @@ inline constexpr long long kIdleAfterMs = 10 * 60 * 1000;  // Own Presence: idle
 inline constexpr int kKeptPerChat = 500;                   // recent messages cached per Chat
 
 struct MessagingEnv {
-    // A call to /api/v1/messaging/<path> with the user's token. `installation` adds the X-Workbench-Installation header.
+    // A call to /api/v1/messaging/<path> with the user's token. `installation` adds the X-Skowork-Installation header.
     // Errors: "offline" while the control plane is not connected, the API's code (MESSAGING_OFF, NOT_FOUND,
     // USER_UNAVAILABLE, TOO_LARGE, ...) or http_<status>.
     std::function<Result<json>(const std::string& method, const std::string& path, const json& body, bool installation)> api;

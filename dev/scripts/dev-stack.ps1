@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Starts (or stops) the local SkoWork control plane from the repository for development and the client end-to-end
+  Starts (or stops) the local Skowork control plane from the repository for development and the client end-to-end
   tests. It uses the organization Keycloak test realm and the real organization LLM API from the repository's .env. Nothing is
   installed outside the repository: dependencies go to control-plane/node_modules, state to dev/.stack.
 
@@ -17,7 +17,7 @@ param(
     [int] $CpPort = 8080,
     [string] $PublicBaseUrl = '',
     [string] $BootstrapAdmins = $env:USERNAME,
-    [string] $TestIssuer = 'https://e2e.workbench.test/realms/e2e',
+    [string] $TestIssuer = 'https://e2e.skowork.test/realms/e2e',
     [string] $TestIssuerJwksFile = '',
     [switch] $Fresh,
     [switch] $Stop
@@ -39,21 +39,21 @@ if ($Stop) { Stop-Stack; return }
 
 New-Item -ItemType Directory -Force $state | Out-Null
 Stop-Stack
-if ($Fresh) { Remove-Item (Join-Path $state 'workbench.db*') -Force -ErrorAction SilentlyContinue }
+if ($Fresh) { Remove-Item (Join-Path $state 'skowork.db*') -Force -ErrorAction SilentlyContinue }
 if (-not (Test-Path (Join-Path $cp 'node_modules'))) { Push-Location $cp; npm ci --no-audit --no-fund | Out-Null; Pop-Location }
 if (-not (Test-Path (Join-Path $repo '.env'))) { throw 'The repository .env (OIDC_* and OPENAI_* settings) is missing.' }
 
-$env:WORKBENCH_ENV = 'development'
+$env:SKOWORK_ENV = 'development'
 $env:PORT = "$CpPort"
 $env:HOST = '127.0.0.1,::1'   # loopback only, both families: "localhost" resolves to ::1 first on Windows
-$env:WORKBENCH_DB = Join-Path $state 'workbench.db'
-$env:WORKBENCH_PUBLIC_BASE_URL = if ($PublicBaseUrl) { $PublicBaseUrl } else { "http://localhost:$CpPort" }
-$env:WORKBENCH_BOOTSTRAP_ADMINS = $BootstrapAdmins
+$env:SKOWORK_DB = Join-Path $state 'skowork.db'
+$env:SKOWORK_PUBLIC_BASE_URL = if ($PublicBaseUrl) { $PublicBaseUrl } else { "http://localhost:$CpPort" }
+$env:SKOWORK_BOOTSTRAP_ADMINS = $BootstrapAdmins
 # The mock MCP servers of the end-to-end tests (dev/mcp-test-server) listen on plain-http loopback.
-$env:WORKBENCH_MCP_ALLOW_INSECURE_HTTP = '1'
+$env:SKOWORK_MCP_ALLOW_INSECURE_HTTP = '1'
 if ($TestIssuerJwksFile) {
-    $env:WORKBENCH_TEST_ISSUER = $TestIssuer
-    $env:WORKBENCH_TEST_ISSUER_JWKS = Get-Content $TestIssuerJwksFile -Raw
+    $env:SKOWORK_TEST_ISSUER = $TestIssuer
+    $env:SKOWORK_TEST_ISSUER_JWKS = Get-Content $TestIssuerJwksFile -Raw
 }
 $node = (Get-Command node -CommandType Application | Select-Object -First 1).Source
 $proc = Start-Process $node -ArgumentList '--env-file=../.env', 'src/main.ts' -WorkingDirectory $cp -PassThru -WindowStyle Hidden `
@@ -67,4 +67,4 @@ while ($true) {
     if (-not $alive -or (Get-Date) -gt $deadline) { Get-Content (Join-Path $state 'cp.err') -Tail 20; throw 'The control plane did not start.' }
     Start-Sleep -Milliseconds 300
 }
-Write-Host "SkoWork control plane is up on http://localhost:$CpPort (logs in $state)"
+Write-Host "Skowork control plane is up on http://localhost:$CpPort (logs in $state)"

@@ -22,7 +22,7 @@ const body = (req: Request) => (req.body && typeof req.body === 'object' && !Buf
 
 export function skillRoutes(reg: SkillRegistry, maxPackageBytes: number): Router {
   const r = Router();
-  r.get('/.well-known/workbench-skill-keys.json', async (_req, res, next) => {
+  r.get('/.well-known/skowork-skill-keys.json', async (_req, res, next) => {
     try {
       res.setHeader('Cache-Control', 'public, max-age=300');
       res.json(await reg.keys.publicKeys());

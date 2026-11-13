@@ -201,7 +201,7 @@ export class MockState {
       sentDateTime: iso(new Date(received.getTime() - 60_000)), createdDateTime: iso(received), lastModifiedDateTime: iso(received),
       isRead: m.isRead ?? false, isDraft: false, importance: m.importance ?? 'normal',
       conversationId: graphId(this.seed, 'conversation', m.user, m.thread ?? m.key), categories: m.categories ?? [], label: this.labelId(m.label),
-      attachments, internetMessageId: `<${m.key}.${m.user}@mock.workbench>`, seq: this.bump(),
+      attachments, internetMessageId: `<${m.key}.${m.user}@mock.skowork>`, seq: this.bump(),
     });
   }
 
@@ -230,7 +230,7 @@ export class MockState {
   /** A new message in a user's folder (delivery, sent copies, drafts); returns it. */
   addMessage(m: Omit<Message, 'id' | 'seq' | 'internetMessageId' | 'createdDateTime' | 'lastModifiedDateTime'> & { id?: string }, now: Date): Message {
     const id = m.id ?? this.nextId('message');
-    const msg: Message = { ...m, id, internetMessageId: `<${id.slice(-12)}@mock.workbench>`, createdDateTime: iso(now), lastModifiedDateTime: iso(now), seq: this.bump() };
+    const msg: Message = { ...m, id, internetMessageId: `<${id.slice(-12)}@mock.skowork>`, createdDateTime: iso(now), lastModifiedDateTime: iso(now), seq: this.bump() };
     this.messages.push(msg);
     return msg;
   }

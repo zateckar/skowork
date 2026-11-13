@@ -2,7 +2,7 @@
 
 ## Why
 
-A production user followed the README, created the adjacent JSON configuration in Windows Notepad, and still saw "Workbench is not configured". The loader assumes byte-oriented UTF-8, has no direct regression coverage, and does not identify the actual file path on failure; the exact encoding and filename used in that deployment are not yet known.
+A production user followed the README, created the adjacent JSON configuration in Windows Notepad, and still saw "Skowork is not configured". The loader assumes byte-oriented UTF-8, has no direct regression coverage, and does not identify the actual file path on failure; the exact encoding and filename used in that deployment are not yet known.
 
 ## What Changes
 

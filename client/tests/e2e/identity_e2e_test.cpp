@@ -19,7 +19,7 @@ namespace {
 constexpr char kRefreshSecret[] = "identity.refresh_token";
 
 struct IdentityE2E : ::testing::Test {
-    void SetUp() override { WORKBENCH_REQUIRE_STACK(); }
+    void SetUp() override { SKOWORK_REQUIRE_STACK(); }
 };
 
 // A store with its own signed-in session (a separate browser sign-in, completed by single sign-on).
@@ -189,7 +189,7 @@ TEST_F(IdentityE2E, ForgedOrForeignRedirectsAreRefusedAndAudited) {
     EXPECT_TRUE(audited);
     // Another path or a private-use scheme is not a sign-in redirect at all.
     EXPECT_FALSE(tm.handle_redirect("http://localhost:" + std::to_string(redirect_port()) + "/other?code=a&state=b"));
-    EXPECT_FALSE(tm.handle_redirect("com.example.workbench:/oauth2redirect?code=abc&state=x"));
+    EXPECT_FALSE(tm.handle_redirect("com.example.skowork:/oauth2redirect?code=abc&state=x"));
     // A forged request on the listener gets a page but no token request is made.
     HttpRequest req;
     req.url = env()->redirect_uri + "?code=abc&state=forged";
@@ -257,7 +257,7 @@ TEST_F(IdentityE2E, DataBoundToAnotherUserRefusesTheSignIn) {
 }
 
 TEST_F(IdentityE2E, UnauthorizedResponseTriggersOneRefreshAndRetry) {
-    if (!slow_tests_enabled()) GTEST_SKIP() << "waits for a real access token to expire; set WORKBENCH_E2E_SLOW=1";
+    if (!slow_tests_enabled()) GTEST_SKIP() << "waits for a real access token to expire; set SKOWORK_E2E_SLOW=1";
     auto s = shared_session();
     ASSERT_TRUE(s) << s.error().message;
     // The client's clock stands still, so it believes its token is fresh; the control plane sees it expire.

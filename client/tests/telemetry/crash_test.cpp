@@ -19,7 +19,7 @@ using namespace wb::telemetry;
 namespace {
 
 struct CrashRig {
-    std::filesystem::path dir = std::filesystem::temp_directory_path() / L"workbench-test" / widen("crash-" + random_urlsafe(6));
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / L"skowork-test" / widen("crash-" + random_urlsafe(6));
     std::filesystem::path dumps = dir / L"crashes";
     FakeClock clock;
     std::shared_ptr<const policy::EffectivePolicy> pol;
@@ -59,7 +59,7 @@ struct CrashRig {
     }
     WorkerHost::Options worker_options() {
         WorkerHost::Options o;
-        o.worker_exe = exe_dir() / L"workbench-worker.exe";
+        o.worker_exe = exe_dir() / L"skowork-worker.exe";
         o.crash_dir = [this]() -> std::optional<std::filesystem::path> {
             if (!svc->crash_reports_enabled()) return std::nullopt;
             return dumps;
@@ -93,7 +93,7 @@ TEST(CrashReports, AnInducedWorkerCrashIsCapturedHeldSentAndDeletable) {
     auto s = crash::summarize(dump);
     ASSERT_TRUE(s) << s.error().message;
     EXPECT_EQ(s->exception_code, "0xC000001D");  // __builtin_trap: illegal instruction
-    EXPECT_EQ(s->module, "workbench-worker.exe");
+    EXPECT_EQ(s->module, "skowork-worker.exe");
     EXPECT_GT(s->threads, 0);
     ASSERT_FALSE(s->modules.empty());
     for (const auto& m : s->modules) EXPECT_EQ(m.find_first_of("\\/"), std::string::npos) << m;  // no paths
@@ -104,7 +104,7 @@ TEST(CrashReports, AnInducedWorkerCrashIsCapturedHeldSentAndDeletable) {
     ASSERT_EQ(v["crashes"].size(), 1u);
     const std::string id = jstr(v["crashes"][0], "id");
     EXPECT_EQ(jstr(v["crashes"][0], "state"), "held");
-    EXPECT_EQ(jstr(v["crashes"][0]["summary"], "module"), "workbench-worker.exe");
+    EXPECT_EQ(jstr(v["crashes"][0]["summary"], "module"), "skowork-worker.exe");
     bool record = false;
     for (const auto& r : v["records"])
         if (jstr(r, "event") == "crash.report" && jstr(r["attrs"], "crash.id") == id) record = true;
@@ -147,7 +147,7 @@ TEST(CrashReports, AnExtractionWorkerCrashIsCaptured) {
                                [](const sandbox::EgressProxy::Owner&, const std::string&, const policy::RuleVerdict&) {}};
     sandbox::Sandbox box{&proxy};
     tools::SandboxExtractorOptions o;
-    o.worker_exe = exe_dir() / L"workbench-worker.exe";
+    o.worker_exe = exe_dir() / L"skowork-worker.exe";
     o.sandbox = &box;
     o.crash_dir = [&rig]() -> std::optional<std::filesystem::path> { return rig.dumps; };
     o.on_crash = [&rig](const std::filesystem::path& d, const std::string& p) { rig.crashes.emplace_back(d, p); };

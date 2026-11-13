@@ -37,7 +37,7 @@ Decisions on each risk class come from client/policy-enforcement. Approval prese
   - MSAL C++: there is no maintained public native MSAL for C++ desktop.
   - A client-hosted WebView2 window that intercepts the redirect URI: the first choice, dropped when add-native-ui removed WebView2 from the client. RFC 8252 recommends the system browser for native apps, and the browser shares the user's Entra session. The loopback listener it needs is allowed by client/desktop-host while a sign-in is pending (delta in this change).
   - Device-code flow: needs user interaction on every new device, and is often blocked by conditional access.
-  - A control-plane on-behalf-of exchange from the Workbench Keycloak token to a Graph token: it would centralise Graph tokens on the server, which increases blast radius, and needs a confidential client. Kept as the fallback if neither client-side path is allowed by conditional access.
+  - A control-plane on-behalf-of exchange from the Skowork Keycloak token to a Graph token: it would centralise Graph tokens on the server, which increases blast radius, and needs a confidential client. Kept as the fallback if neither client-side path is allowed by conditional access.
 
 ### D2. Risk classes for mail and calendar tools
 - **mail.draft is external, not write-local.** It writes to the server-side mailbox, so it syncs to other devices and colleagues with delegate access can see it.

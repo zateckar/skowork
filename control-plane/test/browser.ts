@@ -7,9 +7,9 @@ import { join } from 'node:path';
 import WebSocket from 'ws';
 import { sleep } from './helpers.ts';
 
-/** The browser to use: WORKBENCH_E2E_BROWSER, else an installed Chrome or Edge; null when there is none. */
+/** The browser to use: SKOWORK_E2E_BROWSER, else an installed Chrome or Edge; null when there is none. */
 export function findBrowser(): string | null {
-  const env = process.env.WORKBENCH_E2E_BROWSER;
+  const env = process.env.SKOWORK_E2E_BROWSER;
   if (env) return existsSync(env) ? env : null;
   const pf = process.env.ProgramFiles ?? 'C:\\Program Files';
   const pf86 = process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)';
@@ -58,7 +58,7 @@ export class Browser {
   }
 
   static async launch(exe: string): Promise<Browser> {
-    const profile = mkdtempSync(join(tmpdir(), 'workbench-e2e-'));
+    const profile = mkdtempSync(join(tmpdir(), 'skowork-e2e-'));
     const proc = spawn(exe, [
       '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
       '--disable-extensions', '--disable-sync', '--disable-background-networking', '--disable-component-update', '--window-size=1400,1000',

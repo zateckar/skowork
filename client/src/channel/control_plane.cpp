@@ -23,7 +23,7 @@ Result<HttpResponse> ControlPlaneClient::call(const std::string& method, const s
     req.cancel = options.cancel;
     {
         const std::lock_guard lock(mx_);
-        if (!installation_id_.empty()) req.headers.emplace_back("X-Workbench-Installation", installation_id_);
+        if (!installation_id_.empty()) req.headers.emplace_back("X-Skowork-Installation", installation_id_);
     }
     for (const auto& h : options.headers) req.headers.push_back(h);
     if (!body.empty()) req.headers.emplace_back("Content-Type", options.content_type);

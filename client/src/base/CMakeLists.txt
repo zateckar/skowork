@@ -13,4 +13,4 @@ add_library(wb_base STATIC
   json_schema.cpp)
 target_include_directories(wb_base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(wb_base PUBLIC nlohmann_json)
-workbench_warnings(wb_base)
+skowork_warnings(wb_base)

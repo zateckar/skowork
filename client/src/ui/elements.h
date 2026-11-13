@@ -314,7 +314,7 @@ public:
     bool arrange_children(Tree& tree, const Rect& inner) override;
 };
 
-// The Workbench mark: an Emerald rounded square with an Electric Green "S" (the app icon, improve-window-frame D4).
+// The Skowork mark: an Emerald rounded square with an Electric Green "S" (the app icon, improve-window-frame D4).
 // Decorative: the name beside it, or the window's name, carries it.
 class BrandMark : public Node {
 public:

@@ -23,11 +23,11 @@ const SOURCES = arg('sources', 8);
 const HANDSHAKES = arg('handshakes', 256);
 // Local ports below the dynamic range, from a random base so that a rerun does not meet the last run's TIME_WAIT.
 const PORT_BASE = 10_000 + Math.floor(Math.random() * 6) * 1000;
-const ISSUER = 'https://idp.load.test/realms/workbench';
-const CLIENT_ID = 'workbench-desktop-load';
+const ISSUER = 'https://idp.load.test/realms/skowork';
+const CLIENT_ID = 'skowork-desktop-load';
 const GROUP = 'load-all';
 
-const dir = mkdtempSync(join(tmpdir(), 'workbench-load-'));
+const dir = mkdtempSync(join(tmpdir(), 'skowork-load-'));
 const dbPath = join(dir, 'cp.db');
 const t0 = Date.now();
 const log = (m: string) => console.log(`[${((Date.now() - t0) / 1000).toFixed(1)}s] ${m}`);
@@ -64,8 +64,8 @@ const server = spawn(process.execPath, ['src/main.ts'], {
   cwd: new URL('..', import.meta.url),
   env: {
     ...process.env,
-    WORKBENCH_ENV: 'test', WORKBENCH_DB: dbPath, OIDC_CLIENT_ID: CLIENT_ID, WORKBENCH_TEST_ISSUER: ISSUER, WORKBENCH_TEST_ISSUER_JWKS: JSON.stringify(jwks),
-    WORKBENCH_BOOTSTRAP_ADMINS: 'admin1', HOST: '127.0.0.1', PORT: '0', OPENAI_BASE_URL: '', OIDC_DISCOVERY_URL: '',
+    SKOWORK_ENV: 'test', SKOWORK_DB: dbPath, OIDC_CLIENT_ID: CLIENT_ID, SKOWORK_TEST_ISSUER: ISSUER, SKOWORK_TEST_ISSUER_JWKS: JSON.stringify(jwks),
+    SKOWORK_BOOTSTRAP_ADMINS: 'admin1', HOST: '127.0.0.1', PORT: '0', OPENAI_BASE_URL: '', OIDC_DISCOVERY_URL: '',
   },
   stdio: ['ignore', 'pipe', 'inherit'],
 });

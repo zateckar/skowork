@@ -18,7 +18,7 @@ constexpr const char* kLog = "egress-proxy";
 constexpr size_t kMaxHead = 16 * 1024;
 constexpr DWORD kHeadTimeoutMs = 30000;
 constexpr long kIdleTimeoutS = 300;
-constexpr const char* kUser = "workbench";
+constexpr const char* kUser = "skowork";
 
 struct Wsa {
     bool ok = false;
@@ -344,7 +344,7 @@ void EgressProxy::serve(std::uintptr_t client_raw) {
     }
     const auto owner = authenticate(header_value(lines, "Proxy-Authorization"));
     if (!owner) {
-        reply(client, 407, "Proxy Authentication Required", "Proxy-Authenticate: Basic realm=\"Workbench\"\r\n");
+        reply(client, 407, "Proxy Authentication Required", "Proxy-Authenticate: Basic realm=\"Skowork\"\r\n");
         return finish();
     }
 

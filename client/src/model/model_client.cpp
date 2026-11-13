@@ -106,8 +106,8 @@ ModelResult<HttpRequest> ModelClient::make_request(const std::string& method, co
     req.headers.emplace_back("Accept", accept);
     if (!req.body.empty()) req.headers.emplace_back("Content-Type", "application/json");
     if (cfg_.installation_id)
-        if (const std::string id = cfg_.installation_id(); !id.empty()) req.headers.emplace_back("X-Workbench-Installation", id);
-    if (!run_id.empty()) req.headers.emplace_back("X-Workbench-Run", run_id);
+        if (const std::string id = cfg_.installation_id(); !id.empty()) req.headers.emplace_back("X-Skowork-Installation", id);
+    if (!run_id.empty()) req.headers.emplace_back("X-Skowork-Run", run_id);
     return req;
 }
 

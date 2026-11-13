@@ -19,7 +19,7 @@ import { simulateToolDecision, type SimulatedCall } from './tool-decision.ts';
 export const GUARDRAIL_SCOPE = 'guardrail';
 export const groupScope = (name: string) => `group:${name}`;
 const GROUP_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-const BUNDLE_TYP = 'workbench-policy+jwt';
+const BUNDLE_TYP = 'skowork-policy+jwt';
 
 export type Actor = Pick<User, 'subject' | 'userName' | 'adminRoles'>;
 
@@ -135,7 +135,7 @@ export class PolicyService {
     );
     const names = new Set<string>([EVERYONE, ...defined.keys()]);
     for (const r of this.#db.prepare("SELECT DISTINCT substr(scope, 7) AS name FROM policy_versions WHERE scope LIKE 'group:%'").all() as { name: string }[]) names.add(r.name);
-    for (const r of this.#db.prepare('SELECT DISTINCT workbench_group AS name FROM group_members UNION SELECT DISTINCT workbench_group FROM role_mappings').all() as { name: string }[]) names.add(r.name);
+    for (const r of this.#db.prepare('SELECT DISTINCT skowork_group AS name FROM group_members UNION SELECT DISTINCT skowork_group FROM role_mappings').all() as { name: string }[]) names.add(r.name);
     return [...names].sort().map((name) => {
       const g = defined.get(name);
       const s = this.#scope(groupScope(name));

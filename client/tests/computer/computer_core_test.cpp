@@ -114,10 +114,10 @@ TEST(ComputerClassify, CredentialFields) {
 }
 
 TEST(ComputerClassify, ApplicationScoping) {
-    const std::vector<std::string> own = {"Workbench.exe", "workbench-worker.exe"};
+    const std::vector<std::string> own = {"Skowork.exe", "skowork-worker.exe"};
     EXPECT_FALSE(app_refusal("EXCEL.EXE", {}, {}, own));
-    EXPECT_TRUE(app_refusal("Workbench.exe", {}, {}, own));
-    EXPECT_TRUE(app_refusal("workbench.exe", {"workbench.exe"}, {}, own)) << "own windows stay out of scope even when allowed";
+    EXPECT_TRUE(app_refusal("Skowork.exe", {}, {}, own));
+    EXPECT_TRUE(app_refusal("skowork.exe", {"skowork.exe"}, {}, own)) << "own windows stay out of scope even when allowed";
     EXPECT_TRUE(app_refusal("CredentialUIBroker.exe", {}, {}, own));
     EXPECT_TRUE(app_refusal("SecHealthUI.exe", {}, {}, own));
     const auto denied = app_refusal("KeePass.exe", {}, {"keepass.exe"}, own);

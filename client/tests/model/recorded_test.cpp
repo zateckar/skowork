@@ -1,5 +1,5 @@
 // client/model-access against responses recorded from the real gateway and organization LLM API (fixtures/, written by
-// e2e_tests ModelE2E.* with WORKBENCH_E2E_RECORD; embedding vectors trimmed to their first 8 values). Covers tasks 2.1
+// e2e_tests ModelE2E.* with SKOWORK_E2E_RECORD; embedding vectors trimmed to their first 8 values). Covers tasks 2.1
 // (recorded streams, cut streams), 2.5 (recorded embedding and rerank responses) and 2.6 (recorded reasoning).
 #include "fake_gateway.h"
 
@@ -16,7 +16,7 @@ using namespace wb::testing;
 namespace {
 
 std::string fixture(const std::string& name) {
-    std::ifstream in(std::string(WORKBENCH_MODEL_FIXTURES) + "/" + name, std::ios::binary);
+    std::ifstream in(std::string(SKOWORK_MODEL_FIXTURES) + "/" + name, std::ios::binary);
     EXPECT_TRUE(in) << name;
     std::stringstream ss;
     ss << in.rdbuf();

@@ -212,7 +212,7 @@ TEST(UiElements, SplitterResizesItsPaneByDragAndKeyboard) {
 TEST(UiElements, ImageDecodesScalesAndNeverUpscales) {
     Surface s(400, 300);
     // A 2x1 PNG made by WIC itself.
-    const auto file = std::filesystem::temp_directory_path() / "workbench-ui-test.png";
+    const auto file = std::filesystem::temp_directory_path() / "skowork-ui-test.png";
     ASSERT_TRUE(write_png(file, {0xFFFF0000, 0xFF0000FF}, 2, 1));
     std::ifstream in(file, std::ios::binary);
     const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());

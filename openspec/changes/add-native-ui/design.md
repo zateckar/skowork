@@ -9,12 +9,12 @@
 ## Goals / Non-Goals
 
 **Goals:**
-- One process, one language: the window is drawn by `Workbench.exe` in C++.
+- One process, one language: the window is drawn by `Skowork.exe` in C++.
 - Window budgets that are measured (client/desktop-host Window Footprint): at most 150 MB in the core process with a 200-message Thread open, first content within 300 ms, 60 frames per second when scrolling, rendered in software (D1).
 - The whole client/work-inbox spec, including WCAG 2.1 AA accessibility, Czech, German and English, and keyboard operation.
 
 **Non-Goals:**
-- A general-purpose UI framework. The toolkit has the widgets Workbench needs and nothing more.
+- A general-purpose UI framework. The toolkit has the widgets Skowork needs and nothing more.
 - Pixel-identical reproduction of the current web UI's look.
 - Animations beyond simple fades and expand or collapse.
 
@@ -122,7 +122,7 @@
 
 ## Footprint Estimate
 
-- **Code:** the toolkit is about 12,000 lines and the screens about 10,000 lines of C++. md4c is about 7,000 lines of C. Together they are expected to add 1.5 to 2 MB to `Workbench.exe`.
+- **Code:** the toolkit is about 12,000 lines and the screens about 10,000 lines of C++. md4c is about 7,000 lines of C. Together they are expected to add 1.5 to 2 MB to `Skowork.exe`.
 - **Install size:** the install shrinks by the embedded UI resource (about 2 MB) and `WebView2Loader.dll` (0.2 MB).
 - **Memory with the window open:** measured 68 MB in the core process with software rendering (Validation Results), from the swap chain, glyph caches and text layouts. Today the WebView2 processes alone typically use 150 MB or more.
 
@@ -156,9 +156,9 @@ Toolkit findings (tasks 2.3–2.5):
 - Menus and tooltips are floating children of an overlay layer above the content. A press outside them or Escape closes them and returns keyboard focus to where it was, found again by the element's runtime id.
 - The Markdown view rebuilds only the blocks after the last unchanged one, so a streaming message keeps the layouts of its finished paragraphs. A link opens only after a confirmation that shows its URL, and only for http, https and mailto.
 - UI Automation calls the providers on its own threads, not on the window thread. An earlier version assumed the window thread and read and changed the element tree from those threads. The add-save-as-note acceptance, driven through UI Automation, crashed the client in rebuilds and in painting. Each provider call that touches the tree is now sent to the window and runs on its thread. `UiAutomation.PatternsActOnTheElements` checks that Invoke and Select handlers run on the window thread, and it fails without the fix. A UIA client in the window's own process deadlocks when that thread raises an event. So the tests split the work: in-process clients check roles, names and patterns on a window that is never shown, so it raises no focus events, and the notification-event test listens from a second process, as a screen reader does. The product has no in-process client.
-- Golden images (`client/tests/ui/golden/`) are drawn with Segoe UI Variable and Segoe Fluent Icons, and the tests skip on machines without those fonts. `WORKBENCH_UPDATE_GOLDEN=1` rewrites the images.
+- Golden images (`client/tests/ui/golden/`) are drawn with Segoe UI Variable and Segoe Fluent Icons, and the tests skip on machines without those fonts. `SKOWORK_UPDATE_GOLDEN=1` rewrites the images.
 
-Product measurement (task 4.1, 2026-10-24, the same development workstation, not the baseline laptop): `ShellFootprint.WindowOnAThreadOf200Messages` in `win_tests` (release build, `WORKBENCH_MEASURE=1`). It shows the real window, with WARP, at 1600 DIPs wide, on a Thread of 200 Markdown messages (headings, lists, a table, code, Czech text, emoji) with 2,000 Threads in the list. The process also holds the inbox service and the scripted runtime, as the core process does. Rerun it on the baseline laptop to close task 4.1.
+Product measurement (task 4.1, 2026-10-24, the same development workstation, not the baseline laptop): `ShellFootprint.WindowOnAThreadOf200Messages` in `win_tests` (release build, `SKOWORK_MEASURE=1`). It shows the real window, with WARP, at 1600 DIPs wide, on a Thread of 200 Markdown messages (headings, lists, a table, code, Czech text, emoji) with 2,000 Threads in the list. The process also holds the inbox service and the scripted runtime, as the core process does. Rerun it on the baseline laptop to close task 4.1.
 
 | Budget | Measured | Limit |
 |---|---|---|

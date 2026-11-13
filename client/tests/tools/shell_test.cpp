@@ -22,7 +22,7 @@ using runtime::ToolOutput;
 namespace {
 
 struct ShellFixture {
-    std::filesystem::path root = std::filesystem::path(local_appdata()) / L"workbench-test" / widen(random_urlsafe(6));
+    std::filesystem::path root = std::filesystem::path(local_appdata()) / L"skowork-test" / widen(random_urlsafe(6));
     std::filesystem::path data = root / L"data", ws = data / L"workspace";
     std::mutex mx;
     std::vector<std::string> denied;  // "<host> <rule>" of each refusal
@@ -175,7 +175,7 @@ TEST(ShellTool, RunningAQuarantinedDownloadNeedsApproval) {
     std::string forward = file;
     std::replace(forward.begin(), forward.end(), '\\', '/');
     for (const std::string& c : {"& '" + file + "' /S", "Start-Process \"" + forward + "\"", "Copy-Item '" + file + "' .\\setup.exe",
-                                 std::string("Get-ChildItem $env:LOCALAPPDATA\\Workbench\\Quarantine")})
+                                 std::string("Get-ChildItem $env:LOCALAPPDATA\\Skowork\\Quarantine")})
         EXPECT_EQ(runtime::effective_risk(tool, {{"command", c}}), runtime::Risk::destructive) << c;
     EXPECT_EQ(runtime::effective_risk(tool, {{"command", "& .\\build\\app.exe"}}), runtime::Risk::write_local);
 

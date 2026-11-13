@@ -262,7 +262,7 @@ struct Calls {
 };
 
 struct TempRoot {
-    std::filesystem::path path = std::filesystem::path(local_appdata()) / L"workbench-test" / widen(random_urlsafe(6));
+    std::filesystem::path path = std::filesystem::path(local_appdata()) / L"skowork-test" / widen(random_urlsafe(6));
     ~TempRoot() {
         std::error_code ec;
         std::filesystem::remove_all(path, ec);

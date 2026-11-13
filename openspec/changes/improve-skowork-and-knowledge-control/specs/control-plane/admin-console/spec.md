@@ -15,12 +15,12 @@ The admin console SHALL let an admin edit a policy document through typed contro
 
 ## ADDED Requirements
 
-### Requirement: SkoWork Console Identity
-The console SHALL identify the product as SkoWork in its page title, sign-in, navigation, dashboard descriptions and visible product guidance, while preserving existing authentication and deployment configuration compatibility.
+### Requirement: Skowork Console Identity
+The console SHALL identify the product as Skowork in its page title, sign-in, navigation, dashboard descriptions and visible product guidance, while preserving existing authentication and deployment configuration compatibility.
 
 #### Scenario: Open the console
 - **WHEN** an administrator opens the console and signs in
-- **THEN** the browser title, sign-in page and console navigation say SkoWork
+- **THEN** the browser title, sign-in page and console navigation say Skowork
 
 ### Requirement: Complete Policy Discovery
 The policy editor SHALL search setting paths, descriptions, Tool ids and rule patterns, including unset and disabled features. Tool results expose attended and unattended decisions through policy.tools.rules and policy.unattended.rules, risk defaults and feature prerequisites, using the catalog of control-plane/policy-service.

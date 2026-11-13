@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Defines the web console that administrators use to operate Workbench: admin roles, the management views over the other control-plane services, the audit viewer and the aggregate usage dashboards. The console exposes functions that other capabilities own and does not redefine them.
+Defines the web console that administrators use to operate Skowork: admin roles, the management views over the other control-plane services, the audit viewer and the aggregate usage dashboards. The console exposes functions that other capabilities own and does not redefine them.
 
 ## ADDED Requirements
 

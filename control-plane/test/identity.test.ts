@@ -82,18 +82,18 @@ describe('identity: Groups and admin roles', () => {
   it('maps token roles to Groups through the role mapping, many-to-many', async () => {
     const put = await h.call('PUT', '/api/v1/admin/identity/role-mappings', admin, {
       mappings: [
-        { idp_role: 'WORKBENCH_DEV', workbench_group: 'developers' },
-        { idp_role: 'WORKBENCH_DEV', workbench_group: 'region-eu' },
-        { idp_role: 'POWER', workbench_group: 'power-users' },
+        { idp_role: 'SKOWORK_DEV', skowork_group: 'developers' },
+        { idp_role: 'SKOWORK_DEV', skowork_group: 'region-eu' },
+        { idp_role: 'POWER', skowork_group: 'power-users' },
       ],
     });
     assert.equal(put.status, 200);
-    const r = await h.call('GET', '/api/v1/identity/whoami', await h.token('dev2', { roles: ['WORKBENCH_DEV', 'POWER', 'unmapped'] }));
+    const r = await h.call('GET', '/api/v1/identity/whoami', await h.token('dev2', { roles: ['SKOWORK_DEV', 'POWER', 'unmapped'] }));
     assert.deepEqual(r.body.groups, ['developers', 'everyone', 'power-users', 'region-eu']);
   });
 
   it('adds Groups assigned directly, whatever the token roles', async () => {
-    assert.equal((await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'dev3', workbench_group: 'region-de' })).status, 200);
+    assert.equal((await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'dev3', skowork_group: 'region-de' })).status, 200);
     const r = await h.call('GET', '/api/v1/identity/whoami', await h.token('DEV3'));
     assert.ok(r.body.groups.includes('region-de'));
   });
@@ -135,26 +135,26 @@ describe('identity: deny list', () => {
 
 describe('identity: production issuer guard', () => {
   it('refuses an http issuer in production', () => {
-    const c = loadConfig({ WORKBENCH_ENV: 'production', OIDC_DISCOVERY_URL: 'http://idp.local/realms/x/.well-known/openid-configuration', OIDC_CLIENT_ID: CLIENT_ID });
+    const c = loadConfig({ SKOWORK_ENV: 'production', OIDC_DISCOVERY_URL: 'http://idp.local/realms/x/.well-known/openid-configuration', OIDC_CLIENT_ID: CLIENT_ID });
     assert.match(productionGuard(c) ?? '', /https/);
   });
   it('refuses a test issuer in production', () => {
     const c = loadConfig({
-      WORKBENCH_ENV: 'production', OIDC_DISCOVERY_URL: 'https://idp/realms/x/.well-known/openid-configuration', OIDC_CLIENT_ID: CLIENT_ID,
-      WORKBENCH_TEST_ISSUER: 'https://t', WORKBENCH_TEST_ISSUER_JWKS: '{"keys":[]}',
+      SKOWORK_ENV: 'production', OIDC_DISCOVERY_URL: 'https://idp/realms/x/.well-known/openid-configuration', OIDC_CLIENT_ID: CLIENT_ID,
+      SKOWORK_TEST_ISSUER: 'https://t', SKOWORK_TEST_ISSUER_JWKS: '{"keys":[]}',
     });
     assert.ok(productionGuard(c));
   });
   it('accepts an https issuer in production', () => {
     const c = loadConfig({
-      WORKBENCH_ENV: 'production', OIDC_DISCOVERY_URL: 'https://idp/realms/x/.well-known/openid-configuration', OIDC_CLIENT_ID: CLIENT_ID,
-      WORKBENCH_TELEMETRY_SECRET: 'from-the-secret-store',
+      SKOWORK_ENV: 'production', OIDC_DISCOVERY_URL: 'https://idp/realms/x/.well-known/openid-configuration', OIDC_CLIENT_ID: CLIENT_ID,
+      SKOWORK_TELEMETRY_SECRET: 'from-the-secret-store',
     });
     assert.equal(productionGuard(c), null);
   });
   it('refuses to start in production without the telemetry secret', () => {
-    const c = loadConfig({ WORKBENCH_ENV: 'production', OIDC_DISCOVERY_URL: 'https://idp/realms/x/.well-known/openid-configuration', OIDC_CLIENT_ID: CLIENT_ID });
-    assert.match(productionGuard(c) ?? '', /WORKBENCH_TELEMETRY_SECRET/);
+    const c = loadConfig({ SKOWORK_ENV: 'production', OIDC_DISCOVERY_URL: 'https://idp/realms/x/.well-known/openid-configuration', OIDC_CLIENT_ID: CLIENT_ID });
+    assert.match(productionGuard(c) ?? '', /SKOWORK_TELEMETRY_SECRET/);
   });
   it('starts while the identity provider is unreachable and refuses tokens until it is back', async () => {
     const h = await startHarness((c) => {
@@ -179,11 +179,11 @@ describe('identity: admin directory', () => {
     const admin = await h.token('admin1');
     const { register } = await import('./helpers.ts');
     await register(h, await h.token('alice', { roles: ['wb-sales'] }));
-    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'bob', workbench_group: 'sales' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'bob', skowork_group: 'sales' });
     await h.call('POST', '/api/v1/admin/identity/admin-roles', admin, { user_name: 'rita', role: 'skill-reviewer' });
     await h.call('POST', '/api/v1/admin/identity/deny-list', admin, { kind: 'user', value: 'mallory', reason: 'left' });
     await h.call('PUT', '/api/v1/admin/policy/groups/sales', admin, { description: 'Sales', owners: ['olga'] });
-    await h.call('PUT', '/api/v1/admin/identity/role-mappings', admin, { mappings: [{ idp_role: 'wb-dev', workbench_group: 'developers' }] });
+    await h.call('PUT', '/api/v1/admin/identity/role-mappings', admin, { mappings: [{ idp_role: 'wb-dev', skowork_group: 'developers' }] });
 
     const d = await h.call('GET', '/api/v1/admin/identity/directory', await h.token('rita'));
     assert.equal(d.status, 200, JSON.stringify(d.body));
@@ -230,7 +230,7 @@ describe('identity: offline-session tokens (add-offline-sign-in 3.1)', () => {
     const installation = 'inst-offline-revoked';
     assert.equal((await h.call('POST', '/api/v1/admin/identity/deny-list', admin, { kind: 'installation', value: installation, reason: 'lost' })).status, 200);
     const t = await h.token('offline3', { sid: 'offline-session-3' }, { lifetimeS: 300 });
-    const r = await h.call('GET', '/api/v1/identity/whoami', t, undefined, { 'x-workbench-installation': installation });
+    const r = await h.call('GET', '/api/v1/identity/whoami', t, undefined, { 'x-skowork-installation': installation });
     assert.equal(r.status, 403);
     assert.equal(r.body.error.code, 'DENIED');
   });

@@ -31,7 +31,7 @@ let lastSubject = null;
 const text = (t) => ({ content: [{ type: 'text', text: t }] });
 
 function buildServer() {
-  const server = new McpServer({ name: 'workbench-mock-jira', version: '1.0.0' });
+  const server = new McpServer({ name: 'skowork-mock-jira', version: '1.0.0' });
   server.registerTool('search_issues', {
     description: 'Searches Jira issues. The query matches summary, key and component.',
     inputSchema: { query: z.string() },

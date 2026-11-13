@@ -5,7 +5,7 @@
 The motivation is in proposal.md. Constraints:
 - **CPU-only ML** on the baseline laptop (i5, 16 GB RAM, iGPU).
 - **Single encrypted SQLite store** in the data root (client/local-storage).
-- **Background work** runs in `workbench-worker.exe`, which exits when idle (client/desktop-host).
+- **Background work** runs in `skowork-worker.exe`, which exits when idle (client/desktop-host).
 - **Mail and calendar events** come from client/mail-calendar.
 - **Thread data** (Source threads) comes from client/agent-runtime.
 - **Document text extraction** for Office and pdf comes from client/core-tools.

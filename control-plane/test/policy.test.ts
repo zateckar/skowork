@@ -10,7 +10,7 @@ async function setup(h: Harness) {
   const put = (path: string, document: unknown, priority = 10, extra: Record<string, unknown> = {}) =>
     h.call('PUT', `/api/v1/admin/policy${path}/draft`, admin, { document, priority, reason: 'test', ...extra });
   const publish = (path: string, body: Record<string, unknown> = {}) => h.call('POST', `/api/v1/admin/policy${path}/publish`, admin, { reason: 'test', ...body });
-  const assign = (user: string, group: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: user, workbench_group: group });
+  const assign = (user: string, group: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: user, skowork_group: group });
   return { admin, put, publish, assign };
 }
 
@@ -21,7 +21,7 @@ async function bundle(h: Harness, user: string, claims: Record<string, unknown> 
 
 async function verify(h: Harness, jws: string) {
   const keys = (await h.call('GET', '/.well-known/policy-keys.json', null)).body;
-  return jwtVerify(jws, createLocalJWKSet(keys), { typ: 'workbench-policy+jwt' });
+  return jwtVerify(jws, createLocalJWKSet(keys), { typ: 'skowork-policy+jwt' });
 }
 
 test('policy: documents are validated on save, naming the field', async () => {
@@ -63,7 +63,7 @@ test('policy: every known Group is listed, also those with members or role mappi
   try {
     const { admin, put, assign } = await setup(h);
     await assign('alice', 'engineering');
-    await h.call('PUT', '/api/v1/admin/identity/role-mappings', admin, { mappings: [{ idp_role: 'sales-staff', workbench_group: 'sales' }], reason: 'test' });
+    await h.call('PUT', '/api/v1/admin/identity/role-mappings', admin, { mappings: [{ idp_role: 'sales-staff', skowork_group: 'sales' }], reason: 'test' });
     await h.call('PUT', '/api/v1/admin/policy/groups/defined-only', admin, { description: 'no policy', owners: [] });
     const list = async () => (await h.call('GET', '/api/v1/admin/policy/groups', admin)).body as { name: string; defined: boolean; has_draft: boolean }[];
     assert.deepEqual((await list()).map((g) => [g.name, g.defined]), [['defined-only', true], ['engineering', false], ['everyone', false], ['sales', false]]);
@@ -419,11 +419,11 @@ test('policy: mapping changes notify everyone, direct assignments only the user,
       await c.opened;
       clients.push(c);
     }
-    await h.call('PUT', '/api/v1/admin/identity/role-mappings', admin, { mappings: [{ idp_role: 'workbench-developer', workbench_group: 'developers' }] });
+    await h.call('PUT', '/api/v1/admin/identity/role-mappings', admin, { mappings: [{ idp_role: 'skowork-developer', skowork_group: 'developers' }] });
     for (const c of clients) await c.waitFor((m) => m.type === 'policy-changed' && m.payload.reason === 'group-mapping');
     const audit = h.cp.audit.query({ action: 'identity.role-mappings.set', limit: 1 })[0] as any;
     assert.deepEqual(audit.details.before, []);
-    assert.deepEqual(audit.details.after, [{ idp_role: 'workbench-developer', workbench_group: 'developers' }]);
+    assert.deepEqual(audit.details.after, [{ idp_role: 'skowork-developer', skowork_group: 'developers' }]);
     assert.equal(audit.user_name, 'admin1');
 
     await assign('dev2', 'power-users');
@@ -432,7 +432,7 @@ test('policy: mapping changes notify everyone, direct assignments only the user,
     assert.equal(clients[0]!.messages.filter((m) => m.payload?.reason === 'group-assignment').length, 0);
 
     // Mapped roles count for the user's Groups in bundles and in simulation.
-    const r = await bundle(h, 'dev3', { roles: ['workbench-developer'] });
+    const r = await bundle(h, 'dev3', { roles: ['skowork-developer'] });
     assert.deepEqual((await verify(h, r.body.bundle)).payload.groups, ['developers', 'everyone']);
     for (const c of clients) c.close();
   } finally {

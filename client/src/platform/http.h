@@ -65,7 +65,7 @@ struct HttpResponse {
 // Error codes: "url", "insecure_url", "tls", "connect", "timeout", "cancelled", "aborted", "io", "too_large".
 class HttpClient {
 public:
-    explicit HttpClient(std::wstring user_agent = L"Workbench");
+    explicit HttpClient(std::wstring user_agent = L"Skowork");
     ~HttpClient();
     HttpClient(const HttpClient&) = delete;
     HttpClient& operator=(const HttpClient&) = delete;
@@ -73,7 +73,7 @@ public:
     Result<HttpResponse> send(const HttpRequest& req);
 
     // True when the URL may be used: https/wss always; http/ws only to loopback in builds with
-    // WORKBENCH_DEV_ENDPOINTS (design D10).
+    // SKOWORK_DEV_ENDPOINTS (design D10).
     static bool url_allowed(std::string_view url);
 
     [[nodiscard]] void* session() const { return session_; }

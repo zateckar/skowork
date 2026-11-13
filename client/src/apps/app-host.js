@@ -1,5 +1,5 @@
 // The app host of client/local-apps (add-local-apps design D2), loaded with --require before a Local app's entry.
-// The app calls http.createServer(...).listen(process.env.WORKBENCH_APP_PIPE) as usual; that listen is served over
+// The app calls http.createServer(...).listen(process.env.SKOWORK_APP_PIPE) as usual; that listen is served over
 // frames on stdin and stdout instead of a socket, so the app opens no socket or pipe (the runtime refuses the network
 // without --allow-net) and only the client reaches it. The app's console output becomes 'log' frames.
 //
@@ -11,7 +11,7 @@ const net = require('node:net');
 const fs = require('node:fs');
 const { Duplex } = require('node:stream');
 
-const target = process.env.WORKBENCH_APP_PIPE;
+const target = process.env.SKOWORK_APP_PIPE;
 const MAX_CHUNK = 1 << 20;
 
 function writeRaw(b) {
@@ -54,7 +54,7 @@ net.Server.prototype.listen = function (...args) {
   const a = args[0];
   const path = typeof a === 'string' ? a : a && typeof a === 'object' ? a.path : undefined;
   if (!target || path !== target) return listen.apply(this, args);
-  if (served) throw new Error('Only one server can listen on WORKBENCH_APP_PIPE.');
+  if (served) throw new Error('Only one server can listen on SKOWORK_APP_PIPE.');
   served = true;
   const server = this;
   const done = args.find((x) => typeof x === 'function');

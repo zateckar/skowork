@@ -17,7 +17,7 @@ struct TempDir {
     fs::path path;
     TempDir() {
         std::random_device rd;
-        path = fs::temp_directory_path() / ("workbench-skills-" + std::to_string(rd()));
+        path = fs::temp_directory_path() / ("skowork-skills-" + std::to_string(rd()));
         fs::create_directories(path);
     }
     ~TempDir() {

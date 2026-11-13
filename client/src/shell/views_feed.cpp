@@ -110,7 +110,7 @@ void message_header(Shell& s, Node& msg, const FeedItem& it) {
         if (me.empty() && auth) me = jstr(*auth, "user");
         head->emplace<ui::Avatar>(s.ui(), me.empty() ? s.t("feed.you") : ui::to_utf16(me));
     } else {
-        head->emplace<ui::Avatar>(s.ui(), u"S", Paint::accent, Paint::accent_text);  // the Workbench mark
+        head->emplace<ui::Avatar>(s.ui(), u"S", Paint::accent, Paint::accent_text);  // the Skowork mark
     }
     auto* who = head->emplace<ui::Label>(s.ui(), s.t(it.type == ItemType::user ? "feed.you" : "feed.agent"),
                                          TextStyle::body_strong, Paint::text, false);
@@ -647,8 +647,8 @@ void FeedView::add_citations(Node& wrap, const std::vector<Citation>& citations,
         const std::string ref = c.ref;
         ui::Ui* up = &u;
         link->on_click = [this, up, ref] {
-            if (ref.starts_with("workbench://thread/")) {
-                shell_.navigate(thread_hash(ref.substr(sizeof("workbench://thread/") - 1)));
+            if (ref.starts_with("skowork://thread/")) {
+                shell_.navigate(thread_hash(ref.substr(sizeof("skowork://thread/") - 1)));
             } else if (ref.starts_with("https://") || ref.starts_with("http://")) {
                 if (up->open_link) up->open_link(ui::to_utf16(ref));  // asks first, shows the URL
             } else {

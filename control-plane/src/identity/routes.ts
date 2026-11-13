@@ -14,7 +14,7 @@ export interface DenyHooks {
   onMappingChanged?(): void;
   /** Called after a direct Group assignment of one user changes. */
   onAssignmentChanged?(userName: string): void;
-  /** WORKBENCH_BOOTSTRAP_ADMINS, listed in the directory. */
+  /** SKOWORK_BOOTSTRAP_ADMINS, listed in the directory. */
   bootstrapAdmins?: readonly string[];
 }
 
@@ -71,26 +71,26 @@ export function identityAdminRoutes(db: Db, audit: Audit, hooks: DenyHooks): Rou
     res.json({ removed: true });
   });
 
-  // Role mappings: identity-provider role -> Workbench Group (many-to-many)
+  // Role mappings: identity-provider role -> Skowork Group (many-to-many)
   r.get('/role-mappings', requireRole('platform-admin'), (_req, res) => {
-    res.json(db.prepare('SELECT idp_role, workbench_group FROM role_mappings ORDER BY idp_role, workbench_group').all());
+    res.json(db.prepare('SELECT idp_role, skowork_group FROM role_mappings ORDER BY idp_role, skowork_group').all());
   });
   r.put('/role-mappings', requireRole('platform-admin'), (req, res) => {
-    const mappings = parsePairs(req.body?.mappings, 'idp_role', 'workbench_group');
+    const mappings = parsePairs(req.body?.mappings, 'idp_role', 'skowork_group');
     if (!mappings) {
-      sendError(res, 400, 'INVALID_REQUEST', 'mappings must be a list of {idp_role, workbench_group}.');
+      sendError(res, 400, 'INVALID_REQUEST', 'mappings must be a list of {idp_role, skowork_group}.');
       return;
     }
-    const before = db.prepare('SELECT idp_role, workbench_group FROM role_mappings ORDER BY idp_role, workbench_group').all();
+    const before = db.prepare('SELECT idp_role, skowork_group FROM role_mappings ORDER BY idp_role, skowork_group').all();
     tx(db, () => {
       db.exec('DELETE FROM role_mappings');
-      const ins = db.prepare('INSERT OR IGNORE INTO role_mappings (idp_role, workbench_group) VALUES (?, ?)');
+      const ins = db.prepare('INSERT OR IGNORE INTO role_mappings (idp_role, skowork_group) VALUES (?, ?)');
       for (const [a, b] of mappings) ins.run(a, b);
     });
-    const after = db.prepare('SELECT idp_role, workbench_group FROM role_mappings ORDER BY idp_role, workbench_group').all();
+    const after = db.prepare('SELECT idp_role, skowork_group FROM role_mappings ORDER BY idp_role, skowork_group').all();
     record(req, 'identity.role-mappings.set', { before, after, reason: str(req.body?.reason) ?? null });
     hooks.onMappingChanged?.();
-    res.json({ mappings: mappings.map(([idp_role, workbench_group]) => ({ idp_role, workbench_group })) });
+    res.json({ mappings: mappings.map(([idp_role, skowork_group]) => ({ idp_role, skowork_group })) });
   });
 
   // Direct Group membership
@@ -98,26 +98,26 @@ export function identityAdminRoutes(db: Db, audit: Audit, hooks: DenyHooks): Rou
     const group = str(req.query.group);
     res.json(
       group
-        ? db.prepare('SELECT user_name, workbench_group FROM group_members WHERE workbench_group = ? ORDER BY user_name').all(group)
-        : db.prepare('SELECT user_name, workbench_group FROM group_members ORDER BY workbench_group, user_name').all(),
+        ? db.prepare('SELECT user_name, skowork_group FROM group_members WHERE skowork_group = ? ORDER BY user_name').all(group)
+        : db.prepare('SELECT user_name, skowork_group FROM group_members ORDER BY skowork_group, user_name').all(),
     );
   });
   r.post('/group-members', requireRole('platform-admin'), (req, res) => {
     const user = str(req.body?.user_name)?.trim();
-    const group = str(req.body?.workbench_group)?.trim();
+    const group = str(req.body?.skowork_group)?.trim();
     if (!user || !group || !validName(group)) {
-      sendError(res, 400, 'INVALID_REQUEST', 'user_name and workbench_group (lowercase letters, digits, - and _) are required.');
+      sendError(res, 400, 'INVALID_REQUEST', 'user_name and skowork_group (lowercase letters, digits, - and _) are required.');
       return;
     }
-    db.prepare('INSERT OR IGNORE INTO group_members (user_name, workbench_group) VALUES (?, ?)').run(user, group);
+    db.prepare('INSERT OR IGNORE INTO group_members (user_name, skowork_group) VALUES (?, ?)').run(user, group);
     record(req, 'identity.group-member.add', { user, group });
     hooks.onAssignmentChanged?.(user);
-    res.json({ user_name: user, workbench_group: group });
+    res.json({ user_name: user, skowork_group: group });
   });
   r.delete('/group-members', requireRole('platform-admin'), (req, res) => {
     const user = str(req.body?.user_name ?? req.query.user_name);
-    const group = str(req.body?.workbench_group ?? req.query.workbench_group);
-    const r2 = db.prepare('DELETE FROM group_members WHERE user_name = ? COLLATE NOCASE AND workbench_group = ?').run(user ?? '', group ?? '');
+    const group = str(req.body?.skowork_group ?? req.query.skowork_group);
+    const r2 = db.prepare('DELETE FROM group_members WHERE user_name = ? COLLATE NOCASE AND skowork_group = ?').run(user ?? '', group ?? '');
     record(req, 'identity.group-member.remove', { user, group });
     if (r2.changes > 0 && user) hooks.onAssignmentChanged?.(user);
     res.json({ removed: r2.changes > 0 });

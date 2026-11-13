@@ -14,7 +14,7 @@ The policy service SHALL let administrators map identity-provider roles to Group
 - **THEN** only members of "region-eu" receive a bundle with meeting capture enabled
 
 #### Scenario: Map role
-- **WHEN** an administrator maps the role "workbench-developer" to the Group "developers"
+- **WHEN** an administrator maps the role "skowork-developer" to the Group "developers"
 - **THEN** users whose token carries that role are members of "developers" on their next request
 
 ### Requirement: Group Definition And Ownership

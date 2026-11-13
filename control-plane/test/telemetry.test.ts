@@ -9,8 +9,8 @@ import { domainOf } from '../src/telemetry/ingest.ts';
 
 function batch(installation: string, records: { event: string; attrs: Record<string, Value> }[], extraResource: Record<string, Value> = {}): Uint8Array {
   const b: LogBatch = {
-    resource: new Map<string, Value>([['service.version', '0.1.0'], ['workbench.installation_id', installation], ...Object.entries(extraResource)]),
-    scopeName: 'workbench.client',
+    resource: new Map<string, Value>([['service.version', '0.1.0'], ['skowork.installation_id', installation], ...Object.entries(extraResource)]),
+    scopeName: 'skowork.client',
     scopeVersion: '0.1.0',
     records: records.map((r, i) => ({ timeUnixNano: BigInt(Date.now() + i) * 1_000_000n, eventName: r.event, attributes: new Map(Object.entries(r.attrs)) })),
   };
@@ -44,7 +44,7 @@ describe('telemetry ingest: authentication and levels', () => {
   it('round-trips the OTLP encoding', () => {
     const bytes = batch('i-1', [{ event: 'tool.call', attrs: { 'tool.id': 'files.read', 'tool.duration_ms': 12n, 'x.y': 1.5, ok: true } }]);
     const d = decodeLogs(bytes);
-    assert.equal(d.resource.get('workbench.installation_id'), 'i-1');
+    assert.equal(d.resource.get('skowork.installation_id'), 'i-1');
     assert.equal(d.records[0]!.eventName, 'tool.call');
     assert.equal(d.records[0]!.attributes.get('tool.duration_ms'), 12n);
     assert.equal(d.records[0]!.attributes.get('x.y'), 1.5);
@@ -101,7 +101,7 @@ describe('telemetry ingest: authentication and levels', () => {
 
   it('keeps content fields when the sender’s policy sets the content level', async () => {
     const admin = await h.token('admin1');
-    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'tel5', workbench_group: 'developers' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'tel5', skowork_group: 'developers' });
     const put = await h.call('PUT', '/api/v1/admin/policy/groups/developers/draft', admin, { document: { telemetry: { level: 'content' } }, priority: 10, reason: 'test' });
     assert.equal(put.status, 200, JSON.stringify(put.body));
     assert.equal((await h.call('POST', '/api/v1/admin/policy/groups/developers/publish', admin, { reason: 'test' })).status, 200);
@@ -253,8 +253,8 @@ describe('telemetry ingest: crash reports', () => {
     return { status: r.status, body: await r.json().catch(() => null) };
   };
   const meta = (id: string, inst: string) => ({
-    'x-workbench-crash-id': id, 'x-workbench-crash-process': 'worker-extract', 'x-workbench-crash-exception_code': '0xC000001D',
-    'x-workbench-crash-module': 'workbench-worker.exe', 'x-workbench-crash-installation_id': inst,
+    'x-skowork-crash-id': id, 'x-skowork-crash-process': 'worker-extract', 'x-skowork-crash-exception_code': '0xC000001D',
+    'x-skowork-crash-module': 'skowork-worker.exe', 'x-skowork-crash-installation_id': inst,
   });
 
   it('stores a dump from the user’s own installation encrypted, and decrypts it', async () => {
@@ -286,7 +286,7 @@ describe('telemetry ingest: crash reports', () => {
 
   it('refuses crash reports while the user’s telemetry level is off', async () => {
     const admin = await h.token('admin1');
-    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'crash4', workbench_group: 'quiet' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'crash4', skowork_group: 'quiet' });
     assert.equal((await h.call('PUT', '/api/v1/admin/policy/groups/quiet/draft', admin, { document: { telemetry: { level: 'off' } }, priority: 10, reason: 'test' })).status, 200);
     assert.equal((await h.call('POST', '/api/v1/admin/policy/groups/quiet/publish', admin, { reason: 'test' })).status, 200);
     const t = await h.token('crash4');

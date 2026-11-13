@@ -2,7 +2,7 @@
 
 ## Why
 
-On 2026-11-10 a user asked the agent to create a skill. The agent did not know where SkoWork keeps skill files, had no tool to save one, and asked the user for a folder. Users cannot be expected to know where SkoWork stores skills.
+On 2026-11-10 a user asked the agent to create a skill. The agent did not know where Skowork keeps skill files, had no tool to save one, and asked the user for a folder. Users cannot be expected to know where Skowork stores skills.
 
 A skill the agent writes must become available to the user at once, and the user must be able to share it with colleagues. Today saving and sharing exist only in the skill editor in Settings and in "Save as skill" on a Thread (client/skills). The agent has no way to use them.
 

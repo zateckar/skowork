@@ -8,11 +8,11 @@
 
 namespace wb {
 
-inline constexpr wchar_t kAppUserModelId[] = L"Workbench.Client";
+inline constexpr wchar_t kAppUserModelId[] = L"Skowork.Client";
 
 struct RegistrationPaths {
     std::wstring run_key = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-    std::wstring run_value = L"Workbench";
+    std::wstring run_value = L"Skowork";
     std::wstring aumid_key = std::wstring(L"Software\\Classes\\AppUserModelId\\") + kAppUserModelId;
 };
 

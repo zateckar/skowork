@@ -1,13 +1,13 @@
 // Development forward proxy (HTTP CONNECT only) on 127.0.0.1. Some managed machines block outbound connections
-// from unsigned executables, such as a locally built Workbench.exe or e2e_tests.exe. Debug and test builds can then
-// reach the real identity provider through this proxy (WORKBENCH_DEV_PROXY=http://127.0.0.1:3128). It only tunnels
+// from unsigned executables, such as a locally built Skowork.exe or e2e_tests.exe. Debug and test builds can then
+// reach the real identity provider through this proxy (SKOWORK_DEV_PROXY=http://127.0.0.1:3128). It only tunnels
 // bytes: TLS stays end to end and nothing is logged except host names.
 //
 //   node dev/scripts/dev-proxy.mjs [port]
 import net from 'node:net';
 import http from 'node:http';
 
-const port = Number(process.argv[2] ?? process.env.WORKBENCH_DEV_PROXY_PORT ?? 3128);
+const port = Number(process.argv[2] ?? process.env.SKOWORK_DEV_PROXY_PORT ?? 3128);
 
 const server = http.createServer((_req, res) => {
   res.writeHead(405, { 'content-type': 'text/plain' }).end('CONNECT only\n');

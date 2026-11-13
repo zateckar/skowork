@@ -2,7 +2,7 @@
 
 ## Why
 
-On 2026-10-31 the product owner asked for messaging between users, with the control plane as the gateway and a list of users with their availability. People who work with Workbench want to reach a colleague, or a few, without leaving the app, and the agent should be able to read and draft messages for them. The product owner chose direct and group conversations with agent access.
+On 2026-10-31 the product owner asked for messaging between users, with the control plane as the gateway and a list of users with their availability. People who work with Skowork want to reach a colleague, or a few, without leaving the app, and the agent should be able to read and draft messages for them. The product owner chose direct and group conversations with agent access.
 
 ## What Changes
 

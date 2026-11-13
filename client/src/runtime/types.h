@@ -154,13 +154,13 @@ struct RuntimeConfig {
     int find_tools_max = 5;       // tools one find_tools call may add
     int tool_schema_token_budget = 4000;  // per-turn size of the tool definitions (Lazy Tool Loading)
     model::Role role = model::Role::main;
-    std::string system_prompt = "You are SkoWork, an assistant that works for the user on their computer. Use the tools you have; "
+    std::string system_prompt = "You are Skowork, an assistant that works for the user on their computer. Use the tools you have; "
                                 "call find_tools to discover more. Ask the user with ask_user when you need a decision. "
                                 "Delegate independent pieces of work to subagents with delegate. When an answer uses a passage "
                                 "that knowledge.search returned, write that passage's number in square brackets after the "
                                 "sentence it supports, such as [2]. Do not write the number of a passage you did not use.";
     // The system prompt of a subagent; the instructions of the delegate call follow it.
-    std::string subagent_prompt = "You are a subagent of SkoWork. Complete the task you are given with the tools you have, then "
+    std::string subagent_prompt = "You are a subagent of Skowork. Complete the task you are given with the tools you have, then "
                                   "answer with the result only; your answer goes to the agent that delegated the task. Use "
                                   "ask_user only when you cannot continue without the user.";
     // Retained for source compatibility; the working-context budget now determines the trigger.

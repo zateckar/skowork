@@ -9,4 +9,4 @@ add_library(wb_platform STATIC
   log.cpp
   crash.cpp)
 target_link_libraries(wb_platform PUBLIC wb_base winhttp bcrypt crypt32 advapi32 shell32 ole32 secur32 dbghelp)
-workbench_warnings(wb_platform)
+skowork_warnings(wb_platform)

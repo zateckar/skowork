@@ -446,7 +446,7 @@ std::vector<Process> audio_processes() {
 
 namespace {
 
-constexpr wchar_t kIndicatorClass[] = L"WorkbenchRecordingIndicator";
+constexpr wchar_t kIndicatorClass[] = L"SkoworkRecordingIndicator";
 constexpr UINT kStopId = 1;
 constexpr UINT kWarningChanged = WM_APP + 1;
 constexpr int kIndicatorHeight = 38, kWarningHeight = 20;
@@ -582,7 +582,7 @@ void Indicator::run(Options o, std::promise<void>& shown) {
         y = work.top + 8;
     }
     // Owned by no window: closing or hiding the main window leaves it on screen (Recording Indicator And Stop).
-    HWND h = ::CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kIndicatorClass, L"SkoWork recording",
+    HWND h = ::CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kIndicatorClass, L"Skowork recording",
                                WS_POPUP | WS_BORDER, x, y, w, hgt, nullptr, nullptr, inst, &st);
     if (!h) {
         shown.set_value();

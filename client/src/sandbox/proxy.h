@@ -43,7 +43,7 @@ public:
         ~Session();
         [[nodiscard]] int port() const { return port_; }
         [[nodiscard]] const std::string& credential() const { return credential_; }
-        // http://workbench:<credential>@127.0.0.1:<port>
+        // http://skowork:<credential>@127.0.0.1:<port>
         [[nodiscard]] std::string proxy_url() const;
 
     private:

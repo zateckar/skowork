@@ -51,7 +51,7 @@ class FetchTests(unittest.TestCase):
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", UserWarning)
                     archive.writestr(name.upper(), self.contents[name])
-        descriptor = dict(schema=1, url="https://github.com/zateckar/skowork/releases/download/speech-assets-v1/SkoWork-speech-build-assets-v1-win-x64.zip",
+        descriptor = dict(schema=1, url="https://github.com/zateckar/skowork/releases/download/speech-assets-v1/Skowork-speech-build-assets-v1-win-x64.zip",
                           bytes=self.archive.stat().st_size,
                           sha256=hashlib.sha256(self.archive.read_bytes()).hexdigest())
         (self.client / "tools/speech-build-assets.json").write_text(json.dumps(descriptor))

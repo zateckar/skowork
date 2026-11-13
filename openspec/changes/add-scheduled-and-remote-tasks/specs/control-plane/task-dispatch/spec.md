@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Defines how people and organization systems ask Workbench to perform work for a user or Group through the control plane, and how those Remote tasks are authorized, delivered, tracked and audited.
+Defines how people and organization systems ask Skowork to perform work for a user or Group through the control plane, and how those Remote tasks are authorized, delivered, tracked and audited.
 
 ## ADDED Requirements
 

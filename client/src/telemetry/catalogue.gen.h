@@ -16,12 +16,12 @@ struct FieldDef {
     Level level;
 };
 
-enum class Res : std::uint8_t { service_version, workbench_channel, os_build, workbench_installation_id };
+enum class Res : std::uint8_t { service_version, skowork_channel, os_build, skowork_installation_id };
 inline constexpr FieldDef kResource[] = {
     {"service.version", Type::string, Level::metadata},
-    {"workbench.channel", Type::string, Level::metadata},
+    {"skowork.channel", Type::string, Level::metadata},
     {"os.build", Type::string, Level::metadata},
-    {"workbench.installation_id", Type::string, Level::metadata},
+    {"skowork.installation_id", Type::string, Level::metadata},
 };
 
 enum class Attr : std::uint8_t {

@@ -1,7 +1,7 @@
 // The loopback listener of client/local-apps (add-local-apps design D3, D4): 127.0.0.1 on a random port, /<app-id>/...
 // mapped to the app's framed connection. A single-use launch token becomes an HttpOnly, SameSite=Strict session cookie
 // scoped to the app's path; requests without it, and requests naming another host, are refused. Pages reach the MCP
-// bridge at POST /<app-id>/_workbench/mcp/<server>/<tool>.
+// bridge at POST /<app-id>/_skowork/mcp/<server>/<tool>.
 #include "apps/apps.h"
 
 #include "base/strings.h"
@@ -144,7 +144,7 @@ std::string strip_session_cookies(const std::string& header) {
     std::string out;
     for (const auto& part : split(header, ';')) {
         const std::string p = trim(part);
-        if (p.empty() || starts_with(p, "workbench_app_")) continue;
+        if (p.empty() || starts_with(p, "skowork_app_")) continue;
         out += (out.empty() ? "" : "; ") + p;
     }
     return out;
@@ -296,7 +296,7 @@ void AppServer::serve(std::uintptr_t raw) {
         reply(c, 308, "Permanent Redirect", "", "Location: /" + app_id + "/" + (query.empty() ? "" : "?" + query) + "\r\n");
         return finish();
     }
-    const std::string cookie_name = "workbench_app_" + app_id;
+    const std::string cookie_name = "skowork_app_" + app_id;
     const std::string launch = query_param(query, "launch");
     if (!launch.empty()) {
         std::string session;
@@ -313,7 +313,7 @@ void AppServer::serve(std::uintptr_t raw) {
             }
         }
         if (session.empty()) {
-            reply(c, 403, "Forbidden", page("Link expired", "This link has been used or has expired. Open the app again from SkoWork."), {},
+            reply(c, 403, "Forbidden", page("Link expired", "This link has been used or has expired. Open the app again from Skowork."), {},
                   "text/html; charset=utf-8");
             return finish();
         }
@@ -328,7 +328,7 @@ void AppServer::serve(std::uintptr_t raw) {
         allowed = it != sessions_.end() && constant_time_equals(it->second, app_id);
     }
     if (!allowed) {
-        reply(c, 403, "Forbidden", page("Not allowed", "Open this app from SkoWork."), {}, "text/html; charset=utf-8");
+        reply(c, 403, "Forbidden", page("Not allowed", "Open this app from Skowork."), {}, "text/html; charset=utf-8");
         return finish();
     }
     if (req->has("Transfer-Encoding") || req->has("Upgrade")) {
@@ -340,16 +340,16 @@ void AppServer::serve(std::uintptr_t raw) {
     const std::string rel = path.substr(slash);  // "/..."
 
     // The MCP bridge (D4).
-    if (starts_with(rel, "/_workbench/")) {
+    if (starts_with(rel, "/_skowork/")) {
         const std::string o = req->header("Origin");
-        if (req->method != "POST" || !starts_with(rel, "/_workbench/mcp/") || (!o.empty() && o != origin) ||
+        if (req->method != "POST" || !starts_with(rel, "/_skowork/mcp/") || (!o.empty() && o != origin) ||
             !starts_with(to_lower(req->header("Content-Type")), "application/json")) {
             reply_json(c, 403, "Forbidden", {{"error", {{"code", "forbidden"}, {"message", "POST JSON from the app's own pages only"}}}});
             return finish();
         }
-        const auto parts = split(rel.substr(sizeof("/_workbench/mcp/") - 1), '/');
+        const auto parts = split(rel.substr(sizeof("/_skowork/mcp/") - 1), '/');
         if (parts.size() != 2 || parts[0].empty() || parts[1].empty() || length > kMaxBridgeBody) {
-            reply_json(c, 400, "Bad Request", {{"error", {{"code", "bad_request"}, {"message", "use /_workbench/mcp/<server>/<tool>"}}}});
+            reply_json(c, 400, "Bad Request", {{"error", {{"code", "bad_request"}, {"message", "use /_skowork/mcp/<server>/<tool>"}}}});
             return finish();
         }
         std::string body = rest;
@@ -382,7 +382,7 @@ void AppServer::serve(std::uintptr_t raw) {
     if (!stream) {
         log::info(kLog, app_id + ": " + stream.error().message);
         reply(c, 503, "Service Unavailable",
-              page("The app is not running", "SkoWork could not start this app. See the app's log in SkoWork's Apps view."), {},
+              page("The app is not running", "Skowork could not start this app. See the app's log in Skowork's Apps view."), {},
               "text/html; charset=utf-8");
         return finish();
     }

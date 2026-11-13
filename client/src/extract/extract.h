@@ -1,5 +1,5 @@
 // Document Text Extraction of client/core-tools (add-core-tools-and-mcp design D4). Runs only inside the sandboxed
-// `workbench-worker.exe --role extract` process: every function here parses untrusted input. The OOXML extractors are
+// `skowork-worker.exe --role extract` process: every function here parses untrusted input. The OOXML extractors are
 // portable (miniz for the zip container, pugixml for the parts) and fuzzed; PDF goes through PDFium on Windows.
 #pragma once
 

@@ -183,7 +183,7 @@ Result<std::unique_ptr<Database>> open_and_migrate(const std::filesystem::path& 
     outcome.from_version = (*db)->user_version();
     outcome.to_version = outcome.from_version;
     if (refuse_newer && outcome.from_version > (ordered.empty() ? 0 : ordered.back().version))
-        return make_error("schema_too_new", "This database was created by a newer version of SkoWork. Update SkoWork before opening it.");
+        return make_error("schema_too_new", "This database was created by a newer version of Skowork. Update Skowork before opening it.");
     const bool pending = std::any_of(ordered.begin(), ordered.end(),
                                      [&](const Migration& m) { return m.version > outcome.from_version; });
     if (!pending) return db;
@@ -245,7 +245,7 @@ Result<std::unique_ptr<Database>> open_and_migrate_consistently(const std::files
     outcome.from_version = (*db)->user_version();
     outcome.to_version = outcome.from_version;
     if (outcome.from_version > (ordered.empty() ? 0 : ordered.back().version))
-        return make_error("schema_too_new", "This database was created by a newer version of SkoWork. Update SkoWork before opening it.");
+        return make_error("schema_too_new", "This database was created by a newer version of Skowork. Update Skowork before opening it.");
     if (std::none_of(ordered.begin(), ordered.end(), [&](const Migration& m) { return m.version > outcome.from_version; }))
         return db;
 

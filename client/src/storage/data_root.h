@@ -13,7 +13,7 @@ namespace wb {
 class DataRoot {
 public:
     // Resolves the root: `override_root` (tests), else the policy.storage.root pointer stored in the default
-    // location's bootstrap file, else %LOCALAPPDATA%\Workbench. Creates it with the owner-only ACL and checks that it
+    // location's bootstrap file, else %LOCALAPPDATA%\Skowork. Creates it with the owner-only ACL and checks that it
     // is bound to the current Windows user. Error code "other_user" when it belongs to someone else.
     static Result<DataRoot> open(const std::optional<std::filesystem::path>& override_root = std::nullopt);
 

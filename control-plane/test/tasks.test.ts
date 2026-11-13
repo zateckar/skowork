@@ -14,7 +14,7 @@ const spToken = (h: Harness, clientId = CI) =>
 async function setup(h: Harness) {
   const admin = await h.token('admin1');
   const rule = (body: Record<string, unknown>) => h.call('POST', '/api/v1/admin/policy/dispatch-rules', admin, body);
-  const assign = (user: string, group: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: user, workbench_group: group });
+  const assign = (user: string, group: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: user, skowork_group: group });
   const policy = async (group: string, document: unknown) => {
     const put = await h.call('PUT', `/api/v1/admin/policy/groups/${group}/draft`, admin, { document, priority: 10, reason: 'test' });
     assert.equal(put.status, 200, JSON.stringify(put.body));

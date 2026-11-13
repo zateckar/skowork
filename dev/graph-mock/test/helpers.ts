@@ -16,7 +16,7 @@ export interface Tokens { access_token: string; refresh_token?: string; scope: s
 export async function signIn(m: GraphMock, opts: { user?: string; scope?: string; verifier?: string } = {}): Promise<{ status: number; body: Record<string, unknown>; tokens?: Tokens; redirect?: URL }> {
   const verifier = randomBytes(32).toString('base64url');
   const challenge = createHash('sha256').update(verifier).digest('base64url');
-  const q = new URLSearchParams({ client_id: 'workbench-dev', response_type: 'code', redirect_uri: REDIRECT, scope: opts.scope ?? ALL_SCOPES, state: 's1', code_challenge: challenge, code_challenge_method: 'S256' });
+  const q = new URLSearchParams({ client_id: 'skowork-dev', response_type: 'code', redirect_uri: REDIRECT, scope: opts.scope ?? ALL_SCOPES, state: 's1', code_challenge: challenge, code_challenge_method: 'S256' });
   if (opts.user) q.set('login_hint', opts.user);
   const a = await fetch(`${m.graphBase}/mock-tenant/oauth2/v2.0/authorize?${q}`, { redirect: 'manual' });
   const redirect = new URL(a.headers.get('location') ?? 'http://invalid/');
@@ -25,7 +25,7 @@ export async function signIn(m: GraphMock, opts: { user?: string; scope?: string
   const t = await fetch(`${m.graphBase}/mock-tenant/oauth2/v2.0/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: REDIRECT, client_id: 'workbench-dev', code_verifier: opts.verifier ?? verifier }),
+    body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: REDIRECT, client_id: 'skowork-dev', code_verifier: opts.verifier ?? verifier }),
   });
   const body = (await t.json()) as Record<string, unknown>;
   return { status: t.status, body, tokens: t.ok ? (body as unknown as Tokens) : undefined, redirect };
@@ -35,7 +35,7 @@ export async function refresh(m: GraphMock, refreshToken: string): Promise<{ sta
   const t = await fetch(`${m.graphBase}/mock-tenant/oauth2/v2.0/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: 'workbench-dev', scope: ALL_SCOPES }),
+    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: 'skowork-dev', scope: ALL_SCOPES }),
   });
   return { status: t.status, body: (await t.json()) as Record<string, unknown> };
 }

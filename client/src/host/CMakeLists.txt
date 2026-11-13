@@ -7,4 +7,4 @@ add_library(wb_host STATIC
   workers.cpp
   toast.cpp)
 target_link_libraries(wb_host PUBLIC wb_platform wb_base shlwapi user32 gdi32 shell32 ole32 runtimeobject)
-workbench_warnings(wb_host)
+skowork_warnings(wb_host)

@@ -10,9 +10,9 @@ export interface FieldDef {
 
 export const RESOURCE = {
   'service.version': { type: 'string', level: 'metadata' },
-  'workbench.channel': { type: 'string', level: 'metadata' },
+  'skowork.channel': { type: 'string', level: 'metadata' },
   'os.build': { type: 'string', level: 'metadata' },
-  'workbench.installation_id': { type: 'string', level: 'metadata' },
+  'skowork.installation_id': { type: 'string', level: 'metadata' },
 } as const satisfies Record<string, FieldDef>;
 export type ResourceName = keyof typeof RESOURCE;
 

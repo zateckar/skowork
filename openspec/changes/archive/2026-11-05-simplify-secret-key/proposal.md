@@ -2,11 +2,11 @@
 
 ## Why
 
-On 2026-11-05 the production control plane would not start. WORKBENCH_SECRET_KEY had to be the base64 encoding of exactly 32 bytes, which an admin cannot type by hand, and anything else crashed the process with a stack trace. The other secrets, such as WORKBENCH_TELEMETRY_SECRET, accept any text.
+On 2026-11-05 the production control plane would not start. SKOWORK_SECRET_KEY had to be the base64 encoding of exactly 32 bytes, which an admin cannot type by hand, and anything else crashed the process with a stack trace. The other secrets, such as SKOWORK_TELEMETRY_SECRET, accept any text.
 
 ## What Changes
 
-- WORKBENCH_SECRET_KEY accepts any passphrase of at least 16 characters. The control plane derives the 32-byte server key from it with scrypt. A value that is already the base64 encoding of 32 bytes is used as the key directly, so existing deployments keep working.
+- SKOWORK_SECRET_KEY accepts any passphrase of at least 16 characters. The control plane derives the 32-byte server key from it with scrypt. A value that is already the base64 encoding of 32 bytes is used as the key directly, so existing deployments keep working.
 - A settings error at startup (a passphrase that is too short, or a key missing while LLM connections exist) ends the process with one `refusing to start: ...` line naming the setting, not a stack trace.
 - The README and `deploy/.env.example` describe the passphrase and no longer require openssl.
 

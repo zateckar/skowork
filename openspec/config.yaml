@@ -2,8 +2,8 @@ schema: spec-driven
 
 context: |
   PRODUCT
-  SkoWork is the organization-internal AI agent for employees' Windows laptops.
-  Each laptop runs one SkoWork client per user session. A central on-premise control plane
+  Skowork is the organization-internal AI agent for employees' Windows laptops.
+  Each laptop runs one Skowork client per user session. A central on-premise control plane
   manages identity, policy, LLM access, skills, MCP servers, remote tasks and telemetry.
   The on-premise LLM is the organization LLM API: an OpenAI-compatible LiteLLM proxy over vLLM. It offers
   chat models with tool calling and vision, plus embedding and reranking models (verified 2026-10-21;
@@ -70,7 +70,7 @@ context: |
     plane accepts the desktop client's access tokens (issuer, authorized party and audience checked).
     Tokens carry no group claim: Groups come from the token's roles where present and from Group
     membership administered in the control plane.
-    Every application trusts only this identity provider: no Workbench component issues tokens or
+    Every application trusts only this identity provider: no Skowork component issues tokens or
     identities for other services, and calls to other services (for example MCP servers) carry the
     user's own access token. (Decided 2026-11-05; use-idp-tokens-for-mcp.)
   - CI/CD: GitHub Actions. Two release artifacts: the control plane as a container image and the

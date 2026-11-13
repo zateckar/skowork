@@ -20,7 +20,7 @@
 - **Alternatives considered:** draining lazily when the user opens the Thread (offline requests would wait for the user without reason).
 
 ### D3. Queued-while-offline label
-- **Choice:** the feed shows queued messages as today. While the client is offline, their label reads "Waits for the connection" instead of "Queued". A message is not tied to how it was queued: whatever is queued when the client connects is started. The composer hint under the box says "You're offline. Your request will start when Workbench is connected again."
+- **Choice:** the feed shows queued messages as today. While the client is offline, their label reads "Waits for the connection" instead of "Queued". A message is not tied to how it was queued: whatever is queued when the client connects is started. The composer hint under the box says "You're offline. Your request will start when Skowork is connected again."
 - **Alternatives considered:** a per-message flag "queued offline" (it adds state; the label can be derived from the connection state).
 
 ### D4. Status bar since-time
@@ -32,7 +32,7 @@
 - **Alternatives considered:** counting offline as a failure with a longer backoff (a long outage still ends in dead Occurrences).
 
 ### D6. Features that need the control plane
-- **Choice:** the views that call the control plane show their existing error state, worded as "Not available while Workbench is offline": sharing, team knowledge note, the colleague directory, sign-in and policy refresh. No feature is hidden.
+- **Choice:** the views that call the control plane show their existing error state, worded as "Not available while Skowork is offline": sharing, team knowledge note, the colleague directory, sign-in and policy refresh. No feature is hidden.
 - **Alternatives considered:** disabling the controls (users would not learn why).
 
 ## Risks / Trade-offs

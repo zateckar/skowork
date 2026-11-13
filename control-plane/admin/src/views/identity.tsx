@@ -117,12 +117,12 @@ function Admins() {
 // ---- Group members ---------------------------------------------------------------------------------------------------
 
 function Members() {
-  const members = useLoad<{ user_name: string; workbench_group: string }[]>(`${I}/group-members`);
+  const members = useLoad<{ user_name: string; skowork_group: string }[]>(`${I}/group-members`);
   const users = useUsers();
   const groups = useGroups();
   const [dlg, open, close] = useDialog<{ group?: string; users: string[] }>();
   const byGroup = new Map<string, string[]>();
-  for (const m of members.data ?? []) byGroup.set(m.workbench_group, [...(byGroup.get(m.workbench_group) ?? []), m.user_name]);
+  for (const m of members.data ?? []) byGroup.set(m.skowork_group, [...(byGroup.get(m.skowork_group) ?? []), m.user_name]);
   const rows = members.data ? [...byGroup.entries()].map(([group, us]) => ({ group, users: us })) : null;
   return (
     <>
@@ -156,8 +156,8 @@ function Members() {
             if (!group) throw new Error('Choose a Group.');
             const after = list(f.users);
             const removed = dlg.users.filter((u) => !after.includes(u));
-            for (const u of after.filter((x) => !dlg.users.includes(x))) await api('POST', `${I}/group-members`, { user_name: u, workbench_group: group });
-            for (const u of removed) await api('DELETE', `${I}/group-members`, { user_name: u, workbench_group: group });
+            for (const u of after.filter((x) => !dlg.users.includes(x))) await api('POST', `${I}/group-members`, { user_name: u, skowork_group: group });
+            for (const u of removed) await api('DELETE', `${I}/group-members`, { user_name: u, skowork_group: group });
             members.reload();
             refreshKnown();
             return `Members of ${group} saved.`;
@@ -180,11 +180,11 @@ function Members() {
 // ---- role mappings ---------------------------------------------------------------------------------------------------
 
 function Mappings() {
-  const maps = useLoad<{ idp_role: string; workbench_group: string }[]>(`${I}/role-mappings`);
+  const maps = useLoad<{ idp_role: string; skowork_group: string }[]>(`${I}/role-mappings`);
   const roles = useIdpRoles();
   const groups = useGroups();
   const [dlg, open, close] = useDialog();
-  const put = (mappings: { idp_role: string; workbench_group: string }[], reason: string) => api('PUT', `${I}/role-mappings`, { mappings, reason });
+  const put = (mappings: { idp_role: string; skowork_group: string }[], reason: string) => api('PUT', `${I}/role-mappings`, { mappings, reason });
   return (
     <>
       <Records
@@ -193,17 +193,17 @@ function Mappings() {
         sub="Users whose token carries an identity-provider role are members of the mapped Group."
         items={maps.data}
         error={maps.error}
-        text={(m) => `${m.idp_role} ${m.workbench_group}`}
+        text={(m) => `${m.idp_role} ${m.skowork_group}`}
         head={<tr><th>Identity-provider role</th><th>Group</th><th /></tr>}
         add={<button className="primary" data-testid="mapping-add-open" onClick={() => open(true)}>Add mapping</button>}
         empty="No identity-provider role is mapped to a Group."
         row={(m) => (
-          <tr key={m.idp_role + m.workbench_group}>
+          <tr key={m.idp_role + m.skowork_group}>
             <td><code>{m.idp_role}</code></td>
-            <td><b>{m.workbench_group}</b></td>
+            <td><b>{m.skowork_group}</b></td>
             <td className="acts">
               <button className="link danger" onClick={async () => {
-                const reason = await ask({ title: 'Remove this mapping?', body: <p>Users with <code>{m.idp_role}</code> are no longer members of {m.workbench_group}, unless they are assigned directly.</p>, action: 'Remove mapping', reason: 'optional' });
+                const reason = await ask({ title: 'Remove this mapping?', body: <p>Users with <code>{m.idp_role}</code> are no longer members of {m.skowork_group}, unless they are assigned directly.</p>, action: 'Remove mapping', reason: 'optional' });
                 if (reason === null) return;
                 await put(maps.data!.filter((x) => x !== m), reason || 'removed in admin console');
                 maps.reload();
@@ -217,7 +217,7 @@ function Mappings() {
         <Dialog id="mapping-add" title="Map an identity-provider role to a Group" submit="Add mapping" onClose={close} noteId="identity-note"
           onSubmit={async (f) => {
             if (!f.role || !f.group) throw new Error('Choose a role and a Group.');
-            await put([...(maps.data ?? []), { idp_role: f.role, workbench_group: f.group }], f.reason ?? '');
+            await put([...(maps.data ?? []), { idp_role: f.role, skowork_group: f.group }], f.reason ?? '');
             maps.reload();
             return `${f.role} now maps to ${f.group}.`;
           }}>
@@ -248,13 +248,13 @@ function Principals() {
       <Records
         title="Service principals"
         id="service-principals"
-        sub="Systems that call SkoWork APIs with client-credentials tokens of the identity provider. Each may call only its APIs."
+        sub="Systems that call Skowork APIs with client-credentials tokens of the identity provider. Each may call only its APIs."
         items={principals.data}
         error={principals.error}
         text={(p) => `${p.name} ${p.client_id} ${p.apis.join(' ')}`}
         head={<tr><th>Name</th><th>Client id</th><th>APIs</th><th>State</th><th /></tr>}
         add={<button className="primary" data-testid="sp-add-open" onClick={() => open(true)}>Register</button>}
-        empty="No system calls SkoWork APIs yet."
+        empty="No system calls Skowork APIs yet."
         row={(p) => (
           <tr key={p.client_id} data-testid={`sp-${p.name}`}>
             <td><b>{p.name}</b></td><td><code>{p.client_id}</code></td><td><Chips values={p.apis} /></td>

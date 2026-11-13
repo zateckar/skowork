@@ -31,7 +31,7 @@ const chat = (h: Harness, t: string) => h.call('POST', '/llm/v1/chat/completions
 const sent = (f: FakeUpstream) => f.requests.filter((r) => !r.path.endsWith('/models'));
 
 test('connections: bootstrap from the environment only when empty; credentials encrypted and write-only', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'workbench-conn-'));
+  const dir = mkdtempSync(join(tmpdir(), 'skowork-conn-'));
   const a = await fakeUpstream();
   const b = await fakeUpstream();
   try {
@@ -80,18 +80,18 @@ test('connections: bootstrap from the environment only when empty; credentials e
   }
 });
 
-test('connections: production refuses to start without WORKBENCH_SECRET_KEY once a connection exists', () => {
-  const cfg: Config = loadConfig({ WORKBENCH_ENV: 'production', WORKBENCH_DB: ':memory:', OPENAI_BASE_URL: 'https://llm.example.test/v1', OPENAI_KEY: 'k-123456789' });
+test('connections: production refuses to start without SKOWORK_SECRET_KEY once a connection exists', () => {
+  const cfg: Config = loadConfig({ SKOWORK_ENV: 'production', SKOWORK_DB: ':memory:', OPENAI_BASE_URL: 'https://llm.example.test/v1', OPENAI_KEY: 'k-123456789' });
   const db = openDb(':memory:');
-  assert.throws(() => new Connections(cfg, db, new Audit(db), () => {}), /WORKBENCH_SECRET_KEY is required/);
+  assert.throws(() => new Connections(cfg, db, new Audit(db), () => {}), /SKOWORK_SECRET_KEY is required/);
   // Without any connection it starts, and refuses to store a credential.
-  const empty = loadConfig({ WORKBENCH_ENV: 'production', WORKBENCH_DB: ':memory:' });
+  const empty = loadConfig({ SKOWORK_ENV: 'production', SKOWORK_DB: ':memory:' });
   const db2 = openDb(':memory:');
   const c = new Connections(empty, db2, new Audit(db2), () => {});
   assert.equal(c.list().key_available, false);
   c.close();
   // With the key it starts and encrypts under it.
-  const keyed = loadConfig({ WORKBENCH_ENV: 'production', WORKBENCH_DB: ':memory:', OPENAI_BASE_URL: 'https://llm.example.test/v1', OPENAI_KEY: 'k-123456789', WORKBENCH_SECRET_KEY: Buffer.alloc(32, 7).toString('base64') });
+  const keyed = loadConfig({ SKOWORK_ENV: 'production', SKOWORK_DB: ':memory:', OPENAI_BASE_URL: 'https://llm.example.test/v1', OPENAI_KEY: 'k-123456789', SKOWORK_SECRET_KEY: Buffer.alloc(32, 7).toString('base64') });
   const db3 = openDb(':memory:');
   const k = new Connections({ ...keyed, gateway: { ...keyed.gateway, discoveryIntervalMs: 3_600_000 } }, db3, new Audit(db3), () => {});
   assert.equal(k.list().connections.length, 1);
@@ -105,9 +105,9 @@ test('connections: the server key comes from a passphrase or an existing base64 
   assert.notDeepEqual(serverKey('correct horse battery stapler'), pass);
   const raw = Buffer.alloc(32, 7);
   assert.deepEqual(serverKey(raw.toString('base64')), raw, 'an existing base64 key is used as it is');
-  assert.throws(() => serverKey('secret'), (e: unknown) => e instanceof StartupError && /WORKBENCH_SECRET_KEY must be at least 16 characters/.test(e.message));
+  assert.throws(() => serverKey('secret'), (e: unknown) => e instanceof StartupError && /SKOWORK_SECRET_KEY must be at least 16 characters/.test(e.message));
   // A production start with a passphrase stores the bootstrap connection.
-  const cfg = loadConfig({ WORKBENCH_ENV: 'production', WORKBENCH_DB: ':memory:', OPENAI_BASE_URL: 'https://llm.example.test/v1', OPENAI_KEY: 'k-123456789', WORKBENCH_SECRET_KEY: 'correct horse battery staple' });
+  const cfg = loadConfig({ SKOWORK_ENV: 'production', SKOWORK_DB: ':memory:', OPENAI_BASE_URL: 'https://llm.example.test/v1', OPENAI_KEY: 'k-123456789', SKOWORK_SECRET_KEY: 'correct horse battery staple' });
   const db = openDb(':memory:');
   const c = new Connections({ ...cfg, gateway: { ...cfg.gateway, discoveryIntervalMs: 3_600_000 } }, db, new Audit(db), () => {});
   assert.equal(c.list().key_available, true);
@@ -172,7 +172,7 @@ test('connections: admin API, discovery, wrong credential, capabilities, disable
     const pol = (path: string, body: unknown) => h.call(path.endsWith('draft') ? 'PUT' : 'POST', `/api/v1/admin/policy${path}`, ad.t, body);
     await pol('/groups/pinned/draft', { document: { llm: { models: { main: 'backup/acme-llm-primary', small: 'no-such-model' } } }, priority: 10, reason: 'test' });
     await pol('/groups/pinned/publish', { reason: 'test' });
-    await h.call('POST', '/api/v1/admin/identity/group-members', ad.t, { user_name: 'pin1', workbench_group: 'pinned' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', ad.t, { user_name: 'pin1', skowork_group: 'pinned' });
     const pin = await h.token('pin1');
     a.requests.length = 0;
     b.requests.length = 0;

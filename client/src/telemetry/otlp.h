@@ -18,7 +18,7 @@ struct ResourceInfo {
     std::vector<std::pair<Res, std::string>> attrs;
 };
 
-inline constexpr std::string_view kScopeName = "workbench.client";
+inline constexpr std::string_view kScopeName = "skowork.client";
 inline constexpr std::string_view kOtlpContentType = "application/x-protobuf";
 
 std::string encode_logs(const ResourceInfo& resource, std::span<const Record> records, std::string_view scope_version);

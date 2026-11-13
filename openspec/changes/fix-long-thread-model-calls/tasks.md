@@ -19,6 +19,8 @@
 - [x] 3.5 Lazy Tool Loading per Thread: load order kept, bound drops the earliest loaded, tools that policy denies are dropped. Verify with unit tests for each scenario
 - [x] 3.6 Run Retry (D6): `threads.retry` resumes the failed latest Run; failed model output is excluded from later requests. Verify with unit tests: one user message after retry, completed tool calls not re-executed, retry refused for an older Run
 
+- [ ] 3.7 Read streams as data arrives (D8): `WinHttpQueryDataAvailable` before each `WinHttpReadData` in `HttpClient::send`. Verify with a test against a loopback server that sends small chunks with gaps: each chunk reaches `on_chunk` before the next is sent, and a gap shorter than the idle timeout never fails
+
 ## 4. Acceptance
 
 - [ ] 4.1 Repeat spike 1.3 after the change on the local stack against the real organization LLM API. Verify: no TIMEOUT over 30 Turns, cached tokens growing per Turn in the gateway audit (if 1.1 found caching on), and the time to the first byte recorded per Turn in design.md

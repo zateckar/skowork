@@ -7,11 +7,11 @@ The client runs tools in child processes contained by client/tool-sandbox (job o
 ## Decisions
 
 ### D1. Folder layout
-- **Choice:** `%LOCALAPPDATA%\Workbench\apps\<app-id>\` with `app.json` (`{name, description, entry, mcp_tools: ["mcp:<server>/<tool>"]}`), `server.js` (entry), `public\`, and `data.db` (node:sqlite). The app id is a slug of the name, unique per user.
+- **Choice:** `%LOCALAPPDATA%\Skowork\apps\<app-id>\` with `app.json` (`{name, description, entry, mcp_tools: ["mcp:<server>/<tool>"]}`), `server.js` (entry), `public\`, and `data.db` (node:sqlite). The app id is a slug of the name, unique per user.
 - **Alternatives considered:** apps inside the agent workspace (mixed with other work files; harder to list and delete).
 
 ### D2. Runtime and containment
-- **Choice:** the optional package holds a pinned, signed `node.exe` (Node.js 26 LTS, which has node:sqlite and network permission), its LICENSE and the client's app host script. Apps run as `node --permission --allow-fs-read=<app folder>,<runtime> --allow-fs-write=<app folder> --require <runtime>/app-host.js <entry>` (no `--allow-net`, `--allow-child-process`, `--allow-addons`, `--allow-ffi` or `--allow-worker`), inside client/tool-sandbox with No-Network Mode and a 512 MB memory limit. The app calls `http.createServer(...).listen(process.env.WORKBENCH_APP_PIPE)` as usual; the app host turns that listen into connections framed over the process's stdin and stdout, so the app opens no socket or pipe and nothing but the client reaches it. The app's console output is framed the same way and becomes its log.
+- **Choice:** the optional package holds a pinned, signed `node.exe` (Node.js 26 LTS, which has node:sqlite and network permission), its LICENSE and the client's app host script. Apps run as `node --permission --allow-fs-read=<app folder>,<runtime> --allow-fs-write=<app folder> --require <runtime>/app-host.js <entry>` (no `--allow-net`, `--allow-child-process`, `--allow-addons`, `--allow-ffi` or `--allow-worker`), inside client/tool-sandbox with No-Network Mode and a 512 MB memory limit. The app calls `http.createServer(...).listen(process.env.SKOWORK_APP_PIPE)` as usual; the app host turns that listen into connections framed over the process's stdin and stdout, so the app opens no socket or pipe and nothing but the client reaches it. The app's console output is framed the same way and becomes its log.
 - **Validation:** spike 1.1 checks that node:sqlite works under the permission model, that listening on a named pipe works, that fetch to an internet host fails, and measures start time and memory on the baseline hardware.
 - **Spike 1.1 results (2026-11-01, development workstation, official win-x64 zips):**
   - Node.js 24.22.2 LTS: node:sqlite works with `--permission` limited to the app folder; reads and writes outside it and child processes are refused (ERR_ACCESS_DENIED); listening on a named pipe works. But the permission model of Node.js 24 has no network scope: a TCP connection to a loopback port succeeds under `--permission`, and No-Network Mode only refuses traffic that goes through the egress proxy, so app code could reach loopback services and, on laptops without endpoint filtering, the internet. This disproves the egress assumption for Node.js 24.
@@ -25,7 +25,7 @@ The client runs tools in child processes contained by client/tool-sandbox (job o
 - **Alternatives considered:** each app on its own TCP port (any local user could connect; app code would have to check tokens).
 
 ### D4. MCP bridge
-- **Choice:** the listener answers `POST /<app-id>/_workbench/mcp/<server>/<tool>` for the app's pages (same cookie) with the JSON result. It checks the manifest list, the user's confirmation (stored with a hash of the list), the tool's read risk class from the catalog, and policy.apps.mcp, then calls through the MCP client and client/policy-enforcement with origin `app:<id>`. Calls are recorded in the approval log like the agent's.
+- **Choice:** the listener answers `POST /<app-id>/_skowork/mcp/<server>/<tool>` for the app's pages (same cookie) with the JSON result. It checks the manifest list, the user's confirmation (stored with a hash of the list), the tool's read risk class from the catalog, and policy.apps.mcp, then calls through the MCP client and client/policy-enforcement with origin `app:<id>`. Calls are recorded in the approval log like the agent's.
 - **Alternatives considered:** a bridge reachable from the app's server process (it would need network or pipe access to the client; the page-side bridge keeps the process without any channel out).
 
 ### D5. Lifecycle and tools
@@ -38,7 +38,7 @@ The client runs tools in child processes contained by client/tool-sandbox (job o
   - The bridge runs the catalog's tool definition only when client/policy-enforcement allows the call: no one can approve a call from an app page, so an approval decision refuses it.
   - "Change with the agent" in the Apps view asks what should change and starts a new Thread with that request, naming the app and its id.
   - Runtime package: `dev/scripts/fetch-node-runtime.ps1` downloads the pinned zip, checks its SHA-256 and the Authenticode signature, and keeps node.exe, LICENSE and VERSION in `client/runtime/node` (ignored by git). The build lays out `bin\runtime\node` (node.exe, LICENSE, app-host.js) and fails above 100 MB (binary megabytes, like the core package's footprint check). Measured: 100,261,172 bytes (95.6 MB).
-  - Release: the release workflow fetches the runtime with the same script before the build. `client/tools/package.ps1` writes the optional package next to the desktop zip as `Workbench-<version>-app-runtime-win-x64.zip`, holding `runtime\node` (node.exe, LICENSE, app-host.js) to be extracted next to Workbench.exe, with its own SHA-256 file (38 MB compressed).
+  - Release: the release workflow fetches the runtime with the same script before the build. `client/tools/package.ps1` writes the optional package next to the desktop zip as `Skowork-<version>-app-runtime-win-x64.zip`, holding `runtime\node` (node.exe, LICENSE, app-host.js) to be extracted next to Skowork.exe, with its own SHA-256 file (38 MB compressed).
 
 ## Risks / Trade-offs
 
@@ -50,7 +50,7 @@ The client runs tools in child processes contained by client/tool-sandbox (job o
 ## Acceptance notes (2026-11-01)
 
 - With the real organization LLM, on a development client signed in through Keycloak:
-  - A request for a 5-slide presentation produced the "Workbench Benefits Presentation" app. It opened in the browser, and the arrow keys move between the slides.
+  - A request for a 5-slide presentation produced the "Skowork Benefits Presentation" app. It opened in the browser, and the arrow keys move between the slides.
   - A request for a live view over the connected mock Jira MCP server produced the "Jira Issues Live Board" app. After the user confirmed its MCP tools, it showed DEMO-101 to DEMO-103 through the bridge, and search and the status filter work.
   - The user checked both pages in the browser.
 - Found and fixed: an MCP server whose discovery had failed, for example because egress policy refused it, stayed unavailable after the policy allowed it. It is now discovered again when the policy changes (McpHttp test).

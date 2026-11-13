@@ -44,7 +44,7 @@ describe('fleet: registration and heartbeat', () => {
   it('updates Groups at heartbeat when membership changes', async () => {
     const t = await h.token('dev5');
     const r = await register(h, t);
-    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'dev5', workbench_group: 'developers' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'dev5', skowork_group: 'developers' });
     const hb = await h.call('POST', '/api/v1/fleet/heartbeat', await h.token('dev5'), { installation_id: r.installation_id, policy_version: 'p1', status: 'running' });
     assert.equal(hb.status, 200);
     assert.equal(hb.body.heartbeat_interval_s, 300);
@@ -101,8 +101,8 @@ describe('fleet: push delivery', () => {
   });
 
   it('fans a Group message out to every member', async () => {
-    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'g1', workbench_group: 'team-x' });
-    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'g2', workbench_group: 'team-x' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'g1', skowork_group: 'team-x' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'g2', skowork_group: 'team-x' });
     const a = await register(h, await h.token('g1'));
     const b = await register(h, await h.token('g2'));
     await register(h, await h.token('outsider'));

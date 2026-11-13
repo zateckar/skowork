@@ -39,7 +39,7 @@ public:
 };
 
 struct TempDir {
-    std::filesystem::path path = std::filesystem::path(local_appdata()) / L"workbench-test" / widen(random_urlsafe(6));
+    std::filesystem::path path = std::filesystem::path(local_appdata()) / L"skowork-test" / widen(random_urlsafe(6));
     TempDir() { std::filesystem::create_directories(path); }
     ~TempDir() {
         std::error_code ec;
@@ -95,7 +95,7 @@ public:
                 {"x", base64url_encode(blob.data() + off, 32)}, {"y", base64url_encode(blob.data() + off + 32, 32)}};
     }
 
-    [[nodiscard]] std::string sign(const json& payload, const std::string& typ = "workbench-policy+jwt") const {
+    [[nodiscard]] std::string sign(const json& payload, const std::string& typ = "skowork-policy+jwt") const {
         const json header = {{"alg", "ES256"}, {"typ", typ}, {"kid", kid_}};
         const std::string input = base64url_encode(header.dump()) + "." + base64url_encode(payload.dump());
         bytes hash = sha256(input);
@@ -375,7 +375,7 @@ TEST(PolicyPathsWin, DenyRulesNamingAJunctionMatchTheFinalPath) {
 
 TEST(PolicyPathsWin, PathRulesExpandVariables) {
     const EffectivePolicy p(PolicyBundle{"u", "", 1, 0, 4102444800, 1, {}, {{"filesystem", {{"read", {"%USERPROFILE%\\Documents\\**"}},
-                                                                                            {"deny", {"%WORKBENCH_DATA%/secrets/**"}}}}}});
+                                                                                            {"deny", {"%SKOWORK_DATA%/secrets/**"}}}}}});
     const PathRules r = path_rules(&p, "C:\\D\\workspace", "C:\\D", {});
     ASSERT_EQ(r.read.size(), 1u);
     EXPECT_EQ(r.read[0].find('%'), std::string::npos);
@@ -495,7 +495,7 @@ std::shared_ptr<const EffectivePolicy> egress_policy(std::vector<std::string> al
 }  // namespace
 
 TEST(PolicyEgressWin, RedirectToADeniedHostIsNotFollowed) {
-    if (!HttpClient::url_allowed("http://127.0.0.1:1/")) GTEST_SKIP() << "http loopback needs WORKBENCH_DEV_ENDPOINTS";
+    if (!HttpClient::url_allowed("http://127.0.0.1:1/")) GTEST_SKIP() << "http loopback needs SKOWORK_DEV_ENDPOINTS";
     OneShotServer srv("HTTP/1.1 302 Found\r\nLocation: http://exfil.pastebin.com/x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     const auto policy = egress_policy({"127.0.0.1", "*.pastebin.com"}, {"*.pastebin.com"});
     EgressGuard guard([policy] { return policy; });
@@ -511,7 +511,7 @@ TEST(PolicyEgressWin, RedirectToADeniedHostIsNotFollowed) {
 }
 
 TEST(PolicyEgressWin, DeniedFirstUrlIsNeverContacted) {
-    if (!HttpClient::url_allowed("http://127.0.0.1:1/")) GTEST_SKIP() << "http loopback needs WORKBENCH_DEV_ENDPOINTS";
+    if (!HttpClient::url_allowed("http://127.0.0.1:1/")) GTEST_SKIP() << "http loopback needs SKOWORK_DEV_ENDPOINTS";
     OneShotServer srv("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
     HttpClient client;
     HttpRequest req;

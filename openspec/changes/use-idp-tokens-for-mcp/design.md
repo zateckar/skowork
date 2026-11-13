@@ -2,7 +2,7 @@
 
 ## Context
 
-add-core-tools-and-mcp D6 made the control plane a token issuer for MCP servers. Clients exchanged their Keycloak access token at `POST /api/v1/identity/token-exchange` for an ES256 token signed with the control plane's `mcp-token` key ring, with the server as the only audience. Catalog discovery signed a 60-second token for the subject `workbench-catalog-discovery`. MCP servers had to trust the control plane's keys at `/.well-known/workbench-token-keys.json`.
+add-core-tools-and-mcp D6 made the control plane a token issuer for MCP servers. Clients exchanged their Keycloak access token at `POST /api/v1/identity/token-exchange` for an ES256 token signed with the control plane's `mcp-token` key ring, with the server as the only audience. Catalog discovery signed a 60-second token for the subject `skowork-catalog-discovery`. MCP servers had to trust the control plane's keys at `/.well-known/skowork-token-keys.json`.
 
 The organization does not allow this. Every application trusts only the central identity provider, and no application vouches for identities towards another. An MCP server that validates against Keycloak answers 401 to a control-plane token. This is how the failure was found (2026-11-05).
 
@@ -34,23 +34,23 @@ The organization does not allow this. Every application trusts only the central 
   - Discovery from a client. The catalog's review flow (Tool Discovery Snapshot) would then depend on a user's machine.
 
 ### D3. What an MCP server must accept
-- **Choice:** An MCP server verifies the signature against the Keycloak realm's JWKS, the issuer of the realm, expiry, and the authorized party (`azp`) of the Workbench client. Keycloak puts `aud` only where an audience mapper adds it. A server that checks `aud` needs an audience mapper on the Workbench client that adds the server's audience. This is an identity-provider setting, not catalog data. It is documented in the deployment guidance (README, Remote MCP servers), not in the catalog.
+- **Choice:** An MCP server verifies the signature against the Keycloak realm's JWKS, the issuer of the realm, expiry, and the authorized party (`azp`) of the Skowork client. Keycloak puts `aud` only where an audience mapper adds it. A server that checks `aud` needs an audience mapper on the Skowork client that adds the server's audience. This is an identity-provider setting, not catalog data. It is documented in the deployment guidance (README, Remote MCP servers), not in the catalog.
 - **Why:** the catalog cannot make Keycloak add an audience, so it no longer keeps one.
 
 ### D4. Catalog data
-- **Choice:** `auth` takes `user-token` (the default for remote entries) or `none`. `audience` is dropped. A migration rewrites the `entry` JSON of `mcp_servers`: `audience-token` becomes `user-token` and `audience` is removed. It also deletes the rows of the `mcp-token` key ring. Past version snapshots stay as they were recorded. `WORKBENCH_MCP_AUDIENCES` (`identity.mcpAudiences`) is removed.
+- **Choice:** `auth` takes `user-token` (the default for remote entries) or `none`. `audience` is dropped. A migration rewrites the `entry` JSON of `mcp_servers`: `audience-token` becomes `user-token` and `audience` is removed. It also deletes the rows of the `mcp-token` key ring. Past version snapshots stay as they were recorded. `SKOWORK_MCP_AUDIENCES` (`identity.mcpAudiences`) is removed.
 - **Why:** a mode named after a token that no longer exists would mislead administrators.
 - **Alternatives considered:**
   - Keep the name audience-token. It would be wrong.
   - Accept both names. That would be a compatibility shim with no client that needs it, because clients read the Policy bundle, which is rebuilt from the migrated entries.
 
 ### D5. Removed code
-- **Choice:** `TokenExchange` (`control-plane/src/identity/tokens.ts`) is removed, together with `POST /api/v1/identity/token-exchange`, `/.well-known/workbench-token-keys.json` and `POST /api/v1/admin/identity/token-keys/rotate`. The client's `exchange_token` and its token cache per audience are removed too.
+- **Choice:** `TokenExchange` (`control-plane/src/identity/tokens.ts`) is removed, together with `POST /api/v1/identity/token-exchange`, `/.well-known/skowork-token-keys.json` and `POST /api/v1/admin/identity/token-keys/rotate`. The client's `exchange_token` and its token cache per audience are removed too.
 - **Why:** nothing uses them, and keeping a token issuer around invites its use.
 
 ## Risks / Trade-offs
 
-- [Risk] The user's token is valid for the control plane and other services that accept the Workbench client, so a compromised MCP server could replay it within its 5-minute lifetime. -> Mitigation: tokens go only to catalog entries that a platform-admin registered and assigned, over HTTPS, never to a host they redirect to. The organization accepts this as the consequence of trusting only the identity provider. Per-server audiences (D1, alternative 1) are the follow-up if it is not acceptable.
+- [Risk] The user's token is valid for the control plane and other services that accept the Skowork client, so a compromised MCP server could replay it within its 5-minute lifetime. -> Mitigation: tokens go only to catalog entries that a platform-admin registered and assigned, over HTTPS, never to a host they redirect to. The organization accepts this as the consequence of trusting only the identity provider. Per-server audiences (D1, alternative 1) are the follow-up if it is not acceptable.
 - [Risk] A server that checks `aud` still refuses the token. -> Mitigation: D3 documents the audience mapper. The discovery error names the HTTP status, so the administrator sees it at registration.
 - [Risk] An administrator's token expires during a long discovery. -> Mitigation: discovery has a timeout (`mcpCatalog.discoveryTimeoutMs`) far below the 5-minute token lifetime, and the admin console refreshes tokens before each call.
 

@@ -204,8 +204,8 @@ Status TelemetryService::flush() {
     if (ids.empty() && reported == 0) return {};
 
     ResourceInfo res;
-    res.attrs = {{Res::service_version, env_.version}, {Res::workbench_channel, env_.channel}, {Res::os_build, env_.os_build},
-                 {Res::workbench_installation_id, env_.installation_id ? env_.installation_id() : std::string{}}};
+    res.attrs = {{Res::service_version, env_.version}, {Res::skowork_channel, env_.channel}, {Res::os_build, env_.os_build},
+                 {Res::skowork_installation_id, env_.installation_id ? env_.installation_id() : std::string{}}};
     const std::string body = encode_logs(res, recs, env_.version);
     auto sent = env_.send(body);
     const std::lock_guard lock(mx_);

@@ -28,7 +28,7 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     idp = await fakeIdp(h);
     // Read per request by /api/v1/public/admin-config.
     h.cfg.identity.discoveryUrl = idp.url;
-    process.env.WORKBENCH_ADMIN_REDIRECT_URI = `${h.base}/admin/`;
+    process.env.SKOWORK_ADMIN_REDIRECT_URI = `${h.base}/admin/`;
     mcp = await fakeMcp();
     mcp.tools = [{ name: 'search_issues' }];
     llm = await fakeUpstream();
@@ -50,7 +50,7 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
     await llm?.close();
     await idp?.close();
     await h?.close();
-    delete process.env.WORKBENCH_ADMIN_REDIRECT_URI;
+    delete process.env.SKOWORK_ADMIN_REDIRECT_URI;
   });
 
   /** Signs the browser in as `user` through the PKCE flow and waits for the console (or the refusal). */
@@ -102,7 +102,7 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
 
   test('5.2 policy: validation errors next to the fields, diff, publish to a pilot, adoption by version, simulation with sources', async () => {
     // Users and their installations: p1 is in the pilot Group, d1 is not.
-    const assign = (user: string, group: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: user, workbench_group: group });
+    const assign = (user: string, group: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: user, skowork_group: group });
     await assign('p1', 'developers');
     await assign('p1', 'pilot');
     await assign('d1', 'developers');
@@ -390,7 +390,7 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
   });
 
   test('add-knowledge-sharing 1.3 team knowledge: list by Group, remove with a reason', async () => {
-    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'kim', workbench_group: 'design' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'kim', skowork_group: 'design' });
     await h.call('PUT', '/api/v1/admin/policy/groups/design/draft', admin, { document: { knowledge: { sharing: { groups: ['design'] } } }, priority: 10, reason: 'e2e' });
     await h.call('POST', '/api/v1/admin/policy/groups/design/publish', admin, { reason: 'e2e' });
     const kim = await h.token('kim');
@@ -463,7 +463,7 @@ describe('admin console end to end', { skip: exe ? false : 'no Chrome or Edge in
 
   test('add-skills 5.3 skill review queue: scan results, diff, approve and sign, reject with a comment, import, revoke', async () => {
     // alice may publish to org through the policy of her Group.
-    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'alice', workbench_group: 'authors' });
+    await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: 'alice', skowork_group: 'authors' });
     await h.call('PUT', '/api/v1/admin/policy/groups/authors/draft', admin, { document: { skills: { publish: ['org'] } }, priority: 5, reason: 'e2e' });
     await h.call('POST', '/api/v1/admin/policy/groups/authors/publish', admin, { reason: 'e2e' });
     const md = (v: string, body: string) => `---\nname: supplier-triage\ndescription: Triage supplier mail\nversion: ${v}\ntools: [mail.search]\nrisk: write-local\n---\n${body}\n`;

@@ -53,9 +53,9 @@ describe('team knowledge publications', () => {
   });
 
   const member = async (u: string, g: string) =>
-    assert.equal((await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: u, workbench_group: g })).status, 200);
+    assert.equal((await h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: u, skowork_group: g })).status, 200);
   const unmember = async (u: string, g: string) =>
-    assert.equal((await h.call('DELETE', '/api/v1/admin/identity/group-members', admin, { user_name: u, workbench_group: g })).status, 200);
+    assert.equal((await h.call('DELETE', '/api/v1/admin/identity/group-members', admin, { user_name: u, skowork_group: g })).status, 200);
   async function setPolicy(group: string, sharing: Record<string, unknown>) {
     const r = await h.call('PUT', `/api/v1/admin/policy/groups/${group}/draft`, admin, { document: { knowledge: { sharing } }, priority: 10, reason: 'test' });
     assert.equal(r.status, 200, JSON.stringify(r.body));
@@ -171,7 +171,7 @@ describe('team knowledge publications', () => {
   });
 
   it('stops counting Groups from identity-provider roles once their token has expired', async () => {
-    const mapped = await h.call('PUT', '/api/v1/admin/identity/role-mappings', admin, { mappings: [{ idp_role: 'role-qa', workbench_group: 'qa' }] });
+    const mapped = await h.call('PUT', '/api/v1/admin/identity/role-mappings', admin, { mappings: [{ idp_role: 'role-qa', skowork_group: 'qa' }] });
     assert.equal(mapped.status, 200);
     const frank = await h.token('frank', { roles: ['role-qa'] }, { lifetimeS: 3 });
     const r = await put(frank, 'qa-notes', envelope(0, ['qa'], [{ id: 'q', text: 'Quality gate for the brake controller passes.' }]));

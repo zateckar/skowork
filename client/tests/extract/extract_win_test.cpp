@@ -1,5 +1,5 @@
 // Document Text Extraction on Windows (add-core-tools-and-mcp task 1.4): PDF text through PDFium, and every document
-// extracted by a sandboxed `workbench-worker.exe --role extract` process; a crashing, hanging or runaway extractor ends
+// extracted by a sandboxed `skowork-worker.exe --role extract` process; a crashing, hanging or runaway extractor ends
 // with an extraction error while the caller keeps running.
 #include "extract/extract.h"
 #include "extract/ooxml_fixtures.h"
@@ -61,7 +61,7 @@ struct ExtractFixture {
     ToolContext ctx;
 
     ExtractFixture() {
-        options.worker_exe = exe_dir() / L"workbench-worker.exe";
+        options.worker_exe = exe_dir() / L"skowork-worker.exe";
         options.sandbox = &box;
     }
     Result<std::string> run(const std::string& kind, const std::string& bytes) { return tools::sandbox_extractor(options)(kind, bytes, ctx); }
@@ -98,7 +98,7 @@ TEST(ExtractWorker, DocumentsAreExtractedInTheSandbox) {
 }
 
 TEST(ExtractWorker, CrashHangAndRunawayParsersAreContained) {
-#ifndef WORKBENCH_DEV_ENDPOINTS
+#ifndef SKOWORK_DEV_ENDPOINTS
     GTEST_SKIP() << "the failing-parser hooks exist in dev builds only";
 #endif
     ExtractFixture f;
@@ -126,7 +126,7 @@ TEST(ExtractWorker, CrashHangAndRunawayParsersAreContained) {
 
 TEST(ExtractWorker, FilesReadReturnsDocumentText) {
     ExtractFixture f;
-    const auto root = std::filesystem::path(local_appdata()) / L"workbench-test" / widen(random_urlsafe(6));
+    const auto root = std::filesystem::path(local_appdata()) / L"skowork-test" / widen(random_urlsafe(6));
     const auto data = root / L"data", ws = data / L"workspace";
     std::filesystem::create_directories(ws);
     std::ofstream(ws / L"report.docx", std::ios::binary) << test::docx();

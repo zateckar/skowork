@@ -1,4 +1,4 @@
-// Workbench.exe: the per-user resident process (client/desktop-host). Starts the tray, storage, identity and the
+// Skowork.exe: the per-user resident process (client/desktop-host). Starts the tray, storage, identity and the
 // control channel; the UI window is created only on demand.
 #include "app/app.h"
 

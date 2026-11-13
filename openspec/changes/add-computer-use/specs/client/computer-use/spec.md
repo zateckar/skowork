@@ -94,7 +94,7 @@ While a Run is controlling the desktop, the client SHALL show an always-on-top o
 - **THEN** the overlay is visible before the first input is sent and remains visible until control ends
 
 ### Requirement: Global Stop Hotkey
-The client SHALL register a global stop hotkey. The default is Ctrl+Alt+End, and policy.tools.computer.stop_hotkey can change it to another combination with at least two modifiers. Pressing the hotkey MUST stop all computer.* actions and cancel the controlling Run within 1 second, even when the Workbench window is not focused.
+The client SHALL register a global stop hotkey. The default is Ctrl+Alt+End, and policy.tools.computer.stop_hotkey can change it to another combination with at least two modifiers. Pressing the hotkey MUST stop all computer.* actions and cancel the controlling Run within 1 second, even when the Skowork window is not focused.
 
 #### Scenario: User presses stop
 - **WHEN** the user presses the stop hotkey during a drag action
@@ -119,7 +119,7 @@ The client's own windows, credential prompts and security tools MUST always be d
 - **THEN** the action is refused with a policy error naming the application, and no input is sent
 
 #### Scenario: Agent targets its own window
-- **WHEN** the agent tries to click in the Workbench approval card
+- **WHEN** the agent tries to click in the Skowork approval card
 - **THEN** the action is refused, because the client's own windows are always out of scope
 
 ### Requirement: Unreachable Surfaces Reported

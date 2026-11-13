@@ -14,7 +14,7 @@ std::string make(const json& h, const json& p, const std::string& sig = "sig") {
 TEST(Jwt, ParsesClaims) {
     const std::string t = make({{"alg", "RS256"}, {"kid", "k1"}},
                                {{"iss", "https://idp/realms/r"}, {"sub", "u1"}, {"exp", 100}, {"iat", 50},
-                                {"aud", json::array({"workbench-control-plane", "account"})},
+                                {"aud", json::array({"skowork-control-plane", "account"})},
                                 {"groups", json::array({"g1", "g2"})}});
     auto j = parse_jwt(t);
     ASSERT_TRUE(j);
@@ -23,7 +23,7 @@ TEST(Jwt, ParsesClaims) {
     EXPECT_EQ(j->iss(), "https://idp/realms/r");
     EXPECT_EQ(j->sub(), "u1");
     EXPECT_EQ(j->exp(), 100);
-    EXPECT_TRUE(j->has_audience("workbench-control-plane"));
+    EXPECT_TRUE(j->has_audience("skowork-control-plane"));
     EXPECT_FALSE(j->has_audience("other"));
     EXPECT_EQ(j->string_list("groups"), (std::vector<std::string>{"g1", "g2"}));
     EXPECT_EQ(to_string(j->signature), "sig");
@@ -31,9 +31,9 @@ TEST(Jwt, ParsesClaims) {
 }
 
 TEST(Jwt, SingleStringAudience) {
-    auto j = parse_jwt(make({{"alg", "ES256"}}, {{"aud", "workbench-desktop"}}));
+    auto j = parse_jwt(make({{"alg", "ES256"}}, {{"aud", "skowork-desktop"}}));
     ASSERT_TRUE(j);
-    EXPECT_TRUE(j->has_audience("workbench-desktop"));
+    EXPECT_TRUE(j->has_audience("skowork-desktop"));
 }
 
 TEST(Jwt, RejectsMalformed) {

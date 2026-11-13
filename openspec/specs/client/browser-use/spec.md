@@ -10,7 +10,7 @@ The client SHALL run browser tools only in a dedicated, persistent Chrome profil
 
 #### Scenario: First browser use
 - **WHEN** the agent first calls a browser tool
-- **THEN** Chrome starts with the dedicated Workbench profile, and the user's own Chrome windows and profile are untouched
+- **THEN** Chrome starts with the dedicated Skowork profile, and the user's own Chrome windows and profile are untouched
 
 #### Scenario: Session persists
 - **WHEN** the user signed in to a web application in the agent browser yesterday

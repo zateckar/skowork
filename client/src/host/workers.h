@@ -1,5 +1,5 @@
 // Worker processes (client/desktop-host Worker Process Lifetime and Worker Memory Budgets). The core starts
-// `workbench-worker.exe --role <role>` on demand inside a Job Object that kills it with the core and caps its
+// `skowork-worker.exe --role <role>` on demand inside a Job Object that kills it with the core and caps its
 // memory; requests are length-prefixed JSON frames over the worker's stdin/stdout. A worker exits on its own
 // after 60 s without a request.
 #pragma once

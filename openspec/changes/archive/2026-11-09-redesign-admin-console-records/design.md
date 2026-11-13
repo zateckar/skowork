@@ -19,9 +19,9 @@ The console is a React single-page app in control-plane/admin, reworked by impro
 - `Tabs`: a tab list whose selection is written to the address as `#/<view>/<tab>`.
 
 ### D2. Directory
-- `GET /api/v1/admin/identity/directory` returns `{ users: [{ name, sources, bootstrap }], idp_roles: [] }`, sorted. Sources: installations, direct members, administrator roles, Group owners, the deny list and `WORKBENCH_BOOTSTRAP_ADMINS`. Roles: the `idp_roles` recorded on installations and the mapped roles. It needs an administrator role, which the admin gate already demands.
+- `GET /api/v1/admin/identity/directory` returns `{ users: [{ name, sources, bootstrap }], idp_roles: [] }`, sorted. Sources: installations, direct members, administrator roles, Group owners, the deny list and `SKOWORK_BOOTSTRAP_ADMINS`. Roles: the `idp_roles` recorded on installations and the mapped roles. It needs an administrator role, which the admin gate already demands.
 - Groups for pickers come from `GET /api/v1/admin/policy/groups` (Every Known Group Is Listed), where the admin may open the policy view; elsewhere the field accepts typed Group names.
-- Alternatives considered: querying the identity provider's user directory. Workbench trusts the identity provider for sign-in only and has no directory credentials; the users the control plane has seen are the ones an admin manages.
+- Alternatives considered: querying the identity provider's user directory. Skowork trusts the identity provider for sign-in only and has no directory credentials; the users the control plane has seen are the ones an admin manages.
 
 ### D3. View by view
 - **Identity:** tabs. Administrators: one row per user with their roles as chips; Grant opens user picker and role checkboxes with what each role may do; Edit changes the checkboxes (grants and revokes the difference); bootstrap administrators are listed as configured and cannot be edited here. Group members: one row per Group with its members as chips; Add members opens Group picker (new allowed) and users picker; Edit members adds and removes the difference. Role mappings: rows; Add opens identity-provider role picker (new allowed), Group picker and reason. Service principals: rows; Register opens name, client id and APIs; Retire asks. Deny list: rows; Deny access opens kind, user picker or installation picker, reason; Lift asks.

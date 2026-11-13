@@ -12,7 +12,7 @@
 namespace wb::policy {
 
 // Expands %VARIABLES% (ExpandEnvironmentStringsW). `extra` adds variables the process environment lacks, such as
-// WORKBENCH_DATA.
+// SKOWORK_DATA.
 std::string expand_environment(std::string_view s, const std::vector<std::pair<std::string, std::string>>& extra = {});
 
 // The final path of `path`: environment variables expanded, relative segments resolved (GetFullPathNameW), device
@@ -48,7 +48,7 @@ std::vector<std::string> final_folders(std::vector<std::string> folders);
 // with a wildcard is returned as given.
 std::string final_glob(const std::string& glob);
 
-// The filesystem rules of an effective policy with environment variables expanded; %WORKBENCH_DATA% is the data root.
+// The filesystem rules of an effective policy with environment variables expanded; %SKOWORK_DATA% is the data root.
 // The folders the rules name (globs, workspace, data root, grants) are final paths, like the paths compared with them.
 PathRules path_rules(const EffectivePolicy* policy, const std::string& workspace, const std::string& data_root,
                      std::vector<FolderGrant> grants);

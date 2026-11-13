@@ -10,7 +10,7 @@ namespace {
 constexpr const char* kLog = "policy";
 constexpr const char* kBundleSecret = "policy.bundle";
 constexpr const char* kKeysSetting = "policy.keys";
-constexpr const char* kBundleTyp = "workbench-policy+jwt";
+constexpr const char* kBundleTyp = "skowork-policy+jwt";
 
 bool same_user(const std::string& a, const std::string& b) { return !a.empty() && to_lower(a) == to_lower(b); }
 }  // namespace

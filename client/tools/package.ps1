@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Packages a client build as the desktop zip: SkoWork.exe, the compatibility launcher, workbench-worker.exe, pdfium.dll and the third-party
+  Packages a client build as the desktop zip: Skowork.exe, the compatibility launcher, skowork-worker.exe, pdfium.dll and the third-party
   licences, plus a SHA-256 checksum file (add-client-foundation task 2.4). When the build holds the app runtime, also
   the optional app runtime package (add-local-apps) with its own checksum file.
 #>
@@ -12,16 +12,15 @@ param(
 $ErrorActionPreference = 'Stop'
 $client = Resolve-Path (Join-Path $PSScriptRoot '..')
 $bin = Join-Path $BuildDir 'bin'
-$name = "SkoWork-$Version-win-x64"
+$name = "Skowork-$Version-win-x64"
 $stage = Join-Path $OutDir $name
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $stage, (Join-Path $stage 'licenses') | Out-Null
 
-foreach ($f in 'SkoWork.exe', 'Workbench-legacy.exe', 'workbench-worker.exe', 'pdfium.dll') {
+foreach ($f in 'Skowork.exe', 'Skowork-legacy.exe', 'skowork-worker.exe', 'pdfium.dll') {
     $src = Join-Path $bin $f
     if (-not (Test-Path $src)) { throw "missing $src" }
-    if ($f -eq 'Workbench-legacy.exe') { Copy-Item $src (Join-Path $stage 'Workbench.exe') }
-    else { Copy-Item $src $stage }
+    Copy-Item $src $stage
 }
 # Licences of the vendored components (client/third_party/README.md is the manifest).
 Copy-Item (Join-Path $client 'third_party\README.md') (Join-Path $stage 'licenses\THIRD-PARTY.md')
@@ -46,10 +45,10 @@ function Write-Zip([string] $From, [string] $ZipName) {
 Write-Zip $stage $name
 
 # The optional app runtime package (add-local-apps D2): runtime\node with node.exe, its LICENSE and app-host.js, to be
-# extracted next to SkoWork.exe. Built only when the build laid out node.exe (dev/scripts/fetch-node-runtime.ps1).
+# extracted next to Skowork.exe. Built only when the build laid out node.exe (dev/scripts/fetch-node-runtime.ps1).
 $runtime = Join-Path $bin 'runtime\node'
 if (Test-Path (Join-Path $runtime 'node.exe')) {
-    $rtName = "SkoWork-$Version-app-runtime-win-x64"
+    $rtName = "Skowork-$Version-app-runtime-win-x64"
     $rtStage = Join-Path $OutDir $rtName
     Remove-Item $rtStage -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force (Join-Path $rtStage 'runtime\node') | Out-Null

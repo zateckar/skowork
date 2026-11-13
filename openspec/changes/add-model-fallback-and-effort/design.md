@@ -99,7 +99,7 @@ Otherwise the original error stands.
 - *Race M and F in parallel:* this doubles load on an upstream that is already overloaded.
 
 ### D4. Cooldown
-When a request falls back for a reason other than F not fitting, the gateway records "M cooling down until now + `WORKBENCH_LLM_FALLBACK_COOLDOWN_MS`" (default 120,000) in memory. During the cooldown, new requests for M that F fits go straight to F, without the fallback wait. A request that F does not fit still tries M.
+When a request falls back for a reason other than F not fitting, the gateway records "M cooling down until now + `SKOWORK_LLM_FALLBACK_COOLDOWN_MS`" (default 120,000) in memory. During the cooldown, new requests for M that F fits go straight to F, without the fallback wait. A request that F does not fit still tries M.
 
 The first request after the cooldown tries M again. If that falls back too, the cooldown restarts.
 

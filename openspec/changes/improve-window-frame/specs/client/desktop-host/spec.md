@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: Window Title Bar
-The main window SHALL have no separate title bar row, as in Windows 11 File Explorer: the panes reach the top edge and their top row is the title bar. The navigation pane starts with the Workbench mark and name, and the top-right corner holds Minimize, Maximize (Restore down while maximised) and Close with accessible names and tooltips. Empty parts of the top row move the window, maximise on double-click and open the window menu. Resizing and Snap layouts work as usual.
+The main window SHALL have no separate title bar row, as in Windows 11 File Explorer: the panes reach the top edge and their top row is the title bar. The navigation pane starts with the Skowork mark and name, and the top-right corner holds Minimize, Maximize (Restore down while maximised) and Close with accessible names and tooltips. Empty parts of the top row move the window, maximise on double-click and open the window menu. Resizing and Snap layouts work as usual.
 
 #### Scenario: Window buttons
 - **WHEN** a screen reader user moves through the window
@@ -26,12 +26,12 @@ The main window SHALL have no separate title bar row, as in Windows 11 File Expl
 - **THEN** the control acts as usual and the window does not move
 
 ### Requirement: App Icon
-Workbench SHALL have its own icon: an Emerald square with an Electric Green "S". It is built into Workbench.exe, it is the main window's icon in the taskbar and in Alt+Tab, and it is the tray icon. On the tray icon, a coloured dot shows the tray state (disconnected, idle, running, action required, paused), and a red badge shows unread Chat messages.
+Skowork SHALL have its own icon: an Emerald square with an Electric Green "S". It is built into Skowork.exe, it is the main window's icon in the taskbar and in Alt+Tab, and it is the tray icon. On the tray icon, a coloured dot shows the tray state (disconnected, idle, running, action required, paused), and a red badge shows unread Chat messages.
 
 #### Scenario: Executable and taskbar
-- **WHEN** the user looks at Workbench.exe in File Explorer, or at the taskbar while the window is open
-- **THEN** both show the Workbench icon
+- **WHEN** the user looks at Skowork.exe in File Explorer, or at the taskbar while the window is open
+- **THEN** both show the Skowork icon
 
 #### Scenario: Tray state
 - **WHEN** a Thread gets an Action item
-- **THEN** the tray shows the Workbench icon with the action-required dot
+- **THEN** the tray shows the Skowork icon with the action-required dot

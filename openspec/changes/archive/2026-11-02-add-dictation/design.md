@@ -2,7 +2,7 @@
 
 ## Context
 
-client/meeting-capture already has what Dictation needs: WASAPI capture of the default communications microphone (AudioCapture with CaptureSource mic), encrypted tracks (TrackWriter, DPAPI-wrapped AES keys), and the stt worker with Silero VAD, language identification and Parakeet-TDT-0.6B-v3 (stt.transcribe). Development builds use the deterministic test engine unless WORKBENCH_STT_ENGINE=sherpa.
+client/meeting-capture already has what Dictation needs: WASAPI capture of the default communications microphone (AudioCapture with CaptureSource mic), encrypted tracks (TrackWriter, DPAPI-wrapped AES keys), and the stt worker with Silero VAD, language identification and Parakeet-TDT-0.6B-v3 (stt.transcribe). Development builds use the deterministic test engine unless SKOWORK_STT_ENGINE=sherpa.
 
 ## Decisions
 
@@ -59,7 +59,7 @@ client/meeting-capture already has what Dictation needs: WASAPI capture of the d
   - ShellDictation.DictateInsertsAtTheCaretEscapeDiscardsAndAvailability.
   - ShellChats: the Chat composer has Dictate.
   - Policy tests: client and control plane.
-- Demo client with WORKBENCH_STT_ENGINE=sherpa: app.status.dictation is {enabled, available}. The new Thread composer shows the microphone button "Dictate" next to Attach files.
+- Demo client with SKOWORK_STT_ENGINE=sherpa: app.status.dictation is {enabled, available}. The new Thread composer shows the microphone button "Dictate" next to Attach files.
 - Not checked yet: dictating by voice in English and Czech on the demo client (task 3.1). This needs the user's voice and their consent to record the microphone.
 - Dictation language (D5), 2026-11-02:
   - Feedback from the user: English dictation works on the demo client. One Czech dictation failed with unsupported_language, because detection took the short Czech speech for a language that is not supported.

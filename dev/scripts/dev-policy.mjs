@@ -56,7 +56,7 @@ async function publish(accessToken) {
 const server = createServer(async (req, res) => {
   const u = new URL(req.url, redirect.origin);
   if (u.pathname !== redirect.pathname) return res.writeHead(404).end();
-  res.writeHead(200, { 'content-type': 'text/plain' }).end('Workbench dev-policy: sign-in received, you can close this tab.');
+  res.writeHead(200, { 'content-type': 'text/plain' }).end('Skowork dev-policy: sign-in received, you can close this tab.');
   server.close();
   let refresh;
   try {

@@ -8,7 +8,7 @@
 #include "platform/win.h"
 
 // MinGW-w64: windows.foundation.h specialises IReference<BYTE> and IReference<boolean>, both `unsigned char`; skipping
-// the boolean one avoids the redefinition (see the toolchain spike). Workbench code must not use IReference<boolean>.
+// the boolean one avoids the redefinition (see the toolchain spike). Skowork code must not use IReference<boolean>.
 #define ____FIReference_1_boolean_INTERFACE_DEFINED__
 #include <windows.foundation.h>
 #include <windows.foundation.collections.h>

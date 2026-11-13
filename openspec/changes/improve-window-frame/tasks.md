@@ -1,6 +1,6 @@
 ## 1. Icon
 
-- [x] 1.1 The icon file and its script, the ICON resource, and the window class icons (D4). Verify: Workbench.exe carries the icon (ExtractIconEx finds one), and the window's large and small icons are set
+- [x] 1.1 The icon file and its script, the ICON resource, and the window class icons (D4). Verify: Skowork.exe carries the icon (ExtractIconEx finds one), and the window's large and small icons are set
 - [x] 1.2 The tray icon from the app icon with the state dot and the unread badge (D4). Verify with host tests: each state makes an icon, and the fallback works without the resource
 
 ## 2. Title bar
@@ -12,5 +12,5 @@
 
 ## 3. Acceptance
 
-- [ ] 3.1 On the demo client: screenshot of the title bar in the dark theme; maximise and restore; Snap layouts on Maximize (by hand, with the user's consent); the icon in the taskbar, in the tray and on Workbench.exe. Record the result in design.md
+- [ ] 3.1 On the demo client: screenshot of the title bar in the dark theme; maximise and restore; Snap layouts on Maximize (by hand, with the user's consent); the icon in the taskbar, in the tray and on Skowork.exe. Record the result in design.md
 - [x] 3.2 Run `openspec validate --all --strict`

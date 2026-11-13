@@ -52,7 +52,7 @@ public:
             ::RegisterClassW(&wc);
             runner_ = ::CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
             Window::Options o;
-            o.title = L"Workbench UIA test";
+            o.title = L"Skowork UIA test";
             o.width = 900;
             o.height = 640;
             o.lang = "en";
@@ -220,7 +220,7 @@ void build_shell(Window& w, Built& b) {
     check->on_change = [&b](bool on) { b.notify = on; };
     auto* card = main->emplace<Card>(ui, "tool", u"Tool call: web.fetch", true, false);
     card->body().emplace<Label>(ui, u"https://example.com", TextStyle::code);
-    auto* md = main->emplace<MarkdownView>(ui, u"Answer from Workbench");
+    auto* md = main->emplace<MarkdownView>(ui, u"Answer from Skowork");
     md->set_markdown("Here is the **summary**. Details are in the [report](https://example.com/report).\n\n```\nok\n```\n");
     for (int i = 0; i < 30; ++i) main->emplace<Label>(ui, u"Line of the transcript to make the feed scroll.", TextStyle::body);
     main->emplace<IconButton>(ui, "more", icon::more, u"More options");
@@ -281,7 +281,7 @@ TEST(UiAutomation, EveryControlHasARoleAndAName) {
     ASSERT_GT(els.size(), 20u);
     std::map<std::wstring, CONTROLTYPEID> by_id;
     for (const El& e : els) {
-        if (e.framework != L"Workbench") continue;  // the system's own parts of the window (its frame), not Workbench's elements
+        if (e.framework != L"Skowork") continue;  // the system's own parts of the window (its frame), not Skowork's elements
         by_id[e.id] = e.type;
         EXPECT_NE(e.type, 0) << std::string(e.id.begin(), e.id.end());
         const bool container = e.type == UIA_PaneControlTypeId || e.type == UIA_GroupControlTypeId;
@@ -413,14 +413,14 @@ TEST(UiAutomation, EveryControlIsReachableWithTab) {
 // Events: a screen reader listens from another process. (A client in the window's own process deadlocks when the
 // window thread raises an event, so the listening client is this test executable started a second time.)
 TEST(UiAutomationChild, ReceivesNotification) {
-    const char* hwnd_text = std::getenv("WORKBENCH_UIA_HWND");
+    const char* hwnd_text = std::getenv("SKOWORK_UIA_HWND");
     if (!hwnd_text) GTEST_SKIP() << "runs as the child of UiAutomation.AnnouncementsArriveAsNotificationEvents";
     const HWND hwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(std::strtoull(hwnd_text, nullptr, 10)));
     Uia u(hwnd);
     ASSERT_TRUE(u.root);
     auto* handler = new Notifications();
     ASSERT_TRUE(SUCCEEDED(u.uia->AddNotificationEventHandler(u.root.get(), TreeScope_Subtree, nullptr, handler)));
-    const std::string ready_name = std::getenv("WORKBENCH_UIA_READY");
+    const std::string ready_name = std::getenv("SKOWORK_UIA_READY");
     HANDLE ready = ::OpenEventA(EVENT_MODIFY_STATE, FALSE, ready_name.c_str());
     ASSERT_NE(ready, nullptr);
     ::SetEvent(ready);
@@ -431,7 +431,7 @@ TEST(UiAutomationChild, ReceivesNotification) {
         std::lock_guard<std::mutex> l(handler->m);
         text = handler->texts.front();
     }
-    std::ofstream(std::getenv("WORKBENCH_UIA_OUT"), std::ios::binary) << std::string(text.begin(), text.end());
+    std::ofstream(std::getenv("SKOWORK_UIA_OUT"), std::ios::binary) << std::string(text.begin(), text.end());
     u.uia->RemoveNotificationEventHandler(u.root.get(), handler);
     handler->Release();
 }
@@ -439,13 +439,13 @@ TEST(UiAutomationChild, ReceivesNotification) {
 TEST(UiAutomation, AnnouncementsArriveAsNotificationEvents) {
     Built b;
     UiThread t([&b](Window& w) { build_shell(w, b); });
-    const std::string ready_name = "WorkbenchUiaReady-" + std::to_string(::GetCurrentProcessId());
+    const std::string ready_name = "SkoworkUiaReady-" + std::to_string(::GetCurrentProcessId());
     HANDLE ready = ::CreateEventA(nullptr, TRUE, FALSE, ready_name.c_str());
-    const auto out = std::filesystem::temp_directory_path() / ("workbench-uia-" + std::to_string(::GetCurrentProcessId()) + ".txt");
+    const auto out = std::filesystem::temp_directory_path() / ("skowork-uia-" + std::to_string(::GetCurrentProcessId()) + ".txt");
     std::filesystem::remove(out);
-    ::SetEnvironmentVariableA("WORKBENCH_UIA_HWND", std::to_string(reinterpret_cast<uintptr_t>(t.hwnd())).c_str());
-    ::SetEnvironmentVariableA("WORKBENCH_UIA_READY", ready_name.c_str());
-    ::SetEnvironmentVariableW(L"WORKBENCH_UIA_OUT", out.wstring().c_str());
+    ::SetEnvironmentVariableA("SKOWORK_UIA_HWND", std::to_string(reinterpret_cast<uintptr_t>(t.hwnd())).c_str());
+    ::SetEnvironmentVariableA("SKOWORK_UIA_READY", ready_name.c_str());
+    ::SetEnvironmentVariableW(L"SKOWORK_UIA_OUT", out.wstring().c_str());
     wchar_t exe[MAX_PATH];
     ::GetModuleFileNameW(nullptr, exe, MAX_PATH);
     std::wstring cmd = L"\"" + std::wstring(exe) + L"\" --gtest_filter=UiAutomationChild.ReceivesNotification";
@@ -453,7 +453,7 @@ TEST(UiAutomation, AnnouncementsArriveAsNotificationEvents) {
     si.cb = sizeof si;
     PROCESS_INFORMATION pi{};
     ASSERT_TRUE(::CreateProcessW(exe, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi));
-    ::SetEnvironmentVariableA("WORKBENCH_UIA_HWND", nullptr);
+    ::SetEnvironmentVariableA("SKOWORK_UIA_HWND", nullptr);
     const HANDLE waits[2] = {ready, pi.hProcess};
     const DWORD w = ::WaitForMultipleObjects(2, waits, FALSE, 20000);
     EXPECT_EQ(w, WAIT_OBJECT_0) << "the listening process did not start";

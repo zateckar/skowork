@@ -36,7 +36,7 @@ ProcessSpec probe_spec(const std::wstring& args, Network net = Network::direct) 
 }
 
 struct TempDir {
-    std::filesystem::path path = std::filesystem::temp_directory_path() / (L"workbench-sbx-" + widen(random_urlsafe(6)));
+    std::filesystem::path path = std::filesystem::temp_directory_path() / (L"skowork-sbx-" + widen(random_urlsafe(6)));
     TempDir() { std::filesystem::create_directories(path); }
     ~TempDir() {
         std::error_code ec;
@@ -128,7 +128,7 @@ std::string proxy_exchange(int port, const std::string& request) {
 }
 
 std::string auth(const std::string& cred) {
-    return "Proxy-Authorization: Basic " + base64_encode(reinterpret_cast<const std::uint8_t*>(("workbench:" + cred).data()), sizeof("workbench:") - 1 + cred.size()) + "\r\n";
+    return "Proxy-Authorization: Basic " + base64_encode(reinterpret_cast<const std::uint8_t*>(("skowork:" + cred).data()), sizeof("skowork:") - 1 + cred.size()) + "\r\n";
 }
 
 bool process_gone(DWORD pid, std::chrono::milliseconds within) {
@@ -306,19 +306,19 @@ TEST(SandboxPrivileges, RestrictedTokenHasNoAdminAndNoPrivileges) {
 }
 
 TEST(SandboxPrivileges, EnvironmentCarriesNoSecrets) {
-    ::SetEnvironmentVariableW(L"WORKBENCH_TEST_ACCESS_TOKEN", L"eyJ-secret-value");
+    ::SetEnvironmentVariableW(L"SKOWORK_TEST_ACCESS_TOKEN", L"eyJ-secret-value");
     ::SetEnvironmentVariableW(L"GITHUB_TOKEN", L"ghp-secret-value");
     Sandbox sb;
     ProcessSpec s = probe_spec(L"env");
     s.privileges = Privileges::restricted;
-    s.env = {{"WORKBENCH_WORKSPACE", "C:\\w"}};
+    s.env = {{"SKOWORK_WORKSPACE", "C:\\w"}};
     auto r = sb.run(s);
-    ::SetEnvironmentVariableW(L"WORKBENCH_TEST_ACCESS_TOKEN", nullptr);
+    ::SetEnvironmentVariableW(L"SKOWORK_TEST_ACCESS_TOKEN", nullptr);
     ::SetEnvironmentVariableW(L"GITHUB_TOKEN", nullptr);
     ASSERT_TRUE(r);
     EXPECT_EQ(r->out.find("secret-value"), std::string::npos) << r->out;
     EXPECT_EQ(r->out.find("TOKEN"), std::string::npos);
-    EXPECT_NE(r->out.find("WORKBENCH_WORKSPACE=C:\\w"), std::string::npos);
+    EXPECT_NE(r->out.find("SKOWORK_WORKSPACE=C:\\w"), std::string::npos);
     EXPECT_NE(r->out.find("SystemRoot="), std::string::npos);
 }
 
@@ -431,7 +431,7 @@ TEST(SandboxProxy, SandboxedProcessGetsItsOwnCredential) {
     s.privileges = Privileges::restricted;
     auto r = sb.run(s);
     ASSERT_TRUE(r) << r.error().message;
-    EXPECT_NE(r->out.find("HTTPS_PROXY=http://workbench:"), std::string::npos) << r->out;
+    EXPECT_NE(r->out.find("HTTPS_PROXY=http://skowork:"), std::string::npos) << r->out;
     EXPECT_NE(r->out.find("@127.0.0.1:"), std::string::npos);
     EXPECT_FALSE(f.proxy.running());  // stopped with the process
     Sandbox none;
@@ -476,7 +476,7 @@ TEST(SandboxNoNetwork, ProcessRunsRestrictedWithTheProxy) {
     s.privileges = Privileges::restricted;
     auto r = sb.run(s);
     ASSERT_TRUE(r) << r.error().message;
-    EXPECT_NE(r->out.find("HTTPS_PROXY=http://workbench:"), std::string::npos) << r->out;
+    EXPECT_NE(r->out.find("HTTPS_PROXY=http://skowork:"), std::string::npos) << r->out;
     EXPECT_NE(r->out.find("NO_PROXY=\n"), std::string::npos) << r->out;
     EXPECT_NE(r->out.find("NODE_USE_ENV_PROXY=1"), std::string::npos) << r->out;
     s.arguments = L"token";
@@ -491,11 +491,11 @@ TEST(SandboxNoNetwork, ProcessRunsRestrictedWithTheProxy) {
 // ---- 4.7 Enforcement level -------------------------------------------------------------------------------------------
 
 TEST(SandboxEnforcement, RuleDetection) {
-    EXPECT_TRUE(is_enforcing_rule(L"v2.30|Action=Block|Active=TRUE|Dir=Out|Protocol=6|EmbedCtxt=Workbench Child Processes|Name=x|"));
-    EXPECT_FALSE(is_enforcing_rule(L"v2.30|Action=Block|Active=FALSE|Dir=Out|EmbedCtxt=Workbench Child Processes|"));
-    EXPECT_FALSE(is_enforcing_rule(L"v2.30|Action=Allow|Active=TRUE|Dir=Out|EmbedCtxt=Workbench Child Processes|"));
-    EXPECT_FALSE(is_enforcing_rule(L"v2.30|Action=Block|Active=TRUE|Dir=In|EmbedCtxt=Workbench Child Processes|"));
-    EXPECT_FALSE(is_enforcing_rule(L"v2.30|Action=Block|Active=TRUE|Dir=Out|EmbedCtxt=Workbench Child Processes 2|"));
+    EXPECT_TRUE(is_enforcing_rule(L"v2.30|Action=Block|Active=TRUE|Dir=Out|Protocol=6|EmbedCtxt=Skowork Child Processes|Name=x|"));
+    EXPECT_FALSE(is_enforcing_rule(L"v2.30|Action=Block|Active=FALSE|Dir=Out|EmbedCtxt=Skowork Child Processes|"));
+    EXPECT_FALSE(is_enforcing_rule(L"v2.30|Action=Allow|Active=TRUE|Dir=Out|EmbedCtxt=Skowork Child Processes|"));
+    EXPECT_FALSE(is_enforcing_rule(L"v2.30|Action=Block|Active=TRUE|Dir=In|EmbedCtxt=Skowork Child Processes|"));
+    EXPECT_FALSE(is_enforcing_rule(L"v2.30|Action=Block|Active=TRUE|Dir=Out|EmbedCtxt=Skowork Child Processes 2|"));
     // This workstation has no such profile.
     EXPECT_EQ(detect_network_enforcement(), "proxy-only");
 }

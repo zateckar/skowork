@@ -5,7 +5,7 @@ $objdump = Get-Command objdump -CommandType Application -ErrorAction Stop | Sele
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
-public static class SkoWorkManifestResource {
+public static class SkoworkManifestResource {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr LoadLibraryEx(string path, IntPtr file, uint flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -21,7 +21,7 @@ public static class SkoWorkManifestResource {
 }
 '@
 
-foreach ($name in 'SkoWork.exe', 'workbench-worker.exe') {
+foreach ($name in 'Skowork.exe', 'skowork-worker.exe') {
     $path = (Resolve-Path -LiteralPath (Join-Path $BuildDir "bin/$name")).Path
     $details = (& $objdump -x $path) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw "Could not inspect resources in $name" }
@@ -29,14 +29,14 @@ foreach ($name in 'SkoWork.exe', 'workbench-worker.exe') {
     if (-not $table.Success -or $table.Groups[1].Value -ne '1') { throw "$name must have exactly one manifest resource" }
 
     # LOAD_LIBRARY_AS_DATAFILE reads resources without executing the program.
-    $module = [SkoWorkManifestResource]::LoadLibraryEx($path, [IntPtr]::Zero, 2)
+    $module = [SkoworkManifestResource]::LoadLibraryEx($path, [IntPtr]::Zero, 2)
     if ($module -eq [IntPtr]::Zero) { throw "Could not load resources from $name" }
     try {
-        $resource = [SkoWorkManifestResource]::FindResource($module, [IntPtr]1, [IntPtr]24)
+        $resource = [SkoworkManifestResource]::FindResource($module, [IntPtr]1, [IntPtr]24)
         if ($resource -eq [IntPtr]::Zero) { throw "Missing manifest 1 in $name" }
-        $size = [SkoWorkManifestResource]::SizeofResource($module, $resource)
-        $loaded = [SkoWorkManifestResource]::LoadResource($module, $resource)
-        $data = [SkoWorkManifestResource]::LockResource($loaded)
+        $size = [SkoworkManifestResource]::SizeofResource($module, $resource)
+        $loaded = [SkoworkManifestResource]::LoadResource($module, $resource)
+        $data = [SkoworkManifestResource]::LockResource($loaded)
         if ($size -eq 0 -or $data -eq [IntPtr]::Zero) { throw "Could not read manifest 1 in $name" }
         $bytes = New-Object byte[] $size
         [Runtime.InteropServices.Marshal]::Copy($data, $bytes, 0, $size)
@@ -45,11 +45,11 @@ foreach ($name in 'SkoWork.exe', 'workbench-worker.exe') {
             $manifest -notmatch '<longPathAware[^>]*>true</longPathAware>') {
             throw "$name is missing its UTF-8 or long-path manifest setting"
         }
-        if ($name -eq 'SkoWork.exe' -and $manifest -notmatch '<dpiAwareness[^>]*>PerMonitorV2</dpiAwareness>') {
+        if ($name -eq 'Skowork.exe' -and $manifest -notmatch '<dpiAwareness[^>]*>PerMonitorV2</dpiAwareness>') {
             throw "$name is missing its DPI manifest setting"
         }
         Write-Host "$name has one manifest with the expected Windows settings."
     } finally {
-        [void][SkoWorkManifestResource]::FreeLibrary($module)
+        [void][SkoworkManifestResource]::FreeLibrary($module)
     }
 }

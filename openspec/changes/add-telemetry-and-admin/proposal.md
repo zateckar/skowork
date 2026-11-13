@@ -11,7 +11,7 @@ To run a managed MVP pilot, operators need two things. First, privacy-preserving
   - an encrypted offline buffer with a size cap;
   - crash reports;
   - an in-app Telemetry viewer that shows the user exactly what was sent.
-- Add the control-plane telemetry ingest: it authenticates OTLP over HTTPS with Workbench tokens, optionally pseudonymizes user identifiers, applies retention, and forwards to the organization observability/SIEM stack.
+- Add the control-plane telemetry ingest: it authenticates OTLP over HTTPS with Skowork tokens, optionally pseudonymizes user identifiers, applies retention, and forwards to the organization observability/SIEM stack.
 - Add the admin console:
   - a web UI signed in through the organization identity provider with five admin roles: platform-admin, security-auditor, group-owner, skill-reviewer and works-council-reviewer;
   - views over the functions owned by other capabilities:

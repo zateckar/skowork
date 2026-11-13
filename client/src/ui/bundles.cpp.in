@@ -4,9 +4,9 @@
 namespace wb::ui {
 
 std::string_view bundle_json(std::string_view lang) {
-    if (lang == "cs") return R"wbjson(@WORKBENCH_UI_STRINGS_CS@)wbjson";
-    if (lang == "de") return R"wbjson(@WORKBENCH_UI_STRINGS_DE@)wbjson";
-    return R"wbjson(@WORKBENCH_UI_STRINGS_EN@)wbjson";
+    if (lang == "cs") return R"wbjson(@SKOWORK_UI_STRINGS_CS@)wbjson";
+    if (lang == "de") return R"wbjson(@SKOWORK_UI_STRINGS_DE@)wbjson";
+    return R"wbjson(@SKOWORK_UI_STRINGS_EN@)wbjson";
 }
 
 }  // namespace wb::ui

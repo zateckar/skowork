@@ -8,7 +8,7 @@
 
 namespace wb {
 
-std::wstring default_pipe_name() { return L"\\\\.\\pipe\\Workbench-" + current_user_sid(); }
+std::wstring default_pipe_name() { return L"\\\\.\\pipe\\Skowork-" + current_user_sid(); }
 
 bool pipe_write_frame(void* handle, const std::string& body) {
     const auto len = static_cast<DWORD>(body.size());

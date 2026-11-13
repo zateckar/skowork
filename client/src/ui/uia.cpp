@@ -153,7 +153,7 @@ public:
         return on_ui([&]() -> HRESULT {
             if (!alive()) return kNotAvailable;
             if (id_ == 0) {
-                if (prop == UIA_FrameworkIdPropertyId) return bstr(ret, std::u16string_view(u"Workbench"));
+                if (prop == UIA_FrameworkIdPropertyId) return bstr(ret, std::u16string_view(u"Skowork"));
                 return S_OK;  // the HWND host provider supplies the window's name, type and bounds
             }
             Node* n = node();
@@ -166,7 +166,7 @@ public:
             case UIA_NamePropertyId: return bstr(ret, std::u16string_view(n->name));
             case UIA_HelpTextPropertyId: return n->help.empty() ? S_OK : bstr(ret, std::u16string_view(n->help));
             case UIA_AutomationIdPropertyId: return bstr(ret, n->automation_id());
-            case UIA_FrameworkIdPropertyId: return bstr(ret, std::u16string_view(u"Workbench"));
+            case UIA_FrameworkIdPropertyId: return bstr(ret, std::u16string_view(u"Skowork"));
             case UIA_IsKeyboardFocusablePropertyId: return boolean(ret, n->focusable && n->enabled);
             case UIA_HasKeyboardFocusPropertyId: return boolean(ret, s_->site->focus_target() == n && ::GetFocus() == s_->site->hwnd());
             case UIA_IsEnabledPropertyId: return boolean(ret, n->enabled);

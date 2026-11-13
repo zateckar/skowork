@@ -46,7 +46,7 @@ Out of scope:
 - **Forward references:** none. This is the last change in the roadmap.
 - **New code:**
   - the audio capture module, using WASAPI process loopback and the microphone;
-  - the stt role of `workbench-worker.exe`, built on sherpa-onnx with the Parakeet-TDT model, Silero VAD and diarization.
+  - the stt role of `skowork-worker.exe`, built on sherpa-onnx with the Parakeet-TDT model, Silero VAD and diarization.
 - **Optional artifacts:** the Parakeet speech model (about 650 MB on disk) and the Whisper-small fallback (about 357 MB as int8 ONNX). Both are part of the models package, count toward the client/desktop-host models budget, and are delivered by the distribution system only to Groups where the feature is enabled.
 - **Licensing:** attribution under CC-BY-4.0 for the speech model.
 - **Governance (organizational, not technical):** before production rollout, the organization-level process covers the GDPR and Czech labour-law assessment, the works-council agreement and a DPIA, with the MS Teams recording policy as precedent.

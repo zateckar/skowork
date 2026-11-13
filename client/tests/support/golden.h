@@ -20,7 +20,7 @@ namespace {
 using wb::com_ptr;
 // --- golden images ----------------------------------------------------------------------------------------------
 
-inline std::filesystem::path golden_dir() { return std::filesystem::path(WORKBENCH_UI_GOLDEN_DIR); }
+inline std::filesystem::path golden_dir() { return std::filesystem::path(SKOWORK_UI_GOLDEN_DIR); }
 
 bool write_png(const std::filesystem::path& file, const std::vector<uint32_t>& px, UINT w, UINT h) {
     com_ptr<IWICImagingFactory> wic;
@@ -55,7 +55,7 @@ std::vector<uint32_t> read_png(const std::filesystem::path& file, UINT& w, UINT&
 }
 
 // Compares with the reference image: at most 0.5 % of pixels may differ by more than 64 per channel (anti-aliasing
-// and ClearType vary a little between Windows builds). WORKBENCH_UPDATE_GOLDEN=1 rewrites the reference instead.
+// and ClearType vary a little between Windows builds). SKOWORK_UPDATE_GOLDEN=1 rewrites the reference instead.
 void expect_golden(const std::string& name, const std::vector<uint32_t>& px, UINT w, UINT h) {
     const HRESULT com = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);  // WIC; the thread may have COM already
     struct ComEnd {
@@ -65,7 +65,7 @@ void expect_golden(const std::string& name, const std::vector<uint32_t>& px, UIN
         }
     } com_end{SUCCEEDED(com)};
     const auto file = golden_dir() / (name + ".png");
-    const char* update = std::getenv("WORKBENCH_UPDATE_GOLDEN");
+    const char* update = std::getenv("SKOWORK_UPDATE_GOLDEN");
     if (update && std::string(update) == "1") {
         std::filesystem::create_directories(golden_dir());
         ASSERT_TRUE(write_png(file, px, w, h)) << file;
@@ -73,7 +73,7 @@ void expect_golden(const std::string& name, const std::vector<uint32_t>& px, UIN
     }
     UINT gw = 0, gh = 0;
     const auto ref = read_png(file, gw, gh);
-    ASSERT_FALSE(ref.empty()) << "missing reference " << file << " (run with WORKBENCH_UPDATE_GOLDEN=1)";
+    ASSERT_FALSE(ref.empty()) << "missing reference " << file << " (run with SKOWORK_UPDATE_GOLDEN=1)";
     ASSERT_EQ(gw, w);
     ASSERT_EQ(gh, h);
     size_t bad = 0;

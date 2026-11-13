@@ -20,7 +20,7 @@
 
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size);
 
-#ifndef WORKBENCH_LIBFUZZER
+#ifndef SKOWORK_LIBFUZZER
 namespace fuzz_driver {
 
 using Bytes = std::vector<std::uint8_t>;

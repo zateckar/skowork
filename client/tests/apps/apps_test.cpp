@@ -23,7 +23,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-fs::path runtime_dir() { return fs::path(WORKBENCH_SOURCE_DIR) / "runtime" / "node"; }
+fs::path runtime_dir() { return fs::path(SKOWORK_SOURCE_DIR) / "runtime" / "node"; }
 
 bool node_present() {
     std::error_code ec;
@@ -60,7 +60,7 @@ struct Rig {
         std::error_code ec;
         fs::create_directories(rt, ec);
         if (node_present()) fs::copy_file(runtime_dir() / "node.exe", rt / "node.exe", ec);
-        fs::copy_file(fs::path(WORKBENCH_SOURCE_DIR) / "src" / "apps" / "app-host.js", rt / "app-host.js", ec);
+        fs::copy_file(fs::path(SKOWORK_SOURCE_DIR) / "src" / "apps" / "app-host.js", rt / "app-host.js", ec);
         AppsEnv e;
         e.root = tmp.path / "apps";
         e.state_dir = tmp.path / "state";
@@ -274,7 +274,7 @@ http.createServer(async (req, res) => {
   }
   res.setHeader('content-type', 'application/json');
   res.end(JSON.stringify(out));
-}).listen(process.env.WORKBENCH_APP_PIPE);
+}).listen(process.env.SKOWORK_APP_PIPE);
 )JS");
     const auto t0 = std::chrono::steady_clock::now();
     ASSERT_TRUE(r.apps->start(a->id)) << r.apps->logs(a->id);
@@ -330,7 +330,7 @@ http.createServer(async (req, res) => {
     r.write(bad->id, "server.js", "console.log('no server here');");
     auto s = r.apps->start(bad->id);
     ASSERT_FALSE(s);
-    EXPECT_NE(s.error().message.find("WORKBENCH_APP_PIPE"), std::string::npos);
+    EXPECT_NE(s.error().message.find("SKOWORK_APP_PIPE"), std::string::npos);
     EXPECT_NE(s.error().message.find("no server here"), std::string::npos);
 }
 
@@ -364,8 +364,8 @@ TEST(AppsServer, LaunchTokenIsSingleUseCookieIsScopedAndWrongHostRefused) {
     // The cookie does not open another app, and a forged one opens nothing.
     const std::string cookie = set.substr(0, set.find(';'));
     const std::string value = cookie.substr(cookie.find('=') + 1);
-    EXPECT_EQ(status_of(get(port, "/two/", "Cookie: workbench_app_two=" + value + "\r\n")), 403);
-    EXPECT_EQ(status_of(get(port, "/one/", "Cookie: workbench_app_one=forged\r\n")), 403);
+    EXPECT_EQ(status_of(get(port, "/two/", "Cookie: skowork_app_two=" + value + "\r\n")), 403);
+    EXPECT_EQ(status_of(get(port, "/one/", "Cookie: skowork_app_one=forged\r\n")), 403);
     // A token of one app does not open another.
     auto url2 = r.server->launch_url(a->id);
     const std::string p2 = url2->substr(url2->find('/', 7));
@@ -386,7 +386,7 @@ TEST(AppsBridge, ListedConfirmedReadToolsOnlyUnderPolicy) {
     const std::string cookie = session_cookie(r, a->id);
     const int port = r.server->port();
     const auto call = [&](const std::string& tool, const std::string& extra = {}) {
-        return post_json(port, "/" + a->id + "/_workbench/mcp/" + tool, R"({"query":"project = DEMO"})", "Cookie: " + cookie + "\r\n" + extra);
+        return post_json(port, "/" + a->id + "/_skowork/mcp/" + tool, R"({"query":"project = DEMO"})", "Cookie: " + cookie + "\r\n" + extra);
     };
     const auto code = [](const std::string& resp) { return jstr(*jobj(*parse_json(body_of(resp)), "error"), "code"); };
 
@@ -410,10 +410,10 @@ TEST(AppsBridge, ListedConfirmedReadToolsOnlyUnderPolicy) {
     EXPECT_EQ(code(resp), "not_read");
     // Another origin, a form post, no cookie.
     EXPECT_EQ(status_of(call("jira/search_issues", "Origin: https://evil.example\r\n")), 403);
-    EXPECT_EQ(status_of(http(port, "POST /" + a->id + "/_workbench/mcp/jira/search_issues HTTP/1.1\r\nHost: 127.0.0.1:" + std::to_string(port) +
+    EXPECT_EQ(status_of(http(port, "POST /" + a->id + "/_skowork/mcp/jira/search_issues HTTP/1.1\r\nHost: 127.0.0.1:" + std::to_string(port) +
                                        "\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nCookie: " + cookie + "\r\n\r\n{}")),
               403);
-    EXPECT_EQ(status_of(post_json(port, "/" + a->id + "/_workbench/mcp/jira/search_issues", "{}", "")), 403);
+    EXPECT_EQ(status_of(post_json(port, "/" + a->id + "/_skowork/mcp/jira/search_issues", "{}", "")), 403);
     // policy.apps.mcp off refuses every call.
     r.pol = policy_with({{"mcp", "off"}});
     resp = call("jira/search_issues");
@@ -505,7 +505,7 @@ TEST(AppsTools, LocalAppBuildNeedsNoToolDiscovery) {
     for (const auto& m : requests.back().messages)
         for (const auto& call : m.tool_calls) EXPECT_NE(call.tool, "find_tools");
 
-    EXPECT_NE(env.tool_content(run, "c1").find("WORKBENCH_APP_PIPE"), std::string::npos);
+    EXPECT_NE(env.tool_content(run, "c1").find("SKOWORK_APP_PIPE"), std::string::npos);
     EXPECT_EQ(env.tool_content(run, "c2").find("denied"), std::string::npos);
     std::ifstream written(r.tmp.path / "apps" / "no-discovery" / "public" / "index.html");
     EXPECT_EQ(std::string(std::istreambuf_iterator<char>(written), {}), page);
@@ -563,7 +563,7 @@ TEST(AppsTools, CreateWriteOpenWithConfirmationUnderPolicyAndModeOff) {
     const auto run = env.run(t, "Make a presentation of the Q3 results as an app");
     ASSERT_TRUE(env.wait_for([&] { return !env.rt->pending_actions(t).empty(); }))
         << env.tool_content(run, "c1") << "\n" << env.tool_content(run, "c2") << "\n" << env.tool_content(run, "c3") << "\n" << to_string(env.rec(run).state) << " " << env.rec(run).reason;
-    EXPECT_NE(env.tool_content(run, "c1").find("WORKBENCH_APP_PIPE"), std::string::npos);
+    EXPECT_NE(env.tool_content(run, "c1").find("SKOWORK_APP_PIPE"), std::string::npos);
     EXPECT_EQ(env.tool_content(run, "c2").find("denied"), std::string::npos) << env.tool_content(run, "c2");
     {
         std::ifstream written(r.tmp.path / "apps" / "q3-slides" / "public" / "index.html");
@@ -655,7 +655,7 @@ TEST(AppsManager, TwoRequestsForAStoppedAppStartOneProcess) {
     Rig r;
     auto a = r.apps->create(manifest("Quick"), "run-1");
     ASSERT_TRUE(a);
-    r.write(a->id, "server.js", "require('node:http').createServer((q, s) => s.end('ok')).listen(process.env.WORKBENCH_APP_PIPE);\n");
+    r.write(a->id, "server.js", "require('node:http').createServer((q, s) => s.end('ok')).listen(process.env.SKOWORK_APP_PIPE);\n");
     std::atomic<int> connected{0};
     std::vector<std::thread> callers;
     for (int i = 0; i < 2; ++i)

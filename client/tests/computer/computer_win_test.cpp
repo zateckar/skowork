@@ -19,8 +19,8 @@ using namespace wb::computer;
 
 TEST(ComputerBranding, BothExecutableNamesAreProtected) {
     const ComputerEnv env;
-    EXPECT_TRUE(app_refusal("SkoWork.exe", {}, {}, env.own_executables));
-    EXPECT_TRUE(app_refusal("Workbench.exe", {}, {}, env.own_executables));
+    EXPECT_TRUE(app_refusal("Skowork.exe", {}, {}, env.own_executables));
+    EXPECT_TRUE(app_refusal("Skowork.exe", {}, {}, env.own_executables));
     EXPECT_TRUE(app_refusal("skowork.exe", {"skowork.exe"}, {}, env.own_executables));
 }
 
@@ -44,7 +44,7 @@ public:
     // canvas_only: nothing but the custom-drawn canvas, like an application that draws all of its content.
     explicit TestApp(bool canvas_only = false) : canvas_only_(canvas_only) {
         dpi_aware();
-        title = L"Workbench computer test " + widen(random_urlsafe(6));
+        title = L"Skowork computer test " + widen(random_urlsafe(6));
         std::promise<void> ready;
         auto f = ready.get_future();
         thread_ = std::thread([this, &ready] { run(ready); });
@@ -834,7 +834,7 @@ TEST(ComputerWin, TheWindowsCredentialPromptIsOutOfScope) {
     f.make();
     CREDUI_INFOW info{};
     info.cbSize = sizeof info;
-    info.pszCaptionText = L"Workbench test credential prompt";
+    info.pszCaptionText = L"Skowork test credential prompt";
     info.pszMessageText = L"The test closes this prompt by itself.";
     std::atomic<DWORD> result{0};
     std::thread prompt([&] {
@@ -882,7 +882,7 @@ struct PwshApp {
     PROCESS_INFORMATION pi{};
     std::string title;
     explicit PwshApp(const std::string& kind) {
-        title = "Workbench " + kind + " test " + random_urlsafe(5);
+        title = "Skowork " + kind + " test " + random_urlsafe(5);
         std::string script;
         if (kind == "WinForms") {
             script = "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.Form; $f.Text = '" + title +
@@ -931,13 +931,13 @@ void drive_framework(const std::string& kind) {
     const std::string field = ref_of(o.content, "edit \"Customer\""), apply = ref_of(o.content, "button \"Apply\"");
     ASSERT_NE(field, "") << o.content;
     ASSERT_NE(apply, "") << o.content;
-    auto typed = f.call("computer.type", {{"ref", field}, {"text", "Workbench contributors"}});
+    auto typed = f.call("computer.type", {{"ref", field}, {"text", "Skowork contributors"}});
     ASSERT_TRUE(typed.ok) << typed.content;
     EXPECT_EQ(jstr(body_of(typed), "method"), "value");
     auto click = f.call("computer.click", {{"ref", apply}});
     ASSERT_TRUE(click.ok) << click.content;
     EXPECT_EQ(jstr(body_of(click), "method"), "invoke");
-    EXPECT_TRUE(wait_until([&] { return app.window("applied: Workbench contributors").has_value(); }, 5s));
+    EXPECT_TRUE(wait_until([&] { return app.window("applied: Skowork contributors").has_value(); }, 5s));
 }
 
 }  // namespace
@@ -1317,7 +1317,7 @@ TEST(ComputerWin, DisplayCaptureShowsPopupMenusAndBlacksOutDeniedApplications) {
     REQUIRE_DESKTOP();
     TestApp app;
     // A denied application's window next to the test window: a PowerShell 7 WinForms window.
-    const std::string denied_title = "Workbench denied window " + random_urlsafe(5);
+    const std::string denied_title = "Skowork denied window " + random_urlsafe(5);
     std::wstring cmd = L"pwsh.exe -NoProfile -NonInteractive -STA -Command \"Add-Type -AssemblyName System.Windows.Forms; $f = New-Object "
                        L"System.Windows.Forms.Form; $f.Text = '" + widen(denied_title) +
                        L"'; $f.StartPosition = 'Manual'; $f.Left = 960; $f.Top = 200; $f.Width = 420; $f.Height = 300; "
@@ -1392,7 +1392,7 @@ TEST(ComputerWin, DrivesAChromiumWindow) {
             break;
         }
     if (exe.empty()) GTEST_SKIP() << "no Chromium browser";
-    const auto profile = std::filesystem::temp_directory_path() / widen("workbench-chromium-" + random_urlsafe(6));
+    const auto profile = std::filesystem::temp_directory_path() / widen("skowork-chromium-" + random_urlsafe(6));
     const std::string title = "Chromium test " + random_urlsafe(5);
     const std::string page = "data:text/html,<title>" + title + "</title><label>Order <input aria-label='Order'></label>"
                              "<button onclick=%22document.title='Ordered '%2Bdocument.querySelector('input').value%22>Place</button>";
@@ -1517,7 +1517,7 @@ TEST(ComputerWin, ACoordinateClickNeverLandsInACoveringWindow) {
     const json at = {{"x", (cx - frame.x + 0.5) * iw / frame.w}, {"y", (cy - frame.y + 0.5) * ih / frame.h}};
 
     // An always-on-top window of another application over the canvas.
-    const std::string cover = "Workbench covering window " + random_urlsafe(5);
+    const std::string cover = "Skowork covering window " + random_urlsafe(5);
     std::wstring cmd = L"pwsh.exe -NoProfile -NonInteractive -STA -Command \"Add-Type -AssemblyName System.Windows.Forms; $f = New-Object "
                        L"System.Windows.Forms.Form; $f.Text = '" + widen(cover) + L"'; $f.StartPosition = 'Manual'; $f.Left = " +
                        std::to_wstring(static_cast<int>(cx) - 150) + L"; $f.Top = " + std::to_wstring(static_cast<int>(cy) - 100) +

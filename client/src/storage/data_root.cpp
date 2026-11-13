@@ -48,7 +48,7 @@ std::filesystem::path profile_dir() {
 
 }  // namespace
 
-std::filesystem::path DataRoot::default_root() { return std::filesystem::path(local_appdata()) / L"Workbench"; }
+std::filesystem::path DataRoot::default_root() { return std::filesystem::path(local_appdata()) / L"Skowork"; }
 
 bool inside_user_profile(const std::filesystem::path& p) {
     const auto profile = to_lower(narrow(profile_dir().lexically_normal().wstring()));

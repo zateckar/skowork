@@ -118,7 +118,7 @@ export function Connections() {
         error={list.error}
         filter={false}
         text={(c) => c.name}
-        tools={list.data && !list.data.key_available && <span className="state failing" role="alert">WORKBENCH_SECRET_KEY is not set: credentials cannot be stored</span>}
+        tools={list.data && !list.data.key_available && <span className="state failing" role="alert">SKOWORK_SECRET_KEY is not set: credentials cannot be stored</span>}
         head={<tr><th>Connection</th><th>Status</th><th>Credential</th><th>Models</th><th>Checked</th><th /></tr>}
         add={<button className="primary" data-testid="connection-add-open" onClick={() => openEdit('new')}>Add connection</button>}
         empty="No connection yet. Add the organization LLM API to give the gateway models."

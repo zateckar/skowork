@@ -20,10 +20,10 @@ const CLIENTS = arg('clients', 30_000);
 const MINUTES = arg('minutes', 2);
 const RECORDS = arg('records', 25);
 const SOCKETS = arg('sockets', 512);
-const ISSUER = 'https://idp.load.test/realms/workbench';
-const CLIENT_ID = 'workbench-desktop-load';
+const ISSUER = 'https://idp.load.test/realms/skowork';
+const CLIENT_ID = 'skowork-desktop-load';
 
-const dir = mkdtempSync(join(tmpdir(), 'workbench-load-'));
+const dir = mkdtempSync(join(tmpdir(), 'skowork-load-'));
 const dbPath = join(dir, 'cp.db');
 const t0 = Date.now();
 const log = (m: string) => console.log(`[${((Date.now() - t0) / 1000).toFixed(1)}s] ${m}`);
@@ -65,7 +65,7 @@ const server = spawn(process.execPath, [...profileArgs, 'src/main.ts'], {
   cwd: new URL('..', import.meta.url),
   env: {
     ...process.env,
-    WORKBENCH_ENV: 'test', WORKBENCH_DB: dbPath, OIDC_CLIENT_ID: CLIENT_ID, WORKBENCH_TEST_ISSUER: ISSUER, WORKBENCH_TEST_ISSUER_JWKS: JSON.stringify(jwks),
+    SKOWORK_ENV: 'test', SKOWORK_DB: dbPath, OIDC_CLIENT_ID: CLIENT_ID, SKOWORK_TEST_ISSUER: ISSUER, SKOWORK_TEST_ISSUER_JWKS: JSON.stringify(jwks),
     HOST: '127.0.0.1', PORT: '0', OPENAI_BASE_URL: '', OIDC_DISCOVERY_URL: '',
   },
   stdio: ['ignore', 'pipe', 'inherit'],
@@ -91,8 +91,8 @@ const EVENTS: [string, Record<string, string | number>][] = [
 const body = (installation: string) => {
   const now = BigInt(Date.now()) * 1_000_000n;
   const batch: LogBatch = {
-    resource: new Map<string, string>([['service.version', '1.0.0'], ['workbench.channel', 'stable'], ['os.build', '10.0.22631'], ['workbench.installation_id', installation]]),
-    scopeName: 'workbench', scopeVersion: '1.0.0',
+    resource: new Map<string, string>([['service.version', '1.0.0'], ['skowork.channel', 'stable'], ['os.build', '10.0.22631'], ['skowork.installation_id', installation]]),
+    scopeName: 'skowork', scopeVersion: '1.0.0',
     records: Array.from({ length: RECORDS }, (_, i) => {
       const [event, attrs] = EVENTS[i % EVENTS.length]!;
       return { timeUnixNano: now, eventName: event, attributes: new Map(Object.entries({ ...attrs, 'run.id': randomUUID() })) };

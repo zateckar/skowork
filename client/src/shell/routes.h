@@ -1,5 +1,5 @@
 // Routes of the window (client/work-inbox), the same strings the web UI used as hashes, so tray menu items, toasts
-// and the workbench:// handler keep opening the same places:
+// and the skowork:// handler keep opening the same places:
 //   #/inbox, #/inbox/<view>, #/inbox/folder/<id>, #/threads/new, #/threads/<id>[?msg=<run>:<seq>],
 //   #/status, #/settings, #/settings/telemetry, #/about,
 //   #/skills/new[?thread=<id>] (the Skill editor, with a draft from a Thread), #/skills/edit/<name>,

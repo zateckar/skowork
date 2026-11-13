@@ -7,7 +7,7 @@ Defines how the control plane receives client telemetry. It covers authenticatio
 ## ADDED Requirements
 
 ### Requirement: Authenticated OTLP Ingest
-The telemetry ingest SHALL accept OpenTelemetry log records over HTTPS, in OTLP with protobuf encoding. Client telemetry is a stream of event records (client/telemetry), so traces and metrics are not accepted. Each request MUST carry a valid Workbench access token. The ingest MUST reject records whose stated installation identifier is not registered to the token's user.
+The telemetry ingest SHALL accept OpenTelemetry log records over HTTPS, in OTLP with protobuf encoding. Client telemetry is a stream of event records (client/telemetry), so traces and metrics are not accepted. Each request MUST carry a valid Skowork access token. The ingest MUST reject records whose stated installation identifier is not registered to the token's user.
 
 #### Scenario: Valid batch
 - **WHEN** a client posts a telemetry batch with a valid access token and its own installation identifier

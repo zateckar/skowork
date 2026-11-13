@@ -1946,7 +1946,7 @@ TEST(ShellComposer, DisconnectedMeansNoNewRuns) {
     ASSERT_TRUE(w.until([&] { return !w.shell().runs_blocked().empty(); }));
     Uia uia;
     auto m = uia.by_id(w.hwnd());
-    EXPECT_EQ(m[L"composer-blocked"].name, L"SkoWork is disconnected, so new runs are unavailable.");
+    EXPECT_EQ(m[L"composer-blocked"].name, L"Skowork is disconnected, so new runs are unavailable.");
     BOOL enabled = TRUE;
     m[L"composer-send"].el->get_CurrentIsEnabled(&enabled);
     EXPECT_FALSE(enabled);
@@ -1989,7 +1989,7 @@ TEST(ShellComposer, OfflineRequestWaitsForTheConnection) {
     ASSERT_TRUE(w.until([&] { return w.exists("composer-blocked"); }));
     Uia uia;
     auto m = uia.by_id(w.hwnd());
-    EXPECT_EQ(m[L"composer-blocked"].name, L"You're offline. Your request will start when SkoWork is connected again.");
+    EXPECT_EQ(m[L"composer-blocked"].name, L"You're offline. Your request will start when Skowork is connected again.");
     EXPECT_EQ(m[L"status-connection"].name.rfind(L"Offline since ", 0), 0u) << narrow(m[L"status-connection"].name);
     EXPECT_GT(m[L"status-connection"].name.size(), std::wstring(L"Offline since ").size());
     BOOL enabled = FALSE;
@@ -2021,7 +2021,7 @@ TEST(ShellComposer, OfflineRequestWaitsForTheConnection) {
     std::string shared_error;
     w.run([&] { w.shell().call("test.share", json::object(), [&](Result<json> r) { if (!r) shared_error = r.error().message; }); });
     ASSERT_TRUE(w.until([&] { return !shared_error.empty(); }));
-    EXPECT_EQ(shared_error, "Not available while SkoWork is offline.");
+    EXPECT_EQ(shared_error, "Not available while Skowork is offline.");
     // Connected again: the waiting request starts.
     *offline = false;
     f.in.env.model.push_text("Here is your week.");
@@ -2090,8 +2090,8 @@ TEST(ShellTelemetry, ViewerListsSentAndBufferedRecordsWithTheirFields) {
         json crashes = json::array();
         if (!deleted) crashes.push_back({{"id", "cr1"}, {"at", 1'790'000'200'000LL}, {"process", "worker-extract"}, {"size", 48000}, {"state", "held"},
                                          {"send_after", 1'790'003'800'000LL},
-                                         {"summary", {{"exception_code", "0xC000001D"}, {"module", "workbench-worker.exe"}, {"threads", 3},
-                                                      {"modules", {"workbench-worker.exe", "ntdll.dll"}}}}});
+                                         {"summary", {{"exception_code", "0xC000001D"}, {"module", "skowork-worker.exe"}, {"threads", 3},
+                                                      {"modules", {"skowork-worker.exe", "ntdll.dll"}}}}});
         return json{{"level", "content"}, {"source", "pilot"}, {"policy_version", 7}, {"content_active", true}, {"crash_reports", true},
                     {"pending", 1}, {"discarded", 0}, {"records", records}, {"crashes", crashes}};
     });
@@ -2315,7 +2315,7 @@ TEST(ShellActions, QuestionCardTakesAChoiceOrFreeText) {
     f.in.svc->wait_idle();
     std::string card = "question-" + open_action(f, t);
     ASSERT_TRUE(w.until([&] { return w.exists(card + "-choice-1") && w.exists(card + "-answer"); }));
-    EXPECT_TRUE(said.heard(u"Question from SkoWork: Which project folder should I use?"));
+    EXPECT_TRUE(said.heard(u"Question from Skowork: Which project folder should I use?"));
     EXPECT_TRUE(f.in.in_view("action", t));  // listed in the Action view until answered
     Uia uia;
     auto m = uia.by_id(w.hwnd());
@@ -2363,7 +2363,7 @@ TEST(ShellActions, StandaloneQuestionOffersOnlyItsChoicesAndAnswersTheCapability
     ASSERT_TRUE(item);
     const std::string card = "question-" + item->id;
     ASSERT_TRUE(w.until([&] { return w.exists(card + "-choice-0"); }));
-    EXPECT_TRUE(said.heard(u"Question from SkoWork: Connect your mailbox"));
+    EXPECT_TRUE(said.heard(u"Question from Skowork: Connect your mailbox"));
     bool free_text = true;
     w.run([&] { free_text = w.exists(card + "-answer"); });
     EXPECT_FALSE(free_text);
@@ -2664,7 +2664,7 @@ TEST(ShellStatusBar, ContextUsageWarnsAtThreeQuartersAndOffersCompactNow) {
     EXPECT_EQ(m[L"status-context"].name, L"Context 30%");
     EXPECT_TRUE(has(m, L"status-auto-compacted"));
     EXPECT_FALSE(has(m, L"status-compact"));
-    EXPECT_EQ(m[L"status-version"].name, L"SkoWork 0.1.0");
+    EXPECT_EQ(m[L"status-version"].name, L"Skowork 0.1.0");
 
     tokens = 80000;
     w.run([&] { w.shell().load_context(); });
@@ -2800,7 +2800,7 @@ TEST(ShellPages, AboutShowsTheVersionAndCopiesTheDetails) {
     ASSERT_TRUE(w.until([&] { return w.exists("about-copy-state"); }));
     std::string copied;
     w.run([&] { copied = w.copied; });
-    EXPECT_EQ(copied, "SkoWork 1.2.3\nChannel: pilot\nCommit: abcdef0\nProcess ID: 4242");
+    EXPECT_EQ(copied, "Skowork 1.2.3\nChannel: pilot\nCommit: abcdef0\nProcess ID: 4242");
     EXPECT_EQ(uia.by_id(w.hwnd())[L"about-copy-state"].name, L"Copied to the clipboard.");
 }
 
@@ -2816,7 +2816,7 @@ TEST(ShellPages, AboutListsThirdPartyNoticesWithTheSpeechModelAttribution) {
     ASSERT_TRUE(w.until([&] { return w.exists("section-notices"); }));
     Uia uia;
     auto m = uia.by_id(w.hwnd());
-    EXPECT_EQ(m[L"about-package-core"].name, L"Included in SkoWork");
+    EXPECT_EQ(m[L"about-package-core"].name, L"Included in Skowork");
     EXPECT_EQ(m[L"about-package-speech-to-text"].name, L"Speech-to-text package");
     EXPECT_EQ(m[L"about-notice-core-0"].name, L"SQLite3 Multiple Ciphers 2.6.1 (SQLite 3.54.0): MIT; SQLite: public domain");
     std::wstring parakeet;
@@ -3369,7 +3369,7 @@ TEST(ShellKnowledge, SearchResultsShowAsOpenableCitations) {
         t.core = true;
         t.run = [&earlier](ToolContext&, const json&) {
             const json body = {{"results",
-                                {{{"n", 1}, {"source", "threads"}, {"title", "Phoenix kickoff"}, {"ref", "workbench://thread/" + earlier}, {"date", "2026-10-20T08:00:00Z"}},
+                                {{{"n", 1}, {"source", "threads"}, {"title", "Phoenix kickoff"}, {"ref", "skowork://thread/" + earlier}, {"date", "2026-10-20T08:00:00Z"}},
                                  {{"n", 2}, {"source", "files"}, {"title", "Jahresbericht.docx"}, {"ref", "C:\\Docs\\Jahresbericht.docx"}},
                                  {{"n", 3}, {"source", "mail"}, {"title", "Budget"}, {"ref", "https://outlook.office.com/mail/id/1"}}}},
                                {"user_facts", json::array()}};
@@ -3445,7 +3445,7 @@ TEST(ShellGolden, GeneratedImage) {
 }
 // The Window Footprint budgets (client/desktop-host; add-native-ui task 4.1), measured in this process as in the
 // core process: a shown window on a Thread of 200 Markdown messages, with 2,000 Threads in the list. It prints the
-// numbers and checks the budgets. It runs only with WORKBENCH_MEASURE=1, and only a release build is representative.
+// numbers and checks the budgets. It runs only with SKOWORK_MEASURE=1, and only a release build is representative.
 namespace {
 
 double ms_between(LARGE_INTEGER a, LARGE_INTEGER b) {
@@ -3502,7 +3502,7 @@ std::string rich_answer(int i) {
 }  // namespace
 
 TEST(ShellFootprint, WindowOnAThreadOf200Messages) {
-    if (!std::getenv("WORKBENCH_MEASURE")) GTEST_SKIP() << "set WORKBENCH_MEASURE=1 to measure";
+    if (!std::getenv("SKOWORK_MEASURE")) GTEST_SKIP() << "set SKOWORK_MEASURE=1 to measure";
     Fixture f;
     for (int i = 0; i < 2000; ++i) f.in.env.thread();
     const auto t1 = f.in.env.thread();
@@ -3894,7 +3894,7 @@ TEST(ShellKnowledge, SourcesFoldersExclusionsForgetMergeAndSplit) {
             std::error_code ec;
             std::filesystem::remove_all(path, ec);
         }
-        std::filesystem::path path = std::filesystem::path(wb::local_appdata()) / L"workbench-test" / wb::widen(wb::random_urlsafe(6));
+        std::filesystem::path path = std::filesystem::path(wb::local_appdata()) / L"skowork-test" / wb::widen(wb::random_urlsafe(6));
     } dir;
     const auto docs = dir.path / L"docs";
     std::filesystem::create_directories(docs / L"HR");
@@ -4059,7 +4059,7 @@ TEST(ShellKnowledge, KnowledgeViewImportNotesSearchCurateAndShare) {
             std::error_code ec;
             std::filesystem::remove_all(path, ec);
         }
-        std::filesystem::path path = std::filesystem::path(wb::local_appdata()) / L"workbench-test" / wb::widen(wb::random_urlsafe(6));
+        std::filesystem::path path = std::filesystem::path(wb::local_appdata()) / L"skowork-test" / wb::widen(wb::random_urlsafe(6));
     } dir;
     const auto docs = dir.path / L"docs";
     std::filesystem::create_directories(docs / L"more");
@@ -4665,7 +4665,7 @@ TEST(ShellKnowledge, SaveMailAndChatAsNote) {
             std::error_code ec;
             std::filesystem::remove_all(path, ec);
         }
-        std::filesystem::path path = std::filesystem::path(wb::local_appdata()) / L"workbench-test" / wb::widen(wb::random_urlsafe(6));
+        std::filesystem::path path = std::filesystem::path(wb::local_appdata()) / L"skowork-test" / wb::widen(wb::random_urlsafe(6));
     } dir;
     auto root = DataRoot::open(dir.path / L"data");
     ASSERT_TRUE(root);
@@ -5378,7 +5378,7 @@ TEST(ShellUsability, AuthorWithdrawsAPublishedSkillVersion) {
 TEST(SkillAuthoringRpc, WithdrawPassesTheVersionToTheRegistry) {
     std::vector<std::pair<std::string, std::string>> calls;
     SkillAuthoringEnv e;
-    e.private_dir = std::filesystem::temp_directory_path() / "workbench-withdraw-unused";
+    e.private_dir = std::filesystem::temp_directory_path() / "skowork-withdraw-unused";
     e.withdraw = [&](const std::string& name, const std::string& version) -> Result<json> {
         calls.emplace_back(name, version);
         if (version == "2.0.0") return make_error("NOT_ACTIVE", "Version 2.0.0 of weekly-report is revoked.");
@@ -5820,7 +5820,7 @@ TEST(ShellKnowledge, ImpactPreviewDialogShowsAnalysisAndAsksAgainWhenStale) {
             std::error_code ec;
             std::filesystem::remove_all(path, ec);
         }
-        std::filesystem::path path = std::filesystem::temp_directory_path() / L"workbench-test" / wb::widen(wb::random_urlsafe(6));
+        std::filesystem::path path = std::filesystem::temp_directory_path() / L"skowork-test" / wb::widen(wb::random_urlsafe(6));
     } dir;
     const auto docs = dir.path / L"docs";
     std::filesystem::create_directories(docs);
@@ -6044,7 +6044,7 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
             std::error_code ec;
             std::filesystem::remove_all(path, ec);
         }
-        std::filesystem::path path = std::filesystem::temp_directory_path() / L"workbench-test" / wb::widen(wb::random_urlsafe(6));
+        std::filesystem::path path = std::filesystem::temp_directory_path() / L"skowork-test" / wb::widen(wb::random_urlsafe(6));
     } dir;
     const auto docs = dir.path / L"docs";
     std::filesystem::create_directories(docs);

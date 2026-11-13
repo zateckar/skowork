@@ -151,7 +151,7 @@ Recorded by the apply step on 2026-11-10 (main 0c70d92 with the uncommitted work
 | ui_tests | 57 passed, 1 failed | 66 passed, 0 failed |
 | knowledge_analysis, telemetry, skills, tools, mcp, browser, computer, policy | pass | pass, unchanged counts |
 
-- The one ui_tests failure before was `ShellFormat.PercentSnippetsAndAboutText` (expected "SkoWork", code said "Workbench"). The coordinator fixed the test; it passes now and is not touched here.
+- The one ui_tests failure before was `ShellFormat.PercentSnippetsAndAboutText` (the test and the code used different spellings of the product name). The coordinator fixed the test; it passes now and is not touched here.
 - `ShellAutomations.EditorRunNowAndOpenResultFromHistory` (win_tests) failed in the last full run and passes when run alone (2 of 2 isolated runs in the last pass). It is timing-sensitive under full load and does not use the feed code. It is recorded as a known flake, not fixed here.
 - The client test run excluded `computer_win_tests` (desktop input) and `e2e_tests` (AppE2E), as the rules require.
 - New tests: runtime (RunEventStream, KnowledgeCitationMarkers), knowledge (CitationNumbers), shell core (ShellFeedLive x7, ShellFeedSources x2), shell (ShellFeed.AnEarlierMessageKeepsItsElementWhenALaterRunArrives, the reasoning-gap case included in ShellFeedLive), ui (UiMarkdown.CtrlCCopiesTheSelectedWordsAndAPressElsewhereClearsThem), app (RunEventRelay x4), host (HostPools).

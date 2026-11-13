@@ -1,6 +1,6 @@
-# Makes client/src/app/workbench.ico (improve-window-frame D4): the Workbench mark, an Emerald rounded square with an
+# Makes client/src/app/skowork.ico (improve-window-frame D4): the Skowork mark, an Emerald rounded square with an
 # Electric Green "S", as PNG images at the icon sizes Windows asks for.
-param([string] $Out = "$PSScriptRoot\..\src\app\workbench.ico")
+param([string] $Out = "$PSScriptRoot\..\src\app\skowork.ico")
 Add-Type -AssemblyName System.Drawing
 
 $emerald = [System.Drawing.Color]::FromArgb(255, 0x0E, 0x3A, 0x2F)

@@ -41,7 +41,7 @@ const token = async (form) => {
 const server = createServer(async (req, res) => {
   const u = new URL(req.url, redirect.origin);
   if (u.pathname !== redirect.pathname) return res.writeHead(404).end();
-  res.writeHead(200, { 'content-type': 'text/plain' }).end('Workbench probe: sign-in received, you can close this tab.');
+  res.writeHead(200, { 'content-type': 'text/plain' }).end('Skowork probe: sign-in received, you can close this tab.');
   server.close();
   if (u.searchParams.get('state') !== state) return console.log('state mismatch');
   if (u.searchParams.get('error')) return console.log('error:', u.searchParams.get('error'), u.searchParams.get('error_description'));

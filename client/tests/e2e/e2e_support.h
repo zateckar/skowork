@@ -26,7 +26,7 @@ namespace wb::e2e {
 class TcpProxy;
 
 // The organization Keycloak test realm from the repository .env (OIDC_*; environment variables win) and the local
-// control plane started by dev/scripts/dev-stack.ps1 (WORKBENCH_E2E_CP, default http://localhost:8080).
+// control plane started by dev/scripts/dev-stack.ps1 (SKOWORK_E2E_CP, default http://localhost:8080).
 struct Env {
     std::string issuer;
     std::string client_id;
@@ -40,12 +40,12 @@ struct Env {
 const std::optional<Env>& env();
 std::string& skip_reason();  // why env() is empty
 
-#define WORKBENCH_REQUIRE_STACK()                                                                                 \
+#define SKOWORK_REQUIRE_STACK()                                                                                 \
     do {                                                                                                        \
         if (!::wb::e2e::env()) GTEST_SKIP() << ::wb::e2e::skip_reason();                                    \
     } while (0)
 
-// True when WORKBENCH_E2E_SLOW is set: tests that wait for a real 5-minute token to expire.
+// True when SKOWORK_E2E_SLOW is set: tests that wait for a real 5-minute token to expire.
 bool slow_tests_enabled();
 
 IdentityConfig desktop_config();
@@ -110,8 +110,8 @@ std::pair<int, json> cp_call(const std::string& method, const std::string& path,
 // Posts a form to the identity provider's token or revocation endpoint.
 std::pair<int, json> idp_token(const std::vector<std::pair<std::string, std::string>>& form);
 std::pair<int, json> idp_revoke(const std::string& refresh_token);
-// When WORKBENCH_E2E_CP_UPSTREAM names the real control-plane port, every test reaches the control plane through
-// a proxy on the WORKBENCH_E2E_CP port, and blip tests can cut it. Returns nullptr otherwise.
+// When SKOWORK_E2E_CP_UPSTREAM names the real control-plane port, every test reaches the control plane through
+// a proxy on the SKOWORK_E2E_CP port, and blip tests can cut it. Returns nullptr otherwise.
 TcpProxy* cp_proxy();
 
 // A settable clock that starts at real time.

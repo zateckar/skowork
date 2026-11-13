@@ -133,7 +133,7 @@ struct ChatRequest {
     std::optional<int> max_tokens;
     std::optional<double> temperature;
     bool stream = true;
-    // Attribution for usage accounting and the gateway audit (X-Workbench-Run).
+    // Attribution for usage accounting and the gateway audit (X-Skowork-Run).
     std::string run_id, thread_id, feature;
     std::shared_ptr<CancelToken> cancel;
     // Validate tool-call arguments against the tool schemas, with one corrective re-prompt.

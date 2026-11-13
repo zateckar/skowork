@@ -266,7 +266,7 @@ TEST(MailOAuth, SignInRestartInteractionRequiredAndDisconnect) {
     ASSERT_TRUE(f.connect());
     EXPECT_EQ(f.browser.landing_status, 200);
     EXPECT_NE(f.browser.last_url.find("code_challenge_method=S256"), std::string::npos);
-    EXPECT_NE(f.browser.last_url.find("client_id=workbench-dev"), std::string::npos);
+    EXPECT_NE(f.browser.last_url.find("client_id=skowork-dev"), std::string::npos);
     EXPECT_EQ(f.browser.redirect().rfind("http://localhost:", 0), 0u) << f.browser.redirect();
     // The listener is gone after the redirect: its port can be bound again.
     EXPECT_FALSE(f.svc->connection()->auth->listener_active());

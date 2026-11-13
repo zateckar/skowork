@@ -6,9 +6,9 @@
 using namespace wb;
 
 TEST(Redact, KeyedSecrets) {
-    const std::string out = redact_secrets("POST token: refresh_token=abc123def&client_id=workbench-desktop");
+    const std::string out = redact_secrets("POST token: refresh_token=abc123def&client_id=skowork-desktop");
     EXPECT_EQ(out.find("abc123def"), std::string::npos);
-    EXPECT_NE(out.find("client_id=workbench-desktop"), std::string::npos);
+    EXPECT_NE(out.find("client_id=skowork-desktop"), std::string::npos);
     const std::string hdr = redact_secrets("Authorization: Bearer eyJhbGciOi.payload.sig");
     EXPECT_EQ(hdr.find("payload.sig"), std::string::npos);
 }

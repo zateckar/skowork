@@ -223,7 +223,7 @@ void ControlChannel::push_loop() {
             continue;
         }
         auto ws = WebSocket::connect(push_url(), {{"Authorization", "Bearer " + *token},
-                                                   {"X-Workbench-Installation", info_.installation_id}},
+                                                   {"X-Skowork-Installation", info_.installation_id}},
                                      std::chrono::seconds(15));
         if (!ws) {
             const auto& code = ws.error().code;

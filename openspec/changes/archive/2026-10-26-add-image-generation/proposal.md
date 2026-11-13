@@ -2,7 +2,7 @@
 
 ## Why
 
-Users ask Workbench for pictures (illustrations, diagrams, mock-ups), and the agent answers that it has no way to make one. The organization LLM API already offers an image generation model, `acme-llm-image`, through the standard OpenAI images endpoint (verified 2026-10-23, see design.md). The gateway has no role for it, and the agent has no tool that uses it.
+Users ask Skowork for pictures (illustrations, diagrams, mock-ups), and the agent answers that it has no way to make one. The organization LLM API already offers an image generation model, `acme-llm-image`, through the standard OpenAI images endpoint (verified 2026-10-23, see design.md). The gateway has no role for it, and the agent has no tool that uses it.
 
 ## What Changes
 

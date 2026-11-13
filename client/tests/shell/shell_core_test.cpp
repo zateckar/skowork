@@ -584,7 +584,7 @@ TEST(ShellFormat, PercentSnippetsAndAboutText) {
     EXPECT_EQ(snippet_parts("no marks [[open"), (P{{"no marks [[open", false}}));
     EXPECT_TRUE(snippet_parts("").empty());
     EXPECT_EQ(about_text({{"version", "1.2.3"}, {"channel", "stable"}, {"commit", "abc"}, {"pid", 42}}),
-              "SkoWork 1.2.3\nChannel: stable\nCommit: abc\nProcess ID: 42");
+              "Skowork 1.2.3\nChannel: stable\nCommit: abc\nProcess ID: 42");
 }
 
 TEST(ShellFormat, SizesDurationsAndRelativeTimes) {

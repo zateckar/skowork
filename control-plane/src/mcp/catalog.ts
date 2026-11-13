@@ -178,7 +178,7 @@ export class McpCatalog {
   }
 
   #assigned(id: string): string[] {
-    return (this.#db.prepare('SELECT workbench_group FROM mcp_assignments WHERE server_id = ? ORDER BY workbench_group').all(id) as { workbench_group: string }[]).map((r) => r.workbench_group);
+    return (this.#db.prepare('SELECT skowork_group FROM mcp_assignments WHERE server_id = ? ORDER BY skowork_group').all(id) as { skowork_group: string }[]).map((r) => r.skowork_group);
   }
 
   #tools(id: string): ToolRow[] {
@@ -226,7 +226,7 @@ export class McpCatalog {
     return this.#db
       .prepare(
         `SELECT DISTINCT s.* FROM mcp_servers s JOIN mcp_assignments a ON a.server_id = s.id
-         WHERE s.enabled = 1 AND a.workbench_group IN (${gs.map(() => '?').join(',')}) ORDER BY s.id`,
+         WHERE s.enabled = 1 AND a.skowork_group IN (${gs.map(() => '?').join(',')}) ORDER BY s.id`,
       )
       .all(...gs) as unknown as ServerRow[];
   }
@@ -365,7 +365,7 @@ export class McpCatalog {
       this.#db
         .prepare('INSERT INTO mcp_servers (id, entry, enabled, discovery_status, updated_by, updated_at) VALUES (?, ?, 0, ?, ?, ?)')
         .run(e.id, JSON.stringify(e), discovery ? 'failed' : 'none', actor.userName, nowIso());
-      for (const g of groups) this.#db.prepare('INSERT INTO mcp_assignments (server_id, workbench_group) VALUES (?, ?)').run(e.id, g);
+      for (const g of groups) this.#db.prepare('INSERT INTO mcp_assignments (server_id, skowork_group) VALUES (?, ?)').run(e.id, g);
       if (discovery) this.#storeDiscovery(e.id, discovery);
       if (wantEnabled && (!discovery || discovery.ok)) this.#db.prepare('UPDATE mcp_servers SET enabled = 1 WHERE id = ?').run(e.id);
     });
@@ -394,7 +394,7 @@ export class McpCatalog {
       if (e.kind === 'local') this.#db.prepare("UPDATE mcp_servers SET discovery_status = 'none', discovery_error = NULL WHERE id = ?").run(id);
       if (groups) {
         this.#db.prepare('DELETE FROM mcp_assignments WHERE server_id = ?').run(id);
-        for (const g of groups) this.#db.prepare('INSERT INTO mcp_assignments (server_id, workbench_group) VALUES (?, ?)').run(id, g);
+        for (const g of groups) this.#db.prepare('INSERT INTO mcp_assignments (server_id, skowork_group) VALUES (?, ?)').run(id, g);
       }
       if (discovery) this.#storeDiscovery(id, discovery);
       const discoveredOk = !discovery || discovery.ok;

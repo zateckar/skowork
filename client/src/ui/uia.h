@@ -46,7 +46,7 @@ public:
     static bool run_call(WPARAM wp, LPARAM lp);   // kUiaCallMessage: runs a provider call; false when it is not one
     void detach();                                // before the window goes away
     void focus_changed(Node* n);
-    void notify(const std::u16string& text, const std::u16string& activity_id = u"workbench");
+    void notify(const std::u16string& text, const std::u16string& activity_id = u"skowork");
     void property_changed_name(Node& n);
 
     struct State;

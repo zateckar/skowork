@@ -2,11 +2,11 @@
 
 ## Why
 
-The desktop still calls itself Workbench, its microphone cannot be made usable from the shipped application, and administrators cannot discover individual tool decisions such as `computer.click`. Long conversations need earlier, reliable compaction, while users need to understand, correct and share the knowledge derived from their Sources without losing control when those Sources change.
+The desktop still calls itself Skowork, its microphone cannot be made usable from the shipped application, and administrators cannot discover individual tool decisions such as `computer.click`. Long conversations need earlier, reliable compaction, while users need to understand, correct and share the knowledge derived from their Sources without losing control when those Sources change.
 
 ## What Changes
 
-- Rename the desktop and control-plane product surfaces to **SkoWork**, including the executable and distributed desktop package, while preserving existing profiles, credentials, configuration and integration identifiers.
+- Rename the desktop and control-plane product surfaces to **Skowork**, including the executable and distributed desktop package, while preserving existing profiles, credentials, configuration and integration identifiers.
 - Make every supported policy setting and Tool discoverable in the control plane. Searching `computer.click` opens its attended and unattended decisions, inherited risk defaults, feature prerequisites and effective-policy explanation. Verify completeness against the client registrations, policy schema and owning specs.
 - Deliver a versioned speech package with each desktop release and a **Set up speech recognition** flow with download, offline package import, progress, verification, repair and an actual recognition check. Keep transcription local and the lightweight core package separate.
 - Replace the existing 85% compaction trigger with model-aware working budgets: at most 500,000 input tokens for models with at least a 1,000,000-token window, and at most 200,000 for smaller large-context models, further reduced for smaller windows and output reserves. Begin compaction before the budget, preserve complete conversational coverage and tool-call boundaries, and retain the readable Thread history.
@@ -22,12 +22,12 @@ The desktop still calls itself Workbench, its microphone cannot be made usable f
 
 ### Modified Capabilities
 
-- `client/desktop-host`: SkoWork desktop identity, compatibility and packaged speech availability. This capability currently lives in the in-flight foundation change.
+- `client/desktop-host`: Skowork desktop identity, compatibility and packaged speech availability. This capability currently lives in the in-flight foundation change.
 - `client/local-storage`: complete forget cascades, recovery-copy invalidation and minimal durable remote-withdrawal state. This capability currently lives in the in-flight foundation change.
 - `client/dictation`: actionable missing-model and microphone states, with a working route back to the composer.
 - `client/agent-runtime`: proactive, bounded and recoverable compaction for all Runs, including child Runs.
 - `client/knowledge-graph`: inspectable knowledge, evidence, categories, conflicts, impact previews, lifecycle and category publication.
-- `control-plane/admin-console`: SkoWork console identity, complete policy discovery and inspectable shared publications.
+- `control-plane/admin-console`: Skowork console identity, complete policy discovery and inspectable shared publications.
 - `control-plane/policy-service`: tool catalog and policy coverage contract. This capability currently lives in in-flight policy changes.
 - `control-plane/team-knowledge`: versioned category publications, authorization and withdrawal. This capability currently lives in the in-flight sharing change.
 
@@ -40,7 +40,7 @@ The desktop still calls itself Workbench, its microphone cannot be made usable f
 - Control-plane impact: policy schema/catalog/simulation and admin forms; team knowledge storage, APIs, search and administration; release/dev-artifact workflows. All service identity remains central-IdP based.
 - Deliberate revisions to existing constraints: permit acquisition of the optional speech data package from inside the application (not a general application updater); extend explicit sharing from document/note text to reviewed knowledge publications; update the product name and Policy bundle glossary. Record these in `openspec/config.yaml` during implementation while preserving its existing edits.
 - User data remains private by default in the encrypted local store. Only explicitly selected publication content goes to team knowledge; extraction, embedding, reranking and compaction use the existing LLM gateway.
-- **Compatibility:** `SkoWork.exe` and SkoWork zip names replace the displayed desktop distribution names. Deployment scripts receive a compatibility entry point for the old executable; profile paths, `WORKBENCH_*` configuration, service URLs, citation identifiers and database formats are not renamed as a cosmetic operation.
+- **Compatibility (superseded by rename-to-skowork):** this change originally kept profile paths, `SKOWORK_*` configuration, service URLs, citation identifiers and database formats unchanged, and offered a compatibility entry point for the old executable. The user later chose to rename these too, and the compatibility requirement was removed from this change.
 
 ## Out Of Scope
 

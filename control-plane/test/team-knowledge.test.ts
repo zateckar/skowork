@@ -36,7 +36,7 @@ describe('team knowledge', () => {
       c.teamKnowledge.quotaBytes = 30_000;
     });
     admin = await h.token('admin1');
-    const member = (u: string, g: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: u, workbench_group: g });
+    const member = (u: string, g: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: u, skowork_group: g });
     await member('alice', 'engineering');
     await member('dave', 'engineering');
     await member('carol', 'sales');
@@ -155,9 +155,9 @@ describe('team knowledge', () => {
 
   it('rechecks withdrawn, newly forbidden and revoked items after an in-flight embedding', async () => {
     assert.equal((await h.call('POST', '/api/v1/admin/identity/group-members', admin,
-      { user_name: 'race-owner', workbench_group: 'engineering' })).status, 200);
+      { user_name: 'race-owner', skowork_group: 'engineering' })).status, 200);
     assert.equal((await h.call('POST', '/api/v1/admin/identity/group-members', admin,
-      { user_name: 'race-reader', workbench_group: 'engineering' })).status, 200);
+      { user_name: 'race-reader', skowork_group: 'engineering' })).status, 200);
     tok['race-owner'] = await h.token('race-owner');
     tok['race-reader'] = await h.token('race-reader');
     for (const action of ['withdraw', 'reader', 'expiry', 'reader-revoke', 'policy', 'revoke'] as const) {
@@ -183,7 +183,7 @@ describe('team knowledge', () => {
         await Promise.race([started, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('embedding did not start')), 5000))]);
         if (action === 'policy') await setPolicy('engineering', []);
         if (action === 'reader') assert.equal((await h.call('DELETE', '/api/v1/admin/identity/group-members', admin,
-          { user_name: 'dave', workbench_group: 'engineering' })).status, 200);
+          { user_name: 'dave', skowork_group: 'engineering' })).status, 200);
         if (action === 'reader-revoke') assert.equal((await h.call('POST', '/api/v1/admin/identity/deny-list', admin,
           { kind: 'user', value: 'race-reader', reason: 'test revocation' })).status, 200);
         if (action === 'expiry') await new Promise((resolve) => setTimeout(resolve, 2100));
@@ -201,16 +201,16 @@ describe('team knowledge', () => {
         up.handler = original;
         if (action === 'policy') await setPolicy('engineering', ['engineering']);
         if (action === 'reader') await h.call('POST', '/api/v1/admin/identity/group-members', admin,
-          { user_name: 'dave', workbench_group: 'engineering' });
+          { user_name: 'dave', skowork_group: 'engineering' });
       }
     }
   });
 
   it('rechecks existing updates after asynchronous embedding', async () => {
     assert.equal((await h.call('POST', '/api/v1/admin/identity/group-members', admin,
-      { user_name: 'write-owner', workbench_group: 'engineering' })).status, 200);
+      { user_name: 'write-owner', skowork_group: 'engineering' })).status, 200);
     assert.equal((await h.call('POST', '/api/v1/admin/identity/group-members', admin,
-      { user_name: 'write-owner', workbench_group: 'quality' })).status, 200);
+      { user_name: 'write-owner', skowork_group: 'quality' })).status, 200);
     await setPolicy('quality', ['quality']);
     tok['write-owner'] = await h.token('write-owner');
     for (const action of ['withdraw', 'recreate', 'concurrent', 'audience', 'membership', 'membership-direct', 'policy', 'quota', 'expiry', 'revoke'] as const) {
@@ -238,7 +238,7 @@ describe('team knowledge', () => {
         if (action === 'audience') assert.equal((await publish('write-owner', id, 'Original audience text.', ['quality'])).status, 200);
         if (action === 'membership' || action === 'membership-direct') {
           assert.equal((await h.call('DELETE', '/api/v1/admin/identity/group-members', admin,
-            { user_name: 'write-owner', workbench_group: 'engineering' })).status, 200);
+            { user_name: 'write-owner', skowork_group: 'engineering' })).status, 200);
           if (action === 'membership') assert.equal((await h.call('GET', '/api/v1/knowledge/items', tok['write-owner']!)).status, 200);
         }
         if (action === 'policy') await setPolicy('engineering', []);
@@ -265,7 +265,7 @@ describe('team knowledge', () => {
         up.handler = original;
         if (action === 'policy') await setPolicy('engineering', ['engineering']);
         if (action === 'membership' || action === 'membership-direct') await h.call('POST', '/api/v1/admin/identity/group-members', admin,
-          { user_name: 'write-owner', workbench_group: 'engineering' });
+          { user_name: 'write-owner', skowork_group: 'engineering' });
         if (action === 'quota') await h.call('DELETE', '/api/v1/knowledge/items/quota-other', tok['write-owner']!);
         if (action === 'expiry') tok['write-owner'] = await h.token('write-owner');
       }
@@ -332,7 +332,7 @@ describe('team knowledge', () => {
   });
 
   it('item shares are owned by issuer and subject; legacy shares are replaced, never adopted, and absence is proven only without them', async () => {
-    const member = (u: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: u, workbench_group: 'engineering' });
+    const member = (u: string) => h.call('POST', '/api/v1/admin/identity/group-members', admin, { user_name: u, skowork_group: 'engineering' });
     for (const u of ['erin', 'erin2', 'frank']) await member(u);
     const erin = await h.token('erin', { sub: 'subject-erin' });
     const put = (token: string, id: string, text: string) =>

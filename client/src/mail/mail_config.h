@@ -57,7 +57,7 @@ struct MailConfig {
 using PolicyLookup = std::function<std::optional<json>(const std::string& key)>;
 
 // Reads policy.mail.* (defaults as specified when a key is missing). `tool_permitted` says whether policy allows a tool at
-// all (scope selection). `dev_build`: WORKBENCH_DEV_ENDPOINTS builds, which also accept loopback http hosts and mock auth.
+// all (scope selection). `dev_build`: SKOWORK_DEV_ENDPOINTS builds, which also accept loopback http hosts and mock auth.
 MailConfig read_config(const PolicyLookup& policy, const std::function<bool(const std::string& tool)>& tool_permitted, bool dev_build);
 
 [[nodiscard]] bool is_graph_host(std::string_view host);

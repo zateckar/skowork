@@ -1,4 +1,4 @@
-# Workbench telemetry catalogue (add-telemetry-and-admin design D1, D2).
+# Skowork telemetry catalogue (add-telemetry-and-admin design D1, D2).
 #
 # Every telemetry field the client may send is listed here with its telemetry level and purpose. This file is the
 # reviewed artefact: it is what the organization-level approval process (data protection officer, works council) receives
@@ -22,7 +22,7 @@ resource:
     type: string
     level: metadata
     purpose: Client version, for version adoption and to tie errors to a release.
-  - name: workbench.channel
+  - name: skowork.channel
     type: string
     level: metadata
     purpose: Update channel of the installation (stable, pilot, dev).
@@ -30,7 +30,7 @@ resource:
     type: string
     level: metadata
     purpose: Windows build number, to find OS-specific failures.
-  - name: workbench.installation_id
+  - name: skowork.installation_id
     type: string
     level: metadata
     purpose: The installation that sent the batch; the ingest checks it belongs to the token's user.

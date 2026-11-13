@@ -88,7 +88,7 @@ type ResolvedRow = ModelRow & { connection_name: string; enabled: number };
 // ---- credential encryption (D1) ----------------------------------------------------------------------
 
 /**
- * The server key from WORKBENCH_SECRET_KEY (Server Key From A Passphrase): the base64 encoding of 32 bytes is the key
+ * The server key from SKOWORK_SECRET_KEY (Server Key From A Passphrase): the base64 encoding of 32 bytes is the key
  * itself (keys of earlier deployments); any other value of at least 16 characters is a passphrase the key is derived
  * from. The salt is fixed so the same passphrase gives the same key after a restart.
  */
@@ -98,8 +98,8 @@ export function serverKey(value: string): Buffer {
     const k = Buffer.from(v, 'base64');
     if (k.length === 32) return k;
   }
-  if (v.length < 16) throw new StartupError('WORKBENCH_SECRET_KEY must be at least 16 characters (any passphrase, for example four random words)');
-  return scryptSync(v, 'workbench/llm-credentials/v1', 32, { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+  if (v.length < 16) throw new StartupError('SKOWORK_SECRET_KEY must be at least 16 characters (any passphrase, for example four random words)');
+  return scryptSync(v, 'skowork/llm-credentials/v1', 32, { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
 }
 
 /** A settings problem that stops the control plane at startup; main.ts prints only its message. */
@@ -108,7 +108,7 @@ export class StartupError extends Error {}
 function loadKey(cfg: Config, needed: boolean): Buffer | null {
   if (cfg.gateway.secretKey) return serverKey(cfg.gateway.secretKey);
   if (cfg.env === 'production') {
-    if (needed) throw new StartupError('WORKBENCH_SECRET_KEY is required: LLM connection credentials are stored encrypted with it (any passphrase of at least 16 characters)');
+    if (needed) throw new StartupError('SKOWORK_SECRET_KEY is required: LLM connection credentials are stored encrypted with it (any passphrase of at least 16 characters)');
     return null;
   }
   if (cfg.dbPath === ':memory:') return randomBytes(32);
@@ -226,7 +226,7 @@ export class Connections {
   readonly #audit: Audit;
   readonly #log: (m: string) => void;
   #key: Buffer | null;
-  /** The server key for credentials, or null when WORKBENCH_SECRET_KEY is not set (API connector secrets use it too). */
+  /** The server key for credentials, or null when SKOWORK_SECRET_KEY is not set (API connector secrets use it too). */
   get secretKey(): Buffer | null {
     return this.#key;
   }
@@ -558,7 +558,7 @@ export class Connections {
   }
 
   #needKey(): Buffer {
-    if (!this.#key) throw new ApiError(409, 'NO_SECRET_KEY', 'WORKBENCH_SECRET_KEY is not set, so no credential can be stored.');
+    if (!this.#key) throw new ApiError(409, 'NO_SECRET_KEY', 'SKOWORK_SECRET_KEY is not set, so no credential can be stored.');
     return this.#key;
   }
 

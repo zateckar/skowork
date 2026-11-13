@@ -10,7 +10,7 @@ $sha = 'DCC60D59A0746999F99064A01C020445D54D84228C691CDBF25B49AC3B59150A'
 $name = "node-$version-win-x64"
 $client = Resolve-Path (Join-Path $PSScriptRoot '../../client')
 $runtime = Join-Path $client 'runtime/node'
-$work = Join-Path ([IO.Path]::GetTempPath()) ("workbench-node-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+$work = Join-Path ([IO.Path]::GetTempPath()) ("skowork-node-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force $work, $runtime | Out-Null
 try {
     $zip = Join-Path $work "$name.zip"

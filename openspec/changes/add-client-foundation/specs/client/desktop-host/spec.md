@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Defines how the Workbench client runs on a user's Windows laptop: process lifecycle, tray presence, the on-demand UI window, the local API, and the footprint budgets that keep it lightweight.
+Defines how the Skowork client runs on a user's Windows laptop: process lifecycle, tray presence, the on-demand UI window, the local API, and the footprint budgets that keep it lightweight.
 
 ## ADDED Requirements
 

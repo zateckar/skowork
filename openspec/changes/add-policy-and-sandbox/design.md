@@ -6,11 +6,11 @@ This design builds on:
 - add-client-foundation: identity, the fleet-registry push, and DPAPI-encrypted storage.
 - add-agent-runtime: the mandatory `BeforeToolCall` hook, Risk classes, and Approval interrupts.
 
-The client runs as the user without admin rights. That rules out kernel drivers, WFP callouts and machine-wide firewall changes from inside Workbench. Enforcement therefore has three layers:
+The client runs as the user without admin rights. That rules out kernel drivers, WFP callouts and machine-wide firewall changes from inside Skowork. Enforcement therefore has three layers:
 
 1. **App layer:** client/policy-enforcement. It sees 100% of agent-initiated tool calls.
 2. **Process layer:** client/tool-sandbox. Job Objects, a restricted token and the egress proxy.
-3. **OS layer:** firewall, WFP and WDAC rules deployed by endpoint management for Groups that need hard guarantees. This layer is outside Workbench. It is documented here and reported as an enforcement level.
+3. **OS layer:** firewall, WFP and WDAC rules deployed by endpoint management for Groups that need hard guarantees. This layer is outside Skowork. It is documented here and reported as an enforcement level.
 
 ## Goals / Non-Goals
 
@@ -71,15 +71,15 @@ The client runs as the user without admin rights. That rules out kernel drivers,
 ### D5. Sandbox implementation
 - **Job Objects:** one job per process the client starts. `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, with breakaway disallowed and no `SILENT_BREAKAWAY`. Also `JOB_OBJECT_LIMIT_JOB_MEMORY` (the memory limit covers the whole group, not each process), `ACTIVE_PROCESS`, and a hard-capped CPU rate. The process is created suspended, assigned to the job, then resumed. The job's completion port reports memory and process-count limit hits, and the client then terminates the job. When the started process exits, the job is terminated too, so nothing it left running survives the tool call.
 - **Restricted token:** `CreateRestrictedToken` with `DISABLE_MAX_PRIVILEGE`, with the Administrators SID set deny-only. The token's owner and default DACL are set to the user (and SYSTEM): an elevated token owns new objects through Administrators, so with Administrators deny-only the child could not open its own process and would fail to start. The integrity level is Medium; Low was considered but breaks too many developer tools. Shell mode `allow` keeps the user's token but still uses the job and the scrubbed environment, without the proxy.
-- **No-network mode (decided 2026-10-22):** the process is started like a sandboxed process with network access: job, restricted token, scrubbed environment and the egress proxy variables. Its proxy session is marked no-network, and the proxy refuses every destination for that credential with the rule `no-network`, before the egress rules are consulted. The refusals go to the approval log like other egress denials. Workbench does not rely on Windows Firewall or AppContainer for this mode. The enforcement level is the same as for all child traffic (D6): `proxy-only`, unless IT deploys the firewall profile for Workbench child processes.
-- **Environment:** built from scratch. Only an allowlist of variables is kept (PATH, TEMP, USERPROFILE and similar), plus `HTTP_PROXY`/`HTTPS_PROXY` (and their lower-case forms) set to `http://workbench:<cred>@127.0.0.1:<port>`.
+- **No-network mode (decided 2026-10-22):** the process is started like a sandboxed process with network access: job, restricted token, scrubbed environment and the egress proxy variables. Its proxy session is marked no-network, and the proxy refuses every destination for that credential with the rule `no-network`, before the egress rules are consulted. The refusals go to the approval log like other egress denials. Skowork does not rely on Windows Firewall or AppContainer for this mode. The enforcement level is the same as for all child traffic (D6): `proxy-only`, unless IT deploys the firewall profile for Skowork child processes.
+- **Environment:** built from scratch. Only an allowlist of variables is kept (PATH, TEMP, USERPROFILE and similar), plus `HTTP_PROXY`/`HTTPS_PROXY` (and their lower-case forms) set to `http://skowork:<cred>@127.0.0.1:<port>`.
 - **Output:** each stream is read continuously on its own thread. The first `output_kb` are kept and the rest is read and discarded, so the process never blocks on a full pipe. Decoding: UTF-8 when valid (a sequence cut at the limit is dropped), UTF-16LE when the bytes look like it, otherwise the OEM code page.
 - **Shell modes:** the sandbox decides the process settings for `shell.run` (client/core-tools). In `sandboxed` mode the working folder must be writable under the filesystem rules, or the command is not started.
 - **Alternatives considered:**
   - Windows Sandbox or Hyper-V: requires admin rights and the feature to be installed, and is heavy.
   - WSL: not available everywhere and outside the policy model.
   - AppContainer for all modes: loopback is blocked, so the proxy cannot be used, and developer toolchains break.
-  - AppContainer for no-network mode only (implemented first, then rejected on 2026-10-22). AppContainer network isolation is enforced by Windows Firewall. On a workstation whose firewall profiles were all off, a container without capabilities still connected to loopback. Relying on it would make the mode depend on firewall configuration that Workbench does not control. It also needed a per-user profile registration and ACL grants on working folders.
+  - AppContainer for no-network mode only (implemented first, then rejected on 2026-10-22). AppContainer network isolation is enforced by Windows Firewall. On a workstation whose firewall profiles were all off, a container without capabilities still connected to loopback. Relying on it would make the mode depend on firewall configuration that Skowork does not control. It also needed a per-user profile registration and ACL grants on working folders.
 
 ### D6. Egress proxy
 - **Lifetime:** an in-process asynchronous HTTP CONNECT and forward proxy, bound to `127.0.0.1` on an ephemeral port. It is started on demand and stopped when the last sandboxed process with network access exits.
@@ -89,7 +89,7 @@ The client runs as the user without admin rights. That rules out kernel drivers,
 - **Name resolution:** DNS uses the system resolver, and the resolved address is pinned for the connection. Loopback, unspecified, link-local (which includes cloud metadata addresses) and multicast addresses are never connected to, whatever name resolves to them, so an allowed host name cannot be pointed at local services.
 - **One destination per connection:** a forwarded plain-HTTP request is sent with `Connection: close`, and proxy headers are removed. A client cannot reuse the connection for another host. `https://` URLs must use CONNECT.
 - **Implementation:** one thread per connection with blocking sockets, at most 128 connections; simple, and sufficient for a handful of child processes.
-- **Honest limitation:** a process that ignores the proxy variables can connect directly. Only the OS layer stops that. The client reports `proxy-only` unless it detects the endpoint-management firewall profile for Workbench child processes, in which case it reports `os-enforced`. Detection reads the local, Group Policy and MDM firewall rule stores in the registry, looking for an active outbound block rule whose group (`EmbedCtxt`) is `Workbench Child Processes`. It runs at start, and the level is sent with every heartbeat.
+- **Honest limitation:** a process that ignores the proxy variables can connect directly. Only the OS layer stops that. The client reports `proxy-only` unless it detects the endpoint-management firewall profile for Skowork child processes, in which case it reports `os-enforced`. Detection reads the local, Group Policy and MDM firewall rule stores in the registry, looking for an active outbound block rule whose group (`EmbedCtxt`) is `Skowork Child Processes`. It runs at start, and the level is sent with every heartbeat.
 
 ### D7. Policy service implementation
 - **Stack:** a module of the one control-plane process (Node.js with TypeScript and Express, storage in SQLite through the built-in `node:sqlite` module; decided 2026-10-22). Tables: `policy_groups` (Group definitions and owners), `policy_versions` (one row per draft or published version of a Group or of the org guardrails, with its content as JSON), `policy_scopes` (the version in force, the previous version and the active rollout of each scope), `user_policy_versions` (the latest bundle and per-user version), `dispatch_rules` and `service_signing_keys`. The role mappings and direct assignments that give Groups stay in control-plane/identity; the policy service is told when they change (D13). Audit rows go to the shared audit trail. The process is one node, so compilation, versions and rollout run in one transaction per change and need no cross-node coordination.
@@ -133,7 +133,7 @@ tools:
   browser:  { retain_screenshots: false }
 filesystem:
   read:  ["%USERPROFILE%\\Documents\\**", "D:\\DEV\\**"]
-  write: ["D:\\DEV\\**", "%WORKBENCH_DATA%\\workspace\\**"]
+  write: ["D:\\DEV\\**", "%SKOWORK_DATA%\\workspace\\**"]
   deny:  ["**\\.ssh\\**", "**\\*.kdbx", "**\\*.pfx"]
   grantable: ["%USERPROFILE%\\**", "D:\\**"]
 network:
@@ -186,7 +186,7 @@ Whenever a guardrail changes a Group's value, `src` names the guardrail and simu
 ### D12. Versions, drafts, rollout, bundles
 - **Versions.** A Group (and the guardrail) has at most one draft, which has version 0. Publishing gives it the next number after the highest published version, so version numbers are gapless, and keeps every version for ever. Rollback publishes a new version that copies the previous one.
 - **Staged rollout.** A publish with a rollout puts the version in the scope's candidate slot. A *pilot* rollout selects users who are also members of another named Group; a *percent* rollout selects users whose bucket (first four bytes of the SHA-256 of the lower-case UPN, modulo 100) is below the percentage. Selected users compile with the candidate, everybody else with the version in force. Promote makes the candidate the version in force and notifies the users who were not selected; cancel notifies the selected users. While a rollout is active, publish and rollback are refused.
-- **Bundle reuse.** Compact JWS with `typ` `workbench-policy+jwt` and the claims of D1, plus `uid` (the token subject) and `schema` (the registry version). A per-user version increases only when the content changes. An unchanged bundle is returned unchanged for the first half of its validity and is then reissued with the same content and a new version.
+- **Bundle reuse.** Compact JWS with `typ` `skowork-policy+jwt` and the claims of D1, plus `uid` (the token subject) and `schema` (the registry version). A per-user version increases only when the content changes. An unchanged bundle is returned unchanged for the first half of its validity and is then reissued with the same content and a new version.
 - **Compile failure.** If a user's combination of Groups cannot be compiled, the service returns the previous bundle while it is still valid (marked `stale`) and otherwise `409 POLICY_COMPILE_FAILED`. Each failure is audited.
 - **Keys.** The policy keys are a ring of an ES256 current and next key. A rotated-out key stays published for the bundle validity plus one day.
 
@@ -227,7 +227,7 @@ Not applicable: this is new functionality. Before this change is deployed, the g
 - [Windows PowerShell 5.1 and old Node.js bypass the proxy] -> This is the `proxy-only` level that Enforcement Limits Disclosure reports. The shell mode stays `off` for standard users, and Groups that need a hard guarantee get the OS firewall profile.
 - **Not verified:** allowed traffic of these tools through the real egress proxy inside the Job Object, and the baseline laptop.
 
-**Enforcement level (task 4.7).** `detect_network_enforcement` reads the local, Group Policy and MDM firewall rule stores for an active outbound block rule of the group "Workbench Child Processes". The client reports the level at start in telemetry, with every heartbeat, and in the policy status. Verified by `SandboxEnforcement.RuleDetection` on a machine without the profile and with rule strings for the with-profile cases. A machine that has the deployed profile was not available.
+**Enforcement level (task 4.7).** `detect_network_enforcement` reads the local, Group Policy and MDM firewall rule stores for an active outbound block rule of the group "Skowork Child Processes". The client reports the level at start in telemetry, with every heartbeat, and in the policy status. Verified by `SandboxEnforcement.RuleDetection` on a machine without the profile and with rule strings for the with-profile cases. A machine that has the deployed profile was not available.
 
 ## Open Questions
 

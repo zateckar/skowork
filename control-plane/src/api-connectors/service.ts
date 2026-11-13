@@ -141,7 +141,7 @@ export class ApiConnectors {
     return this.#db
       .prepare(
         `SELECT DISTINCT s.id, s.entry, s.enabled FROM mcp_servers s JOIN mcp_assignments a ON a.server_id = s.id
-         WHERE s.id = ? AND s.enabled = 1 AND a.workbench_group IN (${gs.map(() => '?').join(',')})`,
+         WHERE s.id = ? AND s.enabled = 1 AND a.skowork_group IN (${gs.map(() => '?').join(',')})`,
       )
       .get(id, ...gs) as EntryRow | undefined;
   }
@@ -152,7 +152,7 @@ export class ApiConnectors {
 
   #key(): Buffer {
     const k = this.#hooks.secretKey();
-    if (!k) throw new ApiError(409, 'NO_SECRET_KEY', 'WORKBENCH_SECRET_KEY is not set, so no credential can be stored.');
+    if (!k) throw new ApiError(409, 'NO_SECRET_KEY', 'SKOWORK_SECRET_KEY is not set, so no credential can be stored.');
     return k;
   }
 
@@ -315,7 +315,7 @@ export class ApiConnectors {
   }
 
   #groupsOf(id: string): string[] {
-    return (this.#db.prepare('SELECT workbench_group FROM mcp_assignments WHERE server_id = ?').all(id) as { workbench_group: string }[]).map((r) => r.workbench_group);
+    return (this.#db.prepare('SELECT skowork_group FROM mcp_assignments WHERE server_id = ?').all(id) as { skowork_group: string }[]).map((r) => r.skowork_group);
   }
 
   // ---- settings and secrets -------------------------------------------------------------------------------------------
@@ -414,7 +414,7 @@ export class ApiConnectors {
     const rows = this.#db
       .prepare(
         `SELECT DISTINCT s.id, s.entry, s.enabled FROM mcp_servers s JOIN mcp_assignments a ON a.server_id = s.id
-         WHERE s.enabled = 1 AND a.workbench_group IN (${gs.map(() => '?').join(',')}) ORDER BY s.id`,
+         WHERE s.enabled = 1 AND a.skowork_group IN (${gs.map(() => '?').join(',')}) ORDER BY s.id`,
       )
       .all(...gs) as unknown as EntryRow[];
     return {

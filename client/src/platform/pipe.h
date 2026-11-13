@@ -1,4 +1,4 @@
-// Named-pipe local API (add-client-foundation design D5): `\\.\pipe\Workbench-<user SID>`, a DACL that grants only
+// Named-pipe local API (add-client-foundation design D5): `\\.\pipe\Skowork-<user SID>`, a DACL that grants only
 // the current user, PIPE_REJECT_REMOTE_CLIENTS, length-prefixed frames (4-byte little-endian length + UTF-8 JSON).
 // The first pipe instance doubles as the single-instance lock.
 #pragma once
