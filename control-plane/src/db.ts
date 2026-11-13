@@ -33,8 +33,8 @@ const migrations: string[] = [
     created_at TEXT NOT NULL,
     UNIQUE (kind, value)
   );
-  CREATE TABLE role_mappings (idp_role TEXT NOT NULL, skowork_group TEXT NOT NULL, PRIMARY KEY (idp_role, skowork_group));
-  CREATE TABLE group_members (user_name TEXT NOT NULL, skowork_group TEXT NOT NULL, PRIMARY KEY (user_name, skowork_group));
+  CREATE TABLE role_mappings (idp_role TEXT NOT NULL, workbench_group TEXT NOT NULL, PRIMARY KEY (idp_role, workbench_group));
+  CREATE TABLE group_members (user_name TEXT NOT NULL, workbench_group TEXT NOT NULL, PRIMARY KEY (user_name, workbench_group));
   CREATE TABLE admin_roles (user_name TEXT NOT NULL, role TEXT NOT NULL, PRIMARY KEY (user_name, role));
   CREATE TABLE installations (
     id TEXT PRIMARY KEY,
@@ -170,8 +170,8 @@ const migrations: string[] = [
   );
   CREATE TABLE mcp_assignments (
     server_id TEXT NOT NULL REFERENCES mcp_servers (id) ON DELETE CASCADE,
-    skowork_group TEXT NOT NULL,
-    PRIMARY KEY (server_id, skowork_group)
+    workbench_group TEXT NOT NULL,
+    PRIMARY KEY (server_id, workbench_group)
   );
   -- status: baseline (first snapshot), pending (appeared later, awaits review), included, excluded.
   CREATE TABLE mcp_tools (
@@ -539,6 +539,12 @@ const migrations: string[] = [
   CREATE INDEX team_items_item ON team_items(item_id);
   ALTER TABLE team_owners ADD COLUMN issuer TEXT;
   ALTER TABLE team_owners ADD COLUMN subject TEXT;
+  `,
+  // rename-to-skowork: the Group columns of migrations 1 and 5 take the Skowork name; databases keep the earlier one.
+  `
+  ALTER TABLE role_mappings RENAME COLUMN workbench_group TO skowork_group;
+  ALTER TABLE group_members RENAME COLUMN workbench_group TO skowork_group;
+  ALTER TABLE mcp_assignments RENAME COLUMN workbench_group TO skowork_group;
   `,
 ];
 

@@ -336,7 +336,9 @@ test('migration: stored audience-token entries become user-token without an audi
     db.exec(`DROP INDEX team_items_subject; DROP INDEX team_items_item;
       ALTER TABLE team_items DROP COLUMN owner_issuer; ALTER TABLE team_items DROP COLUMN owner_subject;
       ALTER TABLE team_owners DROP COLUMN issuer; ALTER TABLE team_owners DROP COLUMN subject;`);
-    db.prepare('UPDATE schema_version SET version = version - 8').run();
+    // The Group column rename (rename-to-skowork) is the last migration; it runs again too.
+    db.exec('ALTER TABLE role_mappings RENAME COLUMN skowork_group TO workbench_group; ALTER TABLE group_members RENAME COLUMN skowork_group TO workbench_group; ALTER TABLE mcp_assignments RENAME COLUMN skowork_group TO workbench_group;');
+    db.prepare('UPDATE schema_version SET version = version - 9').run();
     db.close();
     db = openDb(path);
     const migrated = JSON.parse((db.prepare("SELECT entry FROM mcp_servers WHERE id = 'jira-corp'").get() as { entry: string }).entry);
