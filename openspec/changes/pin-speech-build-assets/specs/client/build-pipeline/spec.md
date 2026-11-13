@@ -19,5 +19,5 @@ Speech packaging SHALL fetch a versioned build-input bundle from this repository
 - **AND** offline import applies the same pinned archive and per-file checks as a download
 
 #### Scenario: Publish product speech artifacts
-- **WHEN** CI builds the optional speech package from the pinned inputs
+- **WHEN** the speech package workflow builds the optional speech package from the pinned inputs, on a change to its pin or when started by hand
 - **THEN** the package retains its existing model/runtime manifest and notices and excludes development recordings

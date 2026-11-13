@@ -1,0 +1,84 @@
+# Publishes the speech package once per pin (publish-pinned-packages-once). It runs when the pin or its build inputs change,
+# or when started by hand. It never replaces an existing release: a new speech version is a new pin.
+name: speech-package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - client/tools/speech-package.json
+      - client/tools/speech-manifest.json
+      - client/tools/speech-build-assets.json
+      - client/tools/package-speech.ps1
+      - dev/scripts/fetch-stt-models.ps1
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish the speech package
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the pin
+        id: pin
+        shell: pwsh
+        run: |
+          $pin = Get-Content client/tools/speech-package.json -Raw | ConvertFrom-Json
+          if ($pin.schema -ne 1 -or $pin.bytes -le 0 -or $pin.sha256 -notmatch '^[a-f0-9]{64}$' -or $pin.version -notmatch '^[A-Za-z0-9_.-]+$') {
+              throw 'Invalid speech package pin'
+          }
+          $tag = "speech-package-v$($pin.version)"
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$($pin.version)" >> $env:GITHUB_OUTPUT
+          "file=SkoWork-speech-v$($pin.version)-win-x64.zip" >> $env:GITHUB_OUTPUT
+          "bytes=$($pin.bytes)" >> $env:GITHUB_OUTPUT
+          "sha256=$($pin.sha256)" >> $env:GITHUB_OUTPUT
+      - name: Stop when the release already exists
+        id: exists
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view '${{ steps.pin.outputs.tag }}' --repo '${{ github.repository }}' *> $null
+          $exists = $LASTEXITCODE -eq 0
+          "exists=$($exists.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          if ($exists) { Write-Host "Release ${{ steps.pin.outputs.tag }} exists; it is not replaced." }
+      - name: Fetch the pinned build inputs
+        if: steps.exists.outputs.exists == 'false'
+        shell: pwsh
+        run: ./dev/scripts/fetch-stt-models.ps1
+      - name: Build the speech package
+        if: steps.exists.outputs.exists == 'false'
+        shell: pwsh
+        working-directory: client
+        run: ./tools/package-speech.ps1 -OutDir build/package
+      - name: Check the package against the pin
+        if: steps.exists.outputs.exists == 'false'
+        shell: pwsh
+        working-directory: client
+        run: |
+          $zip = Join-Path build/package '${{ steps.pin.outputs.file }}'
+          $item = Get-Item -LiteralPath $zip
+          $sha = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($item.Length -ne ${{ steps.pin.outputs.bytes }}) { throw "speech package has $($item.Length) bytes, pin says ${{ steps.pin.outputs.bytes }}" }
+          if ($sha -ne '${{ steps.pin.outputs.sha256 }}') { throw "speech package has SHA-256 $sha, pin says ${{ steps.pin.outputs.sha256 }}" }
+      - name: Publish the release
+        if: steps.exists.outputs.exists == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: client
+        run: |
+          $zip = Join-Path build/package '${{ steps.pin.outputs.file }}'
+          $notes = @"
+          Speech package ${{ steps.pin.outputs.tag }}: the on-device speech runtime and models for Dictation and meeting transcripts.
+          Pinned in client/tools/speech-package.json. SHA-256: ${{ steps.pin.outputs.sha256 }}
+          The client accepts only an archive with this digest; set policy speech.package.url and speech.package.sha256 to it.
+          "@
+          gh release create '${{ steps.pin.outputs.tag }}' "$zip" "$zip.sha256" --repo '${{ github.repository }}' `
+            --target $env:GITHUB_SHA --latest=false --title "Speech package v${{ steps.pin.outputs.version }}" --notes $notes

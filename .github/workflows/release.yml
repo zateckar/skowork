@@ -1,7 +1,7 @@
 # Release (add-client-foundation task 2.4): a version tag publishes two artifacts:
 #   - the control plane as a container image on GitHub Container Registry,
 #   - the desktop client as a zip package with its SHA-256 checksum, attached to the GitHub release,
-#     with optional Local apps and speech runtime packages next to it.
+#     with the optional app runtime package next to it. The speech package is published by speech-package.yml.
 name: release
 
 on:
@@ -96,9 +96,19 @@ jobs:
           if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:WINLIBS_SHA256) { throw 'WinLibs hash mismatch' }
           7z x $archive "-o$env:RUNNER_TEMP\winlibs" -y | Out-Null
           Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\winlibs\mingw64\bin"
+      - name: Restore the app runtime from its cache
+        id: runtime
+        uses: actions/cache@v4
+        with:
+          path: client/runtime/node
+          key: app-runtime-${{ hashFiles('dev/scripts/fetch-node-runtime.ps1') }}
       - name: Fetch the app runtime (pinned Node.js, SHA-256 and signature checked)
+        if: steps.runtime.outputs.cache-hit != 'true'
         shell: pwsh
         run: ./dev/scripts/fetch-node-runtime.ps1
+      - name: Verify the app runtime
+        shell: pwsh
+        run: ./dev/scripts/fetch-node-runtime.ps1 -VerifyOnly
       - name: Release build and package checks
         shell: pwsh
         working-directory: client
@@ -119,13 +129,6 @@ jobs:
         shell: pwsh
         working-directory: client
         run: ./tools/package.ps1 -BuildDir build/release -OutDir build/package -Version '${{ needs.version.outputs.version }}'
-      - name: Fetch pinned speech assets
-        shell: pwsh
-        run: ./dev/scripts/fetch-stt-models.ps1
-      - name: Build and verify optional speech package
-        shell: pwsh
-        working-directory: client
-        run: ./tools/package-speech.ps1 -OutDir build/package
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-zip
@@ -142,6 +145,14 @@ jobs:
         with:
           name: desktop-zip
           path: dist
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: client/tools/speech-package.json
+      - name: Read the speech package pin
+        id: speech
+        run: |
+          echo "tag=speech-package-v$(jq -r .version client/tools/speech-package.json)" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(jq -r .sha256 client/tools/speech-package.json)" >> "$GITHUB_OUTPUT"
       - uses: softprops/action-gh-release@v2
         with:
           name: Skowork ${{ needs.version.outputs.version }}
@@ -152,5 +163,5 @@ jobs:
           body: |
             Desktop client: `Skowork-${{ needs.version.outputs.version }}-win-x64.zip` (checksum in the `.sha256` file).
             Optional app runtime for Local apps: `Skowork-${{ needs.version.outputs.version }}-app-runtime-win-x64.zip`, extracted next to Skowork.exe.
-            Optional speech runtime and models: `Skowork-speech-v1-win-x64.zip` (checksum in the `.sha256` file), downloaded by clients from the address and SHA-256 set in policy (speech.package.*), or imported in Skowork's speech setup.
+            Optional speech package: [${{ steps.speech.outputs.tag }}](https://github.com/${{ github.repository }}/releases/tag/${{ steps.speech.outputs.tag }}), SHA-256 `${{ steps.speech.outputs.sha256 }}`. Set policy speech.package.url and speech.package.sha256 to it, or import the zip in Skowork's speech setup.
             Control plane image: `ghcr.io/${{ github.repository_owner }}/skowork-control-plane:${{ needs.version.outputs.version }}`.
