@@ -155,6 +155,7 @@ std::vector<ToolDef> app_tools(AppToolsEnv env) {
                                               {"description", "Read-risk MCP tools the app's pages call, as mcp:<server>/<tool>; the user confirms them"}}},
                                {"app", kAppRef}});
         d.risk = Risk::write_local;
+        d.core = true;
         d.offered = offered;
         d.run = [t](ToolContext& c, const json& a) { return t->create(c, a); };
         out.push_back(std::move(d));
@@ -185,6 +186,7 @@ std::vector<ToolDef> app_tools(AppToolsEnv env) {
         d.description = "Start a Local app and open it in the user's browser. The user confirms the app's MCP tools first.";
         d.parameters = schema({{"app", kAppRef}}, {"app"});
         d.risk = Risk::write_local;
+        d.core = true;
         d.offered = offered;
         d.run = [t](ToolContext& c, const json& a) { return t->open(c, a); };
         d.resume = [t](ToolContext& c, const json& a, const json& s, const std::string& ans) { return t->open_resumed(c, a, s, ans); };

@@ -78,12 +78,13 @@ ToolDef make_delegate() {
     t.id = kDelegate;
     t.description = "Delegate an independent task to a subagent and get its final answer back. Several delegate calls in "
                     "one turn run in parallel. The subagent sees only the task and instructions you give it, not this "
-                    "conversation, and only the tools you list.";
+                    "conversation. By default it gets your baseline tools and the tools loaded in this Thread; the tools list "
+                    "restricts that set.";
     t.parameters = json::parse(R"({"type":"object","properties":{
         "task":{"type":"string","minLength":1,"description":"What the subagent must do, with everything it needs to know"},
         "instructions":{"type":"string","description":"Optional extra instructions, for example the form of the answer"},
         "tools":{"type":"array","items":{"type":"string","minLength":1},"maxItems":20,
-                 "description":"Tool ids the subagent may use; by default the tools you have loaded"}},"required":["task"]})");
+                 "description":"Tool ids the subagent may use; by default your baseline tools and the tools loaded in this Thread"}},"required":["task"]})");
     t.risk = Risk::read;  // the subagent's own calls are decided one by one
     t.core = true;
     t.own_data = true;  // reads or asks within the client only (fail-closed reads)
@@ -93,7 +94,7 @@ ToolDef make_delegate() {
 ToolDef make_find_tools() {
     ToolDef t;
     t.id = kFindTools;
-    t.description = "Search the available tools by name and description. The tools found are loaded for the rest of this run.";
+    t.description = "Search the available tools by name and description. The tools found are loaded for the rest of this Thread.";
     t.parameters = json::parse(R"({"type":"object","properties":{
         "query":{"type":"string","minLength":1,"description":"What you want to do, for example: calendar events"},
         "max_results":{"type":"integer","minimum":1,"maximum":10}},"required":["query"]})");
@@ -526,8 +527,8 @@ private:
             if (!permitted(def, dr)) return;  // a loaded tool policy no longer permits is not sent
             out.push_back(wire_spec(def, needs_rationale(def, dr)));
         };
-        // The core set first, then the Thread's loaded tools in load order: loading a tool only appends to the list,
-        // so the definitions before it keep their bytes (Stable Prompt Prefix).
+        // Baseline definitions first, then Thread-loaded tools in first-load order. This order stays stable within a
+        // catalog revision. Adding a definition is itself a catalog revision and cache boundary (Stable Prompt Prefix).
         for (const ToolDef* def : rt_.tools_.all())
             if (def->core) offer(*def);
         for (const auto& id : loaded_order_)
@@ -1428,10 +1429,19 @@ private:
                 for (const auto& id : *t)
                     if (id.is_string()) requested.insert(id.get<std::string>());
             } else {
-                const std::lock_guard lock(loaded_mx_);
-                requested = loaded_;
+                {
+                    const std::lock_guard lock(loaded_mx_);
+                    requested = loaded_;
+                }
+                // Baseline tools never enter lazy-load history through find_tools. Include them in the default Child Run
+                // set, or promoting a previously loaded tool would silently remove it from an old or new Thread's child.
+                const std::lock_guard lock(rt_.tools_mx_);
+                for (const ToolDef* def : rt_.tools_.all())
+                    if (def->core && !reserved_id(def->id) && available(*def) && permitted(*def, declared_risk(*def)))
+                        requested.insert(def->id);
             }
-            // A subagent can never obtain a tool its parent lacks.
+            // A subagent can never obtain a tool its parent lacks. This grant pass also filters reserved, unavailable and
+            // policy-denied tools. An explicit tools list never receives the baseline union above.
             std::vector<std::string> granted, refused;
             {
                 const std::lock_guard lock(rt_.tools_mx_);

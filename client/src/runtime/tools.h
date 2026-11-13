@@ -131,7 +131,10 @@ struct ToolDef {
     ToolFn run;
     ToolResumeFn resume;  // continuation after a Question this tool raised
     Provenance provenance;  // source of this tool's results; source_kind empty means "tool result, trusted"
-    bool core = false;      // sent on every turn (find_tools, ask_user, tools pinned by the active skill)
+    // Sent in the baseline on every model request, subject to availability and policy filtering. This covers reserved
+    // runtime tools plus files.read/write/edit and, while Local apps are offered, apps.create/open. Other tools are
+    // discovered into per-Thread lazy loading with find_tools.
+    bool core = false;
     // Touches only the client's own data (Threads, attachments); see ToolCallInfo::own_data.
     bool own_data = false;
     // Offered only in top-level Runs that are not Unattended runs (add-agent-created-skills design D10): a Child Run or

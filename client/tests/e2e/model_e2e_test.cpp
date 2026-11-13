@@ -5,14 +5,17 @@
 // WORKBENCH_E2E_RECORD=<dir> writes the raw gateway responses (streams as .sse, bodies as .json) for the unit-test
 // fixtures under client/tests/model/fixtures.
 #include "e2e_support.h"
+#include "base/sse.h"
 #include "base/strings.h"
 #include "base/url.h"
 
+#include "apps/apps.h"
 #include "model/model_client.h"
 #include "platform/win.h"
 #include "policy/enforcer.h"
 #include "runtime/runtime.h"
 #include "storage/app_store.h"
+#include "tools/files.h"
 
 #include <gtest/gtest.h>
 
@@ -34,24 +37,76 @@ std::string env_var(const char* name) {
 // The production transport, recording what the gateway answered.
 class RecordingTransport final : public model::ITransport {
 public:
+    struct Attempt {
+        std::string request_body;
+        std::string response;
+        std::string failure;
+        std::optional<long long> prompt_tokens;
+        std::optional<long long> cached_tokens;
+        std::optional<long long> first_data_ms;
+    };
+
     Result<HttpResponse> send(const HttpRequest& request) override {
         HttpRequest req = request;
         auto captured = std::make_shared<std::string>();
+        const auto started = std::chrono::steady_clock::now();
+        std::optional<long long> first_data_ms;
+        SseParser timing_parser;
         if (request.on_chunk) {
-            req.on_chunk = [captured, inner = request.on_chunk](std::string_view chunk) {
+            req.on_chunk = [&, captured, inner = request.on_chunk](std::string_view chunk) {
                 captured->append(chunk);
+                if (!first_data_ms) {
+                    std::vector<SseEvent> events;
+                    if (timing_parser.feed(chunk, events))
+                        for (const auto& e : events)
+                            if (!e.data.empty()) {
+                                first_data_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - started).count();
+                                break;
+                            }
+                }
                 return inner(chunk);
             };
         }
         auto r = real_.send(req);
         const std::lock_guard lock(mx);
         bodies.push_back(request.body);
+        Attempt attempt{request.body};
+        attempt.first_data_ms = first_data_ms;
         if (r) {
-            last_response = request.on_chunk ? *captured : r->body;
+            attempt.response = request.on_chunk ? *captured : r->body;
+            const auto usage = usage_from_stream(attempt.response);
+            attempt.prompt_tokens = usage.prompt_tokens;
+            attempt.cached_tokens = usage.cached_tokens;
+            last_response = attempt.response;
             last_streamed = static_cast<bool>(request.on_chunk);
             last_status = r->status;
+        } else {
+            attempt.failure = r.error().message;
         }
+        attempts.push_back(std::move(attempt));
         return r;
+    }
+    struct StreamUsage {
+        std::optional<long long> prompt_tokens;
+        std::optional<long long> cached_tokens;
+    };
+    static StreamUsage usage_from_stream(std::string_view text) {
+        SseParser parser;
+        std::vector<SseEvent> events;
+        StreamUsage result;
+        if (!parser.feed(text, events)) return result;
+        for (const auto& e : events) {
+            const auto j = json::parse(e.data, nullptr, false);
+            const auto* usage = j.is_object() ? jobj(j, "usage") : nullptr;
+            if (!usage) continue;
+            if (const auto* prompt = jobj(*usage, "prompt_tokens"); prompt && prompt->is_number_integer())
+                result.prompt_tokens = prompt->get<long long>();
+            const auto* details = jobj(*usage, "prompt_tokens_details");
+            const auto* cached = details ? jobj(*details, "cached_tokens") : nullptr;
+            if (cached && cached->is_number_integer()) result.cached_tokens = cached->get<long long>();
+        }
+        return result;
     }
     // Writes the last response to <WORKBENCH_E2E_RECORD>/<name>.sse|.json.
     void save(const std::string& name) {
@@ -64,6 +119,7 @@ public:
     }
     std::mutex mx;
     std::vector<std::string> bodies;
+    std::vector<Attempt> attempts;
     std::string last_response;
     bool last_streamed = false;
     int last_status = 0;
@@ -89,6 +145,15 @@ struct ModelE2E : ::testing::Test {
             FAIL() << roles.failure().code << ": " << roles.failure().message;
         }
     }
+    std::unique_ptr<model::ModelClient> no_retry_client() {
+        model::ModelClientConfig cfg;
+        cfg.gateway_url = [] { return e2e::env()->cp + "/llm/v1"; };
+        cfg.idle_timeout = 180s;
+        cfg.max_retries = 0;
+        cfg.max_timeout_retries = 0;
+        return std::make_unique<model::ModelClient>(cfg, *auth, transport);
+    }
+
     std::unique_ptr<model::TokenManagerAuth> auth;
     RecordingTransport transport;
     std::unique_ptr<model::ModelClient> client;
@@ -99,6 +164,135 @@ model::ChatMessage msg(const std::string& role, const std::string& content) {
     m.role = role;
     m.content = content;
     return m;
+}
+
+// Synthetic provider/cache checks. Production AgentRuntime request assembly is covered by runtime integration tests;
+// these requests deliberately control catalog revisions and source-bearing history so cache reuse is deterministic.
+std::vector<runtime::ToolDef> app_file_definitions() {
+    tools::FileToolsEnv files;
+    files.workspace = R"(C:\workspace)";
+    auto definitions = tools::file_tools(files);
+    auto app_definitions = apps::app_tools({});
+    definitions.insert(definitions.end(), std::make_move_iterator(app_definitions.begin()), std::make_move_iterator(app_definitions.end()));
+    return definitions;
+}
+
+std::vector<model::ToolSpec> select_app_file_specs(const std::vector<runtime::ToolDef>& definitions,
+                                                   const std::vector<std::string>& ids) {
+    std::vector<model::ToolSpec> out;
+    for (const auto& id : ids) {
+        const auto it = std::find_if(definitions.begin(), definitions.end(), [&](const auto& d) { return d.id == id; });
+        EXPECT_NE(it, definitions.end()) << id;
+        if (it != definitions.end()) out.push_back(runtime::wire_spec(*it, true));
+    }
+    return out;
+}
+
+std::vector<model::ToolSpec> control_core_specs() {
+    runtime::ToolDef find;
+    find.id = "find_tools";
+    find.description = "Search available tools by name and description";
+    find.risk = runtime::Risk::read;
+    runtime::ToolDef ask;
+    ask.id = "ask_user";
+    ask.description = "Ask the user a question";
+    ask.risk = runtime::Risk::read;
+    return {runtime::wire_spec(find, false), runtime::wire_spec(ask, false)};
+}
+
+model::ToolSpec unrelated_spec() {
+    runtime::ToolDef t;
+    t.id = "calendar.list";
+    t.description = "List calendar events in a date range";
+    t.risk = runtime::Risk::read;
+    return runtime::wire_spec(t, false);
+}
+
+void append_tool_call(std::vector<model::ChatMessage>& messages, const std::string& call_id, const std::string& tool,
+                      const json& arguments, const std::string& result) {
+    auto assistant = msg("assistant", "");
+    assistant.tool_calls.push_back({call_id, tool, arguments.dump()});
+    messages.push_back(std::move(assistant));
+    auto tool_result = msg("tool", result);
+    tool_result.tool_call_id = call_id;
+    messages.push_back(std::move(tool_result));
+}
+
+void append_discovery(std::vector<model::ChatMessage>& messages, const std::string& call_id, const std::string& query,
+                      const std::string& result) {
+    append_tool_call(messages, call_id, "find_tools", {{"query", query}}, result);
+}
+
+std::string app_source_chunk(int turn) {
+    constexpr size_t kBytes = 12 * 1024;
+    std::string out;
+    for (int block = 0; out.size() < kBytes; ++block) {
+        out += "\n// Stable source fixture; turn " + std::to_string(turn) + ", blocks " + std::to_string(block) + " and " +
+               std::to_string(block * 17 + turn * 31) + "\n";
+        out += "export function panel" + std::to_string(turn) + "Block" + std::to_string(block) + "() {\n";
+        out += "  const record = { turn: " + std::to_string(turn) + ", block: " + std::to_string(block) +
+               ", title: 'Regional production overview', units: [" + std::to_string(block * 101 + 7) + ", " +
+               std::to_string(block * 151 + 19) + ", " + std::to_string(block * 211 + 23) + "] };\n";
+        out += "  return `<section class=\"metric\"><h2>${record.title} ${record.turn}</h2><p>${record.units.join(' / ')}</p></section>`;\n}\n";
+    }
+    out.resize(kBytes);
+    return out;
+}
+
+std::string new_cache_series(const std::string& name) {
+    static std::atomic<unsigned> next{0};
+    const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    return name + "-" + std::to_string(millis) + "-" + std::to_string(++next);
+}
+
+struct CacheTurn {
+    long long prompt = 0;
+    long long cached = 0;
+    std::string model;
+};
+
+void print_cache_turn(const std::string& label, int turn, const CacheTurn& values, const RecordingTransport::Attempt& attempt,
+                      const std::string& run_id) {
+    std::printf("[ %s %d ] prompt=%lld cached=%lld first_data_ms=%lld run_id=%s\n", label.c_str(), turn, values.prompt,
+                values.cached, attempt.first_data_ms.value_or(-1), run_id.c_str());
+}
+
+CacheTurn cache_turn(ModelE2E& fixture, model::IChatModel& client, const model::ChatRequest& request, const std::string& label,
+                     int turn) {
+    const size_t before = fixture.transport.attempts.size();
+    auto response = client.chat(request, {});
+    if (!response.ok()) ADD_FAILURE() << label << " turn " << turn << ": " << response.failure().code << " " << response.failure().reason;
+    if (fixture.transport.attempts.size() != before + 1)
+        ADD_FAILURE() << label << " turn " << turn << ": retries or missing transport attempt";
+    if (fixture.transport.attempts.size() <= before) return {};
+    const auto& attempt = fixture.transport.attempts[before];
+    CacheTurn out;
+    if (!response.ok()) return out;
+    out.model = response->model;
+    EXPECT_FALSE(out.model.empty()) << label << " turn " << turn;
+    if (!attempt.prompt_tokens || !attempt.cached_tokens) {
+        ADD_FAILURE() << label << " turn " << turn << ": final stream usage is missing prompt or cached token counts";
+        return out;
+    }
+    out.prompt = *attempt.prompt_tokens;
+    out.cached = *attempt.cached_tokens;
+    EXPECT_EQ(out.prompt, response->usage.prompt) << label << " turn " << turn;
+    EXPECT_TRUE(attempt.first_data_ms.has_value()) << label << " turn " << turn;
+    print_cache_turn(label, turn, out, attempt, request.run_id);
+    return out;
+}
+
+model::ChatRequest cache_request(const std::string& series, int turn, const std::vector<model::ToolSpec>& specs) {
+    model::ChatRequest request;
+    request.role = model::Role::main;
+    request.run_id = series + "-turn-" + std::to_string(turn);
+    request.thread_id = series;
+    request.feature = "e2e-tool-catalog";
+    request.max_tokens = 8;
+    request.validate_tool_calls = false;  // Responses only advance the synthetic next request; no hidden repair attempt.
+    request.tools = specs;
+    request.messages = {msg("system", "Build and repair the user's small Local app carefully. Keep files complete and valid.")};
+    return request;
 }
 
 }  // namespace
@@ -222,6 +416,141 @@ TEST_F(ModelE2E, ThirtyPassagesGiveThirtyScoresInInputOrder) {
     ASSERT_EQ(r->size(), 30u);
     const auto best = std::max_element(r->begin(), r->end()) - r->begin();
     EXPECT_EQ(best, 17);  // input order: the relevant passage keeps its index
+}
+
+TEST_F(ModelE2E, AppThenFileCatalogRevisionsColdPrefillSourceHistory) {
+    const auto real = no_retry_client();
+    const auto definitions = app_file_definitions();
+    const auto app_specs = select_app_file_specs(definitions, {"apps.create", "apps.open"});
+    const auto file_specs = select_app_file_specs(definitions, {"files.read", "files.write", "files.edit"});
+    auto tools = control_core_specs();
+    const auto series = new_cache_series("catalog-app-file-before");
+
+    auto run = [&](int turn, const std::vector<model::ToolSpec>& specs, const std::vector<model::ChatMessage>& history) {
+        auto request = cache_request(series, turn, specs);
+        request.messages = history;
+        return cache_turn(*this, *real, request, "catalog-app-file-before", turn);
+    };
+    auto history = cache_request(series, 1, tools).messages;
+    history.push_back(msg("user", "Build a Local app with several production dashboard panels."));
+    const auto t1 = run(1, tools, history);
+    ASSERT_FALSE(t1.model.empty());
+
+    history.push_back(msg("assistant", "I will establish the app structure and identify the required tools."));
+    history.push_back(msg("user", "Proceed with the implementation."));
+    const auto t2 = run(2, tools, history);
+    ASSERT_FALSE(t2.model.empty());
+    EXPECT_GT(t2.cached, 0);
+
+    tools.insert(tools.end(), app_specs.begin(), app_specs.end());
+    append_discovery(history, "discover-apps", "create and open a Local app", "apps.create, apps.open (loaded)");
+    const auto t3 = run(3, tools, history);
+    ASSERT_FALSE(t3.model.empty());
+    EXPECT_LT(t3.cached, t2.cached) << "the app definitions must cross an explicit cache boundary";
+
+    append_tool_call(history, "create-app", "apps.create",
+                     {{"name", "Production dashboard"}, {"description", "Plant output"}, {"rationale", "Create the requested app"}},
+                     R"({"app":"production-dashboard","folder":"C:\\workspace\\production-dashboard"})");
+    history.push_back(msg("assistant", "The app is allocated. Drafting the first source component:" + app_source_chunk(1)));
+    const auto t4 = run(4, tools, history);
+    ASSERT_FALSE(t4.model.empty());
+    EXPECT_GT(t4.cached, t3.cached) << "the unchanged app catalog recovers reuse";
+
+    tools.insert(tools.end(), file_specs.begin(), file_specs.end());
+    append_discovery(history, "discover-files", "read write edit app source", "files.read, files.write, files.edit (loaded)");
+    history.push_back(msg("assistant", "The next component expands the dashboard:" + app_source_chunk(2)));
+    const auto t5 = run(5, tools, history);
+    ASSERT_FALSE(t5.model.empty());
+    EXPECT_LT(t5.cached, t4.cached) << "the later file definitions cold-prefill the earlier app/source history";
+
+    append_tool_call(history, "write-source", "files.write",
+                     {{"path", R"(C:\workspace\production-dashboard\public\panel.js)"}, {"content", app_source_chunk(3)},
+                      {"rationale", "Write the dashboard panel"}},
+                     "Wrote 12288 bytes.");
+    const auto t6 = run(6, tools, history);
+    ASSERT_FALSE(t6.model.empty());
+    EXPECT_GT(t6.cached, t5.cached) << "the full unchanged catalog recovers reuse";
+    for (const auto* model : {&t2.model, &t3.model, &t4.model, &t5.model, &t6.model}) EXPECT_EQ(*model, t1.model);
+}
+
+TEST_F(ModelE2E, ToolCatalogRevisionBreaksThenRecoversPrefixCache) {
+    const auto real = no_retry_client();
+    const auto definitions = app_file_definitions();
+    auto tools = select_app_file_specs(definitions, {"files.read", "files.write", "files.edit", "apps.create", "apps.open"});
+    const auto series = new_cache_series("catalog-revision");
+    auto history = cache_request(series, 1, tools).messages;
+    history.push_back(msg("user", "Create the production dashboard app."));
+    auto run = [&](int turn) {
+        auto request = cache_request(series, turn, tools);
+        request.messages = history;
+        return cache_turn(*this, *real, request, "catalog-revision", turn);
+    };
+
+    const auto t1 = run(1);
+    ASSERT_FALSE(t1.model.empty());
+    history.push_back(msg("user", "Continue with the same catalog."));
+    const auto t2 = run(2);
+    ASSERT_FALSE(t2.model.empty());
+    EXPECT_GT(t2.cached, 0);
+
+    tools.push_back(unrelated_spec());
+    append_discovery(history, "discover-calendar", "calendar events", "calendar.list (loaded)");
+    const auto t3 = run(3);
+    ASSERT_FALSE(t3.model.empty());
+    EXPECT_LT(t3.cached, t2.cached) << "the added definition must reset the prefix";
+
+    append_tool_call(history, "write-revised", "files.write",
+                     {{"path", R"(C:\workspace\app\public\revised.js)"}, {"content", app_source_chunk(1)},
+                      {"rationale", "Continue under the revised catalog"}},
+                     "Wrote 12288 bytes.");
+    const auto t4 = run(4);
+    ASSERT_FALSE(t4.model.empty());
+    EXPECT_GT(t4.cached, t3.cached) << "the revised, now stable catalog must recover";
+    append_tool_call(history, "edit-revised", "files.edit",
+                     {{"path", R"(C:\workspace\app\public\revised.js)"}, {"old_text", "panel1"}, {"new_text", app_source_chunk(2)},
+                      {"rationale", "Expand the revised app"}},
+                     "Edited revised.js.");
+    const auto t5 = run(5);
+    ASSERT_FALSE(t5.model.empty());
+    EXPECT_GE(t5.cached, t4.cached);
+    for (const auto* model : {&t2.model, &t3.model, &t4.model, &t5.model}) EXPECT_EQ(*model, t1.model);
+}
+
+TEST_F(ModelE2E, StableToolCatalogKeepsAppLikePrefixWarm) {
+    const auto real = no_retry_client();
+    const auto definitions = app_file_definitions();
+    const auto tools = select_app_file_specs(definitions, {"files.read", "files.write", "files.edit", "apps.create", "apps.open"});
+    const auto series = new_cache_series("catalog-stable");
+    auto history = cache_request(series, 1, tools).messages;
+    history.push_back(msg("user", "Build a substantial Local app from deterministic source components."));
+
+    auto first_request = cache_request(series, 1, tools);
+    first_request.messages = history;
+    const auto first = cache_turn(*this, *real, first_request, "catalog-stable", 1);
+    ASSERT_FALSE(first.model.empty());
+    CacheTurn warm;
+    CacheTurn previous = first;
+    for (int turn = 2; turn <= 30; ++turn) {
+        const bool replace = turn % 2 != 0;
+        json arguments = {{"path", replace ? R"(C:\workspace\app\server.js)" : R"(C:\workspace\app\public\panel.js)"},
+                          {replace ? "new_text" : "content", app_source_chunk(turn)},
+                          {"rationale", "Append the deterministic app source for cache acceptance"}};
+        if (replace) arguments["old_text"] = "previous panel source";
+        append_tool_call(history, "source-" + std::to_string(turn), replace ? "files.edit" : "files.write", arguments,
+                         replace ? "Edited server.js." : "Wrote 12288 bytes.");
+        auto request = cache_request(series, turn, tools);
+        request.messages = history;
+        const auto current = cache_turn(*this, *real, request, "catalog-stable", turn);
+        ASSERT_FALSE(current.model.empty()) << "turn " << turn;
+        ASSERT_GT(current.prompt, 0) << "turn " << turn;
+        EXPECT_GT(current.cached, 0) << "cached reuse is mandatory after the cold first Turn; turn " << turn;
+        EXPECT_GE(current.cached, previous.cached) << "cache counts may plateau by KV block, never regress; turn " << turn;
+        EXPECT_EQ(current.model, first.model) << "answered model must never change; turn " << turn;
+        if (turn == 2) warm = current;
+        previous = current;
+    }
+    EXPECT_GT(previous.cached, warm.cached) << "cache reuse must grow with the source history";
+    EXPECT_GE(previous.prompt, 90000) << "undersized fixture: the original timeout-scale workload is mandatory";
 }
 
 // The agent runtime on the real model: one Run that needs a tool.

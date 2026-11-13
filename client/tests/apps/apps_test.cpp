@@ -424,6 +424,96 @@ TEST(AppsBridge, ListedConfirmedReadToolsOnlyUnderPolicy) {
 
 // ---- 2.4 Tools in a Run ------------------------------------------------------------------------------------------------
 
+template <typename A, typename B>
+void expect_same_message(const A& a, const B& b) {
+    EXPECT_EQ(a.role, b.role);
+    EXPECT_EQ(a.content, b.content);
+    EXPECT_EQ(a.tool_call_id, b.tool_call_id);
+    ASSERT_EQ(a.tool_calls.size(), b.tool_calls.size());
+    for (size_t i = 0; i < a.tool_calls.size(); ++i) {
+        EXPECT_EQ(a.tool_calls[i].id, b.tool_calls[i].id);
+        EXPECT_EQ(a.tool_calls[i].tool, b.tool_calls[i].tool);
+        EXPECT_EQ(a.tool_calls[i].arguments, b.tool_calls[i].arguments);
+    }
+    ASSERT_EQ(a.images.size(), b.images.size());
+    for (size_t i = 0; i < a.images.size(); ++i) {
+        EXPECT_EQ(a.images[i].mime, b.images[i].mime);
+        EXPECT_EQ(a.images[i].data_base64, b.images[i].data_base64);
+        EXPECT_EQ(a.images[i].prepared, b.images[i].prepared);
+    }
+}
+
+// Changing the app/file constructors so these five schemas are not baseline definitions must make this test fail.
+// It catches first-call discovery detours, schema churn and changes to source-bearing message history.
+TEST(AppsTools, LocalAppBuildNeedsNoToolDiscovery) {
+    if (!node_present()) GTEST_SKIP() << "client/runtime/node is missing (dev/scripts/fetch-node-runtime.ps1)";
+    Rig r;
+    std::vector<std::string> opened;
+    AppToolsEnv te;
+    te.apps = r.apps.get();
+    te.server = r.server.get();
+    te.open_url = [&](const std::string& u) { opened.push_back(u); };
+    const auto defs = app_tools(te);
+
+    Env env;
+    const std::string data_root = narrow(r.tmp.path.wstring());
+    fs::create_directories(r.tmp.path / "workspace");
+    policy::EnforcerEnv ee;
+    ee.policy = [&r] { return r.pol; };
+    ee.workspace = narrow((r.tmp.path / "workspace").wstring());
+    ee.data_root = data_root;
+    ee.app_folders = [&r](const std::string& run) { return r.apps->folders_for(run); };
+    auto enforcer = std::make_shared<policy::PolicyEnforcer>(ee);
+    env.policy_hook = enforcer;
+    env.make_runtime();
+    for (auto d : defs) env.add_tool(d);
+    tools::FileToolsEnv fe;
+    fe.rules = [enforcer] { return enforcer->path_rules_now(); };
+    fe.workspace = ee.workspace;
+    for (auto& d : tools::file_tools(fe)) env.add_tool(d);
+    env.start();
+
+    const std::string folder = narrow((r.tmp.path / "apps" / "no-discovery").wstring());
+    const std::string page = "<!doctype html><title>No discovery</title><h1>First-call source</h1>";
+    env.model.push_calls({{"c1", "apps.create", {{"name", "No discovery"}, {"description", "First-call app"}}}});
+    env.model.push_calls({{"c2", "files.write", {{"path", folder + "\\public\\index.html"}, {"content", page}}}});
+    env.model.push_calls({{"c3", "apps.open", {{"app", "no-discovery"}}}});
+    env.model.push_text("Opened.");
+    const auto thread = env.thread();
+    const auto run = env.run(thread, "Make a Local app without discovery detours");
+    ASSERT_TRUE(env.wait(run, RunState::succeeded)) << env.rec(run).reason << "\n" << env.tool_content(run, "c1") << "\n"
+                                                      << env.tool_content(run, "c2") << "\n" << env.tool_content(run, "c3");
+
+    const auto requests = env.model.requests();
+    ASSERT_EQ(requests.size(), 4u);
+    const std::set<std::string> baseline{"apps.create", "apps.open", "files.read", "files.write", "files.edit"};
+    std::set<std::string> first_ids;
+    for (const auto& spec : requests.front().tools) first_ids.insert(spec.id);
+    for (const auto& id : baseline) EXPECT_TRUE(first_ids.count(id)) << "missing baseline definition " << id;
+    for (size_t n = 1; n < requests.size(); ++n) {
+        ASSERT_EQ(requests[n].tools.size(), requests[n - 1].tools.size()) << "catalog changed at model call " << n;
+        for (size_t t = 0; t < requests[n].tools.size(); ++t) {
+            EXPECT_EQ(requests[n].tools[t].id, requests[n - 1].tools[t].id);
+            EXPECT_EQ(requests[n].tools[t].description, requests[n - 1].tools[t].description);
+            EXPECT_EQ(requests[n].tools[t].parameters.dump(), requests[n - 1].tools[t].parameters.dump());
+        }
+        ASSERT_GT(requests[n].messages.size(), requests[n - 1].messages.size());
+        for (size_t m = 0; m < requests[n - 1].messages.size(); ++m)
+            expect_same_message(requests[n - 1].messages[m], requests[n].messages[m]);
+    }
+    for (const auto& e : env.rt->events(run)) EXPECT_NE(e.kind, "tools_loaded");
+    for (const auto& m : requests.back().messages)
+        for (const auto& call : m.tool_calls) EXPECT_NE(call.tool, "find_tools");
+
+    EXPECT_NE(env.tool_content(run, "c1").find("WORKBENCH_APP_PIPE"), std::string::npos);
+    EXPECT_EQ(env.tool_content(run, "c2").find("denied"), std::string::npos);
+    std::ifstream written(r.tmp.path / "apps" / "no-discovery" / "public" / "index.html");
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(written), {}), page);
+    ASSERT_EQ(opened.size(), 1u) << env.tool_content(run, "c3");
+    EXPECT_EQ(opened.front().rfind("http://127.0.0.1:", 0), 0u);
+    EXPECT_EQ(r.apps->running_count(), 1u);
+}
+
 TEST(AppsTools, CreateWriteOpenWithConfirmationUnderPolicyAndModeOff) {
     // apps.create and apps.open are not offered without the Node runtime (a checkout that has not fetched it).
     if (!node_present()) GTEST_SKIP() << "client/runtime/node is missing (dev/scripts/fetch-node-runtime.ps1)";
@@ -465,8 +555,6 @@ TEST(AppsTools, CreateWriteOpenWithConfirmationUnderPolicyAndModeOff) {
 
     const std::string folder = narrow((r.tmp.path / "apps" / "q3-slides").wstring());
     const std::string page = "<!doctype html><title>Q3</title><h1>Q3 results</h1>";
-    env.model.push_calls({{"f1", "find_tools", {{"query", "apps.create apps.open local app"}}}});
-    env.model.push_calls({{"f2", "find_tools", {{"query", "files.write write a file"}}}});
     env.model.push_calls({{"c1", "apps.create", {{"name", "Q3 slides"}, {"description", "Q3 results"}, {"mcp_tools", {"mcp:jira/search_issues"}}}}});
     env.model.push_calls({{"c2", "files.write", {{"path", folder + "\\public\\index.html"}, {"content", page}}}});
     env.model.push_calls({{"c3", "apps.open", {{"app", "q3-slides"}}}});
@@ -497,7 +585,6 @@ TEST(AppsTools, CreateWriteOpenWithConfirmationUnderPolicyAndModeOff) {
     }
 
     // Another Run may not write the folder; the agent workspace stays writable.
-    env.model.push_calls({{"f3", "find_tools", {{"query", "files.write write a file"}}}});
     env.model.push_calls({{"d1", "files.write", {{"path", folder + "\\server.js"}, {"content", "x"}}}});
     env.model.push_text("Done.");
     const auto t2 = env.thread();
@@ -614,8 +701,7 @@ TEST(AppsTools, WriteToAnAppFolderCompletesWhileAnotherAppStarts) {
     // The first model step waits until the test has granted the Run access to the target folder (the Run's id is known
     // only once it starts), then the write follows.
     Gate granted;
-    env.model.push_blocking(granted, calls_response({{"f1", "find_tools", {{"query", "files.write write a file"}}}}));
-    env.model.push_calls({{"d1", "files.write", {{"path", target->folder + "\\public\\index.html"}, {"content", "<h1>Updated</h1>"}}}});
+    env.model.push_blocking(granted, calls_response({{"d1", "files.write", {{"path", target->folder + "\\public\\index.html"}, {"content", "<h1>Updated</h1>"}}}}));
     env.model.push_text("Done.");
     const auto t = env.thread();
     const auto began = std::chrono::steady_clock::now();

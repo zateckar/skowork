@@ -4,6 +4,8 @@
 // model is scripted; nothing here needs a network.
 #include "api_connectors/connectors.h"
 #include "app/skill_save_tool.h"
+#include "apps/apps.h"
+#include "tools/files.h"
 #include "support/http_server.h"
 #include "support/runtime_harness.h"
 #include <sstream>
@@ -3013,6 +3015,11 @@ bool same_messages(const model::ChatMessage& a, const model::ChatMessage& b) {
         if (a.tool_calls[i].id != b.tool_calls[i].id || a.tool_calls[i].tool != b.tool_calls[i].tool ||
             a.tool_calls[i].arguments != b.tool_calls[i].arguments)
             return false;
+    if (a.images.size() != b.images.size()) return false;
+    for (size_t i = 0; i < a.images.size(); ++i)
+        if (a.images[i].mime != b.images[i].mime || a.images[i].data_base64 != b.images[i].data_base64 ||
+            a.images[i].prepared != b.images[i].prepared)
+            return false;
     return true;
 }
 
@@ -3022,6 +3029,251 @@ std::vector<std::string> offered_ids(const model::ChatRequest& r) {
     return out;
 }
 }  // namespace
+
+// A wrong default delegate initializer that consults only lazy-load history must fail this test.
+TEST(LazyToolLoading, DefaultChildRunInheritsBaselineAndLoadedTools) {
+    Env env;
+    for (const char* id : {"files.read", "files.write", "files.edit", "apps.create", "apps.open"}) {
+        auto t = make_tool(env, id, id == std::string("files.read") ? Risk::read : Risk::write_local);
+        t.core = true;
+        env.add_tool(std::move(t));
+    }
+    env.add_tool(make_tool(env, "calendar.list", Risk::read, "List calendar events"));
+    auto unavailable = make_tool(env, "unavailable.news", Risk::read);
+    unavailable.core = true;
+    unavailable.offered = [] { return false; };
+    env.add_tool(std::move(unavailable));
+    auto denied = make_tool(env, "forbidden.secret", Risk::read);
+    denied.core = true;
+    env.add_tool(std::move(denied));
+    env.policy->denied.insert("forbidden.secret");
+
+    std::set<std::string> child_tools;
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (!is_subagent(req)) return std::nullopt;
+        for (const auto& spec : req.tools) child_tools.insert(spec.id);
+        return model::ModelResult<model::ChatResponse>(text_response("child done"));
+    });
+    env.start();
+    env.model.push_calls({{"c1", "find_tools", {{"query", "calendar events"}}}});
+    env.model.push_calls({{"c2", "delegate", {{"task", "use the parent's defaults"}}}});
+    env.model.push_text("parent done");
+    const auto thread = env.thread();
+    const auto id = env.run(thread, "delegate with defaults");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded)) << env.rec(id).reason;
+    for (const char* tool : {"files.read", "files.write", "files.edit", "apps.create", "apps.open", "calendar.list"})
+        EXPECT_TRUE(child_tools.count(tool)) << "default Child Run is missing " << tool;
+    EXPECT_FALSE(child_tools.count("unavailable.news"));
+    EXPECT_FALSE(child_tools.count("forbidden.secret"));
+    EXPECT_FALSE(child_tools.count("delegate"));
+    const auto children = children_of(env, thread, id);
+    ASSERT_EQ(children.size(), 1u);
+    bool baseline_load_event = false;
+    for (const auto& e : env.rt->events(id))
+        if (e.kind == "tools_loaded")
+            for (const auto& tool : e.payload["tools"])
+                if (tool != "calendar.list") baseline_load_event = true;
+    EXPECT_FALSE(baseline_load_event) << "baseline definitions must not need discovery events";
+}
+
+TEST(LazyToolLoading, ExplicitChildRunSetStillRestrictsBaselineTools) {
+    Env env;
+    for (const char* id : {"files.read", "files.write", "files.edit", "apps.create", "apps.open"}) {
+        auto t = make_tool(env, id, id == std::string("files.read") ? Risk::read : Risk::write_local);
+        t.core = true;
+        env.add_tool(std::move(t));
+    }
+    std::set<std::string> child_tools;
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (!is_subagent(req)) return std::nullopt;
+        for (const auto& spec : req.tools) child_tools.insert(spec.id);
+        return model::ModelResult<model::ChatResponse>(text_response("restricted child done"));
+    });
+    env.start();
+    env.model.push_calls({{"c1", "delegate", {{"task", "read only"}, {"tools", json::array({"files.read"})}}}});
+    env.model.push_text("parent done");
+    const auto id = env.run(env.thread(), "delegate a restricted subset");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    EXPECT_TRUE(child_tools.count("files.read"));
+    for (const char* tool : {"files.write", "files.edit", "apps.create", "apps.open"}) EXPECT_FALSE(child_tools.count(tool));
+}
+
+TEST(LazyToolLoading, BaselineToolLoadedByOldThreadIsNotDuplicated) {
+    Env env;
+    auto legacy = make_tool(env, "files.write", Risk::write_local, "Write a file");
+    env.add_tool(legacy);
+    env.start();
+    env.model.push_calls({{"c1", "find_tools", {{"query", "write file"}}}});
+    env.model.push_text("legacy loaded");
+    const auto thread = env.thread();
+    const auto first = env.run(thread, "load files.write before baseline promotion");
+    ASSERT_TRUE(env.wait(first, RunState::succeeded));
+    bool legacy_load = false;
+    for (const auto& e : env.rt->events(first)) legacy_load = legacy_load || e.kind == "tools_loaded";
+    ASSERT_TRUE(legacy_load);
+
+    // Re-register all baseline definitions, simulating a new runtime after promotion. files.write is now core but its
+    // legacy Thread load id remains in first-load history.
+    for (const char* id : {"files.read", "files.write", "files.edit", "apps.create", "apps.open"}) {
+        if (std::string(id) != "files.write") env.add_tool(make_tool(env, id, Risk::write_local));
+        auto t = make_tool(env, id, Risk::write_local);
+        t.core = true;
+        ASSERT_TRUE(env.rt->add_tool(std::move(t)));
+    }
+    std::set<std::string> child_tools;
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (!is_subagent(req)) return std::nullopt;
+        for (const auto& spec : req.tools) child_tools.insert(spec.id);
+        return model::ModelResult<model::ChatResponse>(text_response("child done"));
+    });
+    env.model.push_calls({{"delegate", "delegate", {{"task", "use defaults"}}}});
+    env.model.push_text("continued");
+    const auto second = env.run(thread, "continue the old Thread");
+    ASSERT_TRUE(env.wait(second, RunState::succeeded));
+    const auto requests = env.model.requests();
+    ASSERT_GE(requests.size(), 2u);
+    for (const char* id : {"files.read", "files.write", "files.edit", "apps.create", "apps.open"}) {
+        EXPECT_EQ(std::count_if(requests.back().tools.begin(), requests.back().tools.end(),
+                                [&](const auto& spec) { return spec.id == id; }),
+                  1)
+            << id;
+        EXPECT_TRUE(child_tools.count(id)) << "old Thread Child Run differs from a new Thread for " << id;
+    }
+}
+
+TEST(StablePromptPrefix, AppFileCallsKeepCompleteCatalogAndMessages) {
+    Env env;
+    for (const char* id : {"files.read", "files.write", "files.edit", "apps.create", "apps.open"}) {
+        auto t = make_tool(env, id, Risk::write_local);
+        t.core = true;
+        env.add_tool(std::move(t));
+    }
+    env.start();
+    const std::vector<std::pair<std::string, std::string>> calls = {
+        {"create", "apps.create"}, {"write-1", "files.write"}, {"write-2", "files.write"}, {"edit", "files.edit"}};
+    for (size_t n = 0; n < calls.size(); ++n) {
+        json args = {{"path", "app\\component.js"}, {"content", "const panel = " + std::string((n + 1) * 128, 'x') + ";"}};
+        auto response = calls_response({{calls[n].first, calls[n].second, args}});
+        auto raw = args.dump();
+        raw.insert(1, "\"rationale\": \"build app\",  ");
+        response.tool_calls[0].raw_arguments = raw;
+        env.model.push_response(std::move(response));
+    }
+    env.model.push_text("app complete");
+    env.model.push_text("repair complete");
+    const auto thread = env.thread();
+    const auto first = env.run(thread, "build an app with several source writes");
+    ASSERT_TRUE(env.wait(first, RunState::succeeded));
+    const auto second = env.run(thread, "repair it without changing the catalog");
+    ASSERT_TRUE(env.wait(second, RunState::succeeded));
+    const auto requests = env.model.requests();
+    ASSERT_EQ(requests.size(), 6u);
+    for (size_t n = 1; n < requests.size(); ++n) {
+        ASSERT_EQ(requests[n].tools.size(), requests[n - 1].tools.size());
+        for (size_t t = 0; t < requests[n].tools.size(); ++t) {
+            EXPECT_EQ(requests[n].tools[t].id, requests[n - 1].tools[t].id);
+            EXPECT_EQ(requests[n].tools[t].description, requests[n - 1].tools[t].description);
+            EXPECT_EQ(requests[n].tools[t].parameters.dump(), requests[n - 1].tools[t].parameters.dump());
+        }
+        ASSERT_GT(requests[n].messages.size(), requests[n - 1].messages.size());
+        for (size_t m = 0; m < requests[n - 1].messages.size(); ++m)
+            EXPECT_TRUE(same_messages(requests[n - 1].messages[m], requests[n].messages[m])) << "call " << n << ", message " << m;
+    }
+    const auto create = std::find_if(requests.begin(), requests.end(), [](const auto& req) {
+        return std::any_of(req.messages.begin(), req.messages.end(), [](const auto& m) {
+            return std::any_of(m.tool_calls.begin(), m.tool_calls.end(), [](const auto& c) { return c.id == "create"; });
+        });
+    });
+    ASSERT_NE(create, requests.end());
+    const auto write = std::find_if(requests.begin(), requests.end(), [](const auto& req) {
+        return std::any_of(req.messages.begin(), req.messages.end(), [](const auto& m) {
+            return std::any_of(m.tool_calls.begin(), m.tool_calls.end(), [](const auto& c) { return c.id == "write-1"; });
+        });
+    });
+    ASSERT_NE(write, requests.end());
+    for (const auto& m : requests.back().messages)
+        for (const auto& call : m.tool_calls)
+            if (call.id == "write-1") EXPECT_EQ(call.arguments.find("\"rationale\": \"build app\",  "), 1u);
+}
+
+TEST(StablePromptPrefix, OneShotImageProjectionIsOnlyTransientDifference) {
+    Env env;
+    const std::string marker = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    ToolDef shot;
+    shot.id = "browser.screenshot";
+    shot.description = "Screenshot";
+    shot.risk = Risk::read;
+    shot.core = true;
+    shot.run = [marker](ToolContext&, const json&) {
+        auto out = ToolOutput::success("screenshot");
+        out.images.push_back({"image/png", marker, true});
+        return out;
+    };
+    env.add_tool(shot);
+    env.start();
+    env.model.push_calls({{"c1", "browser.screenshot", {}}});
+    env.model.push_calls({{"c2", "unknown.noop", {}}});
+    env.model.push_text("done");
+    const auto id = env.run(env.thread(), "look and continue");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    const auto requests = env.model.requests();
+    ASSERT_EQ(requests.size(), 3u);
+    ASSERT_EQ(requests[1].role, model::Role::vision);
+    ASSERT_EQ(requests[2].role, model::Role::main);
+    ASSERT_FALSE(requests[1].messages.back().images.empty());
+    auto canonical = requests[1].messages;
+    canonical.pop_back();  // the only transient provider-only image message
+    ASSERT_EQ(canonical.size(), requests[0].messages.size() + 2u);
+    ASSERT_GT(requests[2].messages.size(), canonical.size());
+    for (size_t m = 0; m < canonical.size(); ++m) EXPECT_TRUE(same_messages(canonical[m], requests[2].messages[m]));
+    for (const auto& m : canonical) EXPECT_TRUE(m.images.empty());
+    for (const auto& m : requests[0].messages) EXPECT_TRUE(same_messages(m, requests[1].messages[&m - requests[0].messages.data()]));
+    ASSERT_EQ(requests[1].tools.size(), requests[2].tools.size());
+    for (size_t t = 0; t < requests[1].tools.size(); ++t) {
+        EXPECT_EQ(requests[1].tools[t].id, requests[2].tools[t].id);
+        EXPECT_EQ(requests[1].tools[t].description, requests[2].tools[t].description);
+        EXPECT_EQ(requests[1].tools[t].parameters.dump(), requests[2].tools[t].parameters.dump());
+    }
+    for (const auto& m : env.rt->conversation(env.rec(id).thread_id)) EXPECT_TRUE(m.images.empty());
+}
+
+TEST(LazyToolLoading, BaselineCatalogFitsSchemaBudget) {
+    Env env;
+    env.start();
+    env.model.push_text("done");
+    const auto thread = env.thread();
+    const auto id = env.run(thread, "capture the actual reserved core schemas");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    const auto requests = env.model.requests();
+    ASSERT_EQ(requests.size(), 1u);
+
+    auto actual = requests.front().tools;
+    std::vector<model::ToolSpec> conservative;
+    for (const auto& spec : actual) {
+        ToolDef core;
+        core.id = spec.id;
+        core.description = spec.description;
+        core.parameters = spec.parameters;
+        conservative.push_back(wire_spec(core, true));
+    }
+
+    tools::FileToolsEnv file_env;
+    file_env.workspace = R"(C:\workspace)";
+    auto definitions = tools::file_tools(file_env);
+    auto app_definitions = apps::app_tools({});
+    definitions.insert(definitions.end(), std::make_move_iterator(app_definitions.begin()), std::make_move_iterator(app_definitions.end()));
+    for (const char* id : {"files.read", "files.write", "files.edit", "apps.create", "apps.open"}) {
+        const auto it = std::find_if(definitions.begin(), definitions.end(), [&](const auto& d) { return d.id == id; });
+        ASSERT_NE(it, definitions.end()) << id;
+        actual.push_back(wire_spec(*it, false));
+        conservative.push_back(wire_spec(*it, true));
+    }
+    const auto actual_tokens = estimate_tool_tokens(actual);
+    const auto conservative_tokens = estimate_tool_tokens(conservative);
+    std::printf("[ baseline schema ] actual=%zu tokens, all-rationale=%zu tokens\n", actual_tokens, conservative_tokens);
+    EXPECT_LE(actual_tokens, 4000u);
+    EXPECT_LE(conservative_tokens, 4000u);
+}
 
 TEST(StablePromptPrefix, NextTurnExtendsThePreviousRequestByteForByte) {
     std::atomic<int> minute{0};

@@ -494,6 +494,7 @@ std::vector<ToolDef> file_tools(FileToolsEnv env) {
                               {"limit", {{"type", "integer"}, {"minimum", 1}, {"description", "Number of lines to read."}}}},
                              {"path"});
     read.risk = Risk::read;
+    read.core = true;
     read.provenance = files_provenance("");
     read.resources_of = [ws](const json& a) { return read_resource(a, "path", ws); };
     read.run = [e](ToolContext& ctx, const json& a) { return read_file(*e, ctx, a); };
@@ -544,6 +545,7 @@ std::vector<ToolDef> file_tools(FileToolsEnv env) {
     write.description = "Create a file or replace its whole content with `content` (UTF-8). The folder must exist. The write is atomic.";
     write.parameters = schema({{"path", path_prop}, {"content", {{"type", "string"}}}}, {"path", "content"});
     write.risk = Risk::write_local;
+    write.core = true;
     write.resources_of = [ws](const json& a) { return std::vector<ToolResource>{{ToolResource::Kind::write_path, arg_path(a, "path", ws)}}; };
     write.run = [e](ToolContext&, const json& a) { return write_file(*e, a); };
     tools.push_back(std::move(write));
@@ -555,6 +557,7 @@ std::vector<ToolDef> file_tools(FileToolsEnv env) {
     edit.parameters = schema({{"path", path_prop}, {"old_text", {{"type", "string"}}}, {"new_text", {{"type", "string"}}}},
                              {"path", "old_text", "new_text"});
     edit.risk = Risk::write_local;
+    edit.core = true;
     edit.resources_of = [ws](const json& a) {
         const std::string p = arg_path(a, "path", ws);
         return std::vector<ToolResource>{{ToolResource::Kind::read_path, p}, {ToolResource::Kind::write_path, p}};

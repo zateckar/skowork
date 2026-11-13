@@ -221,7 +221,7 @@ if(WIN32)
     e2e/app_e2e_test.cpp
     e2e/model_e2e_test.cpp
     e2e/browser_e2e_test.cpp)
-  target_link_libraries(e2e_tests PRIVATE wb_app wb_model wb_runtime GTest::gtest_main ws2_32 iphlpapi)
+  target_link_libraries(e2e_tests PRIVATE wb_app wb_model wb_runtime wb_tools wb_apps GTest::gtest_main ws2_32 iphlpapi)
   target_compile_definitions(e2e_tests PRIVATE WORKBENCH_MCP_TEST_SERVER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../dev/mcp-test-server"
     WORKBENCH_DEV_STACK_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../dev/.stack")
   set_target_properties(e2e_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

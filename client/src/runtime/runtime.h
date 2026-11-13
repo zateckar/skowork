@@ -74,9 +74,12 @@ public:
     // Receives every event (see RunEvent). Set before start().
     void set_listener(EventListener listener);
 
-    // Registers a tool, replacing one with the same id. The ids find_tools, ask_user, read_attachment, delegate and
-    // use_skill are reserved. Tools may be added and removed while Runs are active (MCP catalog updates): the change applies from the
-    // next model call, and a call already in flight finishes with the definition it started with.
+    // Registers a tool, replacing one with the same id. ToolDef::core marks a baseline definition. Other tools become
+    // available through per-Thread lazy loading. When delegate omits its tools list, a Child Run inherits available,
+    // permitted non-reserved baseline definitions plus Thread-loaded definitions; an explicit list remains restrictive.
+    // The ids find_tools, ask_user, read_attachment, delegate and use_skill are reserved. Tools may be added and removed
+    // while Runs are active (MCP catalog updates): the change applies from the next model call, and a call already in
+    // flight finishes with the definition it started with.
     Status add_tool(ToolDef tool);
     // Withdraws a tool; returns false when there was none.
     bool remove_tool(const std::string& id);

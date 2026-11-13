@@ -217,6 +217,7 @@ context: |
   44 improve-meeting-capture-quality  [Hardening, Knowledge]
   45 keep-client-unit-tests-local     [Hardening]
   46 pin-speech-build-assets          [Hardening]
+  47 stabilize-agent-tool-catalog     [Hardening]
 
 rules:
   proposal:
