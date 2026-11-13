@@ -2,7 +2,7 @@
 // staged rollout, signed per-user bundles, policy-changed notification, simulation, diff and dispatch rules
 // (design D7, D11-D14).
 import { createHash } from 'node:crypto';
-import { SignJWT, type JWK } from 'jose';
+import { SignJWT, decodeProtectedHeader, type JWK } from 'jose';
 import type { Config } from '../config.ts';
 import type { Db } from '../db.ts';
 import { nowIso, tx } from '../db.ts';
@@ -20,6 +20,8 @@ export const GUARDRAIL_SCOPE = 'guardrail';
 export const groupScope = (name: string) => `group:${name}`;
 const GROUP_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const BUNDLE_TYP = 'skowork-policy+jwt';
+// A stored bundle is reused only in the current format; clients reject any other type.
+const reusable = (bundle: string) => decodeProtectedHeader(bundle).typ === BUNDLE_TYP;
 
 export type Actor = Pick<User, 'subject' | 'userName' | 'adminRoles'>;
 
@@ -506,7 +508,7 @@ export class PolicyService {
         category: 'policy', action: 'policy.compile-failed', outcome: 'error', subject: user.subject, userName: user.userName,
         reason: c.errors.map((e) => e.message).join('; '), details: { groups: user.groups, errors: c.errors },
       });
-      if (prev && Date.parse(prev.expires_at) > now) return { bundle: prev.bundle, version: prev.version, expires_at: prev.expires_at, stale: true };
+      if (prev && reusable(prev.bundle) && Date.parse(prev.expires_at) > now) return { bundle: prev.bundle, version: prev.version, expires_at: prev.expires_at, stale: true };
       throw new ApiError(409, 'POLICY_COMPILE_FAILED', `Your policy cannot be compiled: ${c.errors.map((e) => e.message).join('; ')}`, { errors: c.errors });
     }
     const hash = createHash('sha256')
@@ -514,7 +516,7 @@ export class PolicyService {
       .digest('hex');
     const validityMs = this.#cfg.policy.bundleValidityS * 1000;
     const scopes = JSON.stringify(c.versions);
-    if (prev && prev.content_hash === hash && now < Date.parse(prev.issued_at) + validityMs / 2) {
+    if (prev && reusable(prev.bundle) && prev.content_hash === hash && now < Date.parse(prev.issued_at) + validityMs / 2) {
       // Same content: a newly published version with identical content counts as adopted (Rollout Adoption).
       this.#db.prepare('UPDATE user_policy_versions SET scopes = ? WHERE user_name = ? COLLATE NOCASE').run(scopes, user.userName);
       return { bundle: prev.bundle, version: prev.version, expires_at: prev.expires_at, stale: false };
