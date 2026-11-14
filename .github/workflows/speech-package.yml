@@ -7,6 +7,8 @@ on:
   push:
     branches: [main]
     paths:
+      - .github/workflows/speech-package.yml
+      - dev/scripts/check-release.ps1
       - client/tools/speech-package.json
       - client/tools/speech-manifest.json
       - client/tools/speech-build-assets.json
@@ -15,6 +17,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: speech-package-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -35,7 +41,7 @@ jobs:
           $tag = "speech-package-v$($pin.version)"
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$($pin.version)" >> $env:GITHUB_OUTPUT
-          "file=SkoWork-speech-v$($pin.version)-win-x64.zip" >> $env:GITHUB_OUTPUT
+          "file=Skowork-speech-v$($pin.version)-win-x64.zip" >> $env:GITHUB_OUTPUT
           "bytes=$($pin.bytes)" >> $env:GITHUB_OUTPUT
           "sha256=$($pin.sha256)" >> $env:GITHUB_OUTPUT
       - name: Stop when the release already exists
@@ -44,10 +50,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view '${{ steps.pin.outputs.tag }}' --repo '${{ github.repository }}' *> $null
-          $exists = $LASTEXITCODE -eq 0
-          "exists=$($exists.ToString().ToLower())" >> $env:GITHUB_OUTPUT
-          if ($exists) { Write-Host "Release ${{ steps.pin.outputs.tag }} exists; it is not replaced." }
+          $exists = ./dev/scripts/check-release.ps1 -Repository '${{ github.repository }}' -Tag '${{ steps.pin.outputs.tag }}' -Asset '${{ steps.pin.outputs.file }}'
+          "exists=$exists" >> $env:GITHUB_OUTPUT
       - name: Fetch the pinned build inputs
         if: steps.exists.outputs.exists == 'false'
         shell: pwsh

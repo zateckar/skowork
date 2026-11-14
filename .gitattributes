@@ -6,3 +6,6 @@ client/tests/model/fixtures/** -text
 client/tests/fixtures/policy/** -text
 # Fuzz seeds are inputs byte for byte.
 client/fuzz/corpus/** -text
+
+# Speech package digest must be independent of runner checkout settings.
+client/tools/speech-manifest.json text eol=lf

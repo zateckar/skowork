@@ -30,9 +30,13 @@ Alternatives:
 
 ### D3: The dev pre-release and the product release carry no speech package
 
+The runtime attachment decision below is superseded by `streamline-release-pipeline`.
+
 The `dev` pre-release and the version release contain the Skowork zip, its checksum and the app runtime package. Testers and administrators take the speech package from its release, using the pinned URL and digest.
 
-### D4: The app runtime package is cached, not published once
+### D4: The app runtime package is cached, not published once (superseded)
+
+Superseded by `streamline-release-pipeline`: the runtime is independently published once per input identity.
 
 The runtime is 100 MB, and product installs need it for Local apps, so it stays in each dev and product release. `ci.yml` and `release.yml` restore `client/runtime/node` from `actions/cache`, keyed on the hash of `dev/scripts/fetch-node-runtime.ps1`. The upstream download runs only on a cache miss. The SHA-256 and signature checks stay in the script.
 

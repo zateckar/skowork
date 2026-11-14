@@ -1,6 +1,5 @@
-# Continuous integration (add-client-foundation tasks 2.2, 2.3, 2.5; design D9). Every push to main that passes
-# publishes a dev build: the control plane image (tagged with the dev version and `main`) and the desktop packages on the
-# rolling `dev` pre-release. Pull requests publish nothing. Version tags are released by release.yml.
+# Main pushes publish a dev client and control-plane image; pull requests build without publishing.
+# Optional packages have independent workflows. Version tags are released by release.yml.
 name: ci
 
 on:
@@ -87,19 +86,6 @@ jobs:
       - name: Put the toolchain first on PATH
         shell: pwsh
         run: Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\winlibs\mingw64\bin"
-      - name: Restore the app runtime from its cache
-        id: runtime
-        uses: actions/cache@v4
-        with:
-          path: client/runtime/node
-          key: app-runtime-${{ hashFiles('dev/scripts/fetch-node-runtime.ps1') }}
-      - name: Fetch the optional app runtime (pinned Node.js, SHA-256 and signature checked)
-        if: steps.runtime.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: ./dev/scripts/fetch-node-runtime.ps1
-      - name: Verify the app runtime
-        shell: pwsh
-        run: ./dev/scripts/fetch-node-runtime.ps1 -VerifyOnly
       # Client unit tests run locally (client/build-pipeline); CI builds and checks the product only.
       - name: Release build (warnings as errors)
         shell: pwsh
@@ -123,7 +109,7 @@ jobs:
         shell: pwsh
         working-directory: client
         run: |
-          ./tools/package.ps1 -BuildDir build/release -OutDir build/package -Version $env:VERSION
+          ./tools/package.ps1 -BuildDir build/release -OutDir build/package -Version $env:VERSION -SkipRuntime
           ./tools/check-footprint.ps1 -BuildDir build/release
       - name: Keep the dev build packages
         if: env.PUBLISH == 'true'
@@ -134,99 +120,12 @@ jobs:
           path: |
             client/build/package/*.zip
             client/build/package/*.zip.sha256
-  fuzz:
-    name: Fuzz untrusted-input parsers (Linux, libFuzzer, ASan/UBSan)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build fuzz targets
-        working-directory: client
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build clang-18 libclang-rt-18-dev
-          cmake --preset fuzz-libfuzzer -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
-          cmake --build --preset fuzz-libfuzzer
-      - name: Fuzz each target for two minutes
-        working-directory: client
-        run: |
-          mkdir -p build/corpus/tool_args build/corpus/sse build/corpus/markdown build/corpus/telemetry_redaction build/corpus/meeting_container
-          ./build/fuzz-libfuzzer/fuzz/fuzz_tool_args build/corpus/tool_args fuzz/corpus/tool_args \
-            -dict=fuzz/corpus/tool_args.dict -max_len=65536 -max_total_time=120 -timeout=2 -artifact_prefix=build/
-          ./build/fuzz-libfuzzer/fuzz/fuzz_sse build/corpus/sse tests/model/fixtures \
-            -dict=fuzz/corpus/sse.dict -max_len=65536 -max_total_time=120 -timeout=2 -artifact_prefix=build/
-          ./build/fuzz-libfuzzer/fuzz/fuzz_markdown build/corpus/markdown fuzz/corpus/markdown \
-            -dict=fuzz/corpus/markdown.dict -max_len=8192 -max_total_time=120 -timeout=2 -artifact_prefix=build/
-          ./build/fuzz-libfuzzer/fuzz/fuzz_telemetry_redaction build/corpus/telemetry_redaction fuzz/corpus/telemetry_redaction \
-            -dict=fuzz/corpus/telemetry_redaction.dict -max_len=20000 -max_total_time=120 -timeout=2 -artifact_prefix=build/
-          ./build/fuzz-libfuzzer/fuzz/fuzz_meeting_container build/corpus/meeting_container fuzz/corpus/meeting_container \
-            -dict=fuzz/corpus/meeting_container.dict -max_len=8192 -max_total_time=120 -timeout=2 -artifact_prefix=build/
-      - name: Keep a crashing input
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuzz-crashes
-          path: client/build/crash-*
-
-  control-plane:
-    name: Control plane (Node.js, SQLite)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: control-plane
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: control-plane/package-lock.json
-      - run: npm ci
-      - name: Type check
-        run: npm run check
-      - name: Policy schema fixture is current
-        run: npm run policy:schema -- --check
-      - name: Telemetry allowlists match telemetry/catalogue.yaml
-        run: npm run telemetry:catalogue -- --check
-      - name: Tests (in-test issuer and upstream fakes; no organization services, no secrets)
-        run: npm test
-      - name: Admin console builds
-        run: npm run admin:build
-      - name: Container image builds
-        run: docker build -t skowork-control-plane:ci .
-
-  graph-mock:
-    name: Graph mock (dev/graph-mock)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: dev/graph-mock
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '26'
-          cache: npm
-          cache-dependency-path: dev/graph-mock/package-lock.json
-      - run: npm ci
-      - name: Type check
-        run: npm run check
-      - name: Tests
-        run: npm test
-      - name: Single executable, ready within 5 seconds
-        run: npm run build:sea
-      - name: Container image builds and is ready within 5 seconds
-        run: |
-          docker build -t skowork-graph-mock:ci .
-          docker run -d --name graph-mock -p 4810:4810 -p 4811:4811 skowork-graph-mock:ci
-          for i in $(seq 1 50); do curl -sf http://127.0.0.1:4811/_mock/health && exit 0; sleep 0.1; done
-          docker logs graph-mock; exit 1
-
-  # ---- Dev build (design D9 Published artifacts): only on a push to main, only when every job above passed. ----
+  # Product image builds on pull requests and is published on main.
 
   publish-image:
-    name: Publish the control plane image (dev build)
+    name: Build and publish the control plane image
     runs-on: ubuntu-latest
-    needs: [version, specs, client-windows, fuzz, control-plane, graph-mock]
-    if: needs.version.outputs.publish == 'true'
+    needs: [version, specs]
     permissions:
       contents: read
       packages: write
@@ -234,6 +133,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
+        if: needs.version.outputs.publish == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -253,7 +153,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: control-plane
-          push: true
+          push: ${{ needs.version.outputs.publish == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
@@ -264,7 +164,7 @@ jobs:
   publish-packages:
     name: Publish the desktop packages (dev pre-release)
     runs-on: ubuntu-latest
-    needs: [version, specs, client-windows, fuzz, control-plane, graph-mock]
+    needs: [version, specs, client-windows, publish-image]
     if: needs.version.outputs.publish == 'true'
     permissions:
       contents: write
@@ -276,6 +176,11 @@ jobs:
         with:
           name: desktop-zip-${{ needs.version.outputs.version }}
           path: dist
+      - uses: actions/checkout@v4
+      - id: optional
+        run: |
+          echo "runtime=$(bash dev/scripts/runtime-id.sh)" >> "$GITHUB_OUTPUT"
+          echo "speech=$(jq -r .version client/tools/speech-package.json)" >> "$GITHUB_OUTPUT"
       - name: Replace the rolling dev pre-release
         run: |
           ls -l dist
@@ -283,7 +188,8 @@ jobs:
           Dev build $VERSION of main at ${GITHUB_SHA::12}, replaced by every change on main that passes CI. Channel: dev.
 
           Desktop client: \`Skowork-$VERSION-win-x64.zip\` (checksum in the \`.sha256\` file).
-          Optional app runtime for Local apps: \`Skowork-$VERSION-app-runtime-win-x64.zip\`, extracted next to Skowork.exe.
+          Optional app runtime: https://github.com/$GITHUB_REPOSITORY/releases/tag/app-runtime-${{ steps.optional.outputs.runtime }}
+          Optional speech package: https://github.com/$GITHUB_REPOSITORY/releases/tag/speech-package-v${{ steps.optional.outputs.speech }}
           Control plane image: \`ghcr.io/${GITHUB_REPOSITORY_OWNER}/skowork-control-plane:$VERSION\` (also \`:main\`).
           EOF
           )

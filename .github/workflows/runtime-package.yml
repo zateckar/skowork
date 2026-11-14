@@ -1,0 +1,57 @@
+name: runtime-package
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - dev/scripts/fetch-node-runtime.ps1
+      - dev/scripts/package-node-runtime.ps1
+      - dev/scripts/runtime-id.sh
+      - client/src/apps/app-host.js
+      - .github/workflows/runtime-package.yml
+permissions:
+  contents: read
+concurrency:
+  group: runtime-package-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    name: Publish pinned Node runtime
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Identify inputs
+        id: pin
+        shell: bash
+        run: |
+          id=$(bash dev/scripts/runtime-id.sh)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "tag=app-runtime-$id" >> "$GITHUB_OUTPUT"
+          echo "file=Skowork-app-runtime-$id-win-x64.zip" >> "$GITHUB_OUTPUT"
+      - name: Check for existing release
+        id: exists
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $exists = ./dev/scripts/check-release.ps1 -Repository '${{ github.repository }}' -Tag '${{ steps.pin.outputs.tag }}' -Asset '${{ steps.pin.outputs.file }}'
+          "exists=$exists" >> $env:GITHUB_OUTPUT
+      - name: Fetch verified Node runtime
+        if: steps.exists.outputs.exists == 'false'
+        shell: pwsh
+        run: ./dev/scripts/fetch-node-runtime.ps1
+      - name: Package runtime
+        if: steps.exists.outputs.exists == 'false'
+        shell: pwsh
+        run: ./dev/scripts/package-node-runtime.ps1 -OutDir client/build/runtime-package -Id '${{ steps.pin.outputs.id }}'
+      - name: Publish runtime
+        if: steps.exists.outputs.exists == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $zip = 'client/build/runtime-package/${{ steps.pin.outputs.file }}'
+          gh release create '${{ steps.pin.outputs.tag }}' "$zip" "$zip.sha256" --repo '${{ github.repository }}' --target $env:GITHUB_SHA --latest=false --title 'Node runtime ${{ steps.pin.outputs.id }}' --notes 'Optional Node runtime for Skowork Local apps; extract next to Skowork.exe.'
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime release creation failed' }

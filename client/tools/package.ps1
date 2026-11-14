@@ -7,7 +7,8 @@
 param(
     [Parameter(Mandatory)] [string] $BuildDir,
     [Parameter(Mandatory)] [string] $OutDir,
-    [Parameter(Mandatory)] [string] $Version
+    [Parameter(Mandatory)] [string] $Version,
+    [switch] $SkipRuntime
 )
 $ErrorActionPreference = 'Stop'
 $client = Resolve-Path (Join-Path $PSScriptRoot '..')
@@ -44,6 +45,8 @@ function Write-Zip([string] $From, [string] $ZipName) {
 }
 Write-Zip $stage $name
 
+
+if (-not $SkipRuntime) {
 # The optional app runtime package (add-local-apps D2): runtime\node with node.exe, its LICENSE and app-host.js, to be
 # extracted next to Skowork.exe. Built only when the build laid out node.exe (dev/scripts/fetch-node-runtime.ps1).
 $runtime = Join-Path $bin 'runtime\node'
@@ -60,4 +63,6 @@ if (Test-Path (Join-Path $runtime 'node.exe')) {
     Write-Zip $rtStage $rtName
 } else {
     Write-Host "No app runtime in ${runtime}: the app runtime package is not built"
+}
+
 }
