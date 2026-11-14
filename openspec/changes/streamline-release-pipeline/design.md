@@ -11,3 +11,5 @@ The speech release remains keyed by the explicit product pin and is never replac
 Exercise release lookup with present, absent and error responses; validate workflow syntax, strict OpenSpec and packaging with fixtures. Verify actual GitHub runs and release assets when credentials permit.
 
 The speech pin is updated to the digest of the current verified package and its actual case-sensitive asset name; the manifest checkout is fixed to LF so package bytes do not depend on Git's platform line-ending setting. The model file hashes and versions are unchanged.
+
+Product release jobs check out source before downloading the build artifact. Checkout cleans the workspace and would otherwise delete the downloaded `dist` directory.

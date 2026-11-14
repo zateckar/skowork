@@ -172,11 +172,11 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       VERSION: ${{ needs.version.outputs.version }}
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: desktop-zip-${{ needs.version.outputs.version }}
           path: dist
-      - uses: actions/checkout@v4
       - id: optional
         run: |
           echo "runtime=$(bash dev/scripts/runtime-id.sh)" >> "$GITHUB_OUTPUT"
