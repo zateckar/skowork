@@ -8,5 +8,5 @@
 
 ## 3. Verification
 - [x] 3.1 Validate release lookup, workflows, package behavior and OpenSpec.
-- [ ] 3.2 Verify GitHub Actions and published assets for the final revision.
-- [ ] 3.3 Archive after all tasks are complete.
+- [x] 3.2 Verify GitHub Actions and published assets for the final revision.
+- [x] 3.3 Archive after all tasks are complete.
