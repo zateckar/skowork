@@ -1,7 +1,7 @@
 // The structured policy editor (improve-usability: admin-console Structured Policy Editor; design D2): one control per
 // policy key, generated from the key registry the policy service serves, editing the same draft as the JSON view.
 import { useState } from 'react';
-import { useLoad } from '../ui.tsx';
+import { Dialog, Picker, useLoad } from '../ui.tsx';
 import type { FieldError } from './policy.tsx';
 
 type KeyType =
@@ -176,11 +176,45 @@ function Control({ id, def, value, tools, details, matchingTools, onChange }: { 
       }
       return <ListText id={id} value={value} onChange={onChange} />;
     case 'decision-map':
+      if (def.path === 'tools.rules' || def.path === 'unattended.rules') return <ToolRules id={id} value={value} tools={tools} details={details} matches={matchingTools} onChange={onChange} />;
       return <MapTable id={id} value={value} fixed={t.keys} values={DECISIONS}
         suggestions={def.path === 'tools.rules' || def.path === 'unattended.rules' ? tools : undefined} details={details} matches={matchingTools} onChange={onChange} />;
     case 'map':
       return <MapTable id={id} value={value} fixed={t.keys} values={t.value.kind === 'enum' ? t.value.values : undefined} onChange={onChange} />;
   }
+}
+
+function ToolRules({ id, value, tools, details, matches, onChange }: { id: string; value: unknown; tools: string[]; details: Record<string, ToolDetail>; matches: string[]; onChange: (v: unknown) => void }) {
+  const map = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, string> : {};
+  const [editing, setEditing] = useState<string | null>(null);
+  const rows = [...new Set([...Object.keys(map), ...matches])];
+  const put = (key: string, decision?: string) => {
+    const next = { ...map };
+    if (decision === undefined) delete next[key]; else next[key] = decision;
+    onChange(Object.keys(next).length ? next : undefined);
+  };
+  return <div className="map-table" id={id} data-testid={id}>
+    {rows.map((key) => <div key={key}>
+      <div className="row"><code className="map-key">{key}</code><span>{map[key] ?? 'inherited'}</span>
+        <button type="button" data-testid={`${id}-edit-${key}`} onClick={() => setEditing(key)}>{map[key] ? 'Edit' : 'Set rule'}</button>
+        {map[key] && <button type="button" data-testid={`${id}-reset-${key}`} onClick={() => put(key)}>Reset</button>}
+      </div>
+      {details[key] ? <small>{details[key].description} Owner: {details[key].owner}. Declared risk: {details[key].declared_risk}. {details[key].prerequisite} {details[key].caveat} {details[key].decision_paths?.map((path) => `policy.${path}`).join(' · ')}</small> : <small>Tool or pattern not currently known.</small>}
+    </div>)}
+    <button type="button" data-testid={`${id}-add`} onClick={() => setEditing('')}>Add rule</button>
+    {editing !== null && <Dialog id={`${id}-dialog`} title={editing ? `Edit rule ${editing}` : 'Add Tool rule'} onClose={() => setEditing(null)} onSubmit={async (form) => {
+      const pattern = (form.pattern ?? '').trim();
+      if (!/^[A-Za-z0-9_.:*\/-]{1,128}$/.test(pattern)) throw new Error('Enter a valid Tool pattern.');
+      if (!DECISIONS.includes(form.decision ?? '')) throw new Error('Choose a decision.');
+      if (editing && pattern !== editing) throw new Error('Reset the old rule before choosing a different pattern.');
+      if (!editing && Object.hasOwn(map, pattern)) throw new Error('This rule already exists; edit it instead.');
+      put(pattern, form.decision);
+    }}>
+      <label>Tool or pattern</label>
+      <Picker name="pattern" label="Tool or pattern" testid={`${id}-dialog-pattern`} options={[...new Set([...tools, 'computer.*', 'browser.*', 'mcp:*/*', '*'])].map((tool) => ({ value: tool, hint: details[tool]?.description }))} allowNew required defaultValue={editing} newHint="custom pattern" />
+      <label>Decision <select name="decision" data-testid={`${id}-dialog-decision`} defaultValue={map[editing] ?? ''} required><option value="">Choose a decision</option>{DECISIONS.map((decision) => <option key={decision}>{decision}</option>)}</select></label>
+    </Dialog>}
+  </div>;
 }
 
 /** A list of strings, one per line; the text is kept while typing so blank lines do not jump away. */

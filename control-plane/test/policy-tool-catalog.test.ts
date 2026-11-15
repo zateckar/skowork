@@ -34,6 +34,36 @@ test('literal client policy lookups have a registered key or map owner', async (
   assert.deepEqual(unregisteredPolicyLookups('policy_string("example.missing", "");', known), ['example.missing']);
 });
 
+test('desktop runtime, image, storage and battery limits have policy bindings', async () => {
+  const code = async (file: string) => (await readFile(new URL(`../../client/src/${file}`, import.meta.url), 'utf8'))
+    .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
+  const app = await code('app/app.cpp');
+  const types = await code('runtime/types.h');
+  const runtime = await code('runtime/runtime.cpp');
+  const model = await code('model/model_client.cpp');
+  for (const key of ['llm.max_images_per_request', 'storage.max_size_gb', 'ui.background_on_battery']) {
+    assert.ok(KEYS.some((entry) => entry.path === key));
+    assert.ok(app.includes(`find("${key}")`), `missing policy binding for ${key}`);
+  }
+  for (const key of ['llm.max_concurrent_runs', 'llm.max_parallel_tools', 'llm.max_tool_result_kb']) {
+    assert.ok(KEYS.some((entry) => entry.path === key));
+    assert.ok(runtime.includes(`policy_limit("${key}"`), `missing runtime limit ${key}`);
+  }
+  for (const mode of ['attended', 'unattended'])
+    for (const limit of ['model_calls', 'tool_calls', 'wall_minutes'])
+      assert.ok(KEYS.some((entry) => entry.path === `llm.run_limits.${mode}.${limit}`));
+  assert.match(types, /"llm\.run_limits\.unattended\."/);
+  assert.match(types, /"llm\.run_limits\.attended\."/);
+  for (const limit of ['model_calls', 'tool_calls', 'wall_minutes'])
+    assert.ok(types.includes(`policy_limit(prefix + "${limit}"`), `missing dynamic run limit ${limit}`);
+  assert.match(app, /rc\.policy_integer\s*=/);
+  assert.match(app, /mc\.max_images_per_request_now\s*=/);
+  assert.match(model, /cfg_\.max_images_per_request_now\(\)/);
+  assert.match(app, /gate\.set_background_on_battery\(/);
+  assert.match(app, /quota\.set_max_bytes\(/);
+  assert.match(app, /ke\.deferred\s*=\s*\[this\]\s*\{\s*return\s+quota\.indexing_paused\(\)/);
+});
+
 function unregisteredSpecReferences(source: string, known: readonly string[]): string[] {
   // Scenarios may deliberately use invalid examples; only inspect the normative requirement text here.
   const requirements = source.replace(/^#### Scenario:[\s\S]*?(?=^### |(?![\s\S]))/gm, '');

@@ -41,16 +41,18 @@ StorageUsage measure_storage(const std::filesystem::path& root) {
 
 QuotaState StorageQuota::check(const std::filesystem::path& root, const std::function<void()>& clear_caches,
                                StorageUsage& usage) {
+    const std::lock_guard lock(mx_);
     usage = measure_storage(root);
-    const auto threshold = max_bytes_ / 10 * 9;
+    const auto maximum = max_bytes_.load();
+    const auto threshold = maximum / 10 * 9;
     if (usage.total >= threshold && clear_caches) {
         clear_caches();
         usage = measure_storage(root);
     }
-    if (usage.total >= max_bytes_) state_ = QuotaState::exceeded;
+    if (usage.total >= maximum) state_ = QuotaState::exceeded;
     else if (usage.total >= threshold) state_ = QuotaState::warning;
     else state_ = QuotaState::normal;
-    return state_;
+    return state_.load();
 }
 
 }  // namespace wb

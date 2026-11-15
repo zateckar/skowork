@@ -36,6 +36,7 @@ const char* role_name(Role r) {
     case Role::menu_item: return "menu_item";
     case Role::scroll_view: return "scroll_view";
     case Role::splitter: return "splitter";
+    case Role::slider: return "slider";
     case Role::tooltip: return "tooltip";
     case Role::image: return "image";
     case Role::status_bar: return "status_bar";
@@ -660,6 +661,7 @@ bool needs_name(Role r) {
     case Role::menu:
     case Role::menu_item:
     case Role::splitter:
+    case Role::slider:
     case Role::image:
     case Role::document:
     case Role::edit:
@@ -680,7 +682,7 @@ void check(const Node& n, std::vector<std::string>& out) {
         out.push_back("focusable node '" + n.automation_id() + "' has no role");
     // A field in its own window gets its name from that window's annotation, which is set from `name` too.
     if ((exposed(n) || n.native_window) && n.parent() && needs_name(n.role) && n.name.empty()) out.push_back(label(n) + " has no name");
-    const bool acts = n.can_invoke() || n.toggle_state() >= 0 || n.expand_state() >= 0 || n.selected_state() >= 0;
+    const bool acts = n.can_invoke() || n.toggle_state() >= 0 || n.expand_state() >= 0 || n.selected_state() >= 0 || n.role == Role::slider;
     if (acts && n.enabled && !n.system_keyboard) {
         bool reachable = false;
         for (const Node* a = &n; a && !reachable; a = a->parent()) reachable = a->focusable;

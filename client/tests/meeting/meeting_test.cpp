@@ -11,6 +11,7 @@
 #include "meeting/dictation.h"
 #include "meeting/meeting_service.h"
 #include "meeting/speech_manifest.h"
+#include "meeting/speech_installer.h"
 #include "scheduler/icu_zone.h"
 #include "scheduler/scheduler.h"
 #include "support/dev_endpoints.h"
@@ -20,6 +21,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -2351,6 +2353,62 @@ TEST(DictationSherpa, CzechSpeechBecomesText) {
     EXPECT_EQ(jstr(*r, "language"), "cs");
     EXPECT_GT(text.size(), 10u);
     EXPECT_EQ(f.audio_files(), 0u);
+}
+
+// Opt-in qualification: exercise the real offline installer and a packaged worker with fixture audio, not a microphone.
+TEST(DictationSherpa, DISABLED_ImportedPackageWithPackagedWorker) {
+    const char* archive = std::getenv("SKOWORK_QUAL_SPEECH_ARCHIVE");
+    const char* worker_path = std::getenv("SKOWORK_QUAL_SPEECH_WORKER");
+    ASSERT_TRUE(archive && worker_path);
+    for (const auto* wav : {"parakeet-en.wav", "parakeet-de.wav", "parakeet-cs.wav"})
+        ASSERT_TRUE(std::filesystem::exists(stt_fixtures() / wav));
+    TempRoot scratch;
+    std::filesystem::create_directories(scratch.path);
+    WorkerHost::Options options;
+    options.worker_exe = widen(worker_path);
+    WorkerHost worker(options);
+    SpeechInstaller::Env env;
+    env.data_root = scratch.path;
+    env.source = [] {
+        SpeechSource source;
+        source.sha256 = "7f68642e69f89792936be93cbb67d186f3e1815dcaed64d8965e1a7e20bfd814";
+        return source;
+    };
+    env.probe = [&worker](const std::filesystem::path& dir) -> Status {
+        auto result = worker.call(WorkerRole::stt, "stt.probe", {{"speech_dir", path_to_utf8(dir)}});
+        return result ? Status{} : Status(result.error());
+    };
+    SpeechInstaller installer(std::move(env));
+    ASSERT_TRUE(installer.start_import(widen(archive)));
+    json status;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(4);
+    do {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        status = installer.status();
+    } while (jstr(status, "state") != "ready" && jstr(status, "state") != "failed" &&
+             std::chrono::steady_clock::now() < deadline);
+    ASSERT_EQ(jstr(status, "state"), "ready") << status.dump();
+    auto dir = active_speech_dir(scratch.path);
+    ASSERT_TRUE(dir);
+    Dictations f;
+    f.transcribe = [&worker, &dir](const json& input) {
+        json params = input;
+        params["engine"] = "sherpa-onnx";
+        params["speech_dir"] = path_to_utf8(*dir);
+        return worker.call(WorkerRole::stt, "stt.transcribe", params);
+    };
+    for (const auto& [wav, lang] : {std::pair{"parakeet-en.wav", "en"}, std::pair{"parakeet-de.wav", "de"},
+                                    std::pair{"parakeet-cs.wav", "cs"}}) {
+        f.speech = concat({silence(0.5), wav16k(wav), silence(0.5)});
+        ASSERT_TRUE(f.svc->start());
+        auto result = f.svc->stop();
+        ASSERT_TRUE(result) << result.error().message;
+        EXPECT_EQ(jstr(*result, "language"), lang);
+        EXPECT_GT(jstr(*result, "text").size(), 10u);
+        EXPECT_EQ(f.audio_files(), 0u);
+        std::printf("[ imported speech ] %s: %s\n", lang, jstr(*result, "text").c_str());
+    }
+    worker.stop_all();
 }
 
 TEST(DictationSherpa, ModelsInUnicodePathWorkInWorker) {

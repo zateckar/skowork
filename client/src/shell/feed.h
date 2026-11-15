@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "shell/model.h"
+#include "ui/generated_surface.h"
 
 namespace wb::shell {
 
@@ -60,8 +61,10 @@ struct FeedItem {
     std::string text;  // user, assistant, reasoning, activity
     std::optional<RunUsage> usage;  // activity: the Run's token totals, after it ended
     bool streaming = false;
+    bool surface_eligible = false;  // completed, durable assistant message; not an activation by itself
     // assistant: the passages the answer cites with [n], in number order (Cited Sources In The Feed)
     std::vector<Citation> sources;
+    std::vector<Citation> surface_sources;  // verified references used by eligible generated surfaces
     // tool
     std::string call_id, tool, risk, decision, reason, rationale;
     json args = json::object();
@@ -75,6 +78,9 @@ struct FeedItem {
     // stopped
     bool by_user = false;
 };
+
+// This is deliberately a Thread feed API, not part of the shared Markdown or human Chat renderer.
+std::vector<ui::GeneratedSurfaceBlock> eligible_generated_surfaces(const FeedItem& item);
 
 // Text that is streaming in, per Run, until the stored message replaces it. text_after and reasoning_after hold, per
 // Run, the sequence number of the Run's last stored event when its first streamed delta of the current model call
@@ -175,6 +181,8 @@ void settle_live(const FeedSnapshot& snap, LiveText& live);
 // The passages a text cites with [n] in its own text, outside code spans and fenced code, in number order. Numbers
 // that are not in `cited` are ignored.
 std::vector<Citation> cited_in_text(const std::string& text, const std::map<long long, Citation>& cited);
+// Resolves references only in eligible validated surfaces against the existing answer Citation registry.
+std::vector<Citation> cited_in_generated_surface(const FeedItem& item, const std::map<long long, Citation>& cited);
 
 enum class Apply { ok, refetch };
 // Applies one live event to the snapshot and the streaming text; refetch when the snapshot does not hold what the

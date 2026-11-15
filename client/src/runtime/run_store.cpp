@@ -771,6 +771,7 @@ Result<std::string> RunStore::add_attachment(const std::string& thread_id, const
 }
 
 std::optional<AttachmentInfo> RunStore::attachment(const std::string& id) {
+    if (id.starts_with("gs_")) return std::nullopt;  // internal, protected surface state is not a Tool attachment
     const std::lock_guard lock(db_.mutex());
     auto st = db_.prepare("SELECT id,thread_id,run_id,call_id,name,size,provenance,created_at FROM thread_attachments WHERE id=?1");
     st.bind(1, id);
@@ -789,6 +790,7 @@ std::optional<AttachmentInfo> RunStore::attachment(const std::string& id) {
 }
 
 Result<std::string> RunStore::read_attachment(const std::string& id, long long offset, long long length) {
+    if (id.starts_with("gs_")) return make_error("not_found", "no such attachment");
     const std::lock_guard lock(db_.mutex());
     if (offset < 0 || length < 0) return make_error("invalid_range", "offset and length must not be negative");
     auto st = db_.prepare("SELECT substr(content, ?2, ?3) FROM thread_attachments WHERE id=?1");

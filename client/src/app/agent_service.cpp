@@ -1,6 +1,7 @@
 #include "app/agent_service.h"
 
 #include "base/strings.h"
+#include "storage/generated_surface_submission.h"
 
 namespace wb {
 
@@ -86,9 +87,10 @@ Result<std::unique_ptr<AgentService>> AgentService::create(Database& db, model::
     if (!policy) policy = std::make_shared<InterimPolicy>();
     runtime::HookRegistry registry(std::move(policy));
     for (auto& h : hooks) registry.add(std::move(h));
+    const bool surfaces_enabled = config.generated_surfaces;
     auto rt = runtime::AgentRuntime::create(std::move(config), db, model, system_clock(), std::move(registry));
     if (!rt) return rt.error();
-    std::unique_ptr<AgentService> svc(new AgentService(std::move(*rt)));
+    std::unique_ptr<AgentService> svc(new AgentService(std::move(*rt), db, surfaces_enabled));
     AgentService* self = svc.get();
     svc->rt_->set_listener([self](const runtime::RunEvent& e) {
         std::function<void(const json&)> sink;
@@ -120,6 +122,84 @@ void AgentService::shutdown() {
 void AgentService::register_rpc(RpcRegistry& rpc, bool expose_on_pipe) {
     const RpcExposure ex = expose_on_pipe ? RpcExposure::ui_and_pipe : RpcExposure::ui;
     runtime::AgentRuntime& rt = *rt_;
+
+    // Surface state is a native-UI capability, never part of the developer pipe API.
+    rpc.add("surfaces.capabilities", RpcExposure::ui, [this](const json&) -> Result<json> {
+        return json{{"enabled", surfaces_enabled_}};
+    });
+    rpc.add("surfaces.open", RpcExposure::ui, [this](const json& p) -> Result<json> {
+        if (!surfaces_enabled_) return make_error("disabled", "generated surfaces are disabled");
+        const auto index = jint(p, "block_index", -1);
+        if (index < 0 || index >= 16) return make_error("invalid_surface", "invalid surface block");
+        GeneratedSurfaceStateStore state(surface_db_);
+        auto binding = state.bind_assistant(jstr(p, "thread_id"), jstr(p, "run_id"), jint(p, "event_seq"), static_cast<int>(index));
+        if (!binding) return binding.error();
+        auto saved = state.load(*binding);
+        if (!saved) return saved.error();
+        GeneratedSurfaceSubmissionStore submissions(surface_db_);
+        auto accepted = submissions.accepted(*binding);
+        if (!accepted) return accepted.error();
+        return json{{"revision", binding->revision}, {"state", saved->has_value() ? **saved : json(nullptr)}, {"accepted", *accepted}};
+    });
+    rpc.add("surfaces.save", RpcExposure::ui, [this](const json& p) -> Result<json> {
+        if (!surfaces_enabled_) return make_error("disabled", "generated surfaces are disabled");
+        const auto index = jint(p, "block_index", -1);
+        if (index < 0 || index >= 16 || !p.contains("state")) return make_error("invalid_surface", "invalid surface state");
+        GeneratedSurfaceBinding binding{jstr(p, "thread_id"), jstr(p, "run_id"), jstr(p, "revision"),
+                                        jint(p, "event_seq"), static_cast<int>(index)};
+        GeneratedSurfaceStateStore state(surface_db_);
+        if (auto result = state.save(binding, p["state"]); !result) return result.error();
+        return json{{"ok", true}};
+    });
+    rpc.add("surfaces.answer_question", RpcExposure::ui, [&rt](const json& p) -> Result<json> {
+        const auto* draft = jobj(p, "draft");
+        if (!draft) return make_error("invalid_surface_values", "Question values are required");
+        const auto* sections = jobj(p, "sections");
+        if (p.contains("sections") && !sections) return make_error("invalid_surface_action", "invalid section state");
+        auto result = rt.answer_generated_question(jstr(p, "action_id"), jstr(p, "thread_id"), jstr(p, "run_id"),
+                                                   jstr(p, "revision"), jstr(p, "token"), jstr(p, "button_id"), *draft,
+                                                   sections ? *sections : json::object());
+        if (!result) return result.error();
+        return json{{"ok", true}};
+    });
+    rpc.add("surfaces.question_open", RpcExposure::ui, [this](const json& p) -> Result<json> {
+        if (!surfaces_enabled_) return make_error("disabled", "generated surfaces are disabled");
+        GeneratedSurfaceStateStore states(surface_db_);
+        auto binding = states.bind_question(jstr(p, "thread_id"), jstr(p, "run_id"), jstr(p, "action_id"),
+                                            jstr(p, "revision"), jstr(p, "token"));
+        if (!binding) return binding.error();
+        auto saved = states.load_question(*binding);
+        if (!saved) return saved.error();
+        return json{{"state", saved->has_value() ? **saved : json(nullptr)}};
+    });
+    rpc.add("surfaces.question_save", RpcExposure::ui, [this](const json& p) -> Result<json> {
+        if (!surfaces_enabled_) return make_error("disabled", "generated surfaces are disabled");
+        if (!p.contains("state")) return make_error("invalid_surface_state", "Question state is required");
+        GeneratedSurfaceStateStore states(surface_db_);
+        auto binding = states.bind_question(jstr(p, "thread_id"), jstr(p, "run_id"), jstr(p, "action_id"),
+                                            jstr(p, "revision"), jstr(p, "token"));
+        if (!binding) return binding.error();
+        if (auto saved = states.save_question(*binding, p["state"]); !saved) return saved.error();
+        return json{{"ok", true}};
+    });
+    rpc.add("surfaces.submit", RpcExposure::ui, [&rt](const json& p) -> Result<json> {
+        const auto index = jint(p, "block_index", -1);
+        const auto* draft = jobj(p, "draft");
+        if (index < 0 || index >= 16 || !draft) return make_error("invalid_surface", "invalid surface submission");
+        const auto choice = jstr(p, "mode");
+        std::optional<runtime::MessageMode> mode;
+        if (choice == "queue") mode = runtime::MessageMode::queue;
+        else if (choice == "steer_now") mode = runtime::MessageMode::steer_now;
+        else if (!choice.empty()) return make_error("invalid_surface_action", "invalid delivery mode");
+        const auto* sections = jobj(p, "sections");
+        if (p.contains("sections") && !sections) return make_error("invalid_surface_action", "invalid section state");
+        GeneratedSurfaceBinding binding{jstr(p, "thread_id"), jstr(p, "run_id"), jstr(p, "revision"),
+                                        jint(p, "event_seq"), static_cast<int>(index)};
+        auto accepted = rt.submit_generated_surface(binding, jstr(p, "button_id"), *draft, mode,
+                                                    sections ? *sections : json::object());
+        if (!accepted) return accepted.error();
+        return json{{"queued_id", *accepted}};
+    });
 
     rpc.add("threads.create", ex, [&rt](const json& p) -> Result<json> {
         auto id = rt.create_thread(jstr(p, "title"));

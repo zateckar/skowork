@@ -16,10 +16,13 @@
 #include "shell/main_window.h"
 #include "shell/routes.h"
 #include "ui/elements.h"
+#include "ui/generated_surface_state.h"
 #include "ui/list.h"
 #include "ui/richtext.h"
 #include "ui/text16.h"
 #include "ui/window.h"
+
+namespace wb::ui { class GeneratedSaveQueue; }
 
 namespace wb::shell {
 
@@ -47,6 +50,8 @@ public:
     Shell& operator=(const Shell&) = delete;
 
     bool ok() const { return window_ != nullptr; }
+    bool has_unsaved_generated_state() const;
+    void confirm_shutdown(std::function<void(bool)> done);
     ui::Window& window() { return *window_; }
     ui::Ui& ui() { return window_->ui(); }
     std::u16string t(std::string_view key, const ui::Params& params = {}) { return ui().strings.get(key, params); }
@@ -64,6 +69,7 @@ public:
     // --- host
     using Done = std::function<void(Result<json>)>;
     void call(const std::string& method, const json& params, Done done = {});
+    std::shared_ptr<ui::GeneratedSaveQueue> generated_writer(const std::string& method, const json& identity);
     void emit(const std::string& event, const json& data);
 
     // --- state the views read
@@ -230,6 +236,7 @@ private:
     MainWindow::Options options_;
     std::function<void()> on_closed_;
     std::shared_ptr<int> alive_ = std::make_shared<int>(0);
+    std::map<std::string, std::shared_ptr<ui::GeneratedSaveQueue>> generated_writers_;
     std::unique_ptr<ui::Window> window_;
 
     Route route_;
@@ -370,6 +377,11 @@ private:
         ui::MarkdownView* markdown = nullptr;  // a streaming or stored model message
         ui::Label* text = nullptr;             // a reasoning block's text
     };
+    struct SurfaceState {
+        bool ready = false, failed = false, accepted = false;
+        std::string revision;
+        std::shared_ptr<ui::GeneratedSurfaceViewState> state;
+    };
     std::unique_ptr<ui::Node> build(const FeedItem& item, Slot& slot);
     // Work Details Visibility: the items shown (reasoning, tool cards and step activity only where details are on), a
     // plain step label for the working line, and Show details after each finished Run with hidden work.
@@ -381,6 +393,8 @@ private:
     Shell& shell_;
     std::string thread_;
     std::vector<Slot> slots_;  // parallel to the children
+    bool generated_surfaces_enabled_ = false;
+    std::map<std::string, SurfaceState> surfaces_;
     std::set<std::string> expanded_;
     std::set<std::string> details_;  // Runs whose details the user opened
     size_t rebuilt_ = 0;

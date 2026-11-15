@@ -10,9 +10,24 @@ file(READ ${SKOWORK_UI_STRINGS}/de.json SKOWORK_UI_STRINGS_DE)
 file(READ ${SKOWORK_UI_STRINGS}/en.json SKOWORK_UI_STRINGS_EN)
 configure_file(bundles.cpp.in ${CMAKE_CURRENT_BINARY_DIR}/bundles.cpp @ONLY)
 
-add_library(wb_ui_core STATIC text16.cpp markdown.cpp layout.cpp list.cpp strings.cpp ${CMAKE_CURRENT_BINARY_DIR}/bundles.cpp)
+add_library(wb_generated_surface_protocol STATIC generated_surface_protocol.cpp generated_values.cpp)
+target_include_directories(wb_generated_surface_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(wb_generated_surface_protocol PUBLIC wb_base nlohmann_json)
+skowork_warnings(wb_generated_surface_protocol)
+
+add_library(wb_ui_markup STATIC text16.cpp markdown.cpp)
+target_include_directories(wb_ui_markup PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(wb_ui_markup PUBLIC wb_base PRIVATE md4c)
+skowork_warnings(wb_ui_markup)
+
+add_library(wb_generated_surface_discovery STATIC generated_surface.cpp)
+target_include_directories(wb_generated_surface_discovery PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(wb_generated_surface_discovery PUBLIC wb_generated_surface_protocol wb_ui_markup)
+skowork_warnings(wb_generated_surface_discovery)
+
+add_library(wb_ui_core STATIC generated_table.cpp generated_chart.cpp generated_surface_state.cpp layout.cpp list.cpp strings.cpp ${CMAKE_CURRENT_BINARY_DIR}/bundles.cpp)
 target_include_directories(wb_ui_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
-target_link_libraries(wb_ui_core PUBLIC wb_base PRIVATE md4c nlohmann_json)
+target_link_libraries(wb_ui_core PUBLIC wb_base wb_generated_surface_discovery PRIVATE nlohmann_json)
 skowork_warnings(wb_ui_core)
 
 # The string bundles are checked at build time: a missing key, parameter or plural form fails the build (D9).
@@ -30,7 +45,7 @@ add_custom_command(
 add_custom_target(ui_strings_checked ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/strings.checked)
 
 if(WIN32)
-  add_library(wb_ui STATIC device.cpp theme.cpp system_language.cpp canvas.cpp elements.cpp richtext.cpp textfield.cpp uia.cpp window.cpp)
+  add_library(wb_ui STATIC device.cpp theme.cpp system_language.cpp canvas.cpp elements.cpp generated_citations.cpp generated_table_view.cpp generated_chart_view.cpp generated_diagram_view.cpp generated_slider.cpp generated_field_view.cpp generated_action_view.cpp generated_surface_view.cpp richtext.cpp textfield.cpp uia.cpp window.cpp)
   target_link_libraries(wb_ui PUBLIC wb_ui_core wb_platform wb_base d2d1 d3d11 dxgi dwrite windowscodecs dwmapi
                                uiautomationcore oleacc shcore ole32 oleaut32 shell32 user32)
   add_dependencies(wb_ui ui_strings_checked)

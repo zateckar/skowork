@@ -492,6 +492,12 @@ TEST(InboxNotifications, TogglesAndManagedSettings) {
     EXPECT_EQ(in.toast_list().size(), 1u);
     EXPECT_TRUE(in.svc->set_setting("ui.language", "cs"));
     EXPECT_FALSE(in.svc->set_setting("ui.language", "fr"));
+    EXPECT_FALSE(in.svc->settings()["ui.generated_surfaces"]["value"].get<bool>());
+    EXPECT_FALSE(in.svc->set_setting("ui.generated_surfaces", "true"));
+    ASSERT_TRUE(in.svc->set_setting("ui.generated_surfaces", true));
+    EXPECT_TRUE(in.svc->settings()["ui.generated_surfaces"]["value"].get<bool>());
+    ASSERT_TRUE(in.svc->set_setting("ui.generated_surfaces", false));
+    EXPECT_FALSE(in.svc->settings()["ui.generated_surfaces"]["value"].get<bool>());
     ASSERT_TRUE(in.svc->store().set_setting("dictation.language", "sk"));
     EXPECT_EQ(in.svc->settings()["dictation.language"]["value"], "auto");
     EXPECT_FALSE(in.svc->set_setting("dictation.language", "pl"));

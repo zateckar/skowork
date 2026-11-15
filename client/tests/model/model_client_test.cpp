@@ -656,6 +656,32 @@ TEST(ModelImages, OnlyTheNewestImagesUpToThePolicyLimitAreSent) {
     EXPECT_EQ(images, 2);
 }
 
+TEST(ModelImages, ChangedPolicyLimitsTheNextRequest) {
+    int limit = 2;
+    Rig rig([&](ModelClientConfig& c) { c.max_images_per_request_now = [&] { return limit; }; });
+    rig.gateway.push(streamed(text_stream({"one"})));
+    rig.gateway.push(streamed(text_stream({"two"})));
+    auto req = simple_request(Role::vision);
+    const std::string png = base64_encode(make_png(16, 16));
+    for (int i = 0; i < 3; ++i) {
+        ChatMessage m{"user", "image", {}, {}, {}};
+        m.images.push_back({"image/png", png, true});
+        req.messages.push_back(m);
+    }
+    ASSERT_TRUE(rig.client->chat(req, {}).ok());
+    limit = 1;
+    ASSERT_TRUE(rig.client->chat(req, {}).ok());
+    for (int request = 0; request < 2; ++request) {
+        int images = 0;
+        const json sent = rig.gateway.request(request).json_body();
+        for (const auto& m : sent["messages"])
+            if (m["content"].is_array())
+                for (const auto& part : m["content"])
+                    if (part["type"] == "image_url") ++images;
+        EXPECT_EQ(images, request == 0 ? 2 : 1);
+    }
+}
+
 TEST(ModelUsage, TotalsPerRunIncludeReasoningTokens) {
     Rig rig;
     rig.gateway.push(streamed(text_stream({"a"}, {"thinking"}, 100, 40, 25)));

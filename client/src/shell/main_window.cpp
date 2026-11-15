@@ -32,9 +32,23 @@ void MainWindow::open(const std::string& route) {
 
 void MainWindow::close() {
     if (!shell_) return;
+    // Programmatic closes must consult the same unsaved-state guard as WM_CLOSE.
+    if (shell_->window().on_close_request && !shell_->window().on_close_request()) return;
+    close_for_shutdown();
+}
+
+void MainWindow::close_for_shutdown() {
+    if (!shell_) return;
     last_route_ = shell_->route().hash;
     shell_.reset();
     if (on_closed) on_closed();
+}
+
+bool MainWindow::has_unsaved_generated_state() const { return shell_ && shell_->has_unsaved_generated_state(); }
+
+void MainWindow::confirm_shutdown(std::function<void(bool)> done) {
+    if (!shell_) return done(true);
+    shell_->confirm_shutdown(std::move(done));
 }
 
 void MainWindow::emit(const std::string& event, const json& data) {

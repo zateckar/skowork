@@ -2467,6 +2467,22 @@ TEST(Quota, WarningAndIndexingPauseAtNinetyPercent) {
     EXPECT_GE(usage.by_category["knowledge"], 400u * 1024u);
 }
 
+TEST(Quota, ChangedLimitIsUsedOnTheNextCheck) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    write_file(root->file("app.db"), 512 * 1024);
+    StorageQuota quota(1024 * 1024);
+    StorageUsage usage;
+    EXPECT_EQ(quota.check(root->root(), {}, usage), QuotaState::normal);
+    quota.set_max_bytes(512 * 1024);
+    EXPECT_EQ(quota.check(root->root(), {}, usage), QuotaState::exceeded);
+    EXPECT_TRUE(quota.indexing_paused());
+    quota.set_max_bytes(2 * 1024 * 1024);
+    EXPECT_EQ(quota.check(root->root(), {}, usage), QuotaState::normal);
+    EXPECT_FALSE(quota.indexing_paused());
+}
+
 TEST(AgentSkillRecords, RecordsCreateUpdateRemoveAndHoldNoSkillText) {
     TempRoot t;
     auto root = DataRoot::open(t.path);

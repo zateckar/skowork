@@ -572,6 +572,16 @@ void PagePane::build_settings() {
                                });
                 c->emplace<ui::Label>(shell_.ui(), shell_.t("settings.general.show_work_details_hint"), TextStyle::caption,
                                       Paint::text_secondary);
+                const json& visuals = setting("ui.generated_surfaces");
+                setting_switch(*c, "settings-generated-surfaces", shell_.t("settings.general.generated_surfaces"), jbool(visuals, "value"),
+                               jbool(visuals, "managed"), [this](bool on) {
+                                   act("settings", "settings.set", {{"key", "ui.generated_surfaces"}, {"value", on}}, [this](const json& r) {
+                                       settings_ = r;
+                                       shell_.announce(shell_.t("settings.general.generated_surfaces_hint"));
+                                   });
+                               });
+                c->emplace<ui::Label>(shell_.ui(), shell_.t("settings.general.generated_surfaces_hint"), TextStyle::caption,
+                                      Paint::text_secondary);
             }
             // Dictation language (add-dictation D5): Automatic, or one language without detection.
             if (settings_.is_object() && jbool(shell_.status().value("dictation", json::object()), "enabled")) {

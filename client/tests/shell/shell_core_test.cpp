@@ -11,6 +11,7 @@
 #include "shell/routes.h"
 #include "shell/shortcuts.h"
 #include "ui/bundles.h"
+#include "ui/generated_surface.h"
 
 using namespace wb;
 using namespace wb::shell;
@@ -106,6 +107,69 @@ std::vector<LiveRunEvent> recorded_stream() {
 }
 
 }  // namespace
+
+TEST(ShellFeed, SurfaceEligibilityRequiresCompletedStoredAssistantMessage) {
+    const std::string fenced = "```skowork-ui\n" + std::string(wb::ui::generated_surface_example()) + "\n```\n";
+    auto r = run("run_surface", "running");
+    r.events = {{1, "", "message", {{"role", "user"}, {"content", "user"}, {"surface_complete", true}}},
+                {2, "", "message", {{"role", "assistant"}, {"content", "old"}}},
+                {3, "", "message", {{"role", "assistant"}, {"content", "partial"}, {"surface_complete", false}}},
+                {4, "", "message", {{"role", "assistant"}, {"content", "complete"}, {"surface_complete", true}}},
+                {5, "", "message", {{"role", "tool"}, {"content", "tool"}, {"surface_complete", true}}}};
+    LiveText live;
+    live.text[r.id] = "streaming";
+    live.text_after[r.id] = 5;
+    const auto items = build_feed(snapshot({r}), live);
+    std::map<std::string, bool> eligible;
+    for (const auto& item : items) if (!item.text.empty()) eligible[item.text] = item.surface_eligible;
+    EXPECT_FALSE(eligible["user"]);
+    EXPECT_FALSE(eligible["old"]);
+    EXPECT_FALSE(eligible["partial"]);
+    EXPECT_TRUE(eligible["complete"]);
+    EXPECT_FALSE(eligible["streaming"]);
+    EXPECT_FALSE(eligible.contains("tool"));
+    FeedItem item;
+    item.text = fenced;
+    item.type = ItemType::assistant;
+    item.surface_eligible = true;
+    EXPECT_EQ(eligible_generated_surfaces(item).size(), 1u);
+    item.streaming = true;
+    EXPECT_TRUE(eligible_generated_surfaces(item).empty());
+    item.streaming = false;
+    item.surface_eligible = false;
+    EXPECT_TRUE(eligible_generated_surfaces(item).empty());
+    item.surface_eligible = true;
+    item.type = ItemType::user;
+    EXPECT_TRUE(eligible_generated_surfaces(item).empty());
+    item.type = ItemType::tool;
+    EXPECT_TRUE(eligible_generated_surfaces(item).empty());
+}
+
+TEST(ShellFeed, IncompleteStoredResponseRemainsReadableAndNeverActivates) {
+    const std::string fenced = "```skowork-ui\n" + std::string(wb::ui::generated_surface_example()) + "\n```\n";
+    auto r = run("run_incomplete", "cancelled");
+    r.events = {{1, "", "incomplete_message", {{"content", fenced}}}};
+    int durable_copies = 0;
+    for (const auto& item : build_feed(snapshot({r}))) if (item.text == fenced) ++durable_copies;
+    EXPECT_EQ(durable_copies, 1);
+    LiveText live;
+    live.text[r.id] = fenced;
+    live.text_after[r.id] = 0;
+    const auto items = build_feed(snapshot({r}), live);
+    int copies = 0;
+    for (const auto& item : items) {
+        if (item.text != fenced) continue;
+        ++copies;
+        EXPECT_FALSE(item.surface_eligible);
+        EXPECT_TRUE(eligible_generated_surfaces(item).empty());
+    }
+    EXPECT_EQ(copies, 1);
+    r.events[0].payload["truncated"] = true;
+    const auto capped = build_feed(snapshot({r}));
+    bool marked = false;
+    for (const auto& item : capped) if (item.text == fenced + "\n\n[...]") marked = true;
+    EXPECT_TRUE(marked);
+}
 
 TEST(ShellFeed, StreamsTextThenTheStoredMessageInItsPlace) {
     const auto stream = recorded_stream();
@@ -743,6 +807,91 @@ TEST(ShellFeedSources, AnswersWithoutUsableMarkersListNothing) {
     EXPECT_EQ(marked[0].n, 2);
     EXPECT_EQ(marked[1].n, 4);
     EXPECT_EQ(marked[2].n, 7);
+}
+
+TEST(ShellFeedSources, StructuredCitationsResolveOnlyForEligibleValidatedAssistantSurfaces) {
+    std::map<long long, Citation> cited{{1, {1, "Source", "files://source", "files", ""}}};
+    FeedItem item;
+    item.type = ItemType::assistant;
+    item.surface_eligible = true;
+    item.text = R"(```skowork-ui
+{"version":1,"id":"s","summary":"S","components":[{"type":"table","id":"t","label":"T","columns":["Value"],"rows":[[{"text":"X","citations":["1","9","9999999999999999999"]}]]}]}
+```
+)";
+    const auto sources = cited_in_generated_surface(item, cited);
+    ASSERT_EQ(sources.size(), 1u);
+    EXPECT_EQ(sources[0].n, 1);
+    item.surface_eligible = false;
+    EXPECT_TRUE(cited_in_generated_surface(item, cited).empty());
+    item.surface_eligible = true;
+    item.type = ItemType::user;
+    EXPECT_TRUE(cited_in_generated_surface(item, cited).empty());
+}
+
+TEST(ShellFeedSources, FoldRetainsVerifiedSurfaceSourcesSeparatelyFromProse) {
+    Recorder ev{"run_1"};
+    FeedSnapshot snap = snapshot({run("run_1", "running")});
+    LiveText live;
+    const std::string surface = R"(```skowork-ui
+{"version":1,"id":"s","summary":"S","components":[{"type":"paragraph","id":"p","label":"Source","content":"Fact","citations":["2","99"]}]}
+```
+)";
+    replay(snap, live,
+           {ev("tool_call", {{"call_id", "c1"}, {"tool", "knowledge.search"}, {"args", {{"query", "doc"}}},
+                             {"risk", "read"}, {"decision", "allow"}}),
+            ev("tool_result", {{"call_id", "c1"}, {"tool", "knowledge.search"}, {"ok", true}, {"content", search_body(3)}}),
+            ev("message", {{"role", "assistant"}, {"content", surface}, {"surface_complete", true}})});
+    const auto items = build_feed(snap, live);
+    const FeedItem* answer = nullptr;
+    for (const auto& item : items) if (item.type == ItemType::assistant) answer = &item;
+    ASSERT_NE(answer, nullptr);
+    EXPECT_TRUE(answer->sources.empty());
+    ASSERT_EQ(answer->surface_sources.size(), 1u);
+    EXPECT_EQ(answer->surface_sources.front().n, 2);
+}
+
+TEST(ShellFeedSources, QuestionSurfaceUsesOnlyItsOwnRunsVerifiedCitations) {
+    FeedSnapshot snap = snapshot({run("parent", "interrupted")});
+    snap.runs[0].events = {
+        {1, "", "tool_call", {{"call_id", "search"}, {"tool", "knowledge.search"}, {"args", json::object()}}},
+        {2, "", "tool_result", {{"call_id", "search"}, {"ok", true}, {"content", search_body(3)}}},
+        {3, "", "interrupt", {{"action_id", "parent-q"}}},
+        {4, "", "tool_call", {{"call_id", "delegate"}, {"tool", "delegate"}, {"args", json::object()}}},
+        {5, "", "subagent", {{"call_id", "delegate"}, {"child_run_id", "child"}}},
+    };
+    RunInfo child = run("child", "interrupted");
+    child.parent_run_id = "parent";
+    child.events = {
+        {1, "", "tool_call", {{"call_id", "search"}, {"tool", "knowledge.search"}, {"args", json::object()}}},
+        {2, "", "tool_result", {{"call_id", "search"}, {"ok", true}, {"content", search_body(1)}}},
+    };
+    snap.subagents = {child};
+    const auto form = json::parse(R"({"version":1,"id":"form","summary":"S","components":[{"type":"paragraph","id":"fact","label":"Fact","content":"Detail","citations":["1","2","99"]},{"type":"button","id":"send","label":"Send"}]})");
+    ActionItem parent;
+    parent.id = "parent-q";
+    parent.thread_id = T;
+    parent.run_id = "parent";
+    parent.kind = "question";
+    parent.payload = {{"prompt", "Choose"}, {"surface", form}};
+    ActionItem sub = parent;
+    sub.id = "child-q";
+    sub.run_id = "child";
+    snap.actions = {parent, sub};
+    const auto items = build_feed(snap);
+    int checked = 0;
+    for (const auto& item : items) {
+        if (item.type != ItemType::action) continue;
+        if (item.action.id == "parent-q") {
+            ++checked;
+            ASSERT_EQ(item.surface_sources.size(), 2u);
+            EXPECT_EQ(item.surface_sources[1].n, 2);
+        } else if (item.action.id == "child-q") {
+            ++checked;
+            ASSERT_EQ(item.surface_sources.size(), 1u);
+            EXPECT_EQ(item.surface_sources[0].n, 1);
+        }
+    }
+    EXPECT_EQ(checked, 2);
 }
 
 // Live Feed Updates: a stream of 2,000 deltas in 20 seconds repaints at most 30 times in any second, and the stored events

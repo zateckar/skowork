@@ -1,9 +1,14 @@
 #include "runtime/runtime.h"
 
 #include "base/json_schema.h"
+#include "base/encoding.h"
 #include "base/strings.h"
+#include "platform/crypto.h"
 #include "platform/log.h"
 #include "runtime/context.h"
+#include "storage/generated_surface_submission.h"
+#include "ui/generated_surface.h"
+#include "ui/generated_values.h"
 
 #include <algorithm>
 #include <atomic>
@@ -104,7 +109,27 @@ ToolDef make_find_tools() {
     return t;  // executed by the runtime itself
 }
 
-ToolDef make_ask_user() {
+size_t question_buttons(const json& components) {
+    size_t count = 0;
+    for (const auto& component : components) {
+        const auto type = jstr(component, "type");
+        if (type == "button") ++count;
+        if (type == "section" || type == "card") count += question_buttons(component["components"]);
+    }
+    return count;
+}
+
+const json* question_button(const json& components, const std::string& id) {
+    for (const auto& component : components) {
+        const auto type = jstr(component, "type");
+        if (type == "button" && jstr(component, "id") == id) return &component;
+        if (type == "section" || type == "card")
+            if (const auto* found = question_button(component["components"], id)) return found;
+    }
+    return nullptr;
+}
+
+ToolDef make_ask_user(bool surfaces_enabled) {
     ToolDef t;
     t.id = kAskUser;
     t.description = "Ask the user a question and wait for the answer. Use it when you need a decision or missing information.";
@@ -112,10 +137,12 @@ ToolDef make_ask_user() {
         "question":{"type":"string","minLength":1},
         "choices":{"type":"array","items":{"type":"string","minLength":1},"maxItems":8,"description":"Optional answers to suggest; the user may also answer in their own words"}},
         "required":["question"]})");
+    if (surfaces_enabled)
+        t.parameters["properties"]["form"] = {{"type", "object"}, {"description", "Optional version 1 generated UI form with exactly one submit button."}};
     t.risk = Risk::read;
     t.core = true;
     t.own_data = true;  // reads or asks within the client only (fail-closed reads)
-    t.run = [](ToolContext&, const json& args) {
+    t.run = [surfaces_enabled](ToolContext&, const json& args) {
         QuestionRequest q;
         q.prompt = jstr(args, "question");
         if (const json* c = jobj(args, "choices"); c && c->is_array())
@@ -124,6 +151,17 @@ ToolDef make_ask_user() {
         // The model's choices are suggestions; the user may always answer in their own words (Ask User Tool).
         // Only tools and client features raise Questions with fixed choices (Client-Raised Questions).
         q.free_text = true;
+        if (args.contains("form")) {
+            if (!surfaces_enabled) return ToolOutput::failure("Generated Question forms are disabled.");
+            auto form = ui::parse_generated_surface(args["form"].dump());
+            if (!form || question_buttons((*form)["components"]) != 1)
+                return ToolOutput::failure("Invalid generated Question form: exactly one button is required.");
+            q.surface_revision = hex_encode(sha256(form->dump()));
+            q.surface_token = random_urlsafe(24);
+            if (q.surface_revision.empty() || q.surface_token.empty())
+                return ToolOutput::failure("Unable to protect the generated Question form.");
+            q.surface = std::move(*form);
+        }
         return ToolOutput::ask(std::move(q));
     };
     return t;
@@ -221,7 +259,7 @@ private:
         return base_active_ms_ +
                std::chrono::duration_cast<std::chrono::milliseconds>(rt_.clock_.now() - active_since_).count();
     }
-    [[nodiscard]] const RunLimits& limits() const { return rt_.limits_for(rec_.unattended); }
+    [[nodiscard]] RunLimits limits() const { return rt_.limits_for(rec_.unattended); }
     void emit(const std::string& kind, json data, long long seq = 0) { rt_.emit(kind, id_, rec_.thread_id, std::move(data), seq); }
 
     bool set_state(RunState to, const std::string& reason, json extra = nullptr) {
@@ -396,6 +434,8 @@ private:
             if (!child_instructions_.empty()) system.content += "\n\nInstructions:\n" + child_instructions_;
         } else {
             system.content = rt_.cfg_.system_prompt;
+            if (rt_.cfg_.generated_surfaces)
+                system.content += "\n\n" + std::string(ui::generated_surface_instructions());
             if (!skills_.empty()) {
                 system.content += "\n\nSkills you can run with use_skill when the user's request matches one:";
                 for (const auto& s : skills_) system.content += "\n- " + s.name + ": " + s.description;
@@ -620,10 +660,24 @@ private:
             end(RunState::failed, why, {{"error", error}});
             return false;
         }
+        std::string incomplete_text;
+        bool incomplete_truncated = false;
+        constexpr size_t kIncompleteLimit = 1024 * 1024;
         model::ChatSink sink;
-        sink.on_text = [&](std::string_view t) { emit("text.delta", {{"text", std::string(t)}}); };
+        sink.on_text = [&](std::string_view t) {
+            emit("text.delta", {{"text", std::string(t)}});
+            if (!rt_.cfg_.generated_surfaces || incomplete_truncated) return;
+            size_t take = std::min(kIncompleteLimit - incomplete_text.size(), t.size());
+            // Model chunks are UTF-8; never cut through a multibyte character at the storage boundary.
+            if (take < t.size())
+                while (take && (static_cast<unsigned char>(t[take]) & 0xc0) == 0x80) --take;
+            if (take) incomplete_text.append(t.data(), take);
+            incomplete_truncated = take < t.size();
+        };
         sink.on_reasoning = [&](std::string_view t) { emit("reasoning.delta", {{"text", std::string(t)}}); };
         sink.on_retry = [&](int attempt, const model::ModelFailure& f, std::chrono::milliseconds delay) {
+            incomplete_text.clear();
+            incomplete_truncated = false;
             emit("discard", json::object());
             activity("Model request failed (" + failure_reason(f) + "); retry " + std::to_string(attempt) + " in " +
                          std::to_string((delay.count() + 500) / 1000) + " s",
@@ -631,8 +685,15 @@ private:
         };
         auto result = rt_.model_.chat(req, sink);
 
-        if (stopped()) return false;
+        auto keep_incomplete = [&] {
+            if (incomplete_text.empty()) return;
+            const json payload = {{"content", incomplete_text}, {"truncated", incomplete_truncated}};
+            if (auto seq = store_.append_event(id_, "incomplete_message", payload)) emit("incomplete_message", payload, *seq);
+        };
+
+        if (stopped()) { keep_incomplete(); return false; }
         if (control_->cancelled()) {
+            keep_incomplete();
             end_cancelled();
             return false;
         }
@@ -644,6 +705,7 @@ private:
                 emit("discard", json::object());
                 if (compact_now("the model reported that the request is too long")) return true;
             }
+            keep_incomplete();
             auto seq = store_.append_event(id_, "error", failure_json(f));
             emit("error", failure_json(f), seq ? *seq : 0);
             end(RunState::failed, failure_reason(f), {{"error", failure_json(f)}});
@@ -674,6 +736,8 @@ private:
             assistant.tool_calls.push_back({c.id, c.tool, args});
         }
         json payload = message_to_event(assistant);
+        // A surface may only activate after the model completed this message, never a truncated stream.
+        payload["surface_complete"] = resp.finish_reason == "stop" || resp.finish_reason == "tool_calls";
         for (size_t i = 0; i < resp.tool_calls.size(); ++i) {
             payload["tool_calls"][i]["valid"] = resp.tool_calls[i].valid;
             payload["tool_calls"][i]["error"] = resp.tool_calls[i].validation_error;
@@ -821,7 +885,7 @@ private:
             const long long size = jint(*a, "size");
             const long long shown = jint(*a, "preview_bytes");
             body = "[The result is " + std::to_string(size) + " bytes, more than the limit of " +
-                   std::to_string(rt_.cfg_.max_tool_result_kb) + " KB. It is stored as attachment " + id + ". Its first " +
+                   std::to_string(rt_.cfg_.policy_limit("llm.max_tool_result_kb", rt_.cfg_.max_tool_result_kb)) + " KB. It is stored as attachment " + id + ". Its first " +
                    std::to_string(shown) + " bytes follow; read further parts with read_attachment (attachment_id \"" + id +
                    "\", offset " + std::to_string(shown) + ").]\n" + body;
         }
@@ -1183,7 +1247,7 @@ private:
                 run_one(work[i]);
             }
         };
-        const size_t threads = std::min<size_t>(work.size(), static_cast<size_t>(std::max(1, rt_.cfg_.max_parallel_tools)));
+        const size_t threads = std::min<size_t>(work.size(), static_cast<size_t>(std::max(1, rt_.cfg_.policy_limit("llm.max_parallel_tools", rt_.cfg_.max_parallel_tools))));
         std::vector<std::thread> pool;
         for (size_t t = 1; t < threads; ++t) pool.emplace_back(worker);
         worker();
@@ -1195,6 +1259,11 @@ private:
                 const QuestionRequest& q = *w.out.question;
                 json payload = {{"prompt", q.prompt}, {"choices", q.choices}, {"free_text", q.free_text}, {"tool", w.info.tool},
                                 {"args", w.info.args}, {"state", q.state}};
+                if (!q.surface.is_null()) {
+                    payload["surface"] = q.surface;
+                    payload["surface_revision"] = q.surface_revision;
+                    payload["surface_token"] = q.surface_token;
+                }
                 raise(w.call_id, "question", payload);
                 continue;
             }
@@ -1203,16 +1272,16 @@ private:
             // Large Tool Results (design D4a): above the cap the model gets a preview and an attachment reference.
             std::string content = std::move(w.out.content);
             json attachment = nullptr;
-            const size_t cap = static_cast<size_t>(std::max(1, rt_.cfg_.max_tool_result_kb)) * 1024;
+            const size_t cap = static_cast<size_t>(std::max(1, rt_.cfg_.policy_limit("llm.max_tool_result_kb", rt_.cfg_.max_tool_result_kb))) * 1024;
             if (content.size() > cap) {
-                const std::string_view preview = utf8_prefix(content, static_cast<size_t>(std::max(256, rt_.cfg_.tool_result_preview_bytes)));
+                const std::string_view preview = utf8_prefix(content, std::min(cap, static_cast<size_t>(std::max(256, rt_.cfg_.tool_result_preview_bytes))));
                 auto id = store_.add_attachment(rec_.thread_id, id_, w.call_id, w.info.tool, content, provenance_json(prov));
                 if (id) {
                     attachment = {{"id", *id}, {"size", content.size()}, {"preview_bytes", preview.size()}};
                     content = std::string(preview);
                 } else {
                     content = std::string(utf8_prefix(content, cap)) + "\n[The result was cut at " +
-                              std::to_string(rt_.cfg_.max_tool_result_kb) + " KB; the rest could not be stored.]";
+                              std::to_string(cap / 1024) + " KB; the rest could not be stored.]";
                 }
             }
             // Image Tool Results: the images go to the next model request only; the stored result notes them.
@@ -1396,7 +1465,7 @@ private:
         const auto info = store_.attachment(id);
         if (!info || info->thread_id != rec_.thread_id) return ToolOutput::failure("No attachment " + id + " in this Thread.");
         // The part plus its header stays below the cap, so it is never offloaded again.
-        const long long max_len = std::max<long long>(256, static_cast<long long>(rt_.cfg_.max_tool_result_kb) * 1024 - 256);
+        const long long max_len = std::max<long long>(256, static_cast<long long>(rt_.cfg_.policy_limit("llm.max_tool_result_kb", rt_.cfg_.max_tool_result_kb)) * 1024 - 256);
         const long long offset = std::clamp<long long>(jint(args, "offset", 0), 0, info->size);
         const long long length = std::clamp<long long>(jint(args, "length", max_len), 1, max_len);
         auto bytes = store_.read_attachment(id, offset, length);
@@ -1635,7 +1704,7 @@ Result<std::unique_ptr<AgentRuntime>> AgentRuntime::create(RuntimeConfig config,
 AgentRuntime::AgentRuntime(RuntimeConfig config, Database& db, model::IChatModel& model, const Clock& clock, HookRegistry hooks)
     : cfg_(std::move(config)), db_(db), model_(model), clock_(clock), hooks_(std::move(hooks)), store_(db, clock) {
     tools_.add(make_find_tools());
-    tools_.add(make_ask_user());
+    tools_.add(make_ask_user(cfg_.generated_surfaces));
     tools_.add(make_read_attachment());
     tools_.add(make_delegate());
     tools_.add(make_use_skill());
@@ -2096,6 +2165,23 @@ Result<SendResult> AgentRuntime::send_message(const std::string& thread_id, cons
     return SendResult{"", *id};
 }
 
+Result<long long> AgentRuntime::submit_generated_surface(const GeneratedSurfaceBinding& binding, const std::string& button_id,
+                                                         const json& draft, std::optional<MessageMode> mode, const json& sections) {
+    const std::lock_guard lock(mx_);
+    if (!cfg_.generated_surfaces) return make_error("disabled", "generated surfaces are disabled");
+    if (!store_.thread_exists(binding.thread_id)) return make_error("not_found", "no such Thread");
+    GeneratedSurfaceSubmissionStore submissions(db_);
+    auto ticket = submissions.prepare(binding, button_id);
+    if (!ticket) return ticket.error();
+    const bool busy = store_.active_run(binding.thread_id).has_value();
+    const std::string delivery = busy && !mode ? "" : mode && *mode == MessageMode::steer_now ? "steer_now" : "queue";
+    auto accepted = submissions.submit(*ticket, draft, delivery, !(cfg_.offline && cfg_.offline()), sections);
+    if (!accepted) return accepted.error();
+    emit("queue.changed", "", binding.thread_id, json::object());
+    if (started_ && !stopping_ && !revoked_) (void)start_oldest_locked(binding.thread_id);
+    return *accepted;
+}
+
 bool AgentRuntime::start_oldest_locked(const std::string& thread_id) {
     if (store_.active_run(thread_id)) return false;
     // The gate first: a message is marked delivered only when its Run can start, so none is lost while offline.
@@ -2139,6 +2225,11 @@ std::vector<QueuedMessage> AgentRuntime::queued_messages(const std::string& thre
 
 // ---- slots ----------------------------------------------------------------------------------------------------------
 
+void AgentRuntime::policy_changed() {
+    const std::lock_guard lock(mx_);
+    pump_locked();
+}
+
 void AgentRuntime::pump_locked() {
     if (!started_ || stopping_) return;
     // Join threads that have finished (never the calling one).
@@ -2158,7 +2249,7 @@ void AgentRuntime::pump_locked() {
         for (const auto& [id, a] : active_) n += a.unattended ? 1 : 0;
         return n >= slots;
     };
-    while (active_.size() < static_cast<size_t>(cfg_.max_concurrent_runs)) {
+    while (active_.size() < static_cast<size_t>(std::max(1, cfg_.policy_limit("llm.max_concurrent_runs", cfg_.max_concurrent_runs)))) {
         std::string next;
         bool next_unattended = false;
         while (!resume_ready_.empty() && next.empty()) {
@@ -2374,6 +2465,56 @@ Status AgentRuntime::resolve_approval(const std::string& action_id, const Approv
         emit("activity", action->run_id, action->thread_id, payload, aseq ? *aseq : 0);
     }
     maybe_ready(action->run_id);
+    return {};
+}
+
+Status AgentRuntime::answer_generated_question(const std::string& action_id, const std::string& thread_id, const std::string& run_id,
+                                                const std::string& revision, const std::string& token, const std::string& button_id,
+                                                const json& draft, const json& sections) {
+    if (!cfg_.generated_surfaces) return make_error("disabled", "generated surfaces are disabled");
+    bool accepted = false;
+    long long sequence = 0;
+    json resolution;
+    auto status = db_.transaction([&]() -> Status {
+        const auto action = store_.action(action_id);
+        if (!action) return make_error("not_found", "no such Action item");
+        if (action->kind != "question") return make_error("wrong_kind", "the Action item is not a Question");
+        if (thread_id.empty() || run_id.empty() || action->thread_id != thread_id || action->run_id != run_id ||
+            revision.empty() || revision != jstr(action->payload, "surface_revision") || token.empty() ||
+            token != jstr(action->payload, "surface_token"))
+            return make_error("stale_surface", "Question identity or revision does not match");
+        if (!action->open()) {
+            if (jstr(action->resolution, "surface_token") == token && jstr(action->resolution, "kind") == "answer") return {};
+            return make_error("already_resolved", "the Question was already resolved");
+        }
+        const auto run = store_.run(run_id);
+        if (!run || run->thread_id != thread_id || is_terminal(run->state))
+            return make_error("stale_surface", "the Question's Run is no longer active");
+        const auto* form = jobj(action->payload, "surface");
+        if (!form) return make_error("invalid_surface", "the Question has no form");
+        const auto valid = ui::parse_generated_surface(form->dump());
+        if (!valid || hex_encode(sha256(valid->dump())) != revision || question_buttons((*valid)["components"]) != 1)
+            return make_error("invalid_surface", "the Question form is invalid");
+        const auto* button = question_button((*valid)["components"], button_id);
+        if (!button || !ui::generated_surface_sections_allow_action(*valid, sections, button_id))
+            return make_error("invalid_surface_action", "the Question controls must be visible");
+        const auto fields = ui::generated_surface_values(*valid, draft);
+        if (!fields) return make_error("invalid_surface_values", "Question values are invalid");
+        std::string answer = jstr(*button, "label");
+        for (const auto& field : *fields) answer += "\n" + field.label + ": " + field.value.dump();
+        resolution = {{"kind", "answer"}, {"answer", answer}, {"surface_token", token}};
+        if (auto s = store_.resolve_action(action_id, resolution); !s) return s;
+        auto event = store_.append_event(run_id, "resolution", {{"action_id", action_id}, {"resolution", resolution}});
+        if (!event) return event.error();
+        sequence = *event;
+        accepted = true;
+        return {};
+    });
+    if (!status) return status;
+    if (accepted) {
+        emit("action.resolved", run_id, thread_id, {{"id", action_id}, {"resolution", resolution}}, sequence);
+        maybe_ready(run_id);
+    }
     return {};
 }
 

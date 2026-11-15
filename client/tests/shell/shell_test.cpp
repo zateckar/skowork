@@ -30,9 +30,12 @@
 #include "host/tray.h"
 #include "shell/main_window.h"
 #include "shell/shell.h"
+#include "storage/generated_surface_submission.h"
 #include "skills/catalog.h"
 #include "ui/richtext.h"
+#include "ui/generated_save_queue.h"
 #include "ui/window.h"
+#include "model/model_client.h"
 
 namespace {
 
@@ -43,8 +46,9 @@ constexpr UINT kRunSync = WM_APP, kRunPosted = WM_APP + 1;
 // The window on its own thread with a message loop, wired to an RpcRegistry like the app wires it.
 class ShellThread {
 public:
-    ShellThread(RpcRegistry& rpc, int width, std::function<long long()> now, bool show = false, bool async_rpc = false) {
-        thread_ = std::thread([this, &rpc, width, now, show, async_rpc] {
+    ShellThread(RpcRegistry& rpc, int width, std::function<long long()> now, bool show = false, bool async_rpc = false,
+                std::string lang = "en", bool high_contrast = false) {
+        thread_ = std::thread([this, &rpc, width, now, show, async_rpc, lang, high_contrast] {
             ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
             // The app is per-monitor DPI aware (its manifest); this test process is not.
             ::SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -80,11 +84,11 @@ public:
                     workers_.emplace_back(std::move(f));
                 }, [this](std::function<void()> f) { post(std::move(f)); });
             shell::MainWindow::Options o;
-            o.lang = "en";
+            o.lang = lang;
             o.width = width;
             o.height = 730;  // the client area of the golden images
             o.show = show;  // shown only to measure: an in-process UI Automation client must not get its events
-            o.theme = ui::make_theme(false, false, kSys);
+            o.theme = ui::make_theme(false, high_contrast, kSys);
             o.post = [this](std::function<void()> f) { post(std::move(f)); };
             o.now = now;
             o.pick_files = [this] { return picks; };
@@ -850,6 +854,421 @@ TEST(ShellFeed, StreamsMarkdownWithReasoningAndCollapsedToolCards) {
     std::vector<std::string> problems;
     w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
     EXPECT_TRUE(problems.empty()) << problems.front();
+}
+
+TEST(ShellFeed, EnabledCompletedSurfaceRendersNativeTableAndKeepsExplorationLocal) {
+    Fixture f;
+    f.rpc.add("surfaces.capabilities", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"enabled", true}}; });
+    f.rpc.add("surfaces.open", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"revision", "test-revision"}, {"state", nullptr}}; });
+    f.rpc.add("surfaces.save", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"ok", true}}; });
+    const auto t = f.in.env.thread();
+    f.in.run_to_end(t, "compare", R"(Summary.
+
+```skowork-ui
+{"version":1,"id":"comparison","summary":"Costs","components":[{"type":"table","id":"costs","label":"Costs","columns":["Name","Hours"],"rows":[["Alpha","12"],["Beta","18"]]}]}
+```
+)");
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + t); });
+    ASSERT_TRUE(w.until([&] {
+        std::function<bool(ui::Node&)> find = [&](ui::Node& node) {
+            if (node.automation_id() == "costs-sort-0") return true;
+            for (const auto& child : node.children()) if (find(*child)) return true;
+            return false;
+        };
+        return find(w.main().window()->tree().root());
+    }));
+    const auto before = f.in.env.model.request_count();
+    EXPECT_TRUE(w.invoke("costs-sort-0"));
+    EXPECT_EQ(f.in.env.model.request_count(), before);
+}
+
+TEST(ShellFeed, GeneratedVisualsAreAccessibleInLocalizedHighContrastThreads) {
+    Fixture f;
+    f.rpc.add("surfaces.capabilities", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"enabled", true}}; });
+    f.rpc.add("surfaces.open", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"revision", "test-revision"}, {"state", nullptr}}; });
+    f.rpc.add("surfaces.save", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"ok", true}}; });
+    const auto thread = f.in.env.thread();
+    f.in.run_to_end(thread, "compare", R"(```skowork-ui
+{"version":1,"id":"s","summary":"Summary","components":[{"type":"line","id":"chart","label":"Trend","unit":"units","points":[{"label":"Q1","value":4}]},{"type":"diagram","id":"graph","label":"Plan","nodes":[{"id":"a","label":"Alpha"},{"id":"b","label":"Beta"}],"edges":[{"from":"a","to":"b"}]},{"type":"switch","id":"notify","label":"Notify","value":false},{"type":"button","id":"go","label":"Continue"}]}
+```
+)");
+    for (const auto& [lang, confirm] : std::vector<std::pair<std::string, std::wstring>>{
+             {"en", L"Confirm"}, {"cs", L"Potvrdit"}, {"de", L"Best\u00e4tigen"}}) {
+        SCOPED_TRACE(lang);
+        ASSERT_TRUE(f.in.svc->set_setting("ui.language", lang));
+        ShellThread w(f.rpc, 1300, [&f] { return f.now(); }, false, false, lang, true);
+        w.run([&] { w.main().open("#/threads/" + thread); });
+        ASSERT_TRUE(w.until([&] {
+            std::function<bool(ui::Node&)> find = [&](ui::Node& node) {
+                if (node.automation_id() == "go-review") return true;
+                for (const auto& child : node.children()) if (find(*child)) return true;
+                return false;
+            };
+            return find(w.main().window()->tree().root());
+        }));
+        Uia uia;
+        auto nodes = uia.by_id(w.hwnd());
+        ASSERT_TRUE(has(nodes, L"chart-plot"));
+        EXPECT_EQ(nodes[L"chart-plot"].type, UIA_ImageControlTypeId);
+        ASSERT_TRUE(has(nodes, L"graph"));
+        EXPECT_EQ(nodes[L"graph"].type, UIA_GroupControlTypeId);
+        ASSERT_TRUE(has(nodes, L"notify-input"));
+        EXPECT_EQ(nodes[L"notify-input"].type, UIA_CheckBoxControlTypeId);
+        ASSERT_TRUE(has(nodes, L"go-review"));
+        EXPECT_EQ(nodes[L"go-review"].type, UIA_ButtonControlTypeId);
+        bool point = false, edge = false;
+        for (const auto& node : uia.elements(w.hwnd())) {
+            if (node.name == L"Q1: 4 units") point = true;
+            if (node.name == L"Alpha \u2192 Beta") edge = true;
+        }
+        EXPECT_TRUE(point);
+        EXPECT_TRUE(edge);
+        std::vector<std::string> tab_order;
+        w.run([&] {
+            auto& tree = w.main().window()->tree();
+            tree.set_focus(nullptr);
+            for (int i = 0; i < 80; ++i) {
+                ::SendMessageW(w.main().window()->hwnd(), WM_KEYDOWN, VK_TAB, 0);
+                if (tree.focused()) tab_order.push_back(tree.focused()->automation_id());
+            }
+        });
+        EXPECT_NE(std::find(tab_order.begin(), tab_order.end(), "notify-input"), tab_order.end());
+        EXPECT_NE(std::find(tab_order.begin(), tab_order.end(), "go-review"), tab_order.end());
+        ASSERT_TRUE(w.invoke("go-review"));
+        nodes = uia.by_id(w.hwnd());
+        ASSERT_TRUE(has(nodes, L"go-confirm"));
+        EXPECT_EQ(nodes[L"go-confirm"].name, confirm);
+    }
+}
+
+TEST(ShellSettings, GeneratedSurfacesAreOptInAndExplainRestart) {
+    Fixture f;
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    w.run([&] { w.main().open("#/settings"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-generated-surfaces"); }));
+    Uia uia;
+    const auto nodes = uia.by_id(w.hwnd());
+    ASSERT_TRUE(has(nodes, L"settings-generated-surfaces"));
+    EXPECT_EQ(nodes.at(L"settings-generated-surfaces").name, L"Generated visuals in chat");
+    bool hint = false;
+    for (const auto& node : uia.elements(w.hwnd()))
+        if (node.name == L"Restart Skowork to apply this change.") hint = true;
+    EXPECT_TRUE(hint);
+    ASSERT_TRUE(w.with("settings-generated-surfaces", [](ui::Node& n) { n.toggle(); return true; }));
+    ASSERT_TRUE(w.until([&] {
+        const auto settings = (*f.rpc.find("settings.get", false))(json::object());
+        return settings && (*settings)["ui.generated_surfaces"]["value"].get<bool>();
+    }));
+}
+
+TEST(ShellFeed, PendingGeneratedSaveSurvivesNavigationAndWarnsBeforeWindowClose) {
+    Fixture f;
+    f.rpc.add("surfaces.save", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"ok", true}}; });
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/inbox"); });
+    w.run([&] {
+        const json identity = {{"thread_id", "thread"}, {"revision", "revision"}};
+        auto writer = w.shell().generated_writer("surfaces.save", identity);
+        writer->save({{"value", 1}});
+        writer->save({{"value", 2}});
+        w.shell().navigate("#/inbox");
+        auto restored = w.shell().generated_writer("surfaces.save", identity);
+        EXPECT_EQ(restored, writer);
+        ASSERT_TRUE(restored->latest());
+        EXPECT_EQ(restored->latest()->at("value"), 2);
+        EXPECT_TRUE(restored->pending());
+        ::SendMessageW(w.main().window()->hwnd(), WM_CLOSE, 0, 0);
+        ASSERT_NE(w.main().window()->modal().top(), nullptr);
+        EXPECT_EQ(w.main().window()->modal().top()->automation_id(), "generated-unsaved");
+    });
+}
+
+TEST(ShellFeed, GeneratedDraftRestoresFromEncryptedStorageInANewWindow) {
+    Fixture f;
+    std::atomic<int> saved{0};
+    f.rpc.add("surfaces.capabilities", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"enabled", true}}; });
+    f.rpc.add("surfaces.open", RpcExposure::ui, [&f](const json& p) -> Result<json> {
+        GeneratedSurfaceStateStore state(*f.in.env.db);
+        auto binding = state.bind_assistant(jstr(p, "thread_id"), jstr(p, "run_id"), jint(p, "event_seq"), static_cast<int>(jint(p, "block_index")));
+        if (!binding) return binding.error();
+        auto value = state.load(*binding);
+        if (!value) return value.error();
+        return json{{"revision", binding->revision}, {"state", value->has_value() ? **value : json(nullptr)}};
+    });
+    f.rpc.add("surfaces.save", RpcExposure::ui, [&f, &saved](const json& p) -> Result<json> {
+        GeneratedSurfaceBinding binding{jstr(p, "thread_id"), jstr(p, "run_id"), jstr(p, "revision"),
+                                        jint(p, "event_seq"), static_cast<int>(jint(p, "block_index"))};
+        GeneratedSurfaceStateStore state(*f.in.env.db);
+        if (auto result = state.save(binding, p["state"]); !result) return result.error();
+        ++saved;
+        return json{{"ok", true}};
+    });
+    const auto thread = f.in.env.thread();
+    f.in.run_to_end(thread, "choose", R"(```skowork-ui
+{"version":1,"id":"form","summary":"Choose","components":[{"type":"switch","id":"notify","label":"Notify","value":false},{"type":"button","id":"send","label":"Continue"}]}
+```
+)");
+    std::function<bool(ui::Node&)> has_notify = [&](ui::Node& node) {
+        if (node.automation_id() == "notify-input") return true;
+        for (const auto& child : node.children()) if (has_notify(*child)) return true;
+        return false;
+    };
+    {
+        ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+        w.run([&] { w.main().open("#/threads/" + thread); });
+        ASSERT_TRUE(w.until([&] { return has_notify(w.main().window()->tree().root()); }));
+        ASSERT_TRUE(w.with("notify-input", [](ui::Node& node) {
+            auto* checkbox = dynamic_cast<ui::Checkbox*>(&node);
+            if (!checkbox) return false;
+            checkbox->set_checked(true);
+            return true;
+        }));
+        ASSERT_TRUE(w.until([&] { return saved.load() > 0; }));
+        w.settle();
+    }
+    {
+        ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+        w.run([&] { w.main().open("#/threads/" + thread); });
+        ASSERT_TRUE(w.until([&] { return has_notify(w.main().window()->tree().root()); }));
+        ASSERT_TRUE(w.invoke("send-review"));
+        Uia uia;
+        bool restored = false;
+        for (const auto& node : uia.elements(w.hwnd())) if (node.name == L"Notify: On") restored = true;
+        EXPECT_TRUE(restored);
+    }
+}
+
+TEST(ShellFeed, ProgrammaticWindowCloseWarnsBeforeDiscardingPendingGeneratedSave) {
+    Fixture f;
+    f.rpc.add("surfaces.save", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"ok", true}}; });
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/inbox"); });
+    w.run([&] {
+        const json identity = {{"thread_id", "thread"}, {"revision", "revision"}};
+        w.shell().generated_writer("surfaces.save", identity)->save({{"value", 1}});
+        w.main().close();
+        ASSERT_TRUE(w.main().is_open());
+        ASSERT_NE(w.main().window()->modal().top(), nullptr);
+        EXPECT_EQ(w.main().window()->modal().top()->automation_id(), "generated-unsaved");
+    });
+}
+
+TEST(ShellFeed, ShutdownConfirmationReportsWhetherTheUserDiscardsPendingGeneratedSave) {
+    Fixture f;
+    f.rpc.add("surfaces.save", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"ok", true}}; });
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    std::atomic<int> decision{-1};
+    w.run([&] { w.main().open("#/inbox"); });
+    w.run([&] {
+        const json identity = {{"thread_id", "thread"}, {"revision", "revision"}};
+        w.shell().generated_writer("surfaces.save", identity)->save({{"value", 1}});
+        w.main().confirm_shutdown([&](bool allowed) { decision = allowed ? 1 : 0; });
+        ASSERT_NE(w.main().window()->modal().top(), nullptr);
+        EXPECT_EQ(decision.load(), -1);
+    });
+    ASSERT_TRUE(w.invoke("generated-unsaved-stay"));
+    EXPECT_EQ(decision.load(), 0);
+    EXPECT_TRUE(w.main().is_open());
+}
+
+TEST(ShellFeed, ShutdownConfirmationCanProceedAfterExplicitDiscard) {
+    Fixture f;
+    f.rpc.add("surfaces.save", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"ok", true}}; });
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    std::atomic<int> decision{-1};
+    w.run([&] { w.main().open("#/inbox"); });
+    w.run([&] {
+        w.shell().generated_writer("surfaces.save", {{"thread_id", "thread"}, {"revision", "revision"}})->save({{"value", 1}});
+        w.main().confirm_shutdown([&](bool allowed) { decision = allowed ? 1 : 0; });
+    });
+    ASSERT_TRUE(w.invoke("generated-unsaved-close"));
+    EXPECT_EQ(decision.load(), 1);
+    EXPECT_TRUE(w.main().is_open());  // the host, not the confirmation dialog, owns application shutdown
+}
+
+TEST(ShellFeed, ClosingWindowCancelsAnOutstandingShutdownConfirmation) {
+    Fixture f;
+    f.rpc.add("surfaces.save", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"ok", true}}; });
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    std::atomic<int> decision{-1};
+    w.run([&] { w.main().open("#/inbox"); });
+    w.run([&] {
+        w.shell().generated_writer("surfaces.save", {{"thread_id", "thread"}, {"revision", "revision"}})->save({{"value", 1}});
+        w.main().confirm_shutdown([&](bool allowed) { decision = allowed ? 1 : 0; });
+        ASSERT_EQ(decision.load(), -1);
+        w.main().close_for_shutdown();
+        EXPECT_EQ(decision.load(), 0);
+    });
+}
+
+TEST(ShellFeed, GeneratedAnswerRequiresReviewBeforeSubmittingValues) {
+    Fixture f;
+    std::atomic<int> submitted{0};
+    std::atomic<int> attempts{0};
+    json received;
+    f.rpc.add("surfaces.capabilities", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"enabled", true}}; });
+    f.rpc.add("surfaces.open", RpcExposure::ui, [&](const json&) -> Result<json> {
+        return json{{"revision", "test-revision"}, {"state", nullptr}, {"accepted", submitted.load() > 0}};
+    });
+    f.rpc.add("surfaces.save", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"ok", true}}; });
+    f.rpc.add("surfaces.submit", RpcExposure::ui, [&](const json& params) -> Result<json> {
+        received = params;
+        if (++attempts == 1) return make_error("unavailable", "temporary failure");
+        ++submitted;
+        return json{{"queued_id", 1}};
+    });
+    const auto thread = f.in.env.thread();
+    f.in.run_to_end(thread, "choose", R"(Choose.
+
+```skowork-ui
+{"version":1,"id":"form","summary":"Choose","components":[{"type":"switch","id":"notify","label":"Notify","value":false},{"type":"button","id":"send","label":"Continue"}]}
+```
+)");
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + thread); });
+    ASSERT_TRUE(w.until([&] {
+        std::function<bool(ui::Node&)> find = [&](ui::Node& node) {
+            if (node.automation_id() == "send-review") return true;
+            for (const auto& child : node.children()) if (find(*child)) return true;
+            return false;
+        };
+        return find(w.main().window()->tree().root());
+    }));
+    EXPECT_EQ(submitted.load(), 0);
+    ASSERT_TRUE(w.with("notify-input", [](ui::Node& node) {
+        auto* checkbox = dynamic_cast<ui::Checkbox*>(&node);
+        if (!checkbox) return false;
+        checkbox->set_checked(true);
+        return true;
+    }));
+    EXPECT_EQ(submitted.load(), 0);
+    ASSERT_TRUE(w.invoke("send-review"));
+    EXPECT_EQ(submitted.load(), 0);
+    ASSERT_TRUE(w.invoke("send-confirm"));
+    ASSERT_TRUE(w.until([&] { return attempts.load() == 1; }));
+    ASSERT_TRUE(w.until([&] {
+        std::function<bool(ui::Node&)> find = [&](ui::Node& node) {
+            if (node.automation_id() == "send-status")
+                return node.name == u"The action could not be accepted. Try again.";
+            for (const auto& child : node.children()) if (find(*child)) return true;
+            return false;
+        };
+        return find(w.main().window()->tree().root());
+    }));
+    EXPECT_EQ(submitted.load(), 0);
+    ASSERT_TRUE(w.invoke("send-confirm"));
+    ASSERT_TRUE(w.until([&] { return submitted.load() == 1; }));
+    EXPECT_EQ(attempts.load(), 2);
+    EXPECT_EQ(jstr(received, "thread_id"), thread);
+    EXPECT_EQ(jstr(received, "button_id"), "send");
+    EXPECT_EQ(received["draft"]["notify"], true);
+    ASSERT_TRUE(w.until([&] {
+        std::function<bool(ui::Node&)> find = [&](ui::Node& node) {
+            if (node.automation_id() == "form-accepted") return true;
+            for (const auto& child : node.children()) if (find(*child)) return true;
+            return false;
+        };
+        return find(w.main().window()->tree().root());
+    }));
+    w.run([&] { w.shell().navigate("#/inbox"); w.shell().navigate("#/threads/" + thread); });
+    ASSERT_TRUE(w.until([&] {
+        std::function<bool(ui::Node&)> find = [&](ui::Node& node) {
+            if (node.automation_id() == "form-accepted") return true;
+            for (const auto& child : node.children()) if (find(*child)) return true;
+            return false;
+        };
+        return find(w.main().window()->tree().root());
+    }));
+}
+
+TEST(ShellFeed, GeneratedAnswerOffersQueueOrSteerForAnActiveRun) {
+    for (const auto& [choice, expected] : std::vector<std::pair<std::string, std::string>>{
+             {"generated-delivery-queue", "queue"}, {"generated-delivery-steer", "steer_now"}}) {
+        SCOPED_TRACE(choice);
+        Fixture f;
+        std::string mode;
+        f.rpc.add("surfaces.capabilities", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"enabled", true}}; });
+        f.rpc.add("surfaces.open", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"revision", "test-revision"}, {"state", nullptr}}; });
+        f.rpc.add("surfaces.save", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"ok", true}}; });
+        f.rpc.add("surfaces.submit", RpcExposure::ui, [&](const json& p) -> Result<json> { mode = jstr(p, "mode"); return json{{"queued_id", 1}}; });
+        const auto thread = f.in.env.thread();
+        f.in.run_to_end(thread, "first", R"(```skowork-ui
+{"version":1,"id":"s","summary":"Choose","components":[{"type":"button","id":"go","label":"Continue"}]}
+```
+)");
+        ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+        f.attach(w);
+        w.run([&] { w.main().open("#/threads/" + thread); });
+        Gate gate;
+        struct Release { Gate& gate; ~Release() { gate.release(); } } release{gate};
+        f.in.env.model.push_blocking(gate, text_response("done"));
+        const auto run = f.in.env.run(thread, "working");
+        ASSERT_TRUE(f.in.env.wait(run, RunState::running));
+        ASSERT_TRUE(w.until([&] { return w.shell().feed() && active_run(*w.shell().feed()); }));
+        ASSERT_TRUE(w.invoke("go-review"));
+        ASSERT_TRUE(w.invoke("go-confirm"));
+        EXPECT_TRUE(mode.empty());
+        ASSERT_TRUE(w.invoke(choice));
+        ASSERT_TRUE(w.until([&] { return !mode.empty(); }));
+        EXPECT_EQ(mode, expected);
+        gate.release();
+        ASSERT_TRUE(f.in.env.wait(run, RunState::succeeded));
+        f.in.svc->wait_idle();
+        f.in.on_emit = nullptr;
+    }
+}
+
+TEST(ShellFeed, StructuredQuestionOffersFormAndFreeTextAndResumesItsRun) {
+    Fixture f([](Inbox& inbox) {
+        inbox.svc.reset();
+        inbox.env.cfg.generated_surfaces = true;
+        inbox.env.make_runtime();
+        inbox.make();
+    });
+    f.rpc.add("surfaces.capabilities", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"enabled", true}}; });
+    f.rpc.add("surfaces.question_open", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"state", nullptr}}; });
+    f.rpc.add("surfaces.question_save", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"ok", true}}; });
+    f.rpc.add("surfaces.answer_question", RpcExposure::ui, [&f](const json& p) -> Result<json> {
+        auto result = f.in.env.rt->answer_generated_question(jstr(p, "action_id"), jstr(p, "thread_id"), jstr(p, "run_id"),
+                                                             jstr(p, "revision"), jstr(p, "token"), jstr(p, "button_id"),
+                                                             p["draft"], p["sections"]);
+        if (!result) return result.error();
+        return json{{"ok", true}};
+    });
+    const auto thread = f.in.env.thread();
+    const json form = json::parse(R"({"version":1,"id":"f","summary":"Choose","components":[{"type":"paragraph","id":"fact","label":"Fact","content":"Detail","citations":["99"]},{"type":"switch","id":"notify","label":"Notify","value":false},{"type":"button","id":"send","label":"Continue"}]})");
+    f.in.env.model.push_calls({{"q1", "ask_user", {{"question", "Choose"}, {"form", form}}}});
+    const auto run = f.in.env.run(thread, "ask");
+    ASSERT_TRUE(f.in.env.wait(run, RunState::interrupted));
+    const auto actions = f.in.env.rt->pending_actions(thread);
+    ASSERT_EQ(actions.size(), 1u);
+    f.in.svc->wait_idle();
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + thread); });
+    ASSERT_TRUE(w.until([&] {
+        std::function<bool(ui::Node&)> find = [&](ui::Node& node) {
+            if (node.automation_id() == "send-review") return true;
+            for (const auto& child : node.children()) if (find(*child)) return true;
+            return false;
+        };
+        return find(w.main().window()->tree().root());
+    }));
+    EXPECT_TRUE(w.with("question-" + actions.front().id + "-answer", [](ui::Node&) { return true; }));
+    EXPECT_TRUE(w.with("fact-unverified-0", [](ui::Node& node) { return node.role != ui::Role::link; }));
+    f.in.env.model.push_text("done");
+    ASSERT_TRUE(w.invoke("send-review"));
+    ASSERT_TRUE(w.invoke("send-confirm"));
+    ASSERT_TRUE(f.in.env.wait(run, RunState::succeeded));
+    EXPECT_NE(f.in.env.tool_content(run, "q1").find("Notify: false"), std::string::npos);
 }
 
 TEST(ShellFeed, StreamingDeltasKeepEarlierItems) {
@@ -3380,6 +3799,10 @@ TEST(ShellKnowledge, SearchResultsShowAsOpenableCitations) {
         in.env.add_tool(std::move(t));
     });
     earlier = f.in.env.thread();
+    f.rpc.add("surfaces.capabilities", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"enabled", true}}; });
+    f.rpc.add("surfaces.open", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"revision", "test-revision"}, {"state", nullptr}};
+    });
     std::mutex mx;
     std::vector<std::string> opened;
     f.rpc.add("knowledge.open", RpcExposure::ui, [&](const json& p) -> Result<json> {
@@ -3389,7 +3812,12 @@ TEST(ShellKnowledge, SearchResultsShowAsOpenableCitations) {
     });
     const auto t = f.in.env.thread();
     f.in.env.model.push_calls({{"c1", "knowledge.search", {{"query", "Phoenix"}}}});
-    f.in.env.model.push_text("Phoenix starts on Monday [1]. The report is in [2] and the budget in [3].");
+    f.in.env.model.push_text(R"(Phoenix starts on Monday [1]. The report is in [2] and the budget in [3].
+
+```skowork-ui
+{"version":1,"id":"source-surface","summary":"Sources","components":[{"type":"table","id":"source-table","label":"Sources","columns":["Document"],"rows":[[{"text":"Report","citations":["2","99"]}]]}]}
+```
+)");
     const auto r = f.in.env.run(t, "When does Phoenix start?");
     ASSERT_TRUE(f.in.env.wait(r, RunState::succeeded));
     f.in.svc->wait_idle();
@@ -3414,13 +3842,21 @@ TEST(ShellKnowledge, SearchResultsShowAsOpenableCitations) {
     EXPECT_EQ(name_of(base + "-0"), u"Open [1] Phoenix kickoff · Threads · 2026-10-20");
     EXPECT_EQ(name_of(base + "-1"), u"Open [2] Jahresbericht.docx · Files");
     EXPECT_EQ(name_of(base + "-2"), u"Open [3] Budget · Mail");
-    // A file goes to the host, which opens only indexed files.
-    ASSERT_TRUE(w.invoke(base + "-1"));
+    ASSERT_TRUE(w.until([&] { return w.exists("source-table-row-0-cell-0-citation-0"); }));
+    EXPECT_TRUE(w.with("source-table-row-0-cell-0-unverified-1", [](ui::Node& node) { return node.role != ui::Role::link; }));
+    ASSERT_TRUE(w.invoke("source-table-row-0-cell-0-citation-0"));
     ASSERT_TRUE(w.until([&] {
         const std::lock_guard lock(mx);
         return opened.size() == 1;
     }));
     EXPECT_EQ(opened[0], "C:\\Docs\\Jahresbericht.docx");
+    // A file goes to the host, which opens only indexed files.
+    ASSERT_TRUE(w.invoke(base + "-1"));
+    ASSERT_TRUE(w.until([&] {
+        const std::lock_guard lock(mx);
+        return opened.size() == 2;
+    }));
+    EXPECT_EQ(opened[1], "C:\\Docs\\Jahresbericht.docx");
     // A Thread opens in the window.
     ASSERT_TRUE(w.invoke(base + "-0"));
     ASSERT_TRUE(w.until([&] { return w.shell().route().thread_id == earlier; }));
@@ -3600,6 +4036,92 @@ TEST(ShellFootprint, WindowOnAThreadOf200Messages) {
     EXPECT_LE(feed.over(25.0), 6);
     EXPECT_LE(list.over(25.0), 6);
     EXPECT_LE(typing.at(0.99), 16.0);
+}
+
+TEST(ShellFootprint, GeneratedSurfaceInTwoHundredMessageThread) {
+    if (!std::getenv("SKOWORK_MEASURE_SURFACES")) GTEST_SKIP() << "set SKOWORK_MEASURE_SURFACES=1 to measure";
+#ifndef NDEBUG
+    GTEST_SKIP() << "a release build is required for representative measurements";
+#endif
+    DWORD_PTR process_mask = 0, system_mask = 0;
+    ASSERT_TRUE(::GetProcessAffinityMask(::GetCurrentProcess(), &process_mask, &system_mask));
+    unsigned cores = 0;
+    for (DWORD_PTR bits = process_mask; bits; bits >>= 1) cores += static_cast<unsigned>(bits & 1);
+    ASSERT_EQ(cores, 4u);
+
+    Fixture f;
+    f.rpc.add("surfaces.capabilities", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"enabled", true}}; });
+    f.rpc.add("surfaces.open", RpcExposure::ui, [&f](const json& params) -> Result<json> {
+        GeneratedSurfaceStateStore states(*f.in.env.db);
+        auto binding = states.bind_assistant(jstr(params, "thread_id"), jstr(params, "run_id"),
+                                              jint(params, "event_seq"), static_cast<int>(jint(params, "block_index")));
+        if (!binding) return binding.error();
+        auto saved = states.load(*binding);
+        if (!saved) return saved.error();
+        GeneratedSurfaceSubmissionStore submissions(*f.in.env.db);
+        auto accepted = submissions.accepted(*binding);
+        if (!accepted) return accepted.error();
+        return json{{"revision", binding->revision}, {"state", saved->has_value() ? **saved : json(nullptr)}, {"accepted", *accepted}};
+    });
+    f.rpc.add("surfaces.save", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"ok", true}}; });
+    const auto thread = f.in.env.thread();
+    for (int i = 0; i < 100; ++i) f.in.run_to_end(thread, "Question " + std::to_string(i), rich_answer(i));
+    json rows = json::array(), points = json::array(), components = json::array();
+    for (int i = 0; i < 100; ++i) {
+        rows.push_back(json::array({"Item " + std::to_string(i), std::to_string(i)}));
+        points.push_back({{"label", "Item " + std::to_string(i)}, {"value", i}});
+    }
+    components.push_back({{"type", "table"}, {"id", "bench-table"}, {"label", "Comparison"},
+                          {"columns", json::array({"Item", "Value"})}, {"rows", rows}});
+    components.push_back({{"type", "line"}, {"id", "bench-chart"}, {"label", "Trend"}, {"unit", "units"}, {"points", points}});
+    for (int i = 0; i < 20; ++i)
+        components.push_back({{"type", "switch"}, {"id", "bench-switch-" + std::to_string(i)},
+                              {"label", "Option " + std::to_string(i)}, {"value", false}});
+    const json surface = {{"version", 1}, {"id", "bench"}, {"summary", "Comparison"}, {"components", components}};
+    f.in.run_to_end(thread, "Compare", "Comparison.\n\n```skowork-ui\n" + surface.dump() + "\n```\n");
+    const double before = working_set_mb();
+    ShellThread w(f.rpc, 1600, [&f] { return f.now(); }, true);
+    f.attach(w);
+    w.run([&] { w.main().open("#/inbox"); });
+    Frames first_paints;
+    for (int i = 0; i < 30; ++i) {
+        w.run([&] { w.shell().navigate("#/inbox"); });
+        const LARGE_INTEGER start = qpc();
+        w.run([&] { w.shell().navigate("#/threads/" + thread); });
+        ASSERT_TRUE(w.until([&] {
+            auto* win = w.main().window();
+            if (!win || !by_id(win->tree().root(), "bench-table-sort-0")) return false;
+            win->render();
+            return true;
+        }, 15000));
+        first_paints.ms.push_back(ms_between(start, qpc()));
+    }
+    Frames scroll;
+    w.run([&] {
+        auto* win = w.main().window();
+        auto* feed = by_id(win->tree().root(), "feed");
+        auto* scroller = feed ? find_node(*feed, [](ui::Node& n) { return n.max_scroll() > 0; }) : nullptr;
+        if (!scroller) return;
+        float y = 0, dy = 40;
+        for (int i = 0; i < 300; ++i) {
+            if (y + dy > scroller->max_scroll() || y + dy < 0) dy = -dy;
+            y += dy;
+            const LARGE_INTEGER start = qpc();
+            win->tree().scroll_to(*scroller, y);
+            win->render();
+            scroll.ms.push_back(ms_between(start, qpc()));
+        }
+    });
+    const double after = working_set_mb();
+    std::printf("[generated-surface] affinity cores: %u; first paint: %s; p95 %.2f ms\n", cores,
+                first_paints.text().c_str(), first_paints.at(0.95));
+    std::printf("[generated-surface] scroll: %s; working set before %.1f MB, after %.1f MB, delta %.1f MB\n",
+                scroll.text().c_str(), before, after, after - before);
+    ASSERT_EQ(first_paints.ms.size(), 30u);
+    ASSERT_EQ(scroll.ms.size(), 300u);
+    EXPECT_LE(first_paints.at(0.95), 200.0);
+    // Present waits for the display refresh; the native UI's 60 Hz validation counts frames over 1.5 periods.
+    EXPECT_EQ(scroll.over(25.0), 0);
 }
 // ---- Automations (add-scheduled-and-remote-tasks 4.1, 4.2) --------------------------------------------------------
 
@@ -4874,9 +5396,15 @@ TEST(ShellChats, EntriesConversationNewChatLeaveAndOff) {
                                {"created_at", "2026-10-23T08:00:00.000Z"}}});
     json messages = json::array({{{"id", "m1"}, {"seq", 1}, {"sender", "bob"}, {"sender_name", "Bob Novak"}, {"text", "Hello **there**"},
                                   {"at", "2026-11-01T10:00:00Z"}, {"pending", false}}});
+    messages.push_back({{"id", "m2"}, {"seq", 2}, {"sender", "bob"}, {"sender_name", "Bob Novak"},
+                        {"text", "Example:\n\n```skowork-ui\n{\"version\":1,\"id\":\"chat-example\",\"summary\":\"Example\",\"components\":[{\"type\":\"button\",\"id\":\"chat-example-button\",\"label\":\"Continue\"}]}\n```"},
+                        {"at", "2026-11-01T10:01:00Z"}, {"pending", false}});
     bool enabled = true, busy = false;
     std::vector<std::pair<std::string, json>> calls;
     Fixture f;
+    std::atomic<int> opened_surfaces{0};
+    f.rpc.add("surfaces.capabilities", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"enabled", true}}; });
+    f.rpc.add("surfaces.open", RpcExposure::ui, [&](const json&) -> Result<json> { ++opened_surfaces; return json::object(); });
     // The messaging service is not in this fixture: Chat entries come from the test's cache below, listed while
     // messaging is on.
     f.in.svc->store().set_chats_listed([&] {
@@ -5029,6 +5557,9 @@ TEST(ShellChats, EntriesConversationNewChatLeaveAndOff) {
     // Opening it shows the conversation in the reading pane, with the list beside it; it leaves Unread.
     w.run([&] { w.shell().open_thread("chat:d1"); });
     ASSERT_TRUE(w.until([&] { return w.exists("chat-message-text-m1") && row_names().count("chat:d1") == 0; }));
+    ASSERT_TRUE(w.until([&] { return w.exists("chat-message-text-m2"); }));
+    EXPECT_FALSE(w.exists("chat-example-button-review"));
+    EXPECT_EQ(opened_surfaces.load(), 0);
     EXPECT_TRUE(w.exists("thread-list"));
     EXPECT_TRUE(w.exists("chats-offline"));
     EXPECT_TRUE(w.exists("chat-dictate")) << "the Chat composer has Dictate too (add-dictation D3)";
@@ -6550,3 +7081,5 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
         window = nullptr;
     }
 }
+
+#include "live_generated_surface.inc"

@@ -55,6 +55,9 @@ public:
     // Opens the window or brings it to the front, at a route such as "#/threads/new" (empty: where it was).
     void open(const std::string& route = {});
     void close();
+    void close_for_shutdown();
+    [[nodiscard]] bool has_unsaved_generated_state() const;
+    void confirm_shutdown(std::function<void(bool)> done);
     bool is_open() const { return shell_ != nullptr; }
     // A host event: status, navigate, run.event, inbox.changed.
     void emit(const std::string& event, const json& data);

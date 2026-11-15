@@ -76,6 +76,9 @@ struct QuestionRequest {
     std::vector<std::string> choices;  // fixed choices (empty: free text)
     bool free_text = false;            // the user may type something other than a choice
     json state = nullptr;              // handed back to ToolDef::resume with the answer
+    json surface = nullptr;            // validated optional generated Question form
+    std::string surface_revision;
+    std::string surface_token;
 };
 
 // A file a tool made for the user, such as a generated image (add-image-generation design D4).

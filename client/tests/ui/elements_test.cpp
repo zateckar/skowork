@@ -11,9 +11,20 @@
 #include "ui/bundles.h"
 #include "ui/canvas.h"
 #include "ui/elements.h"
+#include "ui/generated_table_view.h"
+#include "ui/generated_chart_view.h"
+#include "ui/generated_section_view.h"
+#include "ui/generated_surface_view.h"
+#include "ui/generated_surface.h"
+#include "ui/generated_diagram_view.h"
+#include "ui/generated_slider.h"
+#include "ui/generated_field_view.h"
+#include "ui/generated_action_view.h"
+#include "ui/generated_citations.h"
 #include "ui/list.h"
 #include "ui/richtext.h"
 #include "ui/text16.h"
+#include "ui/textfield.h"
 #include "support/golden.h"
 
 using namespace wb;
@@ -88,6 +99,394 @@ size_t ink(const std::vector<uint32_t>& px, UINT w, const Rect& r, uint32_t bg) 
 
 
 }  // namespace
+
+TEST(UiGeneratedTable, SortAndFilterKeepLocalStateAcrossRebuild) {
+    Surface s(600, 500);
+    const json table = json::parse(R"({"type":"table","id":"projects","label":"Projects","columns":["Name","Hours"],"rows":[["Boreal","18"],["Atlas","12"]]})");
+    auto state = std::make_shared<GeneratedTableState>();
+    int changes = 0;
+    auto* view = s.content().emplace<GeneratedTableView>(*s.ui, table, state, [&] { ++changes; });
+    auto find = [](Node& root, const std::string& id, auto&& self) -> Node* {
+        if (root.automation_id() == id) return &root;
+        for (const auto& child : root.children()) if (auto* result = self(*child, id, self)) return result;
+        return nullptr;
+    };
+    auto* sort = dynamic_cast<Button*>(find(*view, "projects-sort-0", find));
+    ASSERT_NE(sort, nullptr);
+    s.tree.layout(s.r->size_dip());
+    auto* first_row = view->children().back()->children().front().get();
+    ASSERT_EQ(first_row->children().size(), 2u);
+    EXPECT_FLOAT_EQ(sort->frame().x, first_row->children()[0]->frame().x);
+    EXPECT_FLOAT_EQ(sort->frame().w, first_row->children()[0]->frame().w);
+    EXPECT_EQ(first_row->children()[0]->name, u"Name: Boreal");
+    sort->invoke();
+    EXPECT_NE(sort->name.find(u"ascending"), std::u16string::npos);
+    EXPECT_EQ(generated_table_rows(table, *state), (std::vector<size_t>{1, 0}));
+    auto* filter = dynamic_cast<TextField*>(find(*view, "projects-filter", find));
+    ASSERT_NE(filter, nullptr);
+    filter->set_text(u"Atlas");
+    ASSERT_TRUE(filter->on_change);
+    filter->on_change();
+    EXPECT_EQ(generated_table_rows(table, *state), (std::vector<size_t>{1}));
+    EXPECT_EQ(changes, 2);
+    s.content().clear_children();
+    auto* restored = s.content().emplace<GeneratedTableView>(*s.ui, table, state, [&] { ++changes; });
+    auto* restored_filter = dynamic_cast<TextField*>(find(*restored, "projects-filter", find));
+    ASSERT_NE(restored_filter, nullptr);
+    EXPECT_EQ(restored_filter->text(), u"Atlas");
+    EXPECT_TRUE(a11y_problems(s.tree).empty());
+    s.render();
+}
+
+TEST(UiGeneratedChart, ShowsDataAndUnitsAsAccessibleTextAlongsideTheVisual) {
+    Surface s(600, 500);
+    const json chart = json::parse(R"({"type":"bar","id":"effort","label":"Effort","unit":"hours","points":[{"label":"Atlas","value":12},{"label":"Boreal","value":-4}]})");
+    auto* view = s.content().emplace<GeneratedChartView>(*s.ui, chart);
+    std::vector<std::u16string> names;
+    std::function<void(const Node&)> collect = [&](const Node& node) {
+        if (node.role != Role::none) names.push_back(node.name);
+        for (const auto& child : node.children()) collect(*child);
+    };
+    collect(*view);
+    EXPECT_NE(std::find(names.begin(), names.end(), u"Atlas: 12 hours"), names.end());
+    EXPECT_NE(std::find(names.begin(), names.end(), u"Boreal: -4 hours"), names.end());
+    EXPECT_TRUE(a11y_problems(s.tree).empty());
+    s.render();
+}
+
+TEST(UiGeneratedSection, ExpansionIsLocalAndSurvivesRebuild) {
+    Surface s(600, 500);
+    auto expanded = std::make_shared<bool>(true);
+    int changes = 0;
+    auto* section = s.content().emplace<GeneratedSectionView>(*s.ui, "details", u"Details", expanded, [&] { ++changes; });
+    section->body().emplace<Label>(*s.ui, u"Contents");
+    EXPECT_EQ(section->header().expand_state(), 1);
+    section->header().set_expanded(false);
+    EXPECT_FALSE(*expanded);
+    EXPECT_EQ(changes, 1);
+    s.content().clear_children();
+    auto* restored = s.content().emplace<GeneratedSectionView>(*s.ui, "details", u"Details", expanded);
+    EXPECT_EQ(restored->header().expand_state(), 0);
+    EXPECT_TRUE(a11y_problems(s.tree).empty());
+    s.render();
+}
+
+TEST(UiGeneratedSurface, ComposesSupportedContentAndRejectsIncompleteCatalogs) {
+    Surface s(600, 500);
+    const auto surface = parse_generated_surface(R"({"version":1,"id":"overview","summary":"Summary","components":[{"type":"section","id":"details","label":"Details","components":[{"type":"paragraph","id":"note","label":"Note","content":"Hello"},{"type":"table","id":"results","label":"Results","columns":["Name"],"rows":[["Atlas"]]}]}]})");
+    ASSERT_TRUE(surface);
+    ASSERT_TRUE(generated_surface_presentation_supported(*surface));
+    auto state = std::make_shared<GeneratedSurfaceViewState>();
+    int changes = 0;
+    auto* view = s.content().emplace<GeneratedSurfaceView>(*s.ui, *surface, state, [&] { ++changes; });
+    auto* section = dynamic_cast<GeneratedSectionView*>(view->children().front().get());
+    ASSERT_NE(section, nullptr);
+    EXPECT_EQ(section->body().children().size(), 2u);
+    section->header().set_expanded(false);
+    EXPECT_EQ(changes, 1);
+    s.content().clear_children();
+    auto* restored = s.content().emplace<GeneratedSurfaceView>(*s.ui, *surface, state);
+    section = dynamic_cast<GeneratedSectionView*>(restored->children().front().get());
+    ASSERT_NE(section, nullptr);
+    EXPECT_EQ(section->header().expand_state(), 0);
+    auto unsupported = *surface;
+    unsupported["components"].push_back({{"type", "switch"}, {"id", "choice"}, {"label", "Choice"}, {"value", false}});
+    EXPECT_FALSE(generated_surface_presentation_supported(unsupported));
+    auto referenced = *surface;
+    referenced["components"][0]["citations"] = json::array({"1"});
+    EXPECT_FALSE(generated_surface_presentation_supported(referenced));
+    EXPECT_TRUE(a11y_problems(s.tree).empty());
+}
+
+TEST(UiGeneratedSurface, ComposesFieldsOnlyWithAnExplicitHostRoute) {
+    Surface s(600, 500);
+    const auto surface = *parse_generated_surface(R"({"version":1,"id":"s","summary":"S","components":[{"type":"switch","id":"notify","label":"Notify","value":false},{"type":"button","id":"continue","label":"Continue"}]})");
+    EXPECT_FALSE(generated_surface_presentation_supported(surface));
+    EXPECT_TRUE(generated_surface_presentation_supported(surface, true));
+    auto state = std::make_shared<GeneratedSurfaceViewState>();
+    int local_changes = 0, host_requests = 0;
+    auto* view = s.content().emplace<GeneratedSurfaceView>(*s.ui, surface, state, [&] { ++local_changes; },
+        [&](std::string, std::vector<GeneratedFieldValue>, std::function<void(bool)> done) { ++host_requests; done(true); });
+    ASSERT_EQ(view->children().size(), 2u);
+    auto* field = dynamic_cast<GeneratedFieldView*>(view->children()[0].get());
+    ASSERT_NE(field, nullptr);
+    auto* toggle = dynamic_cast<Checkbox*>(field->children()[0].get());
+    ASSERT_NE(toggle, nullptr);
+    toggle->set_checked(true);
+    EXPECT_EQ((*state->draft)["notify"], true);
+    EXPECT_EQ(local_changes, 1);
+    EXPECT_EQ(host_requests, 0);
+    auto* action = dynamic_cast<GeneratedActionView*>(view->children()[1].get());
+    ASSERT_NE(action, nullptr);
+    auto* review = dynamic_cast<Button*>(action->children()[0].get());
+    ASSERT_NE(review, nullptr);
+    review->invoke();
+    EXPECT_EQ(host_requests, 0);
+    auto* panel = action->children().back().get();
+    auto* confirm = dynamic_cast<Button*>(panel->children()[panel->children().size() - 2].get());
+    ASSERT_NE(confirm, nullptr);
+    confirm->invoke();
+    EXPECT_EQ(host_requests, 1);
+}
+
+TEST(UiGeneratedSurface, ReviewRequiresControlsInExpandedSections) {
+    Surface s(600, 500);
+    const auto surface = *parse_generated_surface(R"({"version":1,"id":"s","summary":"S","components":[{"type":"section","id":"details","label":"Details","components":[{"type":"switch","id":"notify","label":"Notify","value":false}]},{"type":"button","id":"send","label":"Send"}]})");
+    auto state = std::make_shared<GeneratedSurfaceViewState>();
+    state->sections["details"] = std::make_shared<bool>(false);
+    int submitted = 0;
+    auto* view = s.content().emplace<GeneratedSurfaceView>(*s.ui, surface, state, std::function<void()>{},
+        [&](std::string, std::vector<GeneratedFieldValue>, std::function<void(bool)>) { ++submitted; });
+    auto* action = dynamic_cast<GeneratedActionView*>(view->children()[1].get());
+    ASSERT_NE(action, nullptr);
+    auto* review = dynamic_cast<Button*>(action->children()[0].get());
+    ASSERT_NE(review, nullptr);
+    review->invoke();
+    ASSERT_EQ(action->children().size(), 2u);
+    for (const auto& child : action->children()[1]->children()) EXPECT_NE(child->automation_id(), "send-confirm");
+    EXPECT_EQ(submitted, 0);
+    *state->sections["details"] = true;
+    review->invoke();
+    bool found = false;
+    for (const auto& child : action->children()[1]->children()) if (child->automation_id() == "send-confirm") found = true;
+    EXPECT_TRUE(found);
+}
+
+TEST(UiGeneratedSurface, AcceptedSurfaceShowsStatusAndDisablesEveryAction) {
+    Surface s(600, 500);
+    const auto surface = *parse_generated_surface(R"({"version":1,"id":"s","summary":"S","components":[{"type":"button","id":"first","label":"First"},{"type":"button","id":"second","label":"Second"}]})");
+    int submitted = 0;
+    auto* view = s.content().emplace<GeneratedSurfaceView>(*s.ui, surface, std::make_shared<GeneratedSurfaceViewState>(),
+        std::function<void()>{}, [&](std::string, std::vector<GeneratedFieldValue>, std::function<void(bool)>) { ++submitted; },
+        GeneratedCitationResolver{}, true);
+    ASSERT_EQ(view->children().size(), 3u);
+    EXPECT_EQ(view->children()[0]->automation_id(), "s-accepted");
+    for (size_t i = 1; i < 3; ++i) {
+        auto* action = dynamic_cast<GeneratedActionView*>(view->children()[i].get());
+        ASSERT_NE(action, nullptr);
+        auto* review = dynamic_cast<Button*>(action->children()[0].get());
+        ASSERT_NE(review, nullptr);
+        EXPECT_FALSE(review->enabled);
+    }
+    EXPECT_EQ(submitted, 0);
+}
+
+TEST(UiGeneratedSurface, ReviewControlsUseTheChosenLanguage) {
+    const auto surface = *parse_generated_surface(R"({"version":1,"id":"s","summary":"S","components":[{"type":"button","id":"go","label":"Continue"}]})");
+    std::vector<std::u16string> confirmations;
+    for (const char* language : {"en", "cs", "de"}) {
+        Surface s(400, 250);
+        s.ui->strings = load_bundle(language);
+        auto* view = s.content().emplace<GeneratedSurfaceView>(*s.ui, surface, std::make_shared<GeneratedSurfaceViewState>(),
+            std::function<void()>{}, [](std::string, std::vector<GeneratedFieldValue>, std::function<void(bool)>) {});
+        auto* action = dynamic_cast<GeneratedActionView*>(view->children()[0].get());
+        ASSERT_NE(action, nullptr);
+        auto* review = dynamic_cast<Button*>(action->children()[0].get());
+        ASSERT_NE(review, nullptr);
+        review->invoke();
+        auto* panel = action->children().back().get();
+        auto* confirm = dynamic_cast<Button*>(panel->children()[panel->children().size() - 2].get());
+        ASSERT_NE(confirm, nullptr);
+        EXPECT_EQ(confirm->name, s.ui->strings.get("generated.action.confirm"));
+        confirmations.push_back(confirm->name);
+    }
+    EXPECT_NE(confirmations[0], confirmations[1]);
+    EXPECT_NE(confirmations[0], confirmations[2]);
+}
+
+TEST(UiGeneratedCitations, KnownReferencesOpenAndUnknownReferencesArePlainText) {
+    Surface s(600, 500);
+    int opens = 0;
+    GeneratedCitationResolver resolver = [&](const std::string& id) -> std::optional<GeneratedCitation> {
+        if (id == "1") return GeneratedCitation{u"Source", [&] { ++opens; }};
+        return std::nullopt;
+    };
+    add_generated_citations(*s.ui, s.content(), json::array({"1", "9"}), resolver, "value");
+    ASSERT_EQ(s.content().children().size(), 2u);
+    auto* known = dynamic_cast<Button*>(s.content().children()[0].get());
+    auto* unknown = dynamic_cast<Label*>(s.content().children()[1].get());
+    ASSERT_NE(known, nullptr);
+    ASSERT_NE(unknown, nullptr);
+    EXPECT_EQ(known->role, Role::link);
+    EXPECT_EQ(unknown->role, Role::text);
+    EXPECT_NE(unknown->text().find(u"9"), std::u16string::npos);
+    known->invoke();
+    EXPECT_EQ(opens, 1);
+    EXPECT_TRUE(a11y_problems(s.tree).empty());
+}
+
+TEST(UiGeneratedCitations, TableCellReferencesAppearNextToTheirValue) {
+    Surface s(600, 500);
+    int opens = 0;
+    GeneratedCitationResolver resolver = [&](const std::string& id) -> std::optional<GeneratedCitation> {
+        if (id == "1") return GeneratedCitation{u"Source", [&] { ++opens; }};
+        return std::nullopt;
+    };
+    const auto table = json::parse(R"({"type":"table","id":"t","label":"T","columns":["Value"],"rows":[[{"text":"X","citations":["1","9"]}]]})");
+    auto* view = s.content().emplace<GeneratedTableView>(*s.ui, table, std::make_shared<GeneratedTableState>(), std::function<void()>{}, resolver);
+    auto* cell = view->children().back()->children()[0]->children()[0].get();
+    ASSERT_EQ(cell->children().size(), 3u);
+    EXPECT_EQ(cell->children()[0]->name, u"Value: X");
+    EXPECT_EQ(cell->children()[1]->role, Role::link);
+    EXPECT_EQ(cell->children()[2]->role, Role::text);
+    cell->children()[1]->invoke();
+    EXPECT_EQ(opens, 1);
+    EXPECT_TRUE(a11y_problems(s.tree).empty());
+}
+
+TEST(UiGeneratedCitations, ChartPointAndDiagramEdgeKeepTheirReferenceContext) {
+    Surface s(600, 500);
+    GeneratedCitationResolver resolver = [](const std::string& id) -> std::optional<GeneratedCitation> {
+        if (id == "1") return GeneratedCitation{u"Source", [] {}};
+        return std::nullopt;
+    };
+    const auto chart = json::parse(R"({"type":"bar","id":"c","label":"C","unit":"hours","points":[{"label":"A","value":1,"citations":["1"]}]})");
+    auto* chart_view = s.content().emplace<GeneratedChartView>(*s.ui, chart, resolver);
+    auto* point = chart_view->children().back().get();
+    ASSERT_EQ(point->children().size(), 2u);
+    EXPECT_EQ(point->children()[0]->name, u"A: 1 hours");
+    EXPECT_EQ(point->children()[1]->role, Role::link);
+    const auto diagram = json::parse(R"({"type":"diagram","id":"d","label":"D","nodes":[{"id":"a","label":"A"},{"id":"b","label":"B"}],"edges":[{"from":"a","to":"b","citations":["9"]}]})");
+    auto* diagram_view = s.content().emplace<GeneratedDiagramView>(*s.ui, diagram, resolver);
+    auto* edge = diagram_view->children().back().get();
+    ASSERT_EQ(edge->children().size(), 2u);
+    EXPECT_EQ(edge->children()[0]->name, u"A → B");
+    EXPECT_EQ(edge->children()[1]->role, Role::text);
+    EXPECT_NE(edge->children()[1]->name.find(u"9"), std::u16string::npos);
+}
+
+TEST(UiGeneratedCitations, SurfaceRequiresResolverBeforeShowingReferencedContent) {
+    Surface s(600, 500);
+    const auto surface = *parse_generated_surface(R"({"version":1,"id":"s","summary":"S","components":[{"type":"paragraph","id":"p","label":"Fact","content":"Value","citations":["1"]}]})");
+    EXPECT_FALSE(generated_surface_presentation_supported(surface));
+    EXPECT_TRUE(generated_surface_presentation_supported(surface, false, true));
+    GeneratedCitationResolver resolver = [](const std::string&) -> std::optional<GeneratedCitation> {
+        return GeneratedCitation{u"Source", [] {}};
+    };
+    auto* view = s.content().emplace<GeneratedSurfaceView>(*s.ui, surface, std::make_shared<GeneratedSurfaceViewState>(),
+        std::function<void()>{}, GeneratedActionView::Submit{}, resolver);
+    ASSERT_EQ(view->children().size(), 1u);
+    const auto& content = view->children()[0]->children();
+    ASSERT_EQ(content.size(), 3u);
+    EXPECT_EQ(content[1]->name, u"Value");
+    EXPECT_EQ(content[2]->role, Role::link);
+}
+
+TEST(UiGeneratedDiagram, CyclesAndSelfEdgesHaveReadableAlternatives) {
+    Surface s(600, 500);
+    const auto diagram = json::parse(R"({"type":"diagram","id":"flow","label":"Flow","nodes":[{"id":"a","label":"Alpha"},{"id":"b","label":"Beta"}],"edges":[{"from":"a","to":"b"},{"from":"b","to":"a"},{"from":"a","to":"a"}]})");
+    auto* view = s.content().emplace<GeneratedDiagramView>(*s.ui, diagram);
+    std::vector<std::u16string> names;
+    std::function<void(const Node&)> collect = [&](const Node& node) {
+        if (node.role != Role::none) names.push_back(node.name);
+        for (const auto& child : node.children()) collect(*child);
+    };
+    collect(*view);
+    EXPECT_NE(std::find(names.begin(), names.end(), u"Alpha → Beta"), names.end());
+    EXPECT_NE(std::find(names.begin(), names.end(), u"Beta → Alpha"), names.end());
+    EXPECT_NE(std::find(names.begin(), names.end(), u"Alpha → Alpha"), names.end());
+    EXPECT_TRUE(a11y_problems(s.tree).empty());
+    s.render();
+}
+
+TEST(UiGeneratedSlider, ChangesAreLocalAndKeyboardAccessible) {
+    Surface s(600, 500);
+    auto* slider = s.content().emplace<GeneratedSlider>(*s.ui, "amount", u"Amount", 0, 10, 5);
+    int changes = 0;
+    slider->on_change = [&](double) { ++changes; };
+    s.tree.layout(s.r->size_dip());
+    s.tree.set_focus(slider);
+    EXPECT_TRUE(s.tree.key({kKeyRight}));
+    EXPECT_GT(slider->range_value(), 5);
+    EXPECT_EQ(changes, 1);
+    EXPECT_FALSE(slider->set_range_value(11));
+    EXPECT_EQ(changes, 1);
+    EXPECT_TRUE(slider->set_range_value(3));
+    EXPECT_DOUBLE_EQ(slider->range_value(), 3);
+    EXPECT_EQ(changes, 2);
+    EXPECT_FALSE(slider->on_pointer({PointerEvent::down, 10, 10, 0, 1}));
+    EXPECT_DOUBLE_EQ(slider->range_value(), 3);
+    EXPECT_TRUE(a11y_problems(s.tree).empty());
+    s.render();
+}
+
+TEST(UiGeneratedField, SelectionSwitchAndTextOnlyChangeTheLocalDraft) {
+    Surface s(600, 500);
+    auto draft = std::make_shared<json>(json::object());
+    int changes = 0;
+    auto changed = [&] { ++changes; };
+    auto* choice = s.content().emplace<GeneratedFieldView>(*s.ui, json::parse(R"({"type":"select","id":"frequency","label":"Frequency","options":["Weekly","Monthly"]})"), draft, changed);
+    auto* first = dynamic_cast<Checkbox*>(choice->children()[1].get());
+    auto* second = dynamic_cast<Checkbox*>(choice->children()[2].get());
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    first->set_checked(true);
+    EXPECT_EQ((*draft)["frequency"], "Weekly");
+    second->set_checked(true);
+    EXPECT_FALSE(first->checked());
+    EXPECT_EQ((*draft)["frequency"], "Monthly");
+    auto* flag = s.content().emplace<GeneratedFieldView>(*s.ui, json::parse(R"({"type":"switch","id":"notify","label":"Notify","value":false})"), draft, changed);
+    auto* toggle = dynamic_cast<Checkbox*>(flag->children().front().get());
+    ASSERT_NE(toggle, nullptr);
+    toggle->set_checked(true);
+    EXPECT_EQ((*draft)["notify"], true);
+    auto* note = s.content().emplace<GeneratedFieldView>(*s.ui, json::parse(R"({"type":"text","id":"note","label":"Note","value":""})"), draft, changed);
+    auto* text = dynamic_cast<TextField*>(note->children().back().get());
+    ASSERT_NE(text, nullptr);
+    text->set_text(u"Ready");
+    text->on_change();
+    EXPECT_EQ((*draft)["note"], "Ready");
+    EXPECT_EQ(changes, 4);
+    EXPECT_TRUE(a11y_problems(s.tree).empty());
+    s.render();
+}
+
+TEST(UiGeneratedAction, RequiresReviewAndRejectsValuesChangedAfterReview) {
+    Surface s(600, 500);
+    const auto surface = *parse_generated_surface(R"({"version":1,"id":"s","summary":"S","components":[{"type":"switch","id":"notify","label":"Notify","value":false},{"type":"button","id":"continue","label":"Continue"}]})");
+    auto draft = std::make_shared<json>(json{{"notify", true}});
+    int submissions = 0;
+    std::function<void(bool)> finish;
+    auto* action = s.content().emplace<GeneratedActionView>(*s.ui, surface["components"][1], surface, draft,
+        [&](const std::string&, const std::vector<GeneratedFieldValue>&, std::function<void(bool)> done) {
+            ++submissions;
+            finish = std::move(done);
+        });
+    auto* review = dynamic_cast<Button*>(action->children().front().get());
+    ASSERT_NE(review, nullptr);
+    review->invoke();
+    EXPECT_EQ(submissions, 0);
+    ASSERT_EQ(action->children().size(), 2u);
+    auto* panel = action->children().back().get();
+    auto* confirm = dynamic_cast<Button*>(panel->children()[panel->children().size() - 2].get());
+    ASSERT_NE(confirm, nullptr);
+    (*draft)["notify"] = false;
+    confirm->invoke();
+    EXPECT_EQ(submissions, 0);
+    auto* status = dynamic_cast<Label*>(panel->children()[panel->children().size() - 3].get());
+    ASSERT_NE(status, nullptr);
+    EXPECT_EQ(status->automation_id(), "continue-status");
+    EXPECT_TRUE(status->visible);
+    EXPECT_EQ(status->text(), u"The fields changed. Review them again before confirming.");
+    review->invoke();
+    panel = action->children().back().get();
+    confirm = dynamic_cast<Button*>(panel->children()[panel->children().size() - 2].get());
+    ASSERT_NE(confirm, nullptr);
+    confirm->invoke();
+    EXPECT_EQ(submissions, 1);
+    EXPECT_FALSE(confirm->enabled);
+    confirm->invoke();
+    EXPECT_EQ(submissions, 1);
+    ASSERT_TRUE(finish);
+    finish(false);
+    EXPECT_TRUE(confirm->enabled);  // a rejected host request can be retried
+    confirm->invoke();
+    EXPECT_EQ(submissions, 2);
+    finish(true);
+    confirm->invoke();
+    EXPECT_EQ(submissions, 2);
+    EXPECT_TRUE(a11y_problems(s.tree).empty());
+}
 
 // --- elements ---------------------------------------------------------------------------------------------------
 
@@ -416,6 +815,28 @@ TEST(UiGolden, HighContrastUsesSystemColours) {
     const auto px = s.render();
     EXPECT_EQ(s.at(px, 1, 1), 0x000000u);
     EXPECT_EQ(s.at(px, b->frame().x + 4, b->frame().y + b->frame().h / 2), 0x1AEBFFu);  // highlight, not the accent
+}
+
+TEST(UiGeneratedSurface, HighContrastUsesSystemColoursAndNamedControls) {
+    Surface s(600, 500);
+    const SystemColors hc{0x000000, 0xFFFFFF, 0x1AEBFF, 0x000000, 0xFFFF00, 0x3FF23F, 0x000000, 0xFFFFFF};
+    s.ui->theme = make_theme(true, true, hc);
+    s.content().padding = Insets::all(8);
+    const auto surface = parse_generated_surface(R"({"version":1,"id":"s","summary":"Summary","components":[{"type":"bar","id":"chart","label":"Cost","unit":"EUR","points":[{"label":"A","value":4}]},{"type":"switch","id":"notify","label":"Notify","value":false},{"type":"button","id":"go","label":"Continue"}]})");
+    ASSERT_TRUE(surface);
+    auto* view = s.content().emplace<GeneratedSurfaceView>(*s.ui, *surface, std::make_shared<GeneratedSurfaceViewState>(),
+        std::function<void()>{}, [](std::string, std::vector<GeneratedFieldValue>, std::function<void(bool)>) {});
+    const auto px = s.render();
+    EXPECT_EQ(s.at(px, 1, 1), 0x000000u);
+    EXPECT_TRUE(a11y_problems(s.tree).empty());
+    ASSERT_EQ(view->children().size(), 3u);
+    EXPECT_EQ(view->children()[0]->name, u"Cost");
+    EXPECT_EQ(view->children()[1]->name, u"Notify");
+    auto* action = dynamic_cast<GeneratedActionView*>(view->children()[2].get());
+    ASSERT_NE(action, nullptr);
+    auto* review = dynamic_cast<Button*>(action->children()[0].get());
+    ASSERT_NE(review, nullptr);
+    EXPECT_EQ(s.at(px, review->frame().x + 4, review->frame().y + review->frame().h / 2), 0x1AEBFFu);
 }
 
 // Ctrl+C copies the message selection while the selected view has keyboard focus; a press elsewhere moves the focus

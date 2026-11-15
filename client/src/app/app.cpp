@@ -14,6 +14,7 @@
 #include "base/url.h"
 
 #include <fstream>
+#include <limits>
 #include "browser/service.h"
 #include "computer/service.h"
 #include "ui/bundles.h"
@@ -97,6 +98,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <future>
 #include <memory>
 
@@ -279,8 +281,9 @@ struct App {
 
     json status();
     void tick();
+    void check_storage_quota();
     void handle_launch(const LaunchArgs& args);
-    void quit();
+    void quit(bool force = false);
     void register_rpc();
     bool start_storage();
     void start_identity_and_channel();
@@ -486,28 +489,46 @@ void App::tick() {
                             {{telemetry::Attr::process_working_set_mb, static_cast<double>(pmc.WorkingSetSize) / (1024.0 * 1024.0)}});
     }
     // Storage quota check every 10 minutes (client/local-storage Storage Quota).
-    if (root && ticks % 600 == 30) {
-        pool.post([this] {
-            StorageUsage u;
-            const QuotaState q = quota.check(root->root(), [this] {
-                std::error_code ec;
-                std::filesystem::remove_all(root->cache(), ec);
-            }, u);
-            MainThread::post([this, u, q] {
-                usage = u;
-                if (q != QuotaState::normal) log::warn(kLog, "storage quota at or above 90%; indexing paused");
-            });
+    if (root && ticks % 600 == 30) check_storage_quota();
+}
+
+void App::check_storage_quota() {
+    if (!root) return;
+    pool.post([this] {
+        StorageUsage u;
+        const bool was_paused = quota.indexing_paused();
+        const QuotaState q = quota.check(root->root(), [this] {
+            std::error_code ec;
+            std::filesystem::remove_all(root->cache(), ec);
+        }, u);
+        if (was_paused && q == QuotaState::normal)
+            if (auto* k = knowledge_live.load()) k->wake();
+        MainThread::post([this, u, q] {
+            usage = u;
+            if (q != QuotaState::normal) log::warn(kLog, "storage quota at or above 90%; indexing paused");
         });
-    }
+    });
 }
 
 void App::handle_launch(const LaunchArgs& args) {
     if (!args.background) MainThread::post([this, route = args.route] { if (ui) ui->open(route); });
 }
 
-void App::quit() {
+void App::quit(bool force) {
+    if (force) {
+        quitting = true;
+        MainThread::post([] { ::PostQuitMessage(0); });
+        return;
+    }
     if (quitting.exchange(true)) return;
-    MainThread::post([] { ::PostQuitMessage(0); });
+    MainThread::post([this] {
+        auto finish = [this](bool allowed) {
+            if (!allowed) { quitting = false; return; }
+            ::PostQuitMessage(0);
+        };
+        if (ui) ui->confirm_shutdown(std::move(finish));
+        else finish(true);
+    });
 }
 
 void App::register_rpc() {
@@ -594,7 +615,7 @@ void App::register_rpc() {
         pending_remote_removals = static_cast<int>(pending.size());
         if (tokens) (void)tokens->sign_out();
         wipe_on_exit = true;
-        quit();
+        quit(true);  // the user explicitly requested deletion of all local data
         return json{{"ok", true}};
     });
     // Policy visibility, "why denied" and folder grants (client/policy-enforcement). The UI only in release builds.
@@ -965,12 +986,27 @@ void App::start_identity_and_channel() {
         log::info(kLog, p ? "policy version " + std::to_string(p->version()) + " applies to the next tool call" : "policy cleared");
         // Offline sign-in (client/identity Offline Sign-In Policy): off ends a stored offline session at once.
         if (p && tokens) tokens->set_offline_sign_in(p->string("identity.offline_sign_in", "on") != "off");
+        const json* battery_policy = p ? p->find("ui.background_on_battery") : nullptr;
+        gate.set_background_on_battery(battery_policy && battery_policy->is_boolean() && battery_policy->get<bool>());
+        const json* quota_policy = p ? p->find("storage.max_size_gb") : nullptr;
+        std::uint64_t quota_bytes = kDefaultQuotaBytes;
+        if (quota_policy && quota_policy->is_number()) {
+            const double gb = quota_policy->get<double>();
+            const long double bytes = static_cast<long double>(gb) * (1ull << 30);
+            if (std::isfinite(gb) && gb >= 0 && bytes < static_cast<long double>(std::numeric_limits<std::uint64_t>::max()))
+                quota_bytes = static_cast<std::uint64_t>(bytes);
+        }
+        quota.set_max_bytes(quota_bytes);
+        check_storage_quota();
         // The MCP catalog arrives in the bundle (Catalog Updates Applied Live).
         if (auto m = mcp()) pool.post([m] { m->apply(); });
         if (auto cm = connectors_mgr()) pool.post([cm] { cm->apply(); });
         // A revoked meeting capture stops at once (client/meeting-capture Policy Revoked During A Meeting).
         if (meeting_svc) meeting_svc->policy_changed();
-        MainThread::post([this] { if (sched) sched->policy_changed(); });
+        MainThread::post([this] {
+            if (sched) sched->policy_changed();
+            if (agent) agent->runtime().policy_changed();
+        });
         pool.post([this] {
             if (mail_svc) mail_svc->policy_changed();
             update_mail_sources();
@@ -1137,9 +1173,29 @@ void App::start_agent() {
     };
     mc.connect_timeout_now = [policy_seconds] { return policy_seconds("llm.timeouts.connect_seconds"); };
     mc.idle_timeout_now = [policy_seconds] { return policy_seconds("llm.timeouts.idle_seconds"); };
+    mc.max_images_per_request_now = [this] {
+        const auto current = policy ? policy->current() : nullptr;
+        const json* value = current ? current->find("llm.max_images_per_request") : nullptr;
+        if (!value || !value->is_number_integer()) return 0;
+        const auto number = value->get<long long>();
+        return number > 0 && number <= std::numeric_limits<int>::max() ? static_cast<int>(number) : 0;
+    };
     model = std::make_unique<model::ModelClient>(mc, *llm_auth, llm_transport);
 
     runtime::RuntimeConfig rc;
+    inbox::InboxStore settings(store->db(), system_clock());
+    rc.generated_surfaces = settings.setting("ui.generated_surfaces").value_or("false") == "true";
+#ifdef SKOWORK_DEV_ENDPOINTS
+    rc.generated_surfaces = rc.generated_surfaces || la.generated_surfaces;
+#endif
+    rc.policy_integer = [this](const std::string& key) -> std::optional<int> {
+        const auto current = policy ? policy->current() : nullptr;
+        const json* value = current ? current->find(key) : nullptr;
+        if (!value || !value->is_number_integer()) return std::nullopt;
+        const auto number = value->get<long long>();
+        if (number < 1 || number > std::numeric_limits<int>::max()) return std::nullopt;
+        return static_cast<int>(number);
+    };
     rc.start_gate = [this] { return run_start_blocked(); };
     rc.offline = [this] { return offline(); };  // add-offline-operation D1
     // Resumed and queued Unattended runs wait for a scheduler slot (client/scheduler design D9). Lock-free.
@@ -1562,7 +1618,7 @@ void App::start_knowledge() {
         if (email.empty() && tokens) email = tokens->user_principal();
         return {std::string{}, email};
     };
-    ke.deferred = [this] { return !gate.may_run(WorkKind::indexing); };
+    ke.deferred = [this] { return quota.indexing_paused() || !gate.may_run(WorkKind::indexing); };
     ke.changed = [this] { MainThread::post([this] { if (ui && ui->is_open()) ui->emit("knowledge.changed", json::object()); }); };
     // control-plane/team-knowledge (add-knowledge-sharing): only while the control channel is connected.
     ke.team = [this](const std::string& method, const std::string& path, const json& body) -> Result<json> {
@@ -2586,7 +2642,7 @@ void App::shutdown() {
     toasts.reset();
     if (auto m = mcp()) m->shutdown();
     if (channel) channel->stop();
-    if (ui) ui->close();
+    if (ui) ui->close_for_shutdown();
     if (workers) workers->stop_all();
     if (pipe) pipe->stop();
     ui_pool.shutdown();
@@ -2652,9 +2708,18 @@ LRESULT CALLBACK host_wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         // Resumed from sleep: missed firings are caught up now (client/scheduler Missed Run Catch-Up).
         if (app && (w == PBT_APMRESUMEAUTOMATIC || w == PBT_APMRESUMESUSPEND)) app->tick();
         return TRUE;
-    case WM_QUERYENDSESSION: return TRUE;
+    case WM_QUERYENDSESSION:
+        if (app && app->ui && app->ui->has_unsaved_generated_state()) {
+            app->ui->close();  // show the pending-draft warning; the user may retry shutdown after deciding
+            return FALSE;
+        }
+        return TRUE;
     case WM_ENDSESSION:
-        if (w && app) app->quit();
+        if (w && app) {
+            if (app->ui && app->ui->has_unsaved_generated_state())
+                log::warn(kLog, "forced session shutdown with generated surface writes outstanding");
+            app->quit(true);
+        }
         return 0;
     default: return ::DefWindowProcW(h, m, w, l);
     }
@@ -2674,6 +2739,7 @@ LaunchArgs parse_launch_args(const std::vector<std::wstring>& args) {
         else if (a == L"--pipe-name" && has_next) la.pipe_name = args[++i];
         else if (a == L"--config" && has_next) la.config_file = args[++i];
         else if (a == L"--no-register") la.no_register = true;
+        else if (a == L"--generated-surfaces") la.generated_surfaces = true;
 #endif
     }
     return la;

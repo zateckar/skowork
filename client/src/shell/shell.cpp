@@ -12,12 +12,24 @@
 #include "shell/derive.h"
 #include "shell/shortcuts.h"
 #include "ui/bundles.h"
+#include "ui/generated_save_queue.h"
 #include "ui/text16.h"
 
 namespace wb::shell {
 
 using ui::Node;
 using ui::Sizing;
+
+namespace {
+struct ShutdownDecision {
+    std::function<void(bool)> callback;
+    ~ShutdownDecision() { if (callback) callback(false); }
+    void resolve(bool allowed) {
+        auto done = std::move(callback);
+        if (done) done(allowed);
+    }
+};
+}
 
 Shell::Shell(HostLink& host, const MainWindow::Options& options, std::function<void()> on_closed)
     : host_(host), options_(options), on_closed_(std::move(on_closed)) {
@@ -43,6 +55,12 @@ Shell::Shell(HostLink& host, const MainWindow::Options& options, std::function<v
         [this](uintptr_t id) { window_->cancel_timer(id); }, [] { return now_millis(); },
         [this] { thread_->update_feed(); });
     window_->on_key = [this](const ui::KeyEvent& e) { return on_key(e); };
+    window_->on_close_request = [this] {
+        if (!has_unsaved_generated_state()) return true;
+        std::weak_ptr<int> alive = alive_;
+        confirm_shutdown([this, alive](bool allowed) { if (allowed && alive.lock()) window_->close(); });
+        return false;
+    };
     window_->on_closed = [this] {
         if (on_closed_) on_closed_();
     };
@@ -60,6 +78,30 @@ Shell::Shell(HostLink& host, const MainWindow::Options& options, std::function<v
     load_folders();
 }
 
+bool Shell::has_unsaved_generated_state() const {
+    return std::any_of(generated_writers_.begin(), generated_writers_.end(), [](const auto& entry) {
+        return entry.second->pending() || entry.second->needs_retry();
+    });
+}
+
+void Shell::confirm_shutdown(std::function<void(bool)> done) {
+    if (!has_unsaved_generated_state()) return done(true);
+    auto dialog = std::make_unique<ui::Dialog>(ui(), "generated-unsaved", t("generated.action.unsaved_title"));
+    dialog->body().emplace<ui::Label>(ui(), t("generated.action.unsaved_body"), ui::TextStyle::body, ui::Paint::text, true);
+    auto* dp = dialog.get();
+    auto decision = std::make_shared<ShutdownDecision>();
+    decision->callback = std::move(done);
+    auto finish = [dp, decision](bool allowed) { auto retained = decision; dp->close(); retained->resolve(allowed); };
+    dialog->add_button("generated-unsaved-close", t("generated.action.close_anyway"), ui::Button::Kind::standard,
+                       [finish] { finish(true); });
+    auto* stay = dialog->add_button("generated-unsaved-stay", t("generated.action.cancel"), ui::Button::Kind::primary,
+                                    [finish] { finish(false); });
+    dialog->on_cancel = [finish] { finish(false); };
+    window_->modal().show(std::move(dialog));
+    window_->tree().set_focus(stay);
+    window_->render();
+}
+
 void Shell::set_show_work_details(bool on) {
     if (show_work_details_ == on) return;
     show_work_details_ = on;
@@ -73,6 +115,7 @@ Shell::~Shell() {
         host_.call("dictation.cancel", json::object(), [](Result<json>) {});
     if (window_) {
         window_->on_closed = nullptr;
+        window_->on_close_request = nullptr;
         window_->tree().on_layout = nullptr;
     }
 }
@@ -100,6 +143,43 @@ void Shell::call(const std::string& method, const json& params, Done done) {
         }
         done(std::move(r));
     });
+}
+
+std::shared_ptr<ui::GeneratedSaveQueue> Shell::generated_writer(const std::string& method, const json& identity) {
+    const auto key = method + ":" + identity.dump();
+    auto found = generated_writers_.find(key);
+    if (found != generated_writers_.end()) {
+        found->second->retry();
+        return found->second;
+    }
+    std::weak_ptr<int> alive = alive_;
+    auto writer = std::make_shared<ui::GeneratedSaveQueue>(
+        [this, alive, method, identity](const json& state, ui::GeneratedSaveQueue::Done done) {
+            if (!alive.lock()) return done(false);
+            auto params = identity;
+            params["state"] = state;
+            call(method, params, [done = std::move(done)](Result<json> result) { done(result.ok()); });
+        },
+        [this, alive, key] {
+            if (!alive.lock()) return;
+            announce(t("generated.action.save_failed"));
+            auto dialog = std::make_unique<ui::Dialog>(ui(), "generated-save-error", t("common.error_prefix"));
+            dialog->body().emplace<ui::Label>(ui(), t("generated.action.save_failed"), ui::TextStyle::body,
+                                              ui::Paint::text, true);
+            auto* dp = dialog.get();
+            dialog->add_button("generated-save-retry", t("common.retry"), ui::Button::Kind::primary, [this, alive, key, dp] {
+                dp->close();
+                if (!alive.lock()) return;
+                const auto entry = generated_writers_.find(key);
+                if (entry != generated_writers_.end()) entry->second->retry();
+            });
+            dialog->add_button("generated-save-dismiss", t("generated.action.cancel"), ui::Button::Kind::standard,
+                               [dp] { dp->close(); });
+            window_->modal().show(std::move(dialog));
+            window_->render();
+        });
+    generated_writers_.emplace(key, writer);
+    return writer;
 }
 
 // ---- the element tree --------------------------------------------------------------------------------------------

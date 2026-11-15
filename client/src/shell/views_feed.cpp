@@ -2,6 +2,9 @@
 #include <algorithm>
 
 #include "shell/shell.h"
+#include "platform/crypto.h"
+#include "ui/generated_save_queue.h"
+#include "ui/generated_surface_view.h"
 #include "ui/text16.h"
 
 namespace wb::shell {
@@ -12,6 +15,35 @@ using ui::Sizing;
 using ui::TextStyle;
 
 namespace {
+
+std::string surface_cache_key(const FeedItem& item, size_t index, const ui::GeneratedSurfaceBlock& block) {
+    const auto content = std::string_view(item.text).substr(block.begin, block.end - block.begin);
+    return item.key + ":surface:" + std::to_string(index) + ":" + hex_encode(sha256(content));
+}
+
+ui::GeneratedCitationResolver surface_citation_resolver(Shell& shell, std::weak_ptr<int> alive,
+                                                        std::vector<Citation> sources) {
+    return [&shell, alive, sources = std::move(sources)](const std::string& id) -> std::optional<ui::GeneratedCitation> {
+        if (!alive.lock()) return std::nullopt;
+        for (const auto& source : sources) {
+            if (std::to_string(source.n) != id) continue;
+            const std::string ref = source.ref;
+            return ui::GeneratedCitation{ui::to_utf16(source.title.empty() ? ref : source.title), [&shell, alive, ref] {
+                if (!alive.lock()) return;
+                if (ref.starts_with("skowork://thread/")) shell.navigate(thread_hash(ref.substr(sizeof("skowork://thread/") - 1)));
+                else if (ref.starts_with("https://") || ref.starts_with("http://")) {
+                    if (shell.ui().open_link) shell.ui().open_link(ui::to_utf16(ref));
+                } else {
+                    shell.call("knowledge.open", {{"ref", ref}}, [&shell, alive](Result<json> result) {
+                        if (alive.lock() && !result)
+                            shell.announce(shell.t("feed.citation_unavailable", {{"reason", ui::to_utf16(result.error().message)}}));
+                    });
+                }
+            }};
+        }
+        return std::nullopt;
+    };
+}
 
 // Automation ids from item keys ("run_1:12" -> "run_1-12").
 std::string id_of(std::string_view prefix, const std::string& key) {
@@ -39,7 +71,7 @@ std::string signature(const FeedItem& it) {
     switch (it.type) {
     case ItemType::user: return s + it.text;
     case ItemType::assistant:  // live text is updated in place
-        return s + (it.streaming ? "live" : it.text) + sources_signature(it.sources);
+        return s + (it.streaming ? "live" : it.text) + sources_signature(it.sources) + sources_signature(it.surface_sources);
     case ItemType::reasoning: return s + (it.streaming ? "live" : it.text);
     case ItemType::details: return s + it.text;
     case ItemType::tool:
@@ -48,7 +80,7 @@ std::string signature(const FeedItem& it) {
         if (it.result)
             for (const FileRef& f : it.result->files) s += "|" + f.id;
         return s;
-    case ItemType::action: return s + it.action.id + "|" + it.action.resolved_at + "|" + it.action.resolution.dump();
+    case ItemType::action: return s + it.action.id + "|" + it.action.resolved_at + "|" + it.action.resolution.dump() + sources_signature(it.surface_sources);
     case ItemType::error: return s + it.error.code;
     case ItemType::stopped: return s + (it.by_user ? "u" : "") + it.reason;
     case ItemType::activity:
@@ -148,12 +180,13 @@ Node* code_box(Shell& s, Node& parent, const std::string& id, const std::string&
 // Respond instead switch the card to a text field with its own confirm and cancel.
 class ActionCard : public ui::Box {
 public:
-    ActionCard(Shell& s, const ActionItem& a)
-        : Box((a.kind == "approval" ? "approval-" : "question-") + a.id, Paint::surface, 8, Paint::border), shell_(s), a_(a) {
+    ActionCard(Shell& s, const ActionItem& a, bool generated_surfaces, std::vector<Citation> sources)
+        : Box((a.kind == "approval" ? "approval-" : "question-") + a.id, Paint::surface, 8, Paint::border), shell_(s), a_(a), sources_(std::move(sources)) {
         role = ui::Role::group;
         padding = ui::Insets::xy(14, 12);
         gap = 6;
         rebuild();
+        if (generated_surfaces && a_.kind == "question" && a_.open()) open_generated_question();
     }
     void draw(ui::Canvas& c) override {
         Box::draw(c);
@@ -174,6 +207,24 @@ private:
     }
     ui::Label* caption(const std::u16string& text) {
         return emplace<ui::Label>(shell_.ui(), text, TextStyle::caption, Paint::text_secondary, true);
+    }
+
+    void open_generated_question() {
+        const auto* form = jobj(a_.payload, "surface");
+        if (!form || !ui::generated_surface_presentation_supported(*form, true, true)) return;
+        question_surface_ = *form;
+        question_identity_ = {{"thread_id", a_.thread_id}, {"run_id", a_.run_id}, {"action_id", a_.id},
+                              {"revision", jstr(a_.payload, "surface_revision")}, {"token", jstr(a_.payload, "surface_token")}};
+        std::weak_ptr<int> alive = alive_;
+        shell_.call("surfaces.question_open", question_identity_, [this, alive](Result<json> result) {
+            if (!alive.lock() || !result) return;
+            auto writer = shell_.generated_writer("surfaces.question_save", question_identity_);
+            question_writer_ = writer;
+            const json saved = writer->latest().value_or(result->value("state", json(nullptr)));
+            question_state_ = std::make_shared<ui::GeneratedSurfaceViewState>(
+                ui::generated_surface_view_state_from_json(question_surface_, saved));
+            rebuild();
+        });
     }
 
     void rebuild() {
@@ -304,6 +355,32 @@ private:
                 button(*row, "choice-" + std::to_string(i++), ui::to_utf16(choice), false, [this, choice] { answer(choice); });
             }
         }
+        if (question_state_) {
+            const auto state = question_state_;
+            const auto identity = question_identity_;
+            const auto writer = question_writer_;
+            std::weak_ptr<int> alive = alive_;
+            auto changed = [alive, state, writer] {
+                if (!alive.lock()) return;
+                writer->save(ui::generated_surface_view_state_to_json(*state));
+            };
+            ui::GeneratedActionView::Submit submit = [this, alive, state, identity, writer](std::string button_id,
+                    std::vector<ui::GeneratedFieldValue> fields, std::function<void(bool)> done) {
+                if (!alive.lock() || busy_) return done(false);
+                auto params = identity;
+                params["button_id"] = std::move(button_id);
+                params["draft"] = json::object();
+                for (const auto& field : fields) params["draft"][field.id] = field.value;
+                params["sections"] = ui::generated_surface_view_state_to_json(*state)["sections"];
+                shell_.call("surfaces.answer_question", params, [this, alive, done, writer](Result<json> result) {
+                    if (result) writer->abandon();
+                    done(result.ok());
+                    if (alive.lock() && result) shell_.load_feed();
+                });
+            };
+            emplace<ui::GeneratedSurfaceView>(u, question_surface_, state, changed, submit,
+                                               surface_citation_resolver(shell_, alive, sources_));
+        }
         if (jbool(p, "free_text")) {
             auto* row = emplace<Node>(id("free"));
             row->axis = ui::Axis::row;
@@ -366,6 +443,7 @@ private:
             if (!alive.lock()) return;
             busy_ = false;
             if (!r) return fail(ui::to_utf16(r.error().message));
+            if (a_.kind == "question" && question_writer_) question_writer_->abandon();
             shell_.load_feed();
         });
     }
@@ -378,9 +456,13 @@ private:
 
     Shell& shell_;
     ActionItem a_;
+    std::vector<Citation> sources_;
     Mode mode_ = Mode::buttons;
     ui::TextField* field_ = nullptr;
     std::u16string draft_, error_;
+    json question_surface_ = nullptr, question_identity_ = nullptr;
+    std::shared_ptr<ui::GeneratedSurfaceViewState> question_state_;
+    std::shared_ptr<ui::GeneratedSaveQueue> question_writer_;
     bool busy_ = false;
     std::shared_ptr<int> alive_ = std::make_shared<int>(0);
 };
@@ -469,6 +551,13 @@ FeedView::FeedView(Shell& shell, std::string thread_id) : ScrollView("feed"), sh
     follow_end = true;  // new output stays in view while the user is at the end
     padding = ui::Insets::xy(20, 16);
     gap = 10;
+    std::weak_ptr<int> alive = alive_;
+    shell_.call("surfaces.capabilities", json::object(), [this, alive](Result<json> result) {
+        if (!alive.lock() || !result || !jbool(*result, "enabled")) return;
+        generated_surfaces_enabled_ = true;
+        for (auto& slot : slots_) slot.sig.clear();
+        update();
+    });
 }
 
 std::vector<FeedItem> FeedView::visible(std::vector<FeedItem> items) const {
@@ -711,6 +800,115 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
         msg->role = ui::Role::group;
         msg->name = shell_.t("feed.agent");
         message_header(shell_, *msg, it);
+        const auto blocks = generated_surfaces_enabled_ ? eligible_generated_surfaces(it) : std::vector<ui::GeneratedSurfaceBlock>{};
+        bool supported = !blocks.empty();
+        for (const auto& block : blocks)
+            if (!ui::generated_surface_presentation_supported(block.surface, true, true)) supported = false;
+        if (supported) {
+            bool ready = true;
+            for (size_t i = 0; i < blocks.size(); ++i) {
+                const std::string key = surface_cache_key(it, i, blocks[i]);
+                auto [entry, inserted] = surfaces_.try_emplace(key);
+                if (inserted) {
+                    const json identity = {{"thread_id", thread_}, {"run_id", it.run_id}, {"event_seq", it.seq}, {"block_index", i}};
+                    const json surface = blocks[i].surface;
+                    const std::string item_key = it.key;
+                    std::weak_ptr<int> alive = alive_;
+                    shell_.call("surfaces.open", identity, [this, alive, key, item_key, surface, identity](Result<json> result) {
+                        if (!alive.lock()) return;
+                        auto found = surfaces_.find(key);
+                        if (found == surfaces_.end()) return;
+                        if (!result || jstr(*result, "revision").empty()) found->second.failed = true;
+                        else {
+                            found->second.revision = jstr(*result, "revision");
+                            found->second.accepted = jbool(*result, "accepted");
+                            auto bound = identity;
+                            bound["revision"] = found->second.revision;
+                            auto writer = shell_.generated_writer("surfaces.save", bound);
+                            const json saved = writer->latest().value_or(result->value("state", json(nullptr)));
+                            found->second.state = std::make_shared<ui::GeneratedSurfaceViewState>(
+                                ui::generated_surface_view_state_from_json(surface, saved));
+                            found->second.ready = true;
+                        }
+                        for (auto& cached : slots_) if (cached.key == item_key) cached.sig.clear();
+                        update();
+                    });
+                }
+                if (!entry->second.ready || entry->second.failed) ready = false;
+            }
+            if (ready) {
+                size_t offset = 0;
+                for (size_t i = 0; i < blocks.size(); ++i) {
+                    const auto& block = blocks[i];
+                    if (block.begin > offset) {
+                        auto* markdown = msg->emplace<ui::MarkdownView>(u, shell_.t("feed.agent"));
+                        markdown->set_markdown(it.text.substr(offset, block.begin - offset));
+                    }
+                    const std::string key = surface_cache_key(it, i, block);
+                    const auto state = surfaces_.at(key).state;
+                    json identity = {{"thread_id", thread_}, {"run_id", it.run_id}, {"event_seq", it.seq},
+                                     {"block_index", i}, {"revision", surfaces_.at(key).revision}};
+                    const auto writer = shell_.generated_writer("surfaces.save", identity);
+                    std::weak_ptr<int> alive = alive_;
+                    auto changed = [alive, state, writer] {
+                        if (!alive.lock()) return;
+                        writer->save(ui::generated_surface_view_state_to_json(*state));
+                    };
+                    ui::GeneratedActionView::Submit submit = [this, alive, state, identity, key, item_key = it.key](std::string button,
+                            std::vector<ui::GeneratedFieldValue> fields, std::function<void(bool)> done) {
+                        if (!alive.lock()) return done(false);
+                        auto params = identity;
+                        params["button_id"] = std::move(button);
+                        params["draft"] = json::object();
+                        for (const auto& field : fields) params["draft"][field.id] = field.value;
+                        params["sections"] = ui::generated_surface_view_state_to_json(*state)["sections"];
+                        auto send = [this, alive, params, done, key, item_key](const std::string& mode) mutable {
+                            if (!alive.lock()) return done(false);
+                            if (!mode.empty()) params["mode"] = mode;
+                            shell_.call("surfaces.submit", params, [this, alive, done, key, item_key](Result<json> result) {
+                                done(result.ok());
+                                if (!alive.lock() || !result) return;
+                                const auto found = surfaces_.find(key);
+                                if (found == surfaces_.end()) return;
+                                found->second.accepted = true;
+                                for (auto& cached : slots_) if (cached.key == item_key) cached.sig.clear();
+                                update();
+                            });
+                        };
+                        const auto& snapshot = shell_.feed();
+                        if (!snapshot || snapshot->entry.id != thread_ || !active_run(*snapshot)) return send("");
+                        auto dialog = std::make_unique<ui::Dialog>(shell_.ui(), "generated-delivery", shell_.t("generated.action.delivery"));
+                        dialog->body().emplace<ui::Label>(shell_.ui(), shell_.t("generated.action.delivery_body"), ui::TextStyle::body, ui::Paint::text, true);
+                        auto* dp = dialog.get();
+                        dialog->add_button("generated-delivery-queue", shell_.t("composer.queue"), ui::Button::Kind::primary, [dp, send] {
+                            auto deliver = send;
+                            dp->close();
+                            deliver("queue");
+                        });
+                        dialog->add_button("generated-delivery-steer", shell_.t("composer.steer"), ui::Button::Kind::standard, [dp, send] {
+                            auto deliver = send;
+                            dp->close();
+                            deliver("steer_now");
+                        });
+                        auto cancel = [dp, done] { auto finish = done; dp->close(); finish(false); };
+                        dialog->add_button("generated-delivery-cancel", shell_.t("thread.cancel"), ui::Button::Kind::standard, cancel);
+                        dialog->on_cancel = cancel;
+                        shell_.window().modal().show(std::move(dialog));
+                        shell_.window().render();
+                    };
+                    auto resolver = surface_citation_resolver(shell_, alive, it.surface_sources);
+                    msg->emplace<ui::GeneratedSurfaceView>(u, block.surface, state, changed, submit, resolver,
+                                                           surfaces_.at(key).accepted);
+                    offset = block.end;
+                }
+                if (offset < it.text.size()) {
+                    auto* markdown = msg->emplace<ui::MarkdownView>(u, shell_.t("feed.agent"));
+                    markdown->set_markdown(it.text.substr(offset));
+                }
+                if (!it.sources.empty()) add_citations(*msg, it.sources, it.key, "msg-sources-", "msg-source-");
+                return msg;
+            }
+        }
         slot.markdown = msg->emplace<ui::MarkdownView>(u, shell_.t("feed.agent"), id_of("md-", it.key));
         slot.markdown->set_markdown(it.text);
         if (!it.sources.empty()) add_citations(*msg, it.sources, it.key, "msg-sources-", "msg-source-");
@@ -776,7 +974,7 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
         return wrap;
     }
     case ItemType::action:
-        return std::make_unique<ActionCard>(shell_, it.action);
+        return std::make_unique<ActionCard>(shell_, it.action, generated_surfaces_enabled_, it.surface_sources);
     case ItemType::activity:
         if (it.usage) {
             const auto n = [](long long v) { return ui::to_utf16(std::to_string(v)); };

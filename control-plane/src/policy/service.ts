@@ -618,7 +618,13 @@ export class PolicyService {
       conflicts: c.conflicts, errors: c.errors, network_enforcement: enforcement, schema: this.registry.version,
       ...(opts.toolCall && (c.errors.length
         ? { tool_decision: null, tool_decision_error: 'Resolve policy errors before simulating a tool decision.' }
-        : { tool_decision: simulateToolDecision(c.policy, c.src, opts.toolCall) })),
+        : {
+            tool_decision: simulateToolDecision(c.policy, c.src, opts.toolCall),
+            tool_decisions: {
+              attended: simulateToolDecision(c.policy, c.src, { ...opts.toolCall, unattended: false }),
+              unattended: simulateToolDecision(c.policy, c.src, { ...opts.toolCall, unattended: true }),
+            },
+          })),
     };
   }
 

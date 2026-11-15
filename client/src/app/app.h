@@ -16,6 +16,7 @@ struct LaunchArgs {
     std::optional<std::wstring> pipe_name;
     std::optional<std::wstring> config_file;
     bool no_register = false;  // skip HKCU registration (tests)
+    bool generated_surfaces = false;  // opt in only in development builds
 };
 
 LaunchArgs parse_launch_args(const std::vector<std::wstring>& args);

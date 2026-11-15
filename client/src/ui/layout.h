@@ -55,6 +55,7 @@ enum class Role {
     menu_item,
     scroll_view,
     splitter,
+    slider,
     tooltip,
     image,
     status_bar,
@@ -184,6 +185,11 @@ public:
     virtual int selected_state() const { return -1; }  // 0 not selected, 1 selected
     virtual void select() {}
     virtual std::u16string value() const { return {}; }  // read-only text content (documents, rich text)
+    virtual double range_value() const { return 0; }
+    virtual double range_minimum() const { return 0; }
+    virtual double range_maximum() const { return 0; }
+    virtual double range_step() const { return 0; }
+    virtual bool set_range_value(double) { return false; }
 
     // --- input: return true when handled. Keys go to the focused node, then bubble to its ancestors.
     virtual bool on_key(const KeyEvent&) { return false; }

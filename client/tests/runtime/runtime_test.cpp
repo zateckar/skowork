@@ -8,9 +8,264 @@
 #include "tools/files.h"
 #include "support/http_server.h"
 #include "support/runtime_harness.h"
+#include "storage/generated_surface_state.h"
+#include "inbox/inbox_store.h"
 #include <sstream>
 
 // ==== 3.1 Run lifecycle states, event log and recovery ==============================================================
+
+TEST(RuntimeGeneratedSurface, ContractIsAdvertisedOnlyWhenTheClientEnablesSurfaces) {
+    RuntimeConfig cfg;
+    cfg.generated_surfaces = true;
+    Env enabled(cfg);
+    enabled.start();
+    enabled.model.push_text("done");
+    const auto first = enabled.run(enabled.thread(), "first");
+    ASSERT_TRUE(enabled.wait(first, RunState::succeeded));
+    const auto enabled_requests = enabled.model.requests();
+    ASSERT_EQ(enabled_requests.size(), 1u);
+    ASSERT_FALSE(enabled_requests[0].messages.empty());
+    EXPECT_NE(enabled_requests[0].messages.front().content.find("skowork-ui"), std::string::npos);
+
+    Env disabled;
+    disabled.start();
+    disabled.model.push_text("done");
+    const auto second = disabled.run(disabled.thread(), "second");
+    ASSERT_TRUE(disabled.wait(second, RunState::succeeded));
+    const auto disabled_requests = disabled.model.requests();
+    ASSERT_EQ(disabled_requests.size(), 1u);
+    ASSERT_FALSE(disabled_requests[0].messages.empty());
+    EXPECT_EQ(disabled_requests[0].messages.front().content.find("skowork-ui"), std::string::npos);
+}
+
+TEST(RuntimeGeneratedSurface, AskUserPersistsValidatedFormWithHostIdentity) {
+    RuntimeConfig cfg;
+    cfg.generated_surfaces = true;
+    Env env(cfg);
+    env.start();
+    const json form = json::parse(R"({"version":1,"id":"f","summary":"Choose","components":[{"type":"select","id":"cadence","label":"Cadence","options":["Weekly","Monthly"]},{"type":"button","id":"send","label":"Continue"}]})");
+    env.model.push_calls({{"q1", "ask_user", {{"question", "Choose a cadence"}, {"form", form}}}});
+    const auto thread = env.thread();
+    const auto run = env.run(thread, "ask");
+    ASSERT_TRUE(env.wait(run, RunState::interrupted));
+    const auto actions = env.rt->pending_actions(thread);
+    ASSERT_EQ(actions.size(), 1u);
+    EXPECT_EQ(actions.front().kind, "question");
+    EXPECT_EQ(actions.front().run_id, run);
+    EXPECT_EQ(actions.front().payload.value("surface", json()), form);
+    EXPECT_FALSE(jstr(actions.front().payload, "surface_revision").empty());
+    EXPECT_FALSE(jstr(actions.front().payload, "surface_token").empty());
+    EXPECT_TRUE(jbool(actions.front().payload, "free_text"));
+    env.model.push_text("done");
+    ASSERT_TRUE(env.rt->answer_question(actions.front().id, "My own answer"));
+    ASSERT_TRUE(env.wait(run, RunState::succeeded));
+    EXPECT_EQ(env.tool_content(run, "q1"), "My own answer");
+}
+
+TEST(RuntimeGeneratedSurface, AskUserRejectsMalformedFormsWithoutCreatingAQuestion) {
+    RuntimeConfig cfg;
+    cfg.generated_surfaces = true;
+    Env env(cfg);
+    env.start();
+    const json form = json::parse(R"({"version":1,"id":"f","summary":"Choose","components":[{"type":"button","id":"one","label":"One"},{"type":"button","id":"two","label":"Two"}]})");
+    env.model.push_calls({{"q1", "ask_user", {{"question", "Choose"}, {"form", form}}}});
+    env.model.push_text("done");
+    const auto thread = env.thread();
+    const auto run = env.run(thread, "ask");
+    ASSERT_TRUE(env.wait(run, RunState::succeeded));
+    EXPECT_TRUE(env.rt->pending_actions(thread).empty());
+    EXPECT_NE(env.tool_content(run, "q1").find("Invalid generated Question form"), std::string::npos);
+}
+
+TEST(RuntimeGeneratedSurface, SubmissionUsesRunQueueAndIsDisabledByDefault) {
+    RuntimeConfig cfg;
+    cfg.generated_surfaces = true;
+    std::atomic<bool> offline{false};
+    std::atomic<bool> blocked{false};
+    cfg.start_gate = [&]() -> std::optional<std::string> { return blocked.load() ? std::optional<std::string>("blocked") : std::nullopt; };
+    cfg.offline = [&] { return offline.load(); };
+    Env env(cfg);
+    env.start();
+    env.model.push_text("```skowork-ui\n{\"version\":1,\"id\":\"s\",\"summary\":\"S\",\"components\":[{\"type\":\"button\",\"id\":\"go\",\"label\":\"Continue\"}]}\n```");
+    const auto thread = env.thread();
+    const auto run = env.run(thread, "first");
+    ASSERT_TRUE(env.wait(run, RunState::succeeded));
+    long long seq = 0;
+    for (const auto& event : env.rt->events(run)) if (event.kind == "message" && jbool(event.payload, "surface_complete")) seq = event.seq;
+    ASSERT_GT(seq, 0);
+    GeneratedSurfaceStateStore states(*env.db);
+    const auto binding = states.bind_assistant(thread, run, seq, 0);
+    ASSERT_TRUE(binding);
+    blocked = true;
+    offline = true;
+    EXPECT_FALSE(env.rt->submit_generated_surface(*binding, "go", json::object(), std::nullopt));
+    EXPECT_TRUE(env.rt->queued_messages(thread).empty());
+    offline = false;
+    const auto accepted = env.rt->submit_generated_surface(*binding, "go", json::object(), std::nullopt);
+    ASSERT_TRUE(accepted);
+    offline = true;
+    const auto retry = env.rt->submit_generated_surface(*binding, "go", json::object(), std::nullopt);
+    ASSERT_TRUE(retry);
+    EXPECT_EQ(*accepted, *retry);
+    ASSERT_EQ(env.rt->queued_messages(thread).size(), 1u);
+    EXPECT_EQ(env.rt->queued_messages(thread).front().text, "Continue");
+    RuntimeConfig disabled;
+    Env other(disabled);
+    EXPECT_FALSE(other.rt->submit_generated_surface(*binding, "go", json::object(), std::nullopt));
+}
+
+TEST(RuntimeGeneratedSurface, BusyThreadRequiresExplicitQueueOrSteer) {
+    Gate gate;
+    RuntimeConfig cfg;
+    cfg.generated_surfaces = true;
+    Env env(cfg);
+    env.start();
+    env.model.push_text("```skowork-ui\n{\"version\":1,\"id\":\"s\",\"summary\":\"S\",\"components\":[{\"type\":\"button\",\"id\":\"go\",\"label\":\"Continue\"}]}\n```");
+    const auto thread = env.thread();
+    const auto first = env.run(thread, "first");
+    ASSERT_TRUE(env.wait(first, RunState::succeeded));
+    long long seq = 0;
+    for (const auto& event : env.rt->events(first)) if (event.kind == "message" && jbool(event.payload, "surface_complete")) seq = event.seq;
+    GeneratedSurfaceStateStore states(*env.db);
+    const auto binding = states.bind_assistant(thread, first, seq, 0);
+    ASSERT_TRUE(binding);
+    env.model.push_blocking(gate, text_response("done"));
+    const auto second = env.run(thread, "second");
+    ASSERT_TRUE(env.wait(second, RunState::running));
+    EXPECT_FALSE(env.rt->submit_generated_surface(*binding, "go", json::object(), std::nullopt));
+    EXPECT_TRUE(env.rt->queued_messages(thread).empty());
+    const auto accepted = env.rt->submit_generated_surface(*binding, "go", json::object(), MessageMode::queue);
+    ASSERT_TRUE(accepted);
+    const auto retry = env.rt->submit_generated_surface(*binding, "go", json::object(), std::nullopt);
+    ASSERT_TRUE(retry);
+    EXPECT_EQ(*accepted, *retry);
+    ASSERT_EQ(env.rt->queued_messages(thread).size(), 1u);
+    gate.release();
+}
+
+TEST(RuntimeGeneratedSurface, CompletedThreadStartsOneFollowupRun) {
+    RuntimeConfig cfg;
+    cfg.generated_surfaces = true;
+    Env env(cfg);
+    env.start();
+    env.model.push_text("```skowork-ui\n{\"version\":1,\"id\":\"s\",\"summary\":\"S\",\"components\":[{\"type\":\"button\",\"id\":\"go\",\"label\":\"Continue\"}]}\n```");
+    const auto thread = env.thread();
+    const auto first = env.run(thread, "first");
+    ASSERT_TRUE(env.wait(first, RunState::succeeded));
+    long long seq = 0;
+    for (const auto& event : env.rt->events(first)) if (event.kind == "message" && jbool(event.payload, "surface_complete")) seq = event.seq;
+    GeneratedSurfaceStateStore states(*env.db);
+    const auto binding = states.bind_assistant(thread, first, seq, 0);
+    ASSERT_TRUE(binding);
+    env.model.push_text("follow-up completed");
+    const auto accepted = env.rt->submit_generated_surface(*binding, "go", json::object(), std::nullopt);
+    ASSERT_TRUE(accepted);
+    ASSERT_TRUE(env.wait_for([&] { return env.model.request_count() >= 2u; }));
+    const auto retry = env.rt->submit_generated_surface(*binding, "go", json::object(), std::nullopt);
+    ASSERT_TRUE(retry);
+    EXPECT_EQ(*accepted, *retry);
+    const auto requests = env.model.requests();
+    ASSERT_EQ(requests.size(), 2u);
+    EXPECT_EQ(requests.back().messages.back().content, "Continue");
+}
+
+TEST(RuntimeGeneratedSurface, SteerFromCompletedSurfaceReachesTheActiveRun) {
+    Gate gate;
+    RuntimeConfig cfg;
+    cfg.generated_surfaces = true;
+    Env env(cfg);
+    ToolDef slow = make_tool(env, "t.slow", Risk::read);
+    slow.core = true;
+    slow.run = [&](ToolContext&, const json&) { gate.wait(); return ToolOutput::success("done"); };
+    env.add_tool(slow);
+    env.start();
+    env.model.push_text("```skowork-ui\n{\"version\":1,\"id\":\"s\",\"summary\":\"S\",\"components\":[{\"type\":\"button\",\"id\":\"go\",\"label\":\"Change direction\"}]}\n```");
+    const auto thread = env.thread();
+    const auto first = env.run(thread, "first");
+    ASSERT_TRUE(env.wait(first, RunState::succeeded));
+    long long seq = 0;
+    for (const auto& event : env.rt->events(first)) if (event.kind == "message" && jbool(event.payload, "surface_complete")) seq = event.seq;
+    GeneratedSurfaceStateStore states(*env.db);
+    const auto binding = states.bind_assistant(thread, first, seq, 0);
+    ASSERT_TRUE(binding);
+    env.model.push_calls({{"c1", "t.slow", {}}});
+    env.model.push_text("adjusted");
+    const auto active = env.run(thread, "second");
+    struct Release { Gate& gate; ~Release() { gate.release(); } } release{gate};
+    ASSERT_TRUE(env.wait_for([&] { return env.rec(active).tool_calls == 1; }));
+    ASSERT_TRUE(env.rt->submit_generated_surface(*binding, "go", json::object(), MessageMode::steer_now));
+    gate.release();
+    ASSERT_TRUE(env.wait(active, RunState::succeeded));
+    const auto requests = env.model.requests();
+    ASSERT_EQ(requests.size(), 3u);
+    ASSERT_FALSE(requests.back().messages.empty());
+    EXPECT_EQ(requests.back().messages.back().role, "user");
+    EXPECT_EQ(requests.back().messages.back().content, "Change direction");
+}
+
+TEST(RuntimeGeneratedSurface, InterruptedCancelledAndDeletedThreadsRespectRouting) {
+    RuntimeConfig cfg;
+    cfg.generated_surfaces = true;
+    Env env(cfg);
+    env.start();
+    env.model.push_text("```skowork-ui\n{\"version\":1,\"id\":\"s\",\"summary\":\"S\",\"components\":[{\"type\":\"button\",\"id\":\"go\",\"label\":\"Continue\"}]}\n```");
+    const auto thread = env.thread();
+    const auto first = env.run(thread, "first");
+    ASSERT_TRUE(env.wait(first, RunState::succeeded));
+    long long seq = 0;
+    for (const auto& event : env.rt->events(first)) if (event.kind == "message" && jbool(event.payload, "surface_complete")) seq = event.seq;
+    GeneratedSurfaceStateStore states(*env.db);
+    const auto binding = states.bind_assistant(thread, first, seq, 0);
+    ASSERT_TRUE(binding);
+    env.model.push_calls({{"q1", "ask_user", {{"question", "Choose"}}}});
+    const auto interrupted = env.run(thread, "ask");
+    ASSERT_TRUE(env.wait(interrupted, RunState::interrupted));
+    EXPECT_FALSE(env.rt->submit_generated_surface(*binding, "go", json::object(), std::nullopt));
+    EXPECT_TRUE(env.rt->queued_messages(thread).empty());
+    ASSERT_TRUE(env.rt->cancel(interrupted));
+    ASSERT_TRUE(env.wait(interrupted, RunState::cancelled));
+    env.model.push_text("follow-up");
+    ASSERT_TRUE(env.rt->submit_generated_surface(*binding, "go", json::object(), std::nullopt));
+    ASSERT_TRUE(env.wait_for([&] { return env.model.request_count() >= 3; }));
+    ASSERT_TRUE(env.wait_for([&] { return !env.rt->runs(thread).empty() && env.rt->runs(thread).back().state == RunState::succeeded; }));
+    inbox::InboxStore inbox_store(*env.db, env.clock);
+    ASSERT_TRUE(inbox_store.delete_thread(thread));
+    EXPECT_FALSE(env.rt->submit_generated_surface(*binding, "go", json::object(), MessageMode::queue));
+    EXPECT_TRUE(env.rt->queued_messages(thread).empty());
+}
+
+TEST(RuntimeGeneratedSurface, SubmittedIntentStillWaitsForPolicyApproval) {
+    RuntimeConfig cfg;
+    cfg.generated_surfaces = true;
+    Env env(cfg);
+    env.add_tool(mail_tool(env));
+    env.policy->approvals.insert("mail.send");
+    env.start();
+    env.model.push_text("```skowork-ui\n{\"version\":1,\"id\":\"s\",\"summary\":\"S\",\"components\":[{\"type\":\"button\",\"id\":\"go\",\"label\":\"Send mail\"}]}\n```");
+    const auto thread = env.thread();
+    const auto first = env.run(thread, "first");
+    ASSERT_TRUE(env.wait(first, RunState::succeeded));
+    long long seq = 0;
+    for (const auto& event : env.rt->events(first)) if (event.kind == "message" && jbool(event.payload, "surface_complete")) seq = event.seq;
+    GeneratedSurfaceStateStore states(*env.db);
+    const auto binding = states.bind_assistant(thread, first, seq, 0);
+    ASSERT_TRUE(binding);
+    env.model.push_calls({{"find", "find_tools", {{"query", "mail send"}}}});
+    env.model.push_calls({{"mail", "mail.send", {{"to", "a@example.test"}, {"body", "hello"}, {"rationale", "requested"}}}});
+    env.model.push_text("done");
+    ASSERT_TRUE(env.rt->submit_generated_surface(*binding, "go", json::object(), std::nullopt));
+    ASSERT_TRUE(env.wait_for([&] { return !env.rt->pending_actions(thread).empty(); }));
+    const auto actions = env.rt->pending_actions(thread);
+    ASSERT_EQ(actions.size(), 1u);
+    EXPECT_EQ(actions.front().kind, "approval");
+    EXPECT_EQ(env.calls.count("mail.send"), 0);
+    EXPECT_FALSE(env.rt->answer_generated_question(actions.front().id, thread, actions.front().run_id,
+                                                    "revision", "token", "go", json::object(), json::object()));
+    EXPECT_EQ(env.calls.count("mail.send"), 0);
+    ASSERT_TRUE(env.rt->resolve_approval(actions.front().id, ApprovalResolution::approve()));
+    ASSERT_TRUE(env.wait(actions.front().run_id, RunState::succeeded));
+    EXPECT_EQ(env.calls.count("mail.send"), 1);
+}
 
 TEST(RuntimeStates, TransitionTable) {
     EXPECT_TRUE(transition_allowed(RunState::queued, RunState::running));
@@ -108,6 +363,29 @@ TEST(RuntimeRecovery, QueuedRunsStartInOrderAfterRestart) {
     ASSERT_EQ(reqs.size(), 2u);
     EXPECT_EQ(reqs[0].messages.back().content, "first");
     EXPECT_EQ(reqs[1].messages.back().content, "second");
+}
+
+TEST(RuntimeRecovery, IncreasedPolicyConcurrencyStartsQueuedRuns) {
+    std::atomic<int> slots{1};
+    RuntimeConfig cfg;
+    cfg.policy_integer = [&slots](const std::string& key) -> std::optional<int> {
+        if (key == "llm.max_concurrent_runs") return slots.load();
+        return std::nullopt;
+    };
+    Env env(cfg);
+    env.start();
+    Gate gate;
+    env.model.push_blocking(gate, text_response("first"));
+    env.model.push_text("second");
+    const auto first = env.run(env.thread(), "first");
+    ASSERT_TRUE(env.wait_for([&] { return env.model.request_count() == 1u; }));
+    const auto second = env.run(env.thread(), "second");
+    EXPECT_EQ(env.rec(second).state, RunState::queued);
+    slots = 2;
+    env.rt->policy_changed();
+    EXPECT_TRUE(env.wait(second, RunState::succeeded));
+    gate.release();
+    EXPECT_TRUE(env.wait(first, RunState::succeeded));
 }
 
 TEST(RuntimeRecovery, ShutdownLeavesRunningRunToBeFailedByNextStart) {
@@ -208,6 +486,32 @@ TEST(RuntimeLoop, MultiStepRunPersistsTheConversation) {
     EXPECT_EQ(env.events.states(id), (std::vector<std::string>{"queued", "running", "succeeded"}));
 }
 
+TEST(RuntimeLoop, StoredAssistantMessagesRecordWhetherTheModelFinishedNormally) {
+    Env env;
+    env.start();
+    auto truncated = text_response("truncated");
+    truncated.finish_reason = "length";
+    env.model.push_response(truncated);
+    const auto first = env.run(env.thread(), "first");
+    ASSERT_TRUE(env.wait(first, RunState::succeeded));
+    env.model.push_response(text_response("complete"));
+    const auto second = env.run(env.thread(), "second");
+    ASSERT_TRUE(env.wait(second, RunState::succeeded));
+    bool saw_truncated = false, saw_complete = false;
+    for (const auto& e : env.events.of("message")) {
+        if (jstr(e.data, "content") == "truncated") { saw_truncated = e.seq > 0 && !jbool(e.data, "surface_complete"); }
+        if (jstr(e.data, "content") == "complete") { saw_complete = e.seq > 0 && jbool(e.data, "surface_complete"); }
+    }
+    EXPECT_TRUE(saw_truncated);
+    EXPECT_TRUE(saw_complete);
+    env.restart();
+    RunStore store(*env.db, env.clock);
+    bool persisted_complete = false;
+    for (const auto& e : store.events(second))
+        if (e.kind == "message" && jstr(e.payload, "content") == "complete") persisted_complete = jbool(e.payload, "surface_complete");
+    EXPECT_TRUE(persisted_complete);
+}
+
 TEST(RuntimeLoop, TextIsStreamedToTheListener) {
     Env env;
     env.start();
@@ -221,6 +525,71 @@ TEST(RuntimeLoop, TextIsStreamedToTheListener) {
     std::string streamed;
     for (const auto& e : env.events.of("text.delta")) streamed += jstr(e.data, "text");
     EXPECT_EQ(streamed, "Hello");
+}
+
+TEST(RuntimeGeneratedSurface, CancelledStreamKeepsDisplayOnlyFallbackAfterRestart) {
+    RuntimeConfig cfg;
+    cfg.generated_surfaces = true;
+    Env env(cfg);
+    env.start();
+    const std::string partial = "An unfinished answer\n\n```skowork-ui\n{\"version\":1";
+    env.model.push([partial](const model::ChatRequest& req, const model::ChatSink& sink) {
+        sink.on_text(partial);
+        while (!(req.cancel && req.cancel->cancelled())) std::this_thread::sleep_for(2ms);
+        return model::ModelResult<model::ChatResponse>(failure(model::code::cancelled));
+    });
+    const auto thread = env.thread();
+    const auto run = env.run(thread, "compare");
+    ASSERT_TRUE(env.wait_for([&] { return !env.events.of("text.delta").empty(); }));
+    ASSERT_TRUE(env.rt->cancel(run));
+    ASSERT_TRUE(env.wait(run, RunState::cancelled));
+    env.restart();
+    bool found = false;
+    for (const auto& e : env.rt->events(run))
+        if (e.kind == "incomplete_message" && jstr(e.payload, "content") == partial) found = true;
+    EXPECT_TRUE(found);
+    for (const auto& message : env.rt->conversation(thread)) EXPECT_NE(message.content, partial);
+}
+
+TEST(RuntimeGeneratedSurface, FailedRetryKeepsOnlyTheLastAttemptAsFallback) {
+    RuntimeConfig cfg;
+    cfg.generated_surfaces = true;
+    Env env(cfg);
+    env.start();
+    env.model.push([](const model::ChatRequest&, const model::ChatSink& sink) {
+        sink.on_text("discarded attempt");
+        sink.on_retry(1, failure(model::code::model_unavailable), 0ms);
+        sink.on_text("last incomplete attempt");
+        return model::ModelResult<model::ChatResponse>(failure(model::code::model_unavailable));
+    });
+    const auto run = env.run(env.thread(), "compare");
+    ASSERT_TRUE(env.wait(run, RunState::failed));
+    std::vector<std::string> partials;
+    for (const auto& e : env.rt->events(run))
+        if (e.kind == "incomplete_message") partials.push_back(jstr(e.payload, "content"));
+    EXPECT_EQ(partials, (std::vector<std::string>{"last incomplete attempt"}));
+}
+
+TEST(RuntimeGeneratedSurface, IncompleteFallbackIsBoundedWithoutSplittingUtf8) {
+    RuntimeConfig cfg;
+    cfg.generated_surfaces = true;
+    Env env(cfg);
+    env.start();
+    const std::string partial = std::string(1024 * 1024 - 1, 'a') + "\xE2\x82\xAC";
+    env.model.push([partial](const model::ChatRequest&, const model::ChatSink& sink) {
+        sink.on_text(partial);
+        return model::ModelResult<model::ChatResponse>(failure(model::code::model_unavailable));
+    });
+    const auto run = env.run(env.thread(), "compare");
+    ASSERT_TRUE(env.wait(run, RunState::failed));
+    bool found = false;
+    for (const auto& e : env.rt->events(run)) {
+        if (e.kind != "incomplete_message") continue;
+        found = true;
+        EXPECT_EQ(jstr(e.payload, "content"), std::string(1024 * 1024 - 1, 'a'));
+        EXPECT_TRUE(jbool(e.payload, "truncated"));
+    }
+    EXPECT_TRUE(found);
 }
 
 TEST(RuntimeLoop, ParallelCallsRunConcurrentlyUpToTheLimitAndResultsKeepModelOrder) {
@@ -261,6 +630,39 @@ TEST(RuntimeLoop, ParallelCallsRunConcurrentlyUpToTheLimitAndResultsKeepModelOrd
     }
 }
 
+TEST(RuntimeLoop, ChangedPolicyControlsParallelToolsOnTheNextRun) {
+    std::atomic<int> limit{1}, inside{0}, peak{0};
+    RuntimeConfig cfg;
+    cfg.policy_integer = [&limit](const std::string& key) -> std::optional<int> {
+        if (key == "llm.max_parallel_tools") return limit.load();
+        return std::nullopt;
+    };
+    Env env(cfg);
+    ToolDef tool = make_tool(env, "t.parallel_policy", Risk::read);
+    tool.core = true;
+    tool.run = [&](ToolContext&, const json&) {
+        const int now = ++inside;
+        int previous = peak.load();
+        while (now > previous && !peak.compare_exchange_weak(previous, now)) {}
+        std::this_thread::sleep_for(100ms);
+        --inside;
+        return ToolOutput::success("done");
+    };
+    env.add_tool(tool);
+    env.start();
+    auto run = [&] {
+        env.model.push_calls({{"a", "t.parallel_policy", {}}, {"b", "t.parallel_policy", {}}});
+        env.model.push_text("done");
+        return env.run(env.thread(), "run tools");
+    };
+    ASSERT_TRUE(env.wait(run(), RunState::succeeded));
+    EXPECT_EQ(peak.load(), 1);
+    limit = 2;
+    peak = 0;
+    ASSERT_TRUE(env.wait(run(), RunState::succeeded));
+    EXPECT_EQ(peak.load(), 2);
+}
+
 TEST(RuntimeLoop, ModelCallLimitFailsTheRun) {
     RuntimeConfig cfg;
     cfg.attended.model_calls = 3;
@@ -274,6 +676,50 @@ TEST(RuntimeLoop, ModelCallLimitFailsTheRun) {
     ASSERT_TRUE(env.wait(id, RunState::failed));
     EXPECT_EQ(env.rec(id).reason, "model call limit reached");
     EXPECT_EQ(env.model.request_count(), 3u);
+}
+
+TEST(RuntimeLoop, RunLimitsFollowCurrentPolicy) {
+    std::atomic<int> limit{1};
+    RuntimeConfig cfg;
+    cfg.policy_integer = [&limit](const std::string& key) -> std::optional<int> {
+        if (key == "llm.run_limits.attended.model_calls") return limit.load();
+        return std::nullopt;
+    };
+    Env env(cfg);
+    ToolDef t = make_tool(env, "t.policy_limit", Risk::read);
+    t.core = true;
+    env.add_tool(t);
+    env.start();
+    env.model.push_calls({{"one", "t.policy_limit", {}}});
+    const auto first = env.run(env.thread(), "first");
+    ASSERT_TRUE(env.wait(first, RunState::failed));
+    EXPECT_EQ(env.rec(first).reason, "model call limit reached");
+    limit = 2;
+    env.model.push_calls({{"two", "t.policy_limit", {}}});
+    env.model.push_text("done");
+    const auto second = env.run(env.thread(), "second");
+    EXPECT_TRUE(env.wait(second, RunState::succeeded));
+}
+
+TEST(RuntimeLoop, PolicyLimitsSelectBothRunModesAndKeepFallbacks) {
+    RuntimeConfig cfg;
+    const std::map<std::string, int> values = {
+        {"llm.run_limits.attended.model_calls", 5}, {"llm.run_limits.attended.tool_calls", 6},
+        {"llm.run_limits.attended.wall_minutes", 7}, {"llm.run_limits.unattended.model_calls", 8},
+        {"llm.run_limits.unattended.tool_calls", 9}, {"llm.run_limits.unattended.wall_minutes", 10},
+    };
+    cfg.policy_integer = [&values](const std::string& key) -> std::optional<int> {
+        const auto it = values.find(key);
+        return it == values.end() ? std::nullopt : std::optional<int>(it->second);
+    };
+    const auto attended = cfg.run_limits(false), unattended = cfg.run_limits(true);
+    EXPECT_EQ(attended.model_calls, 5);
+    EXPECT_EQ(attended.tool_calls, 6);
+    EXPECT_EQ(attended.wall_minutes, 7);
+    EXPECT_EQ(unattended.model_calls, 8);
+    EXPECT_EQ(unattended.tool_calls, 9);
+    EXPECT_EQ(unattended.wall_minutes, 10);
+    EXPECT_EQ(cfg.policy_limit("missing", 4), 4);
 }
 
 TEST(RuntimeLoop, ToolCallLimitFailsTheRunAndFillsInTheOpenResults) {
@@ -1605,6 +2051,40 @@ TEST(RuntimeProvenance, ExternalActionAfterUntrustedContentNeedsApprovalThatShow
 
 // ==== 3.6 Large tool results, compaction =================================================================================
 
+TEST(RuntimeLargeResults, ChangedPolicyControlsAttachmentThresholdOnTheNextRun) {
+    std::atomic<int> limit{1};
+    RuntimeConfig cfg;
+    cfg.policy_integer = [&limit](const std::string& key) -> std::optional<int> {
+        if (key == "llm.max_tool_result_kb") return limit.load();
+        return std::nullopt;
+    };
+    Env env(cfg);
+    ToolDef tool = make_tool(env, "t.large_policy", Risk::read);
+    tool.core = true;
+    tool.run = [](ToolContext&, const json&) { return ToolOutput::success(std::string(1500, 'x')); };
+    env.add_tool(tool);
+    env.start();
+    auto run = [&] {
+        env.model.push_calls({{"result", "t.large_policy", {}}});
+        env.model.push_text("done");
+        return env.run(env.thread(), "run tool");
+    };
+    const auto first = run();
+    ASSERT_TRUE(env.wait(first, RunState::succeeded));
+    bool first_attached = false;
+    for (const auto& event : env.rt->events(first))
+        if (event.kind == "tool_result" && jstr(event.payload, "call_id") == "result")
+            first_attached = event.payload.contains("attachment");
+    EXPECT_TRUE(first_attached);
+    limit = 2;
+    const auto second = run();
+    ASSERT_TRUE(env.wait(second, RunState::succeeded));
+    EXPECT_EQ(env.tool_content(second, "result"), std::string(1500, 'x'));
+    for (const auto& event : env.rt->events(second))
+        if (event.kind == "tool_result" && jstr(event.payload, "call_id") == "result")
+            EXPECT_FALSE(event.payload.contains("attachment"));
+}
+
 TEST(RuntimeLargeResults, TwoMegabyteResultBecomesAPreviewAndAnAttachmentReadInParts) {
     Env env;
     std::string big;
@@ -2564,6 +3044,41 @@ TEST(RuntimeSubagents, SubagentQuestionInterruptsTheParentAndTheAnswerResumesThe
     EXPECT_EQ(child_requests.load(), 2);
 }
 
+TEST(RuntimeSubagents, StructuredQuestionResumesChildAndParentAfterRestart) {
+    RuntimeConfig cfg;
+    cfg.generated_surfaces = true;
+    Env env(cfg);
+    const json form = json::parse(R"({"version":1,"id":"f","summary":"Choose","components":[{"type":"select","id":"folder","label":"Folder","options":["A","B"]},{"type":"button","id":"send","label":"Continue"}]})");
+    std::atomic<int> child_requests{0};
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (!is_subagent(req)) return std::nullopt;
+        if (child_requests++ == 0)
+            return model::ModelResult<model::ChatResponse>(calls_response({{"q1", "ask_user", {{"question", "Which folder?"}, {"form", form}}}}));
+        return model::ModelResult<model::ChatResponse>(text_response("child resumed"));
+    });
+    env.start();
+    env.model.push_calls({{"c1", "delegate", {{"task", "find the project folder"}}}});
+    env.model.push_text("parent resumed");
+    const auto thread = env.thread();
+    const auto parent = env.run(thread, "set up the project");
+    ASSERT_TRUE(env.wait(parent, RunState::interrupted));
+    const auto children = children_of(env, thread, parent);
+    ASSERT_EQ(children.size(), 1u);
+    const auto child = children.front().id;
+    const auto actions = env.rt->pending_actions(thread);
+    ASSERT_EQ(actions.size(), 1u);
+    const auto action = actions.front();
+    EXPECT_EQ(action.run_id, child);
+    const auto revision = jstr(action.payload, "surface_revision"), token = jstr(action.payload, "surface_token");
+    env.restart();
+    EXPECT_FALSE(env.rt->answer_generated_question(action.id, thread, parent, revision, token, "send", {{"folder", "B"}}, json::object()));
+    ASSERT_TRUE(env.rt->answer_generated_question(action.id, thread, child, revision, token, "send", {{"folder", "B"}}, json::object()));
+    ASSERT_TRUE(env.wait(parent, RunState::succeeded));
+    EXPECT_EQ(env.rec(child).state, RunState::succeeded);
+    EXPECT_NE(env.tool_content(child, "q1").find("Folder: \"B\""), std::string::npos);
+    EXPECT_EQ(env.tool_content(parent, "c1"), "child resumed");
+}
+
 TEST(RuntimeSubagents, CancellingTheParentCancelsItsInterruptedSubagent) {
     Env env;
     env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
@@ -3465,9 +3980,10 @@ TEST(RunContext, CollectsRealFolders) {
 
 namespace {
 struct ServiceEnv {
-    explicit ServiceEnv(std::function<std::optional<std::string>()> gate = {}) {
+    explicit ServiceEnv(std::function<std::optional<std::string>()> gate = {}, bool generated_surfaces = false) {
         RuntimeConfig cfg;
         cfg.start_gate = std::move(gate);
+        cfg.generated_surfaces = generated_surfaces;
         auto s = wb::AgentService::create(*env.db, env.model, cfg);
         EXPECT_TRUE(s);
         svc = std::move(*s);
@@ -3489,6 +4005,100 @@ struct ServiceEnv {
     std::vector<json> pushed;
 };
 }  // namespace
+
+TEST(LocalRunApi, StructuredQuestionIsBoundAtomicAndIdempotent) {
+    ServiceEnv s({}, true);
+    RpcRegistry rpc;
+    s.svc->register_rpc(rpc, true);
+    ASSERT_NE(rpc.find("surfaces.answer_question", false), nullptr);
+    EXPECT_EQ(rpc.find("surfaces.answer_question", true), nullptr);
+    const json form = json::parse(R"({"version":1,"id":"f","summary":"Choose","components":[{"type":"select","id":"cadence","label":"Cadence","options":["Weekly","Monthly"]},{"type":"button","id":"send","label":"Continue"}]})");
+    s.env.model.push_calls({{"q1", "ask_user", {{"question", "Choose"}, {"form", form}}}});
+    const auto sent = s.call(rpc, "threads.send", {{"text", "ask"}});
+    ASSERT_TRUE(sent);
+    const auto thread = jstr(*sent, "thread_id"), run = jstr(*sent, "run_id");
+    ASSERT_TRUE(s.svc->runtime().wait_for_state(run, RunState::interrupted, 10s));
+    const auto actions = s.svc->runtime().pending_actions(thread);
+    ASSERT_EQ(actions.size(), 1u);
+    const auto& action = actions.front();
+    const json request = {{"thread_id", thread}, {"run_id", run}, {"action_id", action.id},
+                          {"revision", jstr(action.payload, "surface_revision")}, {"token", jstr(action.payload, "surface_token")},
+                          {"button_id", "send"}, {"draft", {{"cadence", "Monthly"}}}};
+    auto wrong = request;
+    wrong["run_id"] = "other";
+    EXPECT_FALSE(s.call(rpc, "surfaces.answer_question", wrong));
+    wrong = request;
+    wrong["token"] = "forged";
+    EXPECT_FALSE(s.call(rpc, "surfaces.answer_question", wrong));
+    wrong = request;
+    wrong["draft"]["cadence"] = "Invalid";
+    EXPECT_FALSE(s.call(rpc, "surfaces.answer_question", wrong));
+    ASSERT_TRUE(s.env.db->exec("CREATE TRIGGER reject_generated_resolution BEFORE INSERT ON run_events WHEN NEW.kind='resolution' BEGIN SELECT RAISE(ABORT, 'test'); END"));
+    EXPECT_FALSE(s.call(rpc, "surfaces.answer_question", request));
+    ASSERT_EQ(s.svc->runtime().pending_actions(thread).size(), 1u);
+    ASSERT_TRUE(s.env.db->exec("DROP TRIGGER reject_generated_resolution"));
+    s.env.model.push_text("done");
+    ASSERT_TRUE(s.call(rpc, "surfaces.answer_question", request));
+    ASSERT_TRUE(s.svc->runtime().wait_for_state(run, RunState::succeeded, 10s));
+    EXPECT_TRUE(s.call(rpc, "surfaces.answer_question", request));
+    int resolutions = 0;
+    for (const auto& event : s.svc->runtime().events(run)) if (event.kind == "resolution") ++resolutions;
+    EXPECT_EQ(resolutions, 1);
+    EXPECT_NE(s.env.tool_content(run, "q1").find("Cadence: \"Monthly\""), std::string::npos);
+}
+
+TEST(LocalRunApi, SurfaceStateIsGatedAndBoundToStoredAssistantEvents) {
+    ServiceEnv disabled;
+    RpcRegistry disabled_rpc;
+    disabled.svc->register_rpc(disabled_rpc, true);
+    const auto disabled_capabilities = disabled.call(disabled_rpc, "surfaces.capabilities", json::object());
+    ASSERT_TRUE(disabled_capabilities);
+    EXPECT_FALSE(jbool(*disabled_capabilities, "enabled"));
+    EXPECT_EQ(disabled_rpc.find("surfaces.capabilities", true), nullptr);
+    ASSERT_NE(disabled_rpc.find("surfaces.open", false), nullptr);
+    EXPECT_EQ(disabled_rpc.find("surfaces.open", true), nullptr);
+    EXPECT_FALSE(disabled.call(disabled_rpc, "surfaces.open", json::object()));
+
+    ServiceEnv enabled({}, true);
+    RpcRegistry rpc;
+    enabled.svc->register_rpc(rpc, true);
+    const auto enabled_capabilities = enabled.call(rpc, "surfaces.capabilities", json::object());
+    ASSERT_TRUE(enabled_capabilities);
+    EXPECT_TRUE(jbool(*enabled_capabilities, "enabled"));
+    enabled.env.model.push_text("```skowork-ui\n{\"version\":1,\"id\":\"s\",\"summary\":\"S\",\"components\":[{\"type\":\"button\",\"id\":\"send\",\"label\":\"Send\"}]}\n```");
+    const auto sent = enabled.call(rpc, "threads.send", {{"text", "first"}});
+    ASSERT_TRUE(sent);
+    const auto thread = jstr(*sent, "thread_id"), run = jstr(*sent, "run_id");
+    ASSERT_TRUE(enabled.svc->runtime().wait_for_state(run, RunState::succeeded, 10s));
+    long long seq = 0;
+    for (const auto& event : enabled.svc->runtime().events(run)) if (event.kind == "message" && jbool(event.payload, "surface_complete")) seq = event.seq;
+    const json identity = {{"thread_id", thread}, {"run_id", run}, {"event_seq", seq}, {"block_index", 0}};
+    const auto opened = enabled.call(rpc, "surfaces.open", identity);
+    ASSERT_TRUE(opened);
+    EXPECT_TRUE((*opened)["state"].is_null());
+    EXPECT_FALSE(jbool(*opened, "accepted"));
+    auto save = identity;
+    save["revision"] = (*opened)["revision"];
+    save["state"] = {{"draft", json::object()}};
+    ASSERT_TRUE(enabled.call(rpc, "surfaces.save", save));
+    const auto restored = enabled.call(rpc, "surfaces.open", identity);
+    ASSERT_TRUE(restored);
+    EXPECT_EQ((*restored)["state"], save["state"]);
+    save["revision"] = "stale";
+    EXPECT_FALSE(enabled.call(rpc, "surfaces.save", save));
+    auto wrong = identity;
+    wrong["thread_id"] = "other";
+    EXPECT_FALSE(enabled.call(rpc, "surfaces.open", wrong));
+    enabled.env.model.push_text("follow-up");
+    auto submit = identity;
+    submit["revision"] = (*opened)["revision"];
+    submit["button_id"] = "send";
+    submit["draft"] = json::object();
+    ASSERT_TRUE(enabled.call(rpc, "surfaces.submit", submit));
+    const auto reopened = enabled.call(rpc, "surfaces.open", identity);
+    ASSERT_TRUE(reopened);
+    EXPECT_TRUE(jbool(*reopened, "accepted"));
+}
 
 TEST(LocalRunApi, ReleaseBuildKeepsEveryMethodOffThePipe) {
     ServiceEnv s;

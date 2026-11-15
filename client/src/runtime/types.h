@@ -143,6 +143,22 @@ struct SkillRun {
 };
 
 struct RuntimeConfig {
+    // Experimental generated Thread surfaces remain unavailable until explicitly enabled by the host.
+    bool generated_surfaces = false;
+    // Read the current policy at each decision; absent or invalid values keep the configured fallback.
+    std::function<std::optional<int>(const std::string&)> policy_integer;
+    [[nodiscard]] int policy_limit(const std::string& key, int fallback) const {
+        const auto value = policy_integer ? policy_integer(key) : std::nullopt;
+        return value && *value > 0 ? *value : fallback;
+    }
+    [[nodiscard]] RunLimits run_limits(bool is_unattended) const {
+        RunLimits limits = is_unattended ? unattended : attended;
+        const std::string prefix = is_unattended ? "llm.run_limits.unattended." : "llm.run_limits.attended.";
+        limits.model_calls = policy_limit(prefix + "model_calls", limits.model_calls);
+        limits.tool_calls = policy_limit(prefix + "tool_calls", limits.tool_calls);
+        limits.wall_minutes = policy_limit(prefix + "wall_minutes", limits.wall_minutes);
+        return limits;
+    }
     // policy.llm.run_limits.attended / .unattended (client/agent-runtime Run Limits)
     RunLimits attended{60, 200, 60};
     RunLimits unattended{30, 80, 30};

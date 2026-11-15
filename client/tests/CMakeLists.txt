@@ -87,7 +87,7 @@ endif()
 add_test(NAME skills_tests COMMAND skills_tests)
 
 # Portable native UI toolkit tests (add-native-ui): Markdown, layout, focus order, string bundles and plurals.
-add_executable(ui_tests ui/ui_core_test.cpp shell/shell_core_test.cpp)
+add_executable(ui_tests ui/ui_core_test.cpp ui/generated_surface_test.cpp ui/generated_table_test.cpp ui/generated_chart_test.cpp ui/generated_values_test.cpp ui/generated_surface_state_test.cpp shell/shell_core_test.cpp)
 target_link_libraries(ui_tests PRIVATE wb_shell_core GTest::gtest_main)
 if(WIN32)
   target_link_options(ui_tests PRIVATE -Wl,--subsystem,console)
@@ -140,6 +140,7 @@ if(WIN32)
     platform/log_test.cpp
     platform/http_stream_test.cpp
     storage/storage_test.cpp
+    storage/generated_surface_state_test.cpp
     host/host_test.cpp
     app/run_event_relay_test.cpp
     app/periodic_pass_test.cpp

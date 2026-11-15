@@ -1,0 +1,1361 @@
+{
+  "date": "2026-11-14T13:40:24.803Z",
+  "roles": {
+    "main": "skoda-llm-primary",
+    "small": "skoda-llm-secondary",
+    "vision": "skoda-llm-primary",
+    "embed": "skoda-llm-embedding",
+    "rerank": "skoda-llm-reranker",
+    "image": "skoda-llm-image"
+  },
+  "results": [
+    {
+      "id": 1,
+      "role": "main",
+      "type": "table",
+      "prompt": "Compare projects Atlas and Boreal. Atlas costs 12 and Boreal costs 18. Show a table with project and cost.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 3864,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "atlas-boreal-comparison",
+        "summary": "Atlas costs 12 and Boreal costs 18.",
+        "components": [
+          {
+            "type": "table",
+            "id": "project-costs",
+            "label": "Project cost comparison",
+            "columns": [
+              "Project",
+              "Cost"
+            ],
+            "rows": [
+              [
+                "Atlas",
+                "12"
+              ],
+              [
+                "Boreal",
+                "18"
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "role": "main",
+      "type": "bar",
+      "prompt": "Show a bar chart of the values: Alpha 12, Beta 18, unit hours.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2675,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "alpha-beta-hours",
+        "summary": "Bar chart showing Alpha at 12 hours and Beta at 18 hours.",
+        "components": [
+          {
+            "type": "bar",
+            "id": "values-chart",
+            "label": "Alpha and Beta values",
+            "unit": "hours",
+            "points": [
+              {
+                "label": "Alpha",
+                "value": 12
+              },
+              {
+                "label": "Beta",
+                "value": 18
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "role": "main",
+      "type": "line",
+      "prompt": "Show a line chart of the values: Monday 12, Tuesday 18, unit hours.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 3366,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "hours-by-day",
+        "summary": "Line chart showing 12 hours on Monday and 18 hours on Tuesday.",
+        "components": [
+          {
+            "type": "line",
+            "id": "hours-line-chart",
+            "label": "Hours by day",
+            "unit": "hours",
+            "points": [
+              {
+                "label": "Monday",
+                "value": 12
+              },
+              {
+                "label": "Tuesday",
+                "value": 18
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "role": "main",
+      "type": "diagram",
+      "prompt": "Draw a directed dependency diagram: Plan leads to Build, and Build leads to Review.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 3087,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "plan-build-review",
+        "summary": "Plan leads to Build, which leads to Review.",
+        "components": [
+          {
+            "type": "diagram",
+            "id": "dependency-diagram",
+            "label": "Directed dependency diagram",
+            "nodes": [
+              {
+                "id": "plan",
+                "label": "Plan"
+              },
+              {
+                "id": "build",
+                "label": "Build"
+              },
+              {
+                "id": "review",
+                "label": "Review"
+              }
+            ],
+            "edges": [
+              {
+                "from": "plan",
+                "to": "build"
+              },
+              {
+                "from": "build",
+                "to": "review"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "role": "main",
+      "type": "select",
+      "prompt": "Ask the user to select either weekly or monthly reporting; include a submit button.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 3825,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "reporting-frequency-form",
+        "summary": "Choose weekly or monthly reporting, then submit your selection.",
+        "components": [
+          {
+            "type": "select",
+            "id": "reporting-frequency",
+            "label": "Select weekly or monthly reporting",
+            "options": [
+              "Weekly reporting",
+              "Monthly reporting"
+            ]
+          },
+          {
+            "type": "button",
+            "id": "submit-reporting-frequency",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "role": "main",
+      "type": "multiselect",
+      "prompt": "Let the user select any of Planning, Build and Review; include a submit button.",
+      "status": 200,
+      "verdict": "requested component missing",
+      "missing_facts": [],
+      "elapsed_ms": 4028,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "phase-selection",
+        "summary": "Select Planning, Build, or Review and submit the choice.",
+        "components": [
+          {
+            "type": "select",
+            "id": "phase-select",
+            "label": "Select a phase",
+            "options": [
+              "Planning",
+              "Build",
+              "Review"
+            ]
+          },
+          {
+            "type": "button",
+            "id": "submit-button",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "role": "main",
+      "type": "switch",
+      "prompt": "Ask whether to include pending items using a switch, initially off; include a submit button.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2345,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "pending-items-controls",
+        "summary": "Choose whether to include pending items and submit the selection.",
+        "components": [
+          {
+            "type": "switch",
+            "id": "include-pending-items",
+            "label": "Include pending items?",
+            "value": false
+          },
+          {
+            "type": "button",
+            "id": "submit-pending-items",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "role": "main",
+      "type": "text",
+      "prompt": "Ask the user for a report title in a text field; include a submit button.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 3119,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "report-title-form",
+        "summary": "Enter a report title and submit it.",
+        "components": [
+          {
+            "type": "text",
+            "id": "report-title",
+            "label": "Report title",
+            "value": ""
+          },
+          {
+            "type": "button",
+            "id": "submit-report",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "role": "main",
+      "type": "slider",
+      "prompt": "Ask for a priority from 1 to 5, initially 3, using a slider and a submit button.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 3129,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "priority-request",
+        "summary": "Choose a priority from 1 to 5, initially set to 3, and submit it.",
+        "components": [
+          {
+            "type": "slider",
+            "id": "priority-slider",
+            "label": "Priority",
+            "min": 1,
+            "max": 5,
+            "value": 3
+          },
+          {
+            "type": "button",
+            "id": "submit-priority",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "role": "main",
+      "type": "card",
+      "prompt": "Use a card with a paragraph to show the status of Project Atlas: ready.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2598,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "project-atlas-ui",
+        "summary": "Project Atlas status: ready.",
+        "components": [
+          {
+            "type": "card",
+            "id": "project-atlas-card",
+            "label": "Project Atlas",
+            "components": [
+              {
+                "type": "paragraph",
+                "id": "project-atlas-status",
+                "label": "Project Atlas status",
+                "content": "Status: ready"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "role": "small",
+      "type": "table",
+      "prompt": "Compare projects Atlas and Boreal. Atlas costs 12 and Boreal costs 18. Show a table with project and cost. Keep it compact.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2162,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "compare-atlas-boreal",
+        "summary": "Compare Atlas and Boreal costs.",
+        "components": [
+          {
+            "type": "table",
+            "id": "project-cost-table",
+            "label": "Project costs",
+            "columns": [
+              "Project",
+              "Cost"
+            ],
+            "rows": [
+              [
+                "Atlas",
+                "12"
+              ],
+              [
+                "Boreal",
+                "18"
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "role": "small",
+      "type": "bar",
+      "prompt": "Show a bar chart of the values: Alpha 12, Beta 18, unit hours. Keep it compact.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2560,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "bar-alpha-beta-hours",
+        "summary": "Bar chart of Alpha and Beta in hours.",
+        "components": [
+          {
+            "type": "bar",
+            "id": "bar-alpha-beta",
+            "label": "Values",
+            "unit": "hours",
+            "points": [
+              {
+                "label": "Alpha",
+                "value": 12
+              },
+              {
+                "label": "Beta",
+                "value": 18
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 13,
+      "role": "small",
+      "type": "line",
+      "prompt": "Show a line chart of the values: Monday 12, Tuesday 18, unit hours. Keep it compact.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2709,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "hours-line-chart",
+        "summary": "Line chart of hours for Monday and Tuesday.",
+        "components": [
+          {
+            "type": "line",
+            "id": "hours-line",
+            "label": "Hours",
+            "unit": "hours",
+            "points": [
+              {
+                "label": "Monday",
+                "value": 12
+              },
+              {
+                "label": "Tuesday",
+                "value": 18
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 14,
+      "role": "small",
+      "type": "diagram",
+      "prompt": "Draw a directed dependency diagram: Plan leads to Build, and Build leads to Review. Keep it compact.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2125,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "dependency-diagram",
+        "summary": "Directed dependency diagram showing Plan → Build → Review.",
+        "components": [
+          {
+            "type": "diagram",
+            "id": "dependency-flow",
+            "label": "Dependency flow",
+            "nodes": [
+              {
+                "id": "plan",
+                "label": "Plan"
+              },
+              {
+                "id": "build",
+                "label": "Build"
+              },
+              {
+                "id": "review",
+                "label": "Review"
+              }
+            ],
+            "edges": [
+              {
+                "from": "plan",
+                "to": "build"
+              },
+              {
+                "from": "build",
+                "to": "review"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 15,
+      "role": "small",
+      "type": "select",
+      "prompt": "Ask the user to select either weekly or monthly reporting; include a submit button. Keep it compact.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2226,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "reporting-frequency-selector",
+        "summary": "Select weekly or monthly reporting and submit.",
+        "components": [
+          {
+            "type": "select",
+            "id": "reporting-frequency",
+            "label": "Reporting frequency",
+            "options": [
+              "Weekly",
+              "Monthly"
+            ]
+          },
+          {
+            "type": "button",
+            "id": "submit-reporting-frequency",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 16,
+      "role": "small",
+      "type": "multiselect",
+      "prompt": "Let the user select any of Planning, Build and Review; include a submit button. Keep it compact.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 3045,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "phase-selection",
+        "summary": "Compact selection for Planning, Build, and Review with a submit button.",
+        "components": [
+          {
+            "type": "multiselect",
+            "id": "phase-select",
+            "label": "Select phases",
+            "options": [
+              "Planning",
+              "Build",
+              "Review"
+            ]
+          },
+          {
+            "type": "button",
+            "id": "submit-phases",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 17,
+      "role": "small",
+      "type": "switch",
+      "prompt": "Ask whether to include pending items using a switch, initially off; include a submit button. Keep it compact.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2813,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "pending-items-prompt",
+        "summary": "Ask whether to include pending items, with a switch initially off and a submit button.",
+        "components": [
+          {
+            "type": "switch",
+            "id": "include-pending-items",
+            "label": "Include pending items",
+            "value": false
+          },
+          {
+            "type": "button",
+            "id": "submit-pending-items",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 18,
+      "role": "small",
+      "type": "text",
+      "prompt": "Ask the user for a report title in a text field; include a submit button. Keep it compact.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2226,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "report-title-form",
+        "summary": "Compact form asking for a report title with a submit button.",
+        "components": [
+          {
+            "type": "text",
+            "id": "report-title",
+            "label": "Report title",
+            "value": ""
+          },
+          {
+            "type": "button",
+            "id": "submit-report-title",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 19,
+      "role": "small",
+      "type": "slider",
+      "prompt": "Ask for a priority from 1 to 5, initially 3, using a slider and a submit button. Keep it compact.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2375,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "priority-form",
+        "summary": "Select a priority from 1 to 5 and submit.",
+        "components": [
+          {
+            "type": "slider",
+            "id": "priority",
+            "label": "Priority",
+            "min": 1,
+            "max": 5,
+            "value": 3
+          },
+          {
+            "type": "button",
+            "id": "submit-priority",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 20,
+      "role": "small",
+      "type": "card",
+      "prompt": "Use a card with a paragraph to show the status of Project Atlas: ready. Keep it compact.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 1894,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "project-atlas-status",
+        "summary": "Project Atlas status card.",
+        "components": [
+          {
+            "type": "card",
+            "id": "project-atlas-status-card",
+            "label": "Project Atlas",
+            "components": [
+              {
+                "type": "paragraph",
+                "id": "project-atlas-status-paragraph",
+                "label": "Project Atlas status",
+                "content": "Ready"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 21,
+      "role": "main",
+      "type": "table",
+      "prompt": "Compare projects Atlas and Boreal. Atlas costs 12 and Boreal costs 18. Show a table with project and cost. Make it suitable for a busy manager.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 3977,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "atlas-boreal-cost-comparison",
+        "summary": "Boreal has the higher cost: 18, compared with 12 for Atlas.",
+        "components": [
+          {
+            "type": "table",
+            "id": "project-costs",
+            "label": "Project cost comparison",
+            "columns": [
+              "Project",
+              "Cost"
+            ],
+            "rows": [
+              [
+                "Atlas",
+                "12"
+              ],
+              [
+                "Boreal",
+                "18"
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 22,
+      "role": "main",
+      "type": "bar",
+      "prompt": "Show a bar chart of the values: Alpha 12, Beta 18, unit hours. Make it suitable for a busy manager.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2539,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "alpha-beta-hours",
+        "summary": "Alpha: 12 hours. Beta: 18 hours.",
+        "components": [
+          {
+            "type": "bar",
+            "id": "hours-bar",
+            "label": "Hours by category",
+            "unit": "hours",
+            "points": [
+              {
+                "label": "Alpha",
+                "value": 12
+              },
+              {
+                "label": "Beta",
+                "value": 18
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 23,
+      "role": "main",
+      "type": "line",
+      "prompt": "Show a line chart of the values: Monday 12, Tuesday 18, unit hours. Make it suitable for a busy manager.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2649,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "hours-overview",
+        "summary": "Tuesday recorded 18 hours, up from 12 hours on Monday.",
+        "components": [
+          {
+            "type": "line",
+            "id": "hours-by-day",
+            "label": "Hours by day",
+            "unit": "hours",
+            "points": [
+              {
+                "label": "Monday",
+                "value": 12
+              },
+              {
+                "label": "Tuesday",
+                "value": 18
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 24,
+      "role": "main",
+      "type": "diagram",
+      "prompt": "Draw a directed dependency diagram: Plan leads to Build, and Build leads to Review. Make it suitable for a busy manager.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2395,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "dependency-flow",
+        "summary": "Plan leads to Build, which leads to Review.",
+        "components": [
+          {
+            "type": "diagram",
+            "id": "plan-build-review",
+            "label": "Directed dependency flow",
+            "nodes": [
+              {
+                "id": "plan",
+                "label": "Plan"
+              },
+              {
+                "id": "build",
+                "label": "Build"
+              },
+              {
+                "id": "review",
+                "label": "Review"
+              }
+            ],
+            "edges": [
+              {
+                "from": "plan",
+                "to": "build"
+              },
+              {
+                "from": "build",
+                "to": "review"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 25,
+      "role": "main",
+      "type": "select",
+      "prompt": "Ask the user to select either weekly or monthly reporting; include a submit button. Make it suitable for a busy manager.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 3177,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "reporting-frequency-form",
+        "summary": "Select weekly or monthly reporting and submit.",
+        "components": [
+          {
+            "type": "select",
+            "id": "reporting-frequency",
+            "label": "Reporting frequency",
+            "options": [
+              "Weekly",
+              "Monthly"
+            ]
+          },
+          {
+            "type": "button",
+            "id": "submit-reporting-frequency",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 26,
+      "role": "main",
+      "type": "multiselect",
+      "prompt": "Let the user select any of Planning, Build and Review; include a submit button. Make it suitable for a busy manager.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 4766,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "stage-selection",
+        "summary": "Select one or more stages and submit.",
+        "components": [
+          {
+            "type": "multiselect",
+            "id": "stages",
+            "label": "Stages",
+            "options": [
+              "Planning",
+              "Build",
+              "Review"
+            ]
+          },
+          {
+            "type": "button",
+            "id": "submit",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 27,
+      "role": "main",
+      "type": "switch",
+      "prompt": "Ask whether to include pending items using a switch, initially off; include a submit button. Make it suitable for a busy manager.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 4768,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "pending-items-control",
+        "summary": "Choose whether to include pending items, then submit.",
+        "components": [
+          {
+            "type": "switch",
+            "id": "include-pending-items",
+            "label": "Include pending items",
+            "value": false
+          },
+          {
+            "type": "button",
+            "id": "submit-selection",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 28,
+      "role": "main",
+      "type": "text",
+      "prompt": "Ask the user for a report title in a text field; include a submit button. Make it suitable for a busy manager.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 3292,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "report-title-form",
+        "summary": "Quickly enter a report title and submit it.",
+        "components": [
+          {
+            "type": "text",
+            "id": "report-title",
+            "label": "Report title",
+            "value": ""
+          },
+          {
+            "type": "button",
+            "id": "submit-report-title",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 29,
+      "role": "main",
+      "type": "slider",
+      "prompt": "Ask for a priority from 1 to 5, initially 3, using a slider and a submit button. Make it suitable for a busy manager.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 4169,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "priority-request",
+        "summary": "Set a priority from 1 to 5 and submit it.",
+        "components": [
+          {
+            "type": "slider",
+            "id": "priority-slider",
+            "label": "Priority (1–5)",
+            "min": 1,
+            "max": 5,
+            "value": 3
+          },
+          {
+            "type": "button",
+            "id": "submit-priority",
+            "label": "Submit priority"
+          }
+        ]
+      }
+    },
+    {
+      "id": 30,
+      "role": "main",
+      "type": "card",
+      "prompt": "Use a card with a paragraph to show the status of Project Atlas: ready. Make it suitable for a busy manager.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 1684,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "project-atlas-overview",
+        "summary": "Project Atlas is ready.",
+        "components": [
+          {
+            "type": "card",
+            "id": "project-atlas-card",
+            "label": "Project Atlas",
+            "components": [
+              {
+                "type": "paragraph",
+                "id": "project-atlas-status",
+                "label": "Project Atlas status",
+                "content": "Status: ready"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 31,
+      "role": "small",
+      "type": "table",
+      "prompt": "Compare projects Atlas and Boreal. Atlas costs 12 and Boreal costs 18. Show a table with project and cost. Use simple labels.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2883,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "compare-atlas-boreal",
+        "summary": "Atlas costs 12 and Boreal costs 18.",
+        "components": [
+          {
+            "type": "table",
+            "id": "project-cost-table",
+            "label": "Project cost",
+            "columns": [
+              "Project",
+              "Cost"
+            ],
+            "rows": [
+              [
+                "Atlas",
+                "12"
+              ],
+              [
+                "Boreal",
+                "18"
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 32,
+      "role": "small",
+      "type": "bar",
+      "prompt": "Show a bar chart of the values: Alpha 12, Beta 18, unit hours. Use simple labels.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2948,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "bar-alpha-beta-hours",
+        "summary": "Bar chart of Alpha and Beta in hours.",
+        "components": [
+          {
+            "type": "bar",
+            "id": "bar-alpha-beta",
+            "label": "Values",
+            "unit": "hours",
+            "points": [
+              {
+                "label": "Alpha",
+                "value": 12
+              },
+              {
+                "label": "Beta",
+                "value": 18
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 33,
+      "role": "small",
+      "type": "line",
+      "prompt": "Show a line chart of the values: Monday 12, Tuesday 18, unit hours. Use simple labels.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2126,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "line-chart-hours",
+        "summary": "Line chart of hours for Monday and Tuesday.",
+        "components": [
+          {
+            "type": "line",
+            "id": "hours-line",
+            "label": "Hours by day",
+            "unit": "hours",
+            "points": [
+              {
+                "label": "Monday",
+                "value": 12
+              },
+              {
+                "label": "Tuesday",
+                "value": 18
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 34,
+      "role": "small",
+      "type": "diagram",
+      "prompt": "Draw a directed dependency diagram: Plan leads to Build, and Build leads to Review. Use simple labels.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2617,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "dependency-diagram",
+        "summary": "Directed dependency diagram showing Plan leads to Build and Build leads to Review.",
+        "components": [
+          {
+            "type": "diagram",
+            "id": "dependency-diagram",
+            "label": "Dependency diagram",
+            "nodes": [
+              {
+                "id": "plan",
+                "label": "Plan"
+              },
+              {
+                "id": "build",
+                "label": "Build"
+              },
+              {
+                "id": "review",
+                "label": "Review"
+              }
+            ],
+            "edges": [
+              {
+                "from": "plan",
+                "to": "build"
+              },
+              {
+                "from": "build",
+                "to": "review"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 35,
+      "role": "small",
+      "type": "select",
+      "prompt": "Ask the user to select either weekly or monthly reporting; include a submit button. Use simple labels.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2398,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "reporting-frequency-selector",
+        "summary": "Select weekly or monthly reporting and submit.",
+        "components": [
+          {
+            "type": "select",
+            "id": "reporting-frequency",
+            "label": "Reporting frequency",
+            "options": [
+              "Weekly",
+              "Monthly"
+            ]
+          },
+          {
+            "type": "button",
+            "id": "submit-reporting",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 36,
+      "role": "small",
+      "type": "multiselect",
+      "prompt": "Let the user select any of Planning, Build and Review; include a submit button. Use simple labels.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2580,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "phase-selection-ui",
+        "summary": "Select one or more phases and submit.",
+        "components": [
+          {
+            "type": "multiselect",
+            "id": "phase-select",
+            "label": "Select phases",
+            "options": [
+              "Planning",
+              "Build",
+              "Review"
+            ]
+          },
+          {
+            "type": "button",
+            "id": "submit-button",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 37,
+      "role": "small",
+      "type": "switch",
+      "prompt": "Ask whether to include pending items using a switch, initially off; include a submit button. Use simple labels.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2410,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "pending-items-ui",
+        "summary": "Include pending items?",
+        "components": [
+          {
+            "type": "switch",
+            "id": "include-pending-items",
+            "label": "Include pending items",
+            "value": false
+          },
+          {
+            "type": "button",
+            "id": "submit-button",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 38,
+      "role": "small",
+      "type": "text",
+      "prompt": "Ask the user for a report title in a text field; include a submit button. Use simple labels.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 2056,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "report-title-form",
+        "summary": "A simple form asking for a report title with a submit button.",
+        "components": [
+          {
+            "type": "text",
+            "id": "report-title",
+            "label": "Report title",
+            "value": ""
+          },
+          {
+            "type": "button",
+            "id": "submit-report-title",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 39,
+      "role": "small",
+      "type": "slider",
+      "prompt": "Ask for a priority from 1 to 5, initially 3, using a slider and a submit button. Use simple labels.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 1885,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "priority-input",
+        "summary": "Priority input with a slider and submit button.",
+        "components": [
+          {
+            "type": "slider",
+            "id": "priority-slider",
+            "label": "Priority",
+            "min": 1,
+            "max": 5,
+            "value": 3
+          },
+          {
+            "type": "button",
+            "id": "priority-submit",
+            "label": "Submit"
+          }
+        ]
+      }
+    },
+    {
+      "id": 40,
+      "role": "small",
+      "type": "card",
+      "prompt": "Use a card with a paragraph to show the status of Project Atlas: ready. Use simple labels.",
+      "status": 200,
+      "verdict": "valid",
+      "missing_facts": [],
+      "elapsed_ms": 1798,
+      "finish_reason": "stop",
+      "surface": {
+        "version": 1,
+        "id": "project-atlas-status",
+        "summary": "Project Atlas status card.",
+        "components": [
+          {
+            "type": "card",
+            "id": "project-atlas-card",
+            "label": "Project Atlas",
+            "components": [
+              {
+                "type": "paragraph",
+                "id": "project-atlas-status-paragraph",
+                "label": "Status",
+                "content": "ready"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

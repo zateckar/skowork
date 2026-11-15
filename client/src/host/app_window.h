@@ -3,6 +3,7 @@
 // app/native_window.h) implements it; the host does not depend on the shell.
 #pragma once
 
+#include <functional>
 #include <string>
 
 #include "base/json.h"
@@ -15,7 +16,10 @@ public:
     // Opens the window or brings it to the foreground, at a route such as "#/about" (empty: where it was).
     virtual void open(const std::string& route = {}) = 0;
     virtual void close() = 0;
+    virtual void close_for_shutdown() = 0;
     [[nodiscard]] virtual bool is_open() const = 0;
+    [[nodiscard]] virtual bool has_unsaved_generated_state() const = 0;
+    virtual void confirm_shutdown(std::function<void(bool)> done) = 0;
     // Sends a host event to the window if it is open (main thread only).
     virtual void emit(const std::string& event, const json& data) = 0;
 };

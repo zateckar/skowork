@@ -18,6 +18,9 @@
 #include <thread>
 
 #include "ui/list.h"
+#include "ui/generated_slider.h"
+#include "ui/generated_surface.h"
+#include "ui/generated_surface_view.h"
 #include "ui/richtext.h"
 #include "ui/window.h"
 
@@ -380,6 +383,70 @@ TEST(UiAutomation, PatternsActOnTheElements) {
     link->Invoke();
     t.run([] {});
     EXPECT_EQ(t.opened_, (std::vector<std::u16string>{u"https://example.com/report"}));
+}
+
+TEST(UiAutomation, GeneratedSliderExposesBoundedRangeAndAcceptsLocalChanges) {
+    std::atomic<double> observed{0};
+    UiThread t([&](Window& w) {
+        auto* slider = w.content().emplace<GeneratedSlider>(w.ui(), "amount", u"Amount", -5, 10, 2);
+        slider->on_change = [&](double value) { observed.store(value); };
+    });
+    Uia u(t.hwnd());
+    ASSERT_TRUE(u.root);
+    const auto element = u.find(L"amount");
+    EXPECT_EQ(element.type, UIA_SliderControlTypeId);
+    EXPECT_TRUE(element.focusable);
+    auto range = pattern<IUIAutomationRangeValuePattern>(element, UIA_RangeValuePatternId);
+    ASSERT_TRUE(range);
+    double value = 0, minimum = 0, maximum = 0;
+    BOOL read_only = TRUE;
+    EXPECT_TRUE(SUCCEEDED(range->get_CurrentValue(&value)));
+    EXPECT_TRUE(SUCCEEDED(range->get_CurrentMinimum(&minimum)));
+    EXPECT_TRUE(SUCCEEDED(range->get_CurrentMaximum(&maximum)));
+    EXPECT_TRUE(SUCCEEDED(range->get_CurrentIsReadOnly(&read_only)));
+    EXPECT_DOUBLE_EQ(value, 2);
+    EXPECT_DOUBLE_EQ(minimum, -5);
+    EXPECT_DOUBLE_EQ(maximum, 10);
+    EXPECT_FALSE(read_only);
+    EXPECT_TRUE(SUCCEEDED(range->SetValue(7)));
+    EXPECT_DOUBLE_EQ(observed.load(), 7);
+    EXPECT_TRUE(FAILED(range->SetValue(11)));
+    EXPECT_DOUBLE_EQ(observed.load(), 7);
+}
+
+TEST(UiAutomation, GeneratedVisualsExposeTheirDataAndControls) {
+    const auto parsed = parse_generated_surface(R"({"version":1,"id":"s","summary":"Summary","components":[{"type":"line","id":"chart","label":"Trend","unit":"units","points":[{"label":"Q1","value":4}]},{"type":"diagram","id":"graph","label":"Plan","nodes":[{"id":"a","label":"Alpha"},{"id":"b","label":"Beta"}],"edges":[{"from":"a","to":"b"}]},{"type":"switch","id":"notify","label":"Notify","value":false},{"type":"button","id":"go","label":"Continue"}]})");
+    ASSERT_TRUE(parsed);
+    const auto surface = *parsed;
+    UiThread t([&](Window& w) {
+        w.content().emplace<GeneratedSurfaceView>(w.ui(), surface, std::make_shared<GeneratedSurfaceViewState>(),
+            std::function<void()>{}, [](std::string, std::vector<GeneratedFieldValue>, std::function<void(bool)>) {});
+    });
+    Uia u(t.hwnd());
+    ASSERT_TRUE(u.root);
+    EXPECT_EQ(u.find(L"chart").type, UIA_GroupControlTypeId);
+    EXPECT_EQ(u.find(L"chart-plot").type, UIA_ImageControlTypeId);
+    EXPECT_EQ(u.find(L"graph").type, UIA_GroupControlTypeId);
+    EXPECT_EQ(u.find(L"notify-input").type, UIA_CheckBoxControlTypeId);
+    EXPECT_EQ(u.find(L"go-review").type, UIA_ButtonControlTypeId);
+    bool point = false, edge = false;
+    for (const auto& element : u.elements()) {
+        if (element.name == L"Q1: 4 units") point = true;
+        if (element.name == L"Alpha \u2192 Beta") edge = true;
+    }
+    EXPECT_TRUE(point);
+    EXPECT_TRUE(edge);
+    std::vector<std::string> tab_order;
+    t.run([&] {
+        auto& tree = t.window().tree();
+        tree.set_focus(nullptr);
+        for (int i = 0; i < 3; ++i) {
+            ::SendMessageW(t.hwnd(), WM_KEYDOWN, VK_TAB, 0);
+            tab_order.push_back(tree.focused() ? tree.focused()->automation_id() : "");
+        }
+    });
+    EXPECT_NE(std::find(tab_order.begin(), tab_order.end(), "notify-input"), tab_order.end());
+    EXPECT_NE(std::find(tab_order.begin(), tab_order.end(), "go-review"), tab_order.end());
 }
 
 TEST(UiAutomation, EveryControlIsReachableWithTab) {

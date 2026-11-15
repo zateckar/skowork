@@ -2,6 +2,30 @@
 
 ## MODIFIED Requirements
 
+### Requirement: Data Location In User Profile
+The client SHALL store all persistent user data under a single data root inside the user's profile. The default is the local application data folder, and policy.storage.root can override it on next start. A root change SHALL preserve the existing profile, including credentials and pending removals, and SHALL NOT replace an unrelated destination. The client MUST NOT follow a link or reparse point outside the user profile. An interrupted or failed transition MUST leave a usable prior profile and be recoverable on the next start. A completed transition MUST NOT leave a separate recoverable content copy outside the active root; Forget Data applies throughout recovery. Data MUST NOT be written to machine-wide locations, other than optional read-only shared ML models.
+
+#### Scenario: Default data root
+- **WHEN** no storage policy is set
+- **THEN** all databases, logs, skills, browser profile and caches are created under the user's local application data folder in a Skowork directory
+
+#### Scenario: Policy override
+- **WHEN** policy.storage.root points to another folder inside the user's profile
+- **THEN** the client uses that folder as the data root on next start
+- **AND** existing Threads, knowledge, credentials and pending removals remain available
+
+#### Scenario: Unsafe or occupied destination
+- **WHEN** the configured destination resolves outside the user profile or contains an unrelated profile
+- **THEN** the client refuses the transition and keeps the current profile usable
+
+#### Scenario: Interrupted root transition
+- **WHEN** the client stops during a root transition before or after selecting the new root
+- **THEN** the next start resumes or safely rolls back without losing committed data or exposing a partial profile
+
+#### Scenario: Forget after root transition
+- **WHEN** the user forgets data after the new root is active
+- **THEN** a later transition recovery cannot restore that data from the previous root or an abandoned staging copy
+
 ### Requirement: Forget Data
 The client SHALL let the user permanently delete selected data: a Thread, a Source, an indexed item, or everything. Deletion MUST cascade to derived indexes, embeddings, knowledge facts, summaries and caches. Shared content follows the withdrawal rules of client/knowledge-graph and control-plane/team-knowledge. Pending remote cleanup retains only the minimal encrypted withdrawal records defined by Pending Shared Data Removal, never the forgotten content.
 

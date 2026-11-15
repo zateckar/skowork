@@ -14,6 +14,7 @@
 #include "runtime/run_store.h"
 #include "runtime/tools.h"
 #include "runtime/types.h"
+#include "storage/generated_surface_state.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -109,6 +110,11 @@ public:
     // without a Run, and resume_waiting() starts it once the client is connected.
     Result<SendResult> send_message(const std::string& thread_id, const std::string& text, MessageMode mode = MessageMode::queue);
 
+    // Accepts an explicitly reviewed surface action into the ordinary Thread queue. A busy Thread requires a delivery choice.
+    Result<long long> submit_generated_surface(const GeneratedSurfaceBinding& binding, const std::string& button_id,
+                                               const json& draft, std::optional<MessageMode> mode,
+                                               const json& sections = json::object());
+
     // Run Retry: continues the latest top-level Run of the Thread when it failed, without a new user message. Fails
     // with "not_failed" when that Run did not fail, "thread_busy", "blocked"/"offline"/"revoked" (as start_run), or
     // "not_found". Returns the Run id; the Run is queued until a slot is free.
@@ -116,6 +122,8 @@ public:
     // Starts a Run with the oldest queued message of every Thread that has queued messages and no active Run, oldest
     // first (called when the client connects again). Returns how many Runs started.
     int resume_waiting();
+    // Re-evaluate queued Runs after a policy limit changes.
+    void policy_changed();
     Status edit_queued_message(long long id, const std::string& text);
     Status remove_queued_message(long long id);
     [[nodiscard]] std::vector<QueuedMessage> queued_messages(const std::string& thread_id);
@@ -131,6 +139,9 @@ public:
     // Answers a Question: one of its choices, or free text when the Question allows it. A standalone Question is resolved
     // and its answer goes to the standalone handler.
     Status answer_question(const std::string& action_id, const std::string& answer);
+    Status answer_generated_question(const std::string& action_id, const std::string& thread_id, const std::string& run_id,
+                                     const std::string& revision, const std::string& token, const std::string& button_id,
+                                     const json& draft, const json& sections);
 
     // Standalone Action items (add-work-inbox design D9): a Question with fixed choices raised by a client capability
     // without a Run, held by an existing Thread. Emits action.created with an empty run_id. A non-empty `copy` is text the
@@ -230,7 +241,7 @@ private:
                               size_t b, const std::shared_ptr<CancelToken>& cancel);
     [[nodiscard]] long long context_window(model::Role role);
     [[nodiscard]] int output_limit(model::Role role);
-    [[nodiscard]] const RunLimits& limits_for(bool unattended) const { return unattended ? cfg_.unattended : cfg_.attended; }
+    [[nodiscard]] RunLimits limits_for(bool unattended) const { return cfg_.run_limits(unattended); }
     Result<std::string> start_run_locked(const std::string& thread_id, const std::string& text, const StartOptions& options);
 
     RuntimeConfig cfg_;

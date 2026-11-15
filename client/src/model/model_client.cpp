@@ -202,14 +202,16 @@ std::optional<ModelFailure> ModelClient::prepare_images(ChatRequest& request) co
         return invalid_request("Images can only be sent with the vision role.", "images require the vision role");
 
     // At most max_images_per_request: the newest ones stay, older ones become a text note.
-    int excess = total - std::max(1, cfg_.max_images_per_request);
+    const int current = cfg_.max_images_per_request_now ? cfg_.max_images_per_request_now() : 0;
+    const int limit = std::max(1, current > 0 ? current : cfg_.max_images_per_request);
+    int excess = total - limit;
     for (auto& m : request.messages) {
         if (excess <= 0) break;
         const int drop = std::min<int>(excess, static_cast<int>(m.images.size()));
         m.images.erase(m.images.begin(), m.images.begin() + drop);
         excess -= drop;
         m.content += (m.content.empty() ? "" : "\n") + std::string("[") + std::to_string(drop) +
-                     " earlier image(s) omitted: at most " + std::to_string(cfg_.max_images_per_request) +
+                     " earlier image(s) omitted: at most " + std::to_string(limit) +
                      " images per request]";
     }
     for (auto& m : request.messages) {

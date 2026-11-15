@@ -2,10 +2,12 @@
 // clears expired caches, pauses new indexing and warns with a usage breakdown.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <string>
 
 namespace wb {
@@ -22,19 +24,20 @@ enum class QuotaState { normal, warning, exceeded };
 class StorageQuota {
 public:
     explicit StorageQuota(std::uint64_t max_bytes) : max_bytes_(max_bytes) {}
-    void set_max_bytes(std::uint64_t b) { max_bytes_ = b; }
-    [[nodiscard]] std::uint64_t max_bytes() const { return max_bytes_; }
+    void set_max_bytes(std::uint64_t b) { max_bytes_.store(b); }
+    [[nodiscard]] std::uint64_t max_bytes() const { return max_bytes_.load(); }
 
     // Measures the root; at >= 90% runs `clear_caches` once, re-measures, and reports the state.
     QuotaState check(const std::filesystem::path& root, const std::function<void()>& clear_caches, StorageUsage& usage);
 
     // True while new indexing must pause (state warning or exceeded at the last check).
-    [[nodiscard]] bool indexing_paused() const { return state_ != QuotaState::normal; }
-    [[nodiscard]] QuotaState state() const { return state_; }
+    [[nodiscard]] bool indexing_paused() const { return state() != QuotaState::normal; }
+    [[nodiscard]] QuotaState state() const { return state_.load(); }
 
 private:
-    std::uint64_t max_bytes_;
-    QuotaState state_ = QuotaState::normal;
+    std::mutex mx_;
+    std::atomic<std::uint64_t> max_bytes_;
+    std::atomic<QuotaState> state_{QuotaState::normal};
 };
 
 }  // namespace wb

@@ -24,7 +24,10 @@ public:
 
     void open(const std::string& route = {}) override { main_.open(route); }
     void close() override { main_.close(); }
+    void close_for_shutdown() override { main_.close_for_shutdown(); }
     [[nodiscard]] bool is_open() const override { return main_.is_open(); }
+    [[nodiscard]] bool has_unsaved_generated_state() const override { return main_.has_unsaved_generated_state(); }
+    void confirm_shutdown(std::function<void(bool)> done) override { main_.confirm_shutdown(std::move(done)); }
     void emit(const std::string& event, const json& data) override { main_.emit(event, data); }
 
 private:

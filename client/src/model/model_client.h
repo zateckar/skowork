@@ -40,6 +40,7 @@ struct ModelClientConfig {
     int max_retry_wait_s = 60;  // a longer retry delay is not waited for: the failure is returned
 
     int max_images_per_request = 4;  // policy.llm.max_images_per_request
+    std::function<int()> max_images_per_request_now;  // positive values apply to the next request
     ImageLimits image;               // longest side 1568 px, 5 MB
     size_t embed_batch_size = 96;    // inputs per embeddings request
     // An image request waits this long for the gateway (which allows the upstream 120 s; add-image-generation D5).

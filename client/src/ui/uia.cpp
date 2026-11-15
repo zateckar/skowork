@@ -46,6 +46,7 @@ long control_type_of(Role r) {
     case Role::menu: return UIA_MenuControlTypeId;
     case Role::menu_item: return UIA_MenuItemControlTypeId;
     case Role::splitter: return UIA_ThumbControlTypeId;
+    case Role::slider: return UIA_SliderControlTypeId;
     case Role::tooltip: return UIA_ToolTipControlTypeId;
     case Role::image: return UIA_ImageControlTypeId;
     case Role::status_bar: return UIA_StatusBarControlTypeId;
@@ -91,7 +92,8 @@ class Provider final : public IRawElementProviderSimple,
                        public ISelectionItemProvider,
                        public ISelectionProvider,
                        public IScrollProvider,
-                       public IValueProvider {
+                       public IValueProvider,
+                       public IRangeValueProvider {
 public:
     // id 0 is the window (the fragment root); other ids are node runtime ids.
     Provider(std::shared_ptr<Accessibility::State> s, uint32_t id) : s_(std::move(s)), id_(id) {}
@@ -491,9 +493,61 @@ public:
         });
     }
     HRESULT STDMETHODCALLTYPE get_IsReadOnly(BOOL* ret) override {
-        *ret = TRUE;
         return on_ui([&]() -> HRESULT {
-            return alive() ? S_OK : kNotAvailable;
+            Node* n = live_node();
+            if (!n) return kNotAvailable;
+            *ret = n->role == Role::slider ? FALSE : TRUE;
+            return S_OK;
+        });
+    }
+
+    // IRangeValueProvider (generated sliders).
+    HRESULT STDMETHODCALLTYPE SetValue(double value) override {
+        return on_ui([&]() -> HRESULT {
+            Node* n = live_node();
+            if (!n) return kNotAvailable;
+            if (!n->enabled) return static_cast<HRESULT>(UIA_E_ELEMENTNOTENABLED);
+            return n->set_range_value(value) ? S_OK : E_INVALIDARG;
+        });
+    }
+    HRESULT STDMETHODCALLTYPE get_Value(double* ret) override {
+        return on_ui([&]() -> HRESULT {
+            Node* n = live_node();
+            if (!n) return kNotAvailable;
+            *ret = n->range_value();
+            return S_OK;
+        });
+    }
+    HRESULT STDMETHODCALLTYPE get_Maximum(double* ret) override {
+        return on_ui([&]() -> HRESULT {
+            Node* n = live_node();
+            if (!n) return kNotAvailable;
+            *ret = n->range_maximum();
+            return S_OK;
+        });
+    }
+    HRESULT STDMETHODCALLTYPE get_Minimum(double* ret) override {
+        return on_ui([&]() -> HRESULT {
+            Node* n = live_node();
+            if (!n) return kNotAvailable;
+            *ret = n->range_minimum();
+            return S_OK;
+        });
+    }
+    HRESULT STDMETHODCALLTYPE get_LargeChange(double* ret) override {
+        return on_ui([&]() -> HRESULT {
+            Node* n = live_node();
+            if (!n) return kNotAvailable;
+            *ret = n->range_step() * 10;
+            return S_OK;
+        });
+    }
+    HRESULT STDMETHODCALLTYPE get_SmallChange(double* ret) override {
+        return on_ui([&]() -> HRESULT {
+            Node* n = live_node();
+            if (!n) return kNotAvailable;
+            *ret = n->range_step();
+            return S_OK;
         });
     }
 
@@ -531,6 +585,7 @@ private:
         if (iid == __uuidof(ISelectionProvider)) return n.role == Role::list;
         if (iid == __uuidof(IScrollProvider)) return n.scrolls;
         if (iid == __uuidof(IValueProvider)) return n.role == Role::document;
+        if (iid == __uuidof(IRangeValueProvider)) return n.role == Role::slider;
         return false;
     }
     static const IID* pattern_iid(PATTERNID p) {
@@ -542,6 +597,7 @@ private:
         case UIA_SelectionPatternId: return &__uuidof(ISelectionProvider);
         case UIA_ScrollPatternId: return &__uuidof(IScrollProvider);
         case UIA_ValuePatternId: return &__uuidof(IValueProvider);
+        case UIA_RangeValuePatternId: return &__uuidof(IRangeValueProvider);
         default: return nullptr;
         }
     }
@@ -553,6 +609,7 @@ private:
         if (iid == __uuidof(ISelectionProvider)) return static_cast<ISelectionProvider*>(this);
         if (iid == __uuidof(IScrollProvider)) return static_cast<IScrollProvider*>(this);
         if (iid == __uuidof(IValueProvider)) return static_cast<IValueProvider*>(this);
+        if (iid == __uuidof(IRangeValueProvider)) return static_cast<IRangeValueProvider*>(this);
         return nullptr;
     }
     HRESULT set_expanded(bool on) {

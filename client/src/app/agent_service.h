@@ -45,8 +45,11 @@ public:
     [[nodiscard]] size_t executing_runs() { return rt_->executing_runs(); }
 
 private:
-    explicit AgentService(std::unique_ptr<runtime::AgentRuntime> rt) : rt_(std::move(rt)) {}
+    explicit AgentService(std::unique_ptr<runtime::AgentRuntime> rt, Database& db, bool surfaces_enabled)
+        : rt_(std::move(rt)), surface_db_(db), surfaces_enabled_(surfaces_enabled) {}
     std::unique_ptr<runtime::AgentRuntime> rt_;
+    Database& surface_db_;
+    bool surfaces_enabled_ = false;
     std::mutex sink_mx_;
     std::function<void(const json&)> sink_;
     std::function<void(const runtime::ActionItem&, const std::string&)> on_resolution_;

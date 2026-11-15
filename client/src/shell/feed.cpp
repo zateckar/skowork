@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <charconv>
 #include <cstdio>
 #include <set>
 
@@ -26,14 +27,16 @@ void fold_event(std::vector<FeedItem>& items, std::map<std::string, size_t>& too
     it.run_id = run.id;
     it.seq = e.seq;
     it.at = e.at;
-    if (e.kind == "message") {
-        const std::string role = str(p, "role");
+    if (e.kind == "message" || e.kind == "incomplete_message") {
+        const std::string role = e.kind == "incomplete_message" ? "assistant" : str(p, "role");
         it.text = str(p, "content");
+        if (e.kind == "incomplete_message" && jbool(p, "truncated")) it.text += "\n\n[...]";
         if (role == "user") {
             it.type = ItemType::user;
             items.push_back(std::move(it));
         } else if (role == "assistant" && !trim(it.text).empty()) {
             it.type = ItemType::assistant;
+            it.surface_eligible = e.kind == "message" && e.seq > 0 && jbool(p, "surface_complete");
             items.push_back(std::move(it));
         }
     } else if (e.kind == "reasoning") {
@@ -100,7 +103,8 @@ void fold_event(std::vector<FeedItem>& items, std::map<std::string, size_t>& too
 bool stored_after(const RunInfo& run, bool reasoning, long long after) {
     for (const StoredEvent& e : run.events) {
         if (e.seq <= after) continue;
-        if (reasoning ? e.kind == "reasoning" : (e.kind == "message" && str(e.payload, "role") == "assistant")) return true;
+        if (reasoning ? e.kind == "reasoning" : (e.kind == "incomplete_message" ||
+                                                  (e.kind == "message" && str(e.payload, "role") == "assistant"))) return true;
     }
     return false;
 }
@@ -185,6 +189,41 @@ long long duration_of(const RunInfo& r, long long now) {
 }  // namespace
 
 bool is_active_state(const std::string& state) { return state == "queued" || state == "running"; }
+
+std::vector<ui::GeneratedSurfaceBlock> eligible_generated_surfaces(const FeedItem& item) {
+    if (item.type != ItemType::assistant || item.streaming || !item.surface_eligible) return {};
+    return ui::discover_generated_surfaces(item.text);
+}
+
+namespace {
+std::vector<Citation> cited_in_surface_values(const std::vector<json>& surfaces, const std::map<long long, Citation>& cited) {
+    std::set<long long> numbers;
+    const auto collect = [&](const json& value, const auto& self) -> void {
+        if (value.is_object()) {
+            if (const auto refs = value.find("citations"); refs != value.end() && refs->is_array()) {
+                for (const auto& ref : *refs) {
+                    if (!ref.is_string()) continue;
+                    const auto& text = ref.get_ref<const std::string&>();
+                    long long number = 0;
+                    const auto result = std::from_chars(text.data(), text.data() + text.size(), number);
+                    if (result.ec == std::errc{} && result.ptr == text.data() + text.size() && number > 0) numbers.insert(number);
+                }
+            }
+        }
+        if (value.is_object() || value.is_array()) for (const auto& child : value) self(child, self);
+    };
+    for (const auto& surface : surfaces) collect(surface, collect);
+    std::vector<Citation> result;
+    for (const auto n : numbers) if (const auto found = cited.find(n); found != cited.end()) result.push_back(found->second);
+    return result;
+}
+}  // namespace
+
+std::vector<Citation> cited_in_generated_surface(const FeedItem& item, const std::map<long long, Citation>& cited) {
+    std::vector<json> surfaces;
+    for (const auto& block : eligible_generated_surfaces(item)) surfaces.push_back(block.surface);
+    return cited_in_surface_values(surfaces, cited);
+}
 
 std::vector<Citation> cited_in_text(const std::string& text, const std::map<long long, Citation>& cited) {
     // Markers of one line outside inline code spans; a backtick run closes at a run of the same length.
@@ -312,6 +351,7 @@ std::vector<FeedItem> FeedFold::build(const FeedSnapshot& snap, const LiveText& 
     }
     std::set<std::string> seen;
     std::vector<FeedItem> items;
+    std::map<std::string, std::map<long long, Citation>> citations_by_run;
     for (const RunInfo& run : snap.runs) {
         seen.insert(run.id);
         FoldedRun& folded = runs_[run.id];
@@ -374,9 +414,13 @@ std::vector<FeedItem> FeedFold::build(const FeedSnapshot& snap, const LiveText& 
         for (size_t i = first; i < items.size(); ++i)
             if (items[i].type == ItemType::tool && items[i].result)
                 for (const Citation& c : items[i].result->citations) cited.emplace(c.n, c);
+        citations_by_run[run.id] = cited;
         if (!cited.empty())
             for (size_t i = first; i < items.size(); ++i)
-                if (items[i].type == ItemType::assistant) items[i].sources = cited_in_text(items[i].text, cited);
+                if (items[i].type == ItemType::assistant) {
+                    items[i].sources = cited_in_text(items[i].text, cited);
+                    items[i].surface_sources = cited_in_generated_surface(items[i], cited);
+                }
     }
     // Child Run Action items sit after the call that started their subagent (Child Run Action Items).
     ChildCards cards = child_action_cards(snap);
@@ -398,6 +442,34 @@ std::vector<FeedItem> FeedFold::build(const FeedSnapshot& snap, const LiveText& 
             for (FeedItem& card : list) cards.unplaced.push_back(std::move(card));
     }
     for (FeedItem& card : cards.unplaced) items.push_back(std::move(card));
+    // Child Runs do not have their full tool feed displayed, but their own verified search results still
+    // provide the Citation registry for their Questions. Never use the parent's registry for a child.
+    std::set<std::string> question_runs;
+    for (const auto& item : items)
+        if (item.type == ItemType::action && item.action.kind == "question" && jobj(item.action.payload, "surface"))
+            question_runs.insert(item.action.run_id);
+    for (const RunInfo& child : snap.subagents) {
+        if (!question_runs.contains(child.id)) continue;
+        std::map<std::string, std::string> tools;
+        auto& cited = citations_by_run[child.id];
+        for (const auto& event : child.events) {
+            if (event.kind == "tool_call") tools[jstr(event.payload, "call_id")] = jstr(event.payload, "tool");
+            else if (event.kind == "tool_result" && jbool(event.payload, "ok")) {
+                const auto tool = tools.find(jstr(event.payload, "call_id"));
+                if (tool != tools.end())
+                    for (const auto& citation : citations_of(tool->second, jstr(event.payload, "content")))
+                        cited.emplace(citation.n, citation);
+            }
+        }
+    }
+    for (auto& item : items) {
+        if (item.type != ItemType::action || item.action.kind != "question") continue;
+        const auto registry = citations_by_run.find(item.action.run_id);
+        const auto* form = jobj(item.action.payload, "surface");
+        if (registry == citations_by_run.end() || !form) continue;
+        const auto valid = ui::parse_generated_surface(form->dump());
+        if (valid) item.surface_sources = cited_in_surface_values({*valid}, registry->second);
+    }
     // Standalone Action items have no Run; they follow the conversation (D9).
     for (const ActionItem& a : snap.actions)
         if (a.run_id.empty()) {
@@ -532,7 +604,8 @@ Apply apply_live_event(FeedSnapshot& snap, LiveText& live, const LiveRunEvent& e
     }
     // A stored answer or reasoning block of the streamed model call replaces the streamed text, whether it is new or
     // already in the snapshot (Live Feed Updates).
-    if (ev.kind == "message" && str(d, "role") == "assistant") settle_streamed(live, run->id, ev.seq, false);
+    if (ev.kind == "incomplete_message" || (ev.kind == "message" && str(d, "role") == "assistant"))
+        settle_streamed(live, run->id, ev.seq, false);
     if (ev.kind == "reasoning") settle_streamed(live, run->id, ev.seq, true);
     if (ev.kind == "run.state") {
         run->state = str(d, "state");

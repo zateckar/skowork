@@ -68,3 +68,25 @@ test('simulation API composes groups and guardrails before explaining a tool', a
     await h.close();
   }
 });
+
+test('one simulation returns attended and unattended traces for a conditional tool', async () => {
+  const h = await startHarness();
+  try {
+    const admin = await h.token('admin1');
+    const root = '/api/v1/admin/policy';
+    await h.call('PUT', `${root}/groups/engineering/draft`, admin, {
+      document: { tools: { computer: { mode: 'allow' }, rules: { 'computer.click': 'allow' } } }, reason: 'test', priority: 1,
+    });
+    const response = await h.call('POST', `${root}/simulate`, admin, {
+      groups: ['engineering'], drafts: true, tool_call: { tool: 'computer.click', risk: 'external', unattended: false },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.body.tool_decisions.attended.decision, 'allow');
+    assert.equal(response.body.tool_decisions.attended.rule, 'tools.rules["computer.click"]');
+    assert.equal(response.body.tool_decisions.attended.source, 'engineering');
+    assert.equal(response.body.tool_decisions.unattended.decision, 'approve');
+    assert.ok(response.body.tool_decisions.unattended.rule);
+    assert.ok(response.body.tool_decisions.unattended.source);
+    assert.ok(response.body.tool_decisions.unattended.conditions.length);
+  } finally { await h.close(); }
+});

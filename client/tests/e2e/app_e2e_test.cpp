@@ -253,6 +253,44 @@ TEST(AppE2E, NoListeningSocketsAndNoProcessForTheWindow) {
     EXPECT_TRUE(process_alive(a.main.pid)) << "the client keeps running in the tray";
     EXPECT_EQ(listening(a.main.pid), 0);
 }
+
+TEST(AppE2E, QuitWithOpenWindowAndNoPendingDrafts) {
+    Instance a;
+    a.write_config(json{{"control_plane_url", ""}});
+    ASSERT_TRUE(a.start());
+    const auto opened = a.call("dev.ui", {{"action", "open"}});
+    ASSERT_TRUE(opened);
+    ASSERT_TRUE(jbool(*opened, "open"));
+    ASSERT_TRUE(a.call("app.quit"));
+    ASSERT_TRUE(exited_within(a.main, 10000));
+    a.main = {};
+}
+
+TEST(AppE2E, GeneratedSurfacePreferenceSurvivesClientRestart) {
+    Instance a;
+    a.write_config(json{{"control_plane_url", "https://127.0.0.1:1"}, {"idp_issuer", "https://127.0.0.1:1/realm"},
+                        {"idp_client_id", "skowork-test"}, {"dev_browser", "record"}});
+    ASSERT_TRUE(a.start());
+    Result<json> initial = make_error("unavailable", "waiting for settings");
+    for (int i = 0; i < 100 && !initial; ++i) {
+        initial = a.call("settings.get");
+        if (!initial) std::this_thread::sleep_for(100ms);
+    }
+    ASSERT_TRUE(initial);
+    EXPECT_FALSE(jbool((*initial)["ui.generated_surfaces"], "value"));
+    ASSERT_TRUE(a.call("settings.set", {{"key", "ui.generated_surfaces"}, {"value", true}}));
+    ASSERT_TRUE(a.call("app.quit"));
+    ASSERT_TRUE(exited_within(a.main, 10000));
+    a.main = {};
+    ASSERT_TRUE(a.start());
+    Result<json> restored = make_error("unavailable", "waiting for settings");
+    for (int i = 0; i < 100 && !restored; ++i) {
+        restored = a.call("settings.get");
+        if (!restored) std::this_thread::sleep_for(100ms);
+    }
+    ASSERT_TRUE(restored);
+    EXPECT_TRUE(jbool((*restored)["ui.generated_surfaces"], "value"));
+}
 // add-agent-runtime 6.1-6.3: the agent runtime in Skowork.exe. A message sent over the (development) pipe API starts
 // a Run against the real gateway and model; the Run context gives the model today's date; while the control plane is
 // unreachable a new Run is refused with the reason (needs SKOWORK_E2E_CP_UPSTREAM for the outage part).

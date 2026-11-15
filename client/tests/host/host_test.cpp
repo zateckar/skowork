@@ -245,6 +245,12 @@ TEST(Workers, Budgets) {
 }
 
 TEST(LaunchArgs, BackgroundAndRoute) {
+    EXPECT_FALSE(parse_launch_args({}).generated_surfaces);
+#ifdef SKOWORK_DEV_ENDPOINTS
+    EXPECT_TRUE(parse_launch_args({L"--generated-surfaces"}).generated_surfaces);
+#else
+    EXPECT_FALSE(parse_launch_args({L"--generated-surfaces"}).generated_surfaces);
+#endif
     EXPECT_FALSE(parse_launch_args({}).background);
     EXPECT_TRUE(parse_launch_args({L"--background"}).background);
     auto c = parse_launch_args({L"--route", L"#/about"});

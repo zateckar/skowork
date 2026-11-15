@@ -84,7 +84,7 @@ json events_json(const std::vector<runtime::StoredEvent>& events) {
 }
 
 bool is_setting_key(const std::string& key) {
-    if (key == "ui.language" || key == "ui.show_work_details" || key == "dictation.language") return true;
+    if (key == "ui.language" || key == "ui.show_work_details" || key == "ui.generated_surfaces" || key == "dictation.language") return true;
     for (const char* k : kNotificationKinds)
         if (key == std::string("notifications.") + k) return true;
     return false;
@@ -387,6 +387,7 @@ json InboxService::settings() {
     }
     out["ui.language"] = {{"value", store_.setting("ui.language").value_or("system")}, {"managed", false}};
     out["ui.show_work_details"] = {{"value", store_.setting("ui.show_work_details").value_or("false") == "true"}, {"managed", false}};
+    out["ui.generated_surfaces"] = {{"value", store_.setting("ui.generated_surfaces").value_or("false") == "true"}, {"managed", false}};
     const std::string dictation = store_.setting("dictation.language").value_or("auto");
     out["dictation.language"] = {{"value", dictation_language(dictation) ? dictation : "auto"}, {"managed", false}};
     return out;
