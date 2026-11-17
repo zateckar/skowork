@@ -3,7 +3,8 @@
 // 200-299 policy-and-sandbox, 300-399 work-inbox, 400-499 core-tools-and-mcp, 500-599 browser-use,
 // 600-699 telemetry, 700-799 computer-use, 800-899 skills, 900-999 scheduler, 1000-1099 mail-calendar,
 // 1100-1199 knowledge (app.db side), 1200-1299 meeting-capture, 1300-1399 skills additions made after them, 1400-1499 user-messaging,
-// 1500-1599 fix-long-thread-model-calls, 1600-1699 agent-created-skills, 1700-1799 improve-meeting-capture-quality.
+// 1500-1599 fix-long-thread-model-calls, 1600-1699 agent-created-skills, 1700-1799 improve-meeting-capture-quality,
+// 1800-1899 improve-skowork-and-knowledge-control.
 #include "storage/app_store.h"
 
 namespace wb {
@@ -523,6 +524,13 @@ CREATE INDEX meetings_detected ON meetings(detected_at);
 CREATE TABLE meeting_terms(
   term TEXT PRIMARY KEY,
   added_at INTEGER NOT NULL);
+)sql"},
+        // client/agent-runtime Context Compaction (improve-skowork-and-knowledge-control D4, task 6.4): the BeforeCompaction
+        // calls that completed, by idempotency key, so a restart does not repeat one for the same revision and boundary.
+        {1800, R"sql(
+CREATE TABLE compaction_hooks(
+  key TEXT PRIMARY KEY,
+  at INTEGER NOT NULL);
 )sql"},
     };
     return migrations;

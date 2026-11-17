@@ -73,7 +73,7 @@ size_t estimate_request_tokens(const std::vector<model::ChatMessage>& messages, 
         n += 4 + estimate_context_tokens(m.content) + estimate_context_tokens(m.tool_call_id);
         for (const auto& c : m.tool_calls)
             n += 4 + estimate_context_tokens(c.tool) + estimate_context_tokens(c.id) + estimate_context_tokens(c.arguments);
-        n += m.images.size() * 1000;
+        n += m.images.size() * kImageTokenAllowance;
     }
     return n;
 }
@@ -120,6 +120,69 @@ std::optional<std::string> render_transcript(const std::string& previous_summary
 std::optional<std::string> render_transcript_range(const std::string& previous_summary, const std::vector<ContextMessage>& msgs,
                                                    size_t begin, size_t end, size_t max_chars) {
     if (begin > end || end > msgs.size()) return std::nullopt;
+    std::vector<TranscriptUnit> units;
+    for (size_t i = begin; i < end; ++i) units.push_back({i, 0, msgs[i].msg.content.size(), 0, 1});
+    return render_units(previous_summary, msgs, units, 0, units.size(), max_chars);
+}
+
+namespace {
+// The estimated tokens of text once JSON-encoded, in thirds of a token: estimate_context_tokens' rates, with the bytes
+// that escaping adds ("\"", "\\", "\u00XX").
+size_t encoded_thirds(unsigned char c) {
+    if (c >= 0x80) return 3;
+    if (c < 0x20) return 6;
+    return c == '"' || c == '\\' ? 2 : 1;
+}
+// The longest prefix of `text` whose encoded estimate is at most `thirds`.
+size_t prefix_within(std::string_view text, size_t thirds) {
+    size_t used = 0, n = 0;
+    while (n < text.size() && used + encoded_thirds(static_cast<unsigned char>(text[n])) <= thirds) used += encoded_thirds(static_cast<unsigned char>(text[n++]));
+    return n;
+}
+}  // namespace
+
+std::vector<TranscriptUnit> transcript_units(const std::vector<ContextMessage>& msgs, size_t end, size_t part_tokens) {
+    std::vector<TranscriptUnit> out;
+    end = std::min(end, msgs.size());
+    const size_t thirds = std::max<size_t>(part_tokens, 4) * 3;
+    for (size_t i = 0; i < end; ++i) {
+        const std::string& content = msgs[i].msg.content;
+        if (prefix_within(content, thirds) == content.size()) {
+            out.push_back({i, 0, content.size(), 0, 1});
+            continue;
+        }
+        const size_t first = out.size();
+        for (size_t pos = 0; pos < content.size();) {
+            const std::string_view rest = std::string_view(content).substr(pos);
+            const size_t fit = prefix_within(rest, thirds);
+            size_t len = utf8_prefix(rest, fit).size();
+            if (len == 0) len = std::max<size_t>(fit, 1);  // not UTF-8: rendering refuses it
+            if (len < rest.size()) {
+                // A line break, else a word break, in the last quarter of the part.
+                const std::string_view window = rest.substr(0, len);
+                for (const char brk : {'\n', ' '}) {
+                    const size_t at = window.find_last_of(brk);
+                    if (at != std::string_view::npos && at + 1 >= len - len / 4) {
+                        len = at + 1;
+                        break;
+                    }
+                }
+            }
+            out.push_back({i, pos, len, 0, 1});
+            pos += len;
+        }
+        const int parts = static_cast<int>(out.size() - first);
+        for (size_t k = first; k < out.size(); ++k) {
+            out[k].part = static_cast<int>(k - first);
+            out[k].parts = parts;
+        }
+    }
+    return out;
+}
+
+std::optional<std::string> render_units(const std::string& previous_summary, const std::vector<ContextMessage>& msgs,
+                                        const std::vector<TranscriptUnit>& units, size_t begin, size_t end, size_t max_chars) {
+    if (begin > end || end > units.size()) return std::nullopt;
     std::string out;
     auto append = [&](std::string_view part) {
         if (part.size() > max_chars - out.size()) return false;
@@ -138,10 +201,15 @@ std::optional<std::string> render_transcript_range(const std::string& previous_s
         if (previous_summary.size() > max_chars - out.size() ||
             !record({{"kind", "previous_summary"}, {"content", previous_summary}})) return std::nullopt;
     }
-    for (size_t i = begin; i < end; ++i) {
-        const auto& source = msgs[i];
+    for (size_t u = begin; u < end; ++u) {
+        const TranscriptUnit& unit = units[u];
+        if (unit.message >= msgs.size()) return std::nullopt;
+        const auto& source = msgs[unit.message];
         const auto& m = source.msg;
         if (!m.images.empty()) return std::nullopt;
+        if (unit.offset > m.content.size() || unit.length > m.content.size() - unit.offset) return std::nullopt;
+        const std::string content = m.content.substr(unit.offset, unit.length);
+        const bool last = unit.part + 1 >= unit.parts;
         // Bound the raw fields before making JSON copies. Escaping can increase the
         // encoded length; record() also enforces the final limit.
         size_t available = max_chars - out.size();
@@ -150,19 +218,26 @@ std::optional<std::string> render_transcript_range(const std::string& previous_s
             available -= field.size();
             return true;
         };
-        if (!take(source.run_id) || !take(m.role) || !take(m.content) || !take(m.tool_call_id)) return std::nullopt;
+        if (!take(source.run_id) || !take(m.role) || !take(content) || !take(m.tool_call_id)) return std::nullopt;
         json calls = json::array();
-        for (const auto& c : m.tool_calls) {
-            if (!take(c.tool) || !take(c.id) || !take(c.arguments)) return std::nullopt;
-            calls.push_back({{"tool", c.tool}, {"id", c.id}, {"arguments", c.arguments}});
+        if (last)
+            for (const auto& c : m.tool_calls) {
+                if (!take(c.tool) || !take(c.id) || !take(c.arguments)) return std::nullopt;
+                calls.push_back({{"tool", c.tool}, {"id", c.id}, {"arguments", c.arguments}});
+            }
+        json row = {{"kind", unit.parts > 1 ? "message_part" : "message"}, {"run_id", source.run_id}, {"seq", source.seq},
+                    {"carried", source.carried}, {"role", m.role}};
+        if (unit.parts > 1) {
+            row["part"] = unit.part + 1;
+            row["parts"] = unit.parts;
         }
-        if (!record({{"kind", "message"}, {"run_id", source.run_id}, {"seq", source.seq}, {"carried", source.carried},
-                     {"role", m.role}, {"content", m.content}, {"tool_call_id", m.tool_call_id}, {"tool_calls", std::move(calls)}}))
-            return std::nullopt;
+        row["content"] = content;
+        row["tool_call_id"] = m.tool_call_id;
+        row["tool_calls"] = std::move(calls);
+        if (!record(row)) return std::nullopt;
     }
     return out;
 }
-
 std::string_view utf8_prefix(std::string_view text, size_t max_bytes) {
     if (text.size() <= max_bytes) return text;
     size_t n = max_bytes;

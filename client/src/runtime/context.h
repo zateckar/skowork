@@ -29,8 +29,17 @@ std::string wrap_untrusted(std::string_view content, std::string_view nonce, std
 // Heuristic only: count non-ASCII bytes individually and allow one token per three ASCII bytes. It deliberately
 // overweights UTF-8 compared with bytes/4, but is not a provider tokenizer or a guaranteed upper bound.
 size_t estimate_context_tokens(std::string_view text);
-// Request estimate including message framing, tool calls, tool definitions and a fixed image allowance.
+// The allowance for one image: images are sent downscaled to at most 1568 px a side (model::ImageLimits), and the
+// costliest common accounting, one token per 28 x 28 px patch, gives 1568 * 1568 / 784 = 3,136 tokens plus framing.
+inline constexpr size_t kImageTokenAllowance = 3'221;
+// Request estimate including message framing, tool calls, tool definitions and kImageTokenAllowance per image.
 size_t estimate_request_tokens(const std::vector<model::ChatMessage>& messages, const std::vector<model::ToolSpec>& tools);
+
+// The summarizer's completion limit when the small role allows it: room for its reasoning and a summary of at most
+// 400 words (design D4, measured in task 1.3).
+inline constexpr int kSummaryOutputTokens = 8'192;
+// The estimated room kept in each summarizer request for the previous summary, unless that summary is larger.
+inline constexpr long long kSummaryRoomTokens = 2'048;
 
 struct WorkingContextBudget {
     long long input = 0;
@@ -52,6 +61,23 @@ std::optional<std::string> render_transcript(const std::string& previous_summary
                                              size_t end, size_t max_chars);
 std::optional<std::string> render_transcript_range(const std::string& previous_summary, const std::vector<ContextMessage>& msgs,
                                                    size_t begin, size_t end, size_t max_chars);
+
+// One record of the summarizer's input: a whole message (parts 1), or part `part` (0-based) of `parts` of a message too
+// large for one pass, covering content bytes [offset, offset + length).
+struct TranscriptUnit {
+    size_t message = 0;
+    size_t offset = 0, length = 0;
+    int part = 0, parts = 1;
+};
+// The units of msgs[0, end) in order. A message whose JSON-encoded content is estimated (estimate_context_tokens) above
+// part_tokens is split into parts within it, never inside a UTF-8 sequence and at a line or word break in the last
+// quarter of a part when there is one; its tool calls go with its last part. Together the parts hold every byte of the
+// content exactly once.
+std::vector<TranscriptUnit> transcript_units(const std::vector<ContextMessage>& msgs, size_t end, size_t part_tokens);
+// Renders units [begin, end) like render_transcript_range; a part is a "message_part" record with its 1-based part and
+// the number of parts. Refuses what does not fit, images and text that is not valid UTF-8.
+std::optional<std::string> render_units(const std::string& previous_summary, const std::vector<ContextMessage>& msgs,
+                                        const std::vector<TranscriptUnit>& units, size_t begin, size_t end, size_t max_chars);
 
 // The longest prefix of `text` of at most `max_bytes` bytes that does not end inside a UTF-8 sequence.
 std::string_view utf8_prefix(std::string_view text, size_t max_bytes);

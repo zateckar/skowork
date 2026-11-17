@@ -139,6 +139,9 @@ public:
     Result<long long> add_compaction(const CompactionRecord& record, const ThreadContext& expected, const std::string& except_run,
                                      const std::function<bool()>& cancelled = {});
     [[nodiscard]] std::vector<CompactionRecord> compactions(const std::string& thread_id);
+    // BeforeCompaction calls that completed, by idempotency key (design D4): a restart does not repeat one.
+    [[nodiscard]] bool compaction_hook_done(const std::string& key);
+    Status mark_compaction_hook(const std::string& key);
     // Gives a record written before boundary tokens were kept its token, once. Returns the token now stored.
     std::string ensure_compaction_nonce(long long id, const std::string& candidate);
 

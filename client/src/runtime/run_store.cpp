@@ -2,6 +2,7 @@
 
 #include "platform/crypto.h"
 
+#include <chrono>
 #include <map>
 #include <mutex>
 #include <set>
@@ -664,6 +665,26 @@ Result<long long> RunStore::add_compaction(const CompactionRecord& c, const Thre
     return id;
 }
 
+bool RunStore::compaction_hook_done(const std::string& key) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare("SELECT 1 FROM compaction_hooks WHERE key=?1");
+    st.bind(1, key);
+    return st.step();
+}
+
+Status RunStore::mark_compaction_hook(const std::string& key) {
+    const std::lock_guard lock(db_.mutex());
+    const long long now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    return db_.transaction([&]() -> Status {
+        auto put = db_.prepare("INSERT OR IGNORE INTO compaction_hooks(key,at) VALUES(?1,?2)");
+        put.bind(1, key).bind(2, now);
+        if (auto s = put.run(); !s) return s;
+        // A key names one revision and boundary: markers older than 90 days cannot be asked for again in practice.
+        auto old = db_.prepare("DELETE FROM compaction_hooks WHERE at<?1");
+        old.bind(1, now - 90LL * 24 * 60 * 60 * 1000);
+        return old.run();
+    });
+}
 std::vector<CompactionRecord> RunStore::compactions(const std::string& thread_id) {
     const std::lock_guard lock(db_.mutex());
     std::vector<CompactionRecord> out;
