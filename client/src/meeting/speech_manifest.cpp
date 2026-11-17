@@ -64,9 +64,13 @@ Result<SpeechManifest> parse_speech_manifest(std::string_view text) {
     if (!parsed || !parsed->is_object()) return make_error("speech_package", "the manifest is not a JSON object");
     const json& j = *parsed;
     if (!j.contains("schema") || !j["schema"].is_number_integer() || j["schema"].get<long long>() != kSpeechSchema)
-        return make_error("speech_package", "the package schema is not supported by this client");
+        return make_error("speech_incompatible", "This client needs a speech package with schema " + std::to_string(kSpeechSchema) + " for " +
+                                                     kSpeechArchitecture + "; this package has another schema.");
     if (jstr(j, "package") != kSpeechPackageName) return make_error("speech_package", "the archive is not a speech package");
-    if (jstr(j, "architecture") != kSpeechArchitecture) return make_error("speech_package", "the package is for another architecture");
+    if (jstr(j, "architecture") != kSpeechArchitecture)
+        return make_error("speech_incompatible", "This client needs a speech package with schema " + std::to_string(kSpeechSchema) + " for " +
+                                                     kSpeechArchitecture + "; this package is for " +
+                                                     (jstr(j, "architecture").empty() ? std::string("an unnamed architecture") : jstr(j, "architecture").substr(0, 32)) + ".");
     SpeechManifest m;
     m.version = jstr(j, "version");
     if (!speech_version_ok(m.version)) return make_error("speech_package", "the package version is invalid");

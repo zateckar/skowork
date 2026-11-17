@@ -25,9 +25,10 @@ bool space(char16_t c) { return c == u' ' || c == u'\t' || c == u'\r' || c == u'
 
 // ---- the window's recording ------------------------------------------------------------------------------------
 
-void Shell::start_dictation(const std::string& owner, std::weak_ptr<int> alive, std::function<ui::TextField*()> field) {
+void Shell::start_dictation(const std::string& owner, std::weak_ptr<int> alive, std::function<ui::TextField*()> field,
+                            DictationDelivery deliver) {
     if (dictation_.phase != DictationPhase::idle) return;
-    dictation_ = {owner, DictationPhase::starting, 0, std::move(alive), std::move(field), 0};
+    dictation_ = {owner, DictationPhase::starting, 0, std::move(alive), std::move(field), 0, std::move(deliver)};
     dictation_changed();
     call("dictation.start", json::object(), [this, owner](Result<json> r) {
         if (dictation_.phase != DictationPhase::starting || dictation_.owner != owner) {
@@ -35,8 +36,10 @@ void Shell::start_dictation(const std::string& owner, std::weak_ptr<int> alive, 
             return;
         }
         if (!r) {
+            DictationRun run = std::move(dictation_);
             dictation_ = {};
             announce(t("composer.dictation_failed", {{"why", ui::to_utf16(r.error().message)}}));
+            if (run.deliver && !run.alive.expired()) run.deliver({}, ui::to_utf16(r.error().message));
             dictation_changed();
             return;
         }
@@ -72,6 +75,12 @@ void Shell::stop_dictation() {
     call("dictation.stop", json::object(), [this](Result<json> r) {
         DictationRun run = std::move(dictation_);
         dictation_ = {};
+        if (run.deliver) {  // the microphone check: shown where it was started, never inserted
+            if (!run.alive.expired()) run.deliver(r ? ui::to_utf16(jstr(*r, "text")) : std::u16string{},
+                                                  r ? std::u16string{} : ui::to_utf16(r.error().message));
+            dictation_changed();
+            return;
+        }
         dictation_changed();
         if (!r) {
             announce(t("composer.dictation_failed", {{"why", ui::to_utf16(r.error().message)}}));
@@ -127,6 +136,7 @@ void Shell::dictation_changed() {
     const auto controls = dictate_controls_;  // an update may rebuild a composer
     for (DictateControl* c : controls)
         if (std::find(dictate_controls_.begin(), dictate_controls_.end(), c) != dictate_controls_.end()) c->update();
+    if (page_ && route_.name == RouteName::settings) page_->speech_check_changed();
 }
 
 // ---- the Dictate control ---------------------------------------------------------------------------------------

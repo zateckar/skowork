@@ -123,7 +123,11 @@ public:
     DictationPhase dictation_phase() const { return dictation_.phase; }
     const std::string& dictation_owner() const { return dictation_.owner; }
     long long dictation_started() const { return dictation_.started; }
-    void start_dictation(const std::string& owner, std::weak_ptr<int> alive, std::function<ui::TextField*()> field);
+    // `deliver`, when set, takes the recognised text (or the error) instead of a composer field: the microphone check of
+    // Settings (client/speech-models Explicit Speech Check) shows it there, and nothing is inserted or sent.
+    using DictationDelivery = std::function<void(const std::u16string& text, const std::u16string& error)>;
+    void start_dictation(const std::string& owner, std::weak_ptr<int> alive, std::function<ui::TextField*()> field,
+                         DictationDelivery deliver = {});
     void stop_dictation();
     void cancel_dictation();
     void discard_dictation();  // the host already discarded the recording (policy turned dictation off)
@@ -228,6 +232,7 @@ private:
         std::weak_ptr<int> alive;
         std::function<ui::TextField*()> field;
         UINT_PTR timer = 0;
+        DictationDelivery deliver;
     };
     DictationRun dictation_;
     std::vector<DictateControl*> dictate_controls_;
@@ -899,6 +904,8 @@ public:
     void apps_changed();
     // Speech setup moved on (speech.changed): the speech recognition block of Settings shows the new state.
     void speech_changed(const json& event);
+    // The window's dictation moved on: the microphone check of the speech block follows it.
+    void speech_check_changed();
 
 private:
     void load();
@@ -979,6 +986,10 @@ private:
     std::string connector_editing_;  // the connector whose token field is open
     json speech_ = nullptr;          // speech.status
     long long speech_bytes_ = 0;     // bytes downloaded so far (speech.changed)
+    std::u16string speech_check_text_, speech_check_error_;  // the last microphone check, shown until the page is left
+    bool speech_check_done_ = false;
+    std::string speech_check_shown_;     // the dictation phase the speech block was built for
+    ui::Label* speech_check_time_ = nullptr;
     connectors::TokenDraft connector_token_;  // the token being typed; taken (and cleared) when it is sent
     json knowledge_ = nullptr;                                                // knowledge.status
     json knowledge_items_ = nullptr, knowledge_entities_ = nullptr;          // the last item and entity searches

@@ -28,7 +28,7 @@ Status SpeechInstaller::start_download() {
                 if (step == progress_step_.exchange(step)) return;
                 if (env_.changed) env_.changed({{"state", "downloading"}, {"bytes", done}});
             };
-            return download_speech_package(env_.data_root, source, token, progress, env_.limits);
+            return download_speech_package(env_.data_root, source, token, progress, env_.limits, env_.send);
         },
         "downloading");
 }
@@ -38,6 +38,44 @@ Status SpeechInstaller::start_import(const fs::path& archive) {
     return run(
         [this, archive, digest](const std::shared_ptr<CancelToken>& token) {
             return install_speech_archive(env_.data_root, archive, digest, env_.limits, [token] { return token->cancelled(); });
+        },
+        "verifying");
+}
+
+Status SpeechInstaller::start_verify() {
+    if (!active_speech_dir(env_.data_root).ok()) return make_error("model_missing", "Speech recognition is not installed.");
+    return run(
+        [this](const std::shared_ptr<CancelToken>& token) -> Result<std::string> {
+            std::string version;
+            if (auto dir = active_speech_dir(env_.data_root, &version); !dir) return dir.error();
+            if (auto st = verify_speech_version(env_.data_root, version, [token] { return token->cancelled(); }); !st.ok())
+                return st.error();
+            return version;
+        },
+        "verifying");
+}
+
+Status SpeechInstaller::start_repair() {
+    if (env_.in_use && env_.in_use())
+        return make_error("in_use", "A meeting capture or transcription is using speech recognition. Repair it when that work ends, or cancel it first.");
+    const SpeechSource source = env_.source ? env_.source() : SpeechSource{};
+    const bool can_download = !source.url.empty() && !source.sha256.empty() && (!env_.download_allowed || env_.download_allowed());
+    return run(
+        [this, source, can_download](const std::shared_ptr<CancelToken>& token) -> Result<std::string> {
+            std::string version;
+            if (auto dir = active_speech_dir(env_.data_root, &version); dir) {
+                const bool files_ok = verify_speech_version(env_.data_root, version, [token] { return token->cancelled(); }).ok();
+                if (token->cancelled()) return make_error("cancelled", "the repair was cancelled");
+                if (files_ok && env_.probe && env_.probe(*dir).ok()) return version;  // nothing to repair
+                // Damaged or not starting: out of use first. A worker holding its files keeps them (deferred).
+                auto removed = remove_speech_version(env_.data_root, version, env_.in_use && env_.in_use());
+                if (!removed) return removed.error();
+                if (!*removed)
+                    return make_error("in_use", "Speech recognition is in use. Repair it when that work ends, or cancel it first.");
+            }
+            if (!can_download)
+                return make_error("need_import", "The damaged speech package was removed. Import the package again to repair speech recognition.");
+            return download_speech_package(env_.data_root, source, token, {}, env_.limits, env_.send);
         },
         "verifying");
 }
@@ -127,7 +165,8 @@ json SpeechInstaller::status() {
                 {"version", installed ? active : version},
                 {"error", error},
                 {"download", !source.url.empty() && !source.sha256.empty() && (!env_.download_allowed || env_.download_allowed())},
-                {"available_version", source.version}};
+                {"available_version", source.version},
+                {"disk_bytes", speech_disk_use(env_.data_root)}};
 }
 
 }  // namespace wb::meeting

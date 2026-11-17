@@ -2,8 +2,8 @@
 # notices, the audio container framing, transcripts, the VAD and test engine, Trigger conditions, the detector) so the
 # fuzz job builds it; wb_meeting_audio is the encrypted track files and the stt worker's request, which the worker
 # links; wb_meeting is the rest of the Windows part (WASAPI capture, the probe, the indicator, the store, the service).
-add_library(wb_meeting_core STATIC core.cpp speech_manifest.cpp)
-target_link_libraries(wb_meeting_core PUBLIC wb_base)
+add_library(wb_meeting_core STATIC core.cpp speech_manifest.cpp speech_archive.cpp)
+target_link_libraries(wb_meeting_core PUBLIC wb_base PRIVATE miniz)
 skowork_warnings(wb_meeting_core)
 
 

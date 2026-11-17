@@ -131,6 +131,7 @@ if(WIN32)
   target_link_libraries(speech_tests PRIVATE wb_meeting wb_platform wb_base miniz GTest::gtest_main)
   set_target_properties(speech_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
   skowork_warnings(speech_tests)
+  target_compile_definitions(speech_tests PRIVATE SKOWORK_SPEECH_CORPUS="${CMAKE_CURRENT_SOURCE_DIR}/../fuzz/corpus/speech_archive")
   add_test(NAME speech_tests COMMAND speech_tests)
 
   add_executable(win_tests

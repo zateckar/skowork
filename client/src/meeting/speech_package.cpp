@@ -24,7 +24,6 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr std::uint64_t kMaxManifestBytes = 1u << 20;
 constexpr size_t kChunk = 1u << 20;
 
 bool is_hex64(std::string_view s) {
@@ -42,6 +41,14 @@ std::string url_host(std::string_view url) {
     if (const size_t at = authority.rfind('@'); at != std::string_view::npos) authority = authority.substr(at + 1);
     if (const size_t colon = authority.rfind(':'); colon != std::string_view::npos) authority = authority.substr(0, colon);
     return to_lower(authority);
+}
+
+// User information in a URL would be sent as credentials; a package URL never carries any.
+bool has_userinfo(std::string_view url) {
+    const size_t p = url.find("://");
+    if (p == std::string_view::npos) return false;
+    const std::string_view rest = url.substr(p + 3);
+    return rest.substr(0, rest.find_first_of("/?#")).find('@') != std::string_view::npos;
 }
 
 // SHA-256 over chunks, through CNG (the whole archive is never held in memory).
@@ -89,91 +96,32 @@ struct Scope {
     }
 };
 
-// A zip file read through miniz's callbacks, so the archive is never loaded whole.
-size_t archive_read(void* opaque, mz_uint64 ofs, void* buf, size_t n) {
-    auto* in = static_cast<std::ifstream*>(opaque);
-    in->clear();
-    in->seekg(static_cast<std::streamoff>(ofs));
-    if (!*in) return 0;
-    in->read(static_cast<char*>(buf), static_cast<std::streamsize>(n));
-    return static_cast<size_t>(in->gcount());
+// The archive file as random-access bytes for SpeechArchive (the archive is never loaded whole).
+SpeechArchiveRead file_reader(const std::shared_ptr<std::ifstream>& in) {
+    return [in](std::uint64_t ofs, void* buf, size_t n) -> size_t {
+        in->clear();
+        in->seekg(static_cast<std::streamoff>(ofs));
+        if (!*in) return 0;
+        in->read(static_cast<char*>(buf), static_cast<std::streamsize>(n));
+        return static_cast<size_t>(in->gcount());
+    };
 }
 
-struct Archive {
-    std::ifstream in;
-    mz_zip_archive zip{};
-    Archive() = default;
-    Archive(const Archive&) = delete;
-    Archive& operator=(const Archive&) = delete;
-    ~Archive() { mz_zip_reader_end(&zip); }
-    bool open(const fs::path& p, std::uint64_t size) {
-        in.open(p, std::ios::binary);
-        if (!in) return false;
-        zip.m_pRead = archive_read;
-        zip.m_pIO_opaque = &in;
-        return mz_zip_reader_init(&zip, size, 0) != 0;
-    }
-};
-
-struct Entry {
-    std::string name;
-    mz_uint index = 0;
-    std::uint64_t size = 0;
-};
-
-Result<std::vector<Entry>> list_entries(Archive& a, const SpeechLimits& lim) {
-    const mz_uint n = mz_zip_reader_get_num_files(&a.zip);
-    if (n == 0 || n > lim.max_entries) return make_error("speech_package", "the archive has an unsupported number of entries");
-    std::vector<Entry> out;
-    std::set<std::string> seen;
-    std::uint64_t total = 0;
-    for (mz_uint i = 0; i < n; ++i) {
-        mz_zip_archive_file_stat st{};
-        if (!mz_zip_reader_file_stat(&a.zip, i, &st)) return make_error("speech_package", "an archive entry cannot be read");
-        Entry e{st.m_filename, i, st.m_uncomp_size};
-        if (st.m_is_directory || st.m_is_encrypted) return make_error("speech_package", "the archive has a directory or encrypted entry");
-        // Unix file type in the high 16 bits of the external attributes: only regular files (or none) are allowed.
-        const mz_uint type = (st.m_external_attr >> 16) & 0170000u;
-        if (type != 0 && type != 0100000u) return make_error("speech_package", "the archive has a link or special file: " + e.name);
-        if (auto s = check_speech_entry_name(e.name); !s.ok()) return s.error();
-        if (e.size > lim.max_entry) return make_error("speech_package", "an archive entry is too large: " + e.name);
-        total += e.size;
-        if (total > lim.max_total) return make_error("speech_package", "the archive inflates beyond the speech budget");
-        if (!seen.insert(to_lower(e.name)).second) return make_error("speech_package", "the archive has a duplicate entry: " + e.name);
-        out.push_back(std::move(e));
-    }
-    return out;
+std::uint64_t free_bytes(const SpeechLimits& lim, const fs::path& at) {
+    if (lim.free_space) return lim.free_space(at);
+    ULARGE_INTEGER avail{};
+    if (!::GetDiskFreeSpaceExW(at.c_str(), &avail, nullptr, nullptr)) return ~0ull;  // unknown: writes report failures
+    return avail.QuadPart;
 }
 
-struct Sink {
-    const std::function<bool(const char*, size_t)>* put = nullptr;
-    const std::function<bool()>* cancelled = nullptr;
-    std::uint64_t expected = 0, written = 0;
-    bool failed = false;
-};
-
-size_t sink_write(void* opaque, mz_uint64, const void* buf, size_t n) {
-    auto* s = static_cast<Sink*>(opaque);
-    if (n == 0) return 0;
-    if (s->cancelled && *s->cancelled && (*s->cancelled)()) return s->failed = true, 0;
-    // An entry that inflates past its declared size is refused rather than grown.
-    if (s->written + n > s->expected || !(*s->put)(static_cast<const char*>(buf), n)) return s->failed = true, 0;
-    s->written += n;
-    return n;
+// Fails with disk_full unless `need` bytes fit and kSpeechDiskReserve stays free.
+Status require_space(const SpeechLimits& lim, const fs::path& at, std::uint64_t need) {
+    const std::uint64_t avail = free_bytes(lim, at);
+    if (avail >= need && avail - need >= kSpeechDiskReserve) return {};
+    const std::uint64_t missing = need + kSpeechDiskReserve - std::min(avail, need + kSpeechDiskReserve);
+    return make_error("disk_full", "Not enough disk space for the speech package: free " + std::to_string((missing + (1u << 20) - 1) >> 20) +
+                                       " MB more and try again.");
 }
-
-Status extract_entry(Archive& a, const Entry& e, const std::function<bool(const char*, size_t)>& put,
-                     const std::function<bool()>& cancelled) {
-    Sink s;
-    s.put = &put;
-    s.cancelled = &cancelled;
-    s.expected = e.size;
-    const bool ok = mz_zip_reader_extract_to_callback(&a.zip, e.index, sink_write, &s, 0) != 0;
-    if (cancelled && cancelled()) return make_error("cancelled", "the speech package was cancelled");
-    if (!ok || s.failed || s.written != e.size) return make_error("speech_package", "an archive entry cannot be read: " + e.name);
-    return {};
-}
-
 bool package_complete(const fs::path& dir, const std::string& name) {
     std::error_code ec;
     std::ifstream in(dir / L"complete.json", std::ios::binary);
@@ -196,10 +144,10 @@ Status ensure_store(const fs::path& root) {
 
 // A GET without credentials. Redirects are followed by hand: each target must be https on an approved host.
 Status fetch(const std::string& start, const std::set<std::string>& hosts, const std::shared_ptr<CancelToken>& cancel,
-             const std::function<bool(std::string_view)>& on_data) {
+             const std::function<bool(std::string_view)>& on_data, const SpeechTransport& send) {
     std::string url = start;
     for (int hop = 0; hop < 5; ++hop) {
-        if (!is_https(url) || !hosts.count(url_host(url)))
+        if (!is_https(url) || has_userinfo(url) || !hosts.count(url_host(url)))
             return make_error("speech_redirect", "the speech package moved to an origin that is not approved");
         HttpRequest req;
         req.url = url;
@@ -210,7 +158,7 @@ Status fetch(const std::string& start, const std::set<std::string>& hosts, const
         req.stream_success_only = true;
         req.max_body = 1u << 20;
         req.on_chunk = on_data;
-        auto res = http().send(req);
+        auto res = send ? send(req) : http().send(req);
         if (!res) return res.error();
         const int s = res->status;
         if (s == 301 || s == 302 || s == 303 || s == 307 || s == 308) {
@@ -280,37 +228,16 @@ Result<std::string> install_speech_archive(const fs::path& data_root, const fs::
     if (ec) return make_error("io", "the speech staging folder cannot be created");
     Scope scope{staging};
 
-    Archive a;
-    if (!a.open(archive, size)) return make_error("speech_package", "the speech package is not a zip archive");
-    auto entries = list_entries(a, lim);
-    if (!entries) return entries.error();
+    auto in = std::make_shared<std::ifstream>(archive, std::ios::binary);
+    if (!*in) return make_error("io", "the speech package cannot be read");
+    SpeechArchive a;
+    if (auto st = a.open(file_reader(in), size); !st.ok()) return st.error();
+    auto plan = a.inspect(lim, cancelled);
+    if (!plan) return plan.error();
+    if (auto st = require_space(lim, staging, plan->total); !st.ok()) return st.error();
 
-    const Entry* manifest_entry = nullptr;
-    for (const auto& e : *entries)
-        if (e.name == "manifest.json") manifest_entry = &e;
-    if (!manifest_entry || manifest_entry->size == 0 || manifest_entry->size > kMaxManifestBytes)
-        return make_error("speech_package", "the speech package has no usable manifest.json");
-    std::string text;
-    if (auto st = extract_entry(a, *manifest_entry, [&](const char* p, size_t n) { text.append(p, n); return true; }, cancelled); !st.ok())
-        return st.error();
-    auto manifest = parse_speech_manifest(text);
-    if (!manifest) return manifest.error();
-
-    // Every archive file is either the manifest, a license, or a listed file under its exact path; every listed file is present.
-    std::map<std::string, const SpeechManifestFile*> listed;
-    for (const auto& f : manifest->files) listed[to_lower(f.path)] = &f;
-    size_t matched = 0;
-    for (const auto& e : *entries) {
-        if (e.name == "manifest.json" || e.name.rfind("licenses/", 0) == 0) continue;
-        const auto it = listed.find(to_lower(e.name));
-        if (it == listed.end() || it->second->path != e.name)
-            return make_error("speech_package", "the archive has a file the manifest does not list: " + e.name);
-        ++matched;
-    }
-    if (matched != manifest->files.size()) return make_error("speech_package", "the manifest lists a file the archive does not contain");
-
-    // Extract into staging, checking each listed file's size and digest as its bytes are written.
-    for (const auto& e : *entries) {
+    // Extract into staging, checking each listed file's digest as its bytes are written.
+    for (const auto& e : plan->entries) {
         const fs::path target = staging / widen(e.name);
         fs::create_directories(target.parent_path(), ec);
         if (ec) return make_error("io", "the speech package cannot be extracted");
@@ -318,23 +245,26 @@ Result<std::string> install_speech_archive(const fs::path& data_root, const fs::
         if (!out) return make_error("io", "the speech package cannot be extracted");
         Sha256 h;
         if (!h.ok()) return make_error("crypto", "SHA-256 is not available");
+        bool write_failed = false;
         const std::function<bool(const char*, size_t)> put = [&](const char* p, size_t n) {
             out.write(p, static_cast<std::streamsize>(n));
-            return static_cast<bool>(out) && h.update(p, n);
+            if (!out) return write_failed = true, false;
+            return h.update(p, n);
         };
-        if (auto st = extract_entry(a, e, put, cancelled); !st.ok()) return st.error();
+        if (auto st = a.extract(e, put, cancelled); !st.ok()) {
+            if (write_failed) return make_error("disk_full", "the speech package cannot be written; free disk space and try again");
+            return st.error();
+        }
         out.close();
-        if (out.fail()) return make_error("io", "the speech package cannot be written (disk full?)");
-        const auto it = listed.find(to_lower(e.name));
-        if (it != listed.end() && (it->second->bytes != e.size || it->second->sha256 != h.finish()))
+        if (out.fail()) return make_error("disk_full", "the speech package cannot be written; free disk space and try again");
+        if (e.listed >= 0 && plan->manifest.files[static_cast<size_t>(e.listed)].sha256 != h.finish())
             return make_error("speech_package", "a file does not match the manifest: " + e.name);
-    }
-    for (const char* req : kSpeechRequiredFiles)
+    }    for (const char* req : kSpeechRequiredFiles)
         if (!fs::is_regular_file(staging / L"models" / L"stt" / widen(req), ec))
             return make_error("speech_package", std::string("the package lacks ") + req);
 
     // The completion marker is written before the rename, so a folder under packages\ is complete when it appears.
-    const std::string version = manifest->version;
+    const std::string version = plan->manifest.version;
     {
         std::ofstream m(staging / L"complete.json", std::ios::binary | std::ios::trunc);
         m << json{{"schema", kSpeechSchema}, {"package", kSpeechPackageName}, {"architecture", kSpeechArchitecture},
@@ -358,10 +288,11 @@ Result<std::string> install_speech_archive(const fs::path& data_root, const fs::
 Result<std::string> download_speech_package(const fs::path& data_root, const SpeechSource& source,
                                             const std::shared_ptr<CancelToken>& cancel,
                                             const std::function<void(std::uint64_t, std::uint64_t)>& progress,
-                                            const SpeechLimits& lim) {
+                                            const SpeechLimits& lim, const SpeechTransport& send) {
     if (source.url.empty() || source.sha256.empty())
         return make_error("unavailable", "No speech package is published. Import a package instead.");
-    if (!is_https(source.url)) return make_error("speech_package", "the speech package origin must use https");
+    if (!is_https(source.url) || has_userinfo(source.url))
+        return make_error("speech_package", "the speech package origin must be an https URL without user information");
     if (!is_hex64(to_lower(source.sha256))) return make_error("speech_digest", "the pinned speech digest is invalid");
     std::set<std::string> hosts;
     for (const auto& h : source.hosts) hosts.insert(to_lower(h));
@@ -376,29 +307,38 @@ Result<std::string> download_speech_package(const fs::path& data_root, const Spe
     Scope scope{stage};
 
 
+    if (auto st = require_space(lim, stage, 0); !st.ok()) return st.error();
     const fs::path archive = stage / L"package.zip";
     std::ofstream out;
-    std::uint64_t done = 0;
-    bool too_big = false;
+    std::uint64_t done = 0, checked = 0;
+    bool too_big = false, write_failed = false;
+    std::optional<Error> no_space;
     const auto on_data = [&](std::string_view c) {
         if (!out.is_open()) {
             out.open(archive, std::ios::binary | std::ios::trunc);
-            if (!out) return false;
+            if (!out) return write_failed = true, false;
         }
         if (done + c.size() > lim.max_archive) return too_big = true, false;
+        // The volume is rechecked every 8 MB, so the download stops before it takes the reserve.
+        if (done + c.size() - checked >= (8u << 20) || checked == 0) {
+            checked = done + c.size();
+            if (auto st = require_space(lim, stage, c.size()); !st.ok()) return no_space = st.error(), false;
+        }
         out.write(c.data(), static_cast<std::streamsize>(c.size()));
-        if (!out) return false;
+        if (!out) return write_failed = true, false;
         done += c.size();
         if (progress) progress(done, 0);
         return true;
     };
-    if (auto st = fetch(source.url, hosts, cancel, on_data); !st.ok()) {
+    if (auto st = fetch(source.url, hosts, cancel, on_data, send); !st.ok()) {
         if (too_big) return make_error("speech_package", "the speech package is larger than the budget");
+        if (no_space) return *no_space;
+        if (write_failed) return make_error("disk_full", "the speech package cannot be written; free disk space and try again");
         return st.error();
     }
     if (!out.is_open()) out.open(archive, std::ios::binary | std::ios::trunc);  // an empty body fails the size check below
     out.close();
-    if (out.fail()) return make_error("io", "the speech package cannot be written (disk full?)");
+    if (out.fail()) return make_error("disk_full", "the speech package cannot be written; free disk space and try again");
     return install_speech_archive(data_root, archive, source.sha256, lim, cancelled);
 }
 
@@ -407,14 +347,51 @@ Result<bool> remove_speech_version(const fs::path& data_root, const std::string&
     const fs::path dir = speech_root(data_root) / L"packages" / widen(version);
     std::error_code ec;
     if (!fs::exists(dir, ec)) return true;
-    if (in_use) {
+    const auto defer = [&]() -> Result<bool> {
         std::ofstream marker(dir / L".remove-pending", std::ios::binary | std::ios::trunc);
         if (!marker) return make_error("io", "the speech package cannot be marked for removal");
         return false;
-    }
-    fs::remove_all(dir, ec);
-    if (ec) return make_error("io", "the speech package cannot be removed: " + ec.message());
+    };
+    if (in_use) return defer();
+    // Out of packages\ first, in one rename: Windows refuses it while a worker has a file of the package open, so a
+    // worker that the caller did not report keeps every file. Then the moved folder is deleted.
+    const fs::path removing = speech_root(data_root) / L"removing";
+    fs::create_directories(removing, ec);
+    const fs::path moved = removing / widen(version + "-" + random_urlsafe(6));
+    if (!::MoveFileExW(dir.c_str(), moved.c_str(), 0)) return defer();
+    fs::remove_all(moved, ec);  // anything left is deleted at the next start
     return true;
+}
+
+Status verify_speech_version(const fs::path& data_root, const std::string& version, const std::function<bool()>& cancelled) {
+    if (!speech_version_ok(version)) return make_error("invalid_params", "unknown speech version");
+    const fs::path dir = speech_root(data_root) / L"packages" / widen(version);
+    if (!package_complete(dir, version)) return make_error("speech_package", "The speech package is incomplete.");
+    std::ifstream in(dir / L"manifest.json", std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    auto manifest = parse_speech_manifest(text);
+    if (!manifest || manifest->version != version) return make_error("speech_package", "The speech package manifest is missing or damaged.");
+    for (const auto& f : manifest->files) {
+        std::error_code ec;
+        const fs::path file = dir / widen(f.path);
+        if (!fs::is_regular_file(file, ec) || fs::file_size(file, ec) != f.bytes)
+            return make_error("speech_package", "A speech file is missing or changed: " + f.path);
+        auto digest = sha256_file(file, cancelled);
+        if (!digest) return digest.error();
+        if (*digest != f.sha256) return make_error("speech_package", "A speech file is damaged: " + f.path);
+    }
+    return {};
+}
+
+std::uint64_t speech_disk_use(const fs::path& data_root) {
+    std::uint64_t total = 0;
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(speech_root(data_root), fs::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        std::error_code e2;
+        if (it->is_regular_file(e2)) total += it->file_size(e2);
+    }
+    return total;
 }
 
 Status recover_speech_store(const fs::path& data_root) {
@@ -422,6 +399,7 @@ Status recover_speech_store(const fs::path& data_root) {
     std::error_code ec;
     if (!fs::is_directory(base, ec)) return {};
     fs::remove_all(base / L"staging", ec);
+    fs::remove_all(base / L"removing", ec);
     std::vector<fs::path> dirs;
     const fs::path pkgs = base / L"packages";
     for (fs::directory_iterator it(pkgs, ec), end; !ec && it != end; it.increment(ec))

@@ -6113,6 +6113,136 @@ TEST(ShellDictation, DictateInsertsAtTheCaretEscapeDiscardsAndAvailability) {
     }));
 }
 
+// client/speech-models Speech Repair And Removal, Explicit Speech Check (task 5.4): the speech block shows disk use and
+// the microphone state, Verify and Repair start the host's checks without recording, and only Test microphone records:
+// Stop shows the recognised text in the block, Cancel discards it, and the composer draft is untouched. Fixture
+// evidence with a fake host; no microphone is used.
+TEST(ShellDictation, SpeechBlockVerifiesRepairsAndTestsTheMicrophoneOnlyWhenAsked) {
+    std::mutex mx;
+    json dictation = {{"enabled", true}, {"available", true}, {"reason", ""}};
+    std::vector<std::string> calls;
+    Fixture f;
+    const auto t = f.in.env.thread();
+    const auto app_status = [&] {
+        const std::lock_guard l(mx);
+        return json{{"version", {{"version", "0.1.0"}}},
+                    {"auth", {{"state", "signed_in"}}},
+                    {"control_plane", {{"configured", true}, {"connected", true}}},
+                    {"background", {{"paused_until", 0}}},
+                    {"storage", {{"read_only", false}, {"degraded", false}}},
+                    {"agent", {{"available", true}}},
+                    {"dictation", dictation}};
+    };
+    f.rpc.add("app.status", RpcExposure::ui, [&](const json&) -> Result<json> { return app_status(); });
+    json speech = {{"state", "ready"}, {"installed", true}, {"version", "1"}, {"error", ""}, {"download", true},
+                   {"available_version", "1"}, {"disk_bytes", 1280ll << 20}};
+    for (const char* name : {"dictation.start", "dictation.stop", "dictation.cancel", "speech.verify", "speech.repair"}) {
+        const std::string method = name;
+        f.rpc.add(method, RpcExposure::ui, [&, method](const json&) -> Result<json> {
+            const std::lock_guard l(mx);
+            calls.push_back(method);
+            if (method == "dictation.start") return json{{"started_at", 1}};
+            if (method == "dictation.stop") return json{{"text", "Dobrý den, tohle je zkouška"}, {"language", "cs"}};
+            if (method.starts_with("speech.")) speech["state"] = "verifying";
+            return json::object();
+        });
+    }
+    f.rpc.add("speech.status", RpcExposure::ui, [&](const json&) -> Result<json> {
+        const std::lock_guard l(mx);
+        return speech;
+    });
+    const auto called = [&](const std::string& method) {
+        const std::lock_guard l(mx);
+        return static_cast<size_t>(std::count(calls.begin(), calls.end(), method));
+    };
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + t); });
+    ASSERT_TRUE(w.until([&] { return w.exists("composer-input"); }));
+    w.type("composer-input", u"Draft before the check");
+    w.run([&] { w.main().open("#/settings"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-speech-verify") && w.exists("settings-speech-repair") && w.exists("settings-speech-test"); }));
+    Uia uia;
+    const auto name_becomes = [&](const wchar_t* id, const std::wstring& want) {
+        for (int i = 0; i < 250; ++i) {
+            if (uia.by_id(w.hwnd())[id].name == want) return true;
+            std::this_thread::sleep_for(20ms);
+        }
+        return false;
+    };
+    EXPECT_TRUE(name_becomes(L"settings-speech-disk", L"Disk use: 1280 MB."));
+    std::vector<std::string> problems;
+    w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
+    EXPECT_TRUE(problems.empty()) << problems.front();
+
+    // Verify and Repair: the host checks; nothing records.
+    for (const char* action : {"verify", "repair"}) {
+        ASSERT_TRUE(w.invoke(std::string("settings-speech-") + action));
+        ASSERT_TRUE(w.until([&] { return called(std::string("speech.") + action) == 1 && w.exists("settings-speech-cancel"); })) << action;
+        EXPECT_FALSE(w.exists("settings-speech-test")) << "no microphone test while the package is being checked";
+        {
+            const std::lock_guard l(mx);
+            speech["state"] = "ready";
+        }
+        w.post([&] { w.main().emit("speech.changed", json{{"state", "ready"}, {"version", "1"}, {"error", ""}}); });
+        ASSERT_TRUE(w.until([&] { return w.exists("settings-speech-test"); })) << action;
+    }
+    EXPECT_EQ(called("dictation.start"), 0u) << "Install, Verify and Repair never record";
+
+    // Test microphone: records only now, with Stop and Cancel; the text is shown here and inserted nowhere.
+    ASSERT_TRUE(w.invoke("settings-speech-test"));
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-speech-test-stop") && w.exists("settings-speech-test-cancel"); }));
+    EXPECT_EQ(called("dictation.start"), 1u);
+    EXPECT_TRUE(uia.by_id(w.hwnd())[L"settings-speech-test-recording"].name.starts_with(L"Recording 0:0"));
+    w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
+    EXPECT_TRUE(problems.empty()) << problems.front();
+    ASSERT_TRUE(w.invoke("settings-speech-test-stop"));
+    ASSERT_TRUE(name_becomes(L"settings-speech-test-result", L"Recognised: Dobrý den, tohle je zkouška"));
+    EXPECT_EQ(called("dictation.stop"), 1u);
+    EXPECT_TRUE(w.exists("settings-speech-test")) << "the check can run again";
+
+    // Cancel discards the test recording and shows no text.
+    ASSERT_TRUE(w.invoke("settings-speech-test"));
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-speech-test-cancel"); }));
+    ASSERT_TRUE(w.invoke("settings-speech-test-cancel"));
+    ASSERT_TRUE(w.until([&] { return called("dictation.cancel") == 1 && w.exists("settings-speech-test"); }));
+    EXPECT_FALSE(w.exists("settings-speech-test-result"));
+    EXPECT_EQ(called("dictation.stop"), 1u);
+
+    // The microphone is unplugged, a meeting takes it, then it is back: the block says why and the test follows.
+    const auto test_enabled = [&] {
+        bool on = false;
+        w.with("settings-speech-test", [&](ui::Node& n) {
+            on = n.enabled;
+            return true;
+        });
+        return on;
+    };
+    for (const auto& [reason, text] : {std::pair{"no_microphone", L"No microphone is connected. Connect one to dictate or test the microphone."},
+                                      std::pair{"meeting", L"A meeting is being recorded. The microphone test is available when it ends."}}) {
+        {
+            const std::lock_guard l(mx);
+            dictation = {{"enabled", true}, {"available", false}, {"reason", reason}};
+        }
+        w.post([&] { w.main().emit("status", app_status()); });
+        ASSERT_TRUE(name_becomes(L"settings-speech-mic", text)) << reason;
+        EXPECT_TRUE(w.until([&] { return !test_enabled(); })) << reason;
+    }
+    {
+        const std::lock_guard l(mx);
+        dictation = {{"enabled", true}, {"available", true}, {"reason", ""}};
+    }
+    w.post([&] { w.main().emit("status", app_status()); });
+    ASSERT_TRUE(w.until([&] { return test_enabled() && !w.exists("settings-speech-mic"); }));
+    EXPECT_EQ(called("dictation.start"), 2u);
+
+    // Back in the Thread: the draft is as it was typed.
+    w.run([&] { w.main().open("#/threads/" + t); });
+    ASSERT_TRUE(w.until([&] { return w.exists("composer-input"); }));
+    EXPECT_EQ(composer_text(w), u"Draft before the check");
+    EXPECT_TRUE(w.until([&] { return f.in.svc->store().draft(t).text == "Draft before the check"; }));
+}
+
 // Keyed feed updates (Live Feed Updates, design D4): when a later Run adds items, the elements of the earlier items are
 // the same objects as before, so their text layout, selection and reading position stay.
 TEST(ShellFeed, AnEarlierMessageKeepsItsElementWhenALaterRunArrives) {

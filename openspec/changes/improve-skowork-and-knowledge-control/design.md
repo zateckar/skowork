@@ -73,6 +73,16 @@ Install into a versioned, user-private speech package directory under the data r
 
 Settings > Speech recognition uses states Not installed, Downloading, Verifying, Ready and Needs repair, with plain error details. Record progress without blocking the native UI. Test microphone is a separate explicit action. Install/verify events invalidate the current 30-second availability cache immediately. Device errors remain distinguishable from model errors in `DictationService` and `views_dictation.cpp`.
 
+Speech setup implementation decisions (tasks 5.2 to 5.4, 2026-11-17):
+- **Archive reader.** Archive inspection moved into a portable reader in the fuzzed core. It checks entry names, links (Unix types and the Windows reparse attribute), case-insensitive duplicates, declared sizes against the limits and the manifest, and that the manifest and archive list exactly the same files. Extraction refuses bytes beyond an entry's declared size. Installation uses the same reader, and a fuzz target exercises it with seed archives.
+- **Disk space.** Setup keeps 256 MB free. Before a download, every 8 MB during it, and before extraction (for the inflated total), too little space fails with an actionable `disk_full` error, and the previous package stays.
+- **Package URLs.** URLs with user information are refused at every redirect hop.
+- **Incompatible packages.** These fail with `speech_incompatible`, naming the required schema and architecture.
+- **Removal.** A version is first renamed out of `packages\`. Windows refuses that rename while a worker has one of its files open, so removal is deferred whether or not the caller knew about that worker. Leftovers under `removing\` are deleted at the next start.
+- **Verify.** Verify re-hashes the installed files against the package's own manifest and then probes the engine.
+- **Repair.** Repair does nothing while capture or transcription is reported in use. Otherwise it verifies and probes. A damaged or non-starting package is taken out of use and downloaded again; when no download is available, Import is requested.
+- **Test microphone.** The test uses the window's single dictation with a Settings owner. The recognised text is shown in the speech block and is never inserted or sent. The block also shows disk use and whether the microphone is missing or held by a meeting or another dictation.
+
 Alternatives: put 1+ GB into every core zip (violates lightweight distribution intent); require a PowerShell script (the reported defect); use hosted transcription (violates local-audio constraints); download arbitrary upstream tarballs at runtime (unbounded dependency and packaging variation).
 
 ### D4. Proactive context budget with a loss-accounted checkpoint

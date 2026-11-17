@@ -119,7 +119,19 @@ void register_speech_rpc(RpcRegistry& rpc, std::function<meeting::SpeechInstalle
         if (Status st = (*s)->start_import(widen(path)); !st) return st.error();
         return json{{"started", true}};
     });
-    rpc.add("speech.cancel", RpcExposure::ui, [svc](const json&) -> Result<json> {
+    // Verify and Repair never record: the microphone is used only by Test microphone and Dictate.
+    rpc.add("speech.verify", RpcExposure::ui, [svc](const json&) -> Result<json> {
+        auto s = svc();
+        if (!s) return s.error();
+        if (Status st = (*s)->start_verify(); !st) return st.error();
+        return json{{"started", true}};
+    });
+    rpc.add("speech.repair", RpcExposure::ui, [svc](const json&) -> Result<json> {
+        auto s = svc();
+        if (!s) return s.error();
+        if (Status st = (*s)->start_repair(); !st) return st.error();
+        return json{{"started", true}};
+    });    rpc.add("speech.cancel", RpcExposure::ui, [svc](const json&) -> Result<json> {
         auto s = svc();
         if (!s) return s.error();
         (*s)->cancel();

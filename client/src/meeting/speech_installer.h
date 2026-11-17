@@ -23,6 +23,7 @@ public:
         std::function<SpeechSource()> source;
         std::function<bool()> download_allowed;  // policy.speech.download
         SpeechLimits limits;
+        SpeechTransport send;  // empty: the shared WinHTTP session
         std::function<Status(const std::filesystem::path& speech_dir)> probe;  // the stt worker initializes the engine there
         std::function<bool()> in_use;                  // a capture or transcription uses the active package
         std::function<void(const json& event)> changed;  // speech.changed {state, version, error}
@@ -37,10 +38,18 @@ public:
     // Each fails with busy while a setup runs. A download fails with unavailable when this build has no source.
     Status start_download();
     Status start_import(const std::filesystem::path& archive);
+    // Verify: the active package's files against its manifest, then the engine probe; nothing is recorded (client/speech-models
+    // Explicit Speech Check, Verify without recording). Fails with model_missing when nothing is installed.
+    Status start_verify();
+    // Repair: Verify, and when the package is damaged or its engine fails, takes it out of use and downloads it again.
+    // Fails with in_use while a capture or transcription uses it (Repair during transcription); a damaged package that
+    // cannot be downloaded is removed and the error asks for Import package.
+    Status start_repair();
     void cancel();
     // Removes a version (deferred while in use). Fails with busy while a setup runs.
     Result<bool> remove(const std::string& version);
-    // {state, installed, version, error}; state: idle, downloading, verifying, probing, ready, failed or cancelled.
+    // {state, installed, version, error, download, available_version, disk_bytes}; state: idle, downloading, verifying,
+    // probing, ready, failed or cancelled.
     json status();
 
 private:
