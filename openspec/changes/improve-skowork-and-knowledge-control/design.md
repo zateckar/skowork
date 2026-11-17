@@ -705,6 +705,53 @@ Add speech to the Policy bundle top-level glossary and also reconcile the alread
     - Only the publication title can be edited. Evidence titles and entry text cannot.
     - The version header is set in the app's hook and is not covered by a unit test.
     - Folders and live-share labels are not changed by publishing.
+- **Publication differences and withdrawal outbox, 10.3, 2026-11-17:**
+  - **Outbox:** schema 14 adds a state to each published entry (published or withdrawing) and to each publication (published, withdrawing, withdrawn or removed). A withdrawing row records its reason, an operation id and, from its first send on, the revision it was sent against. The row is the outbox record, so no separate copy of identity is needed:
+    - forgetting a fact only clears the entry's fact id, so the record stays;
+    - the row is deleted only when the server acknowledges the removal;
+    - a retry repeats the same operation and revision, so the server's ledger replays it instead of applying it twice;
+    - after a revision conflict (an administrator, another device), the client reads the server's state and sends a new operation against the current revision.
+    A missing entry counts as removed only after the server has advertised publication version 1, because a server with publications off also answers "not found".
+  - **What is withdrawn, automatically:** a published entry is withdrawn when it would not be published the same way now:
+    - its fact was forgotten;
+    - it is no longer in any of the publication's categories;
+    - it is disputed, unsupported, rejected or withheld;
+    - its support now needs a Source kind the policy does not permit;
+    - its statement, Source kinds or excerpts changed (compared by a digest stored at publication).
+    The check reads only the local store. It runs on every sharing pass (after forget, exclusion and reindexing), on every worker step when the knowledge generation changed, and on the periodic sweep. It never waits for a model or the extraction budget. A fact still waiting for its consistency check is not a reason to withdraw an entry that was already published.
+  - **What waits for review:** new category members, changed statements (the old entry is withdrawn) and broader audiences are never uploaded on their own. Renaming a category changes nothing published. Sharing shows how many new facts wait. Review changes previews the next version:
+    - by default, the publication's categories, Groups and title;
+    - entries still published keep their entry and excerpt ids ("Already published"); others are "New";
+    - it counts what stays, what is new and what will no longer be published, and names Groups added to the audience;
+    - the payload is sent against the publication's current revision.
+    The next version is refused while withdrawals from that publication are unacknowledged, so withdrawals always reach the server before additions. A confirmation is refused as stale if the revision or the outbox changed since the preview.
+  - **States shown under Sharing:**
+    - published, with its Groups and entry count;
+    - "N removals are pending", warning that the previously published text may remain available until the server confirms the removal;
+    - withdrawal pending;
+    - withdrawn;
+    - removed by an administrator, with the reason;
+    - the last failed attempt.
+    Withdraw removes a whole publication; offline it is queued and said to be pending.
+  - **Administrator removal:** the server's list marks the publication removed. The client never publishes it again: the next version is refused, and sync never uploads. Its entries can still be withdrawn.
+  - **Delete all:** every publication is withdrawn first. If one cannot be withdrawn (for example offline), Delete all refuses and keeps the local data, as it does for shared items.
+  - **Deviations from D8:** removing a fact from a category withdraws its entry when the next sharing pass or step runs; the category edit does not preview the removal first. Narrowing `knowledge.sharing.groups` withdraws nothing locally; the server authorizes reads by current policy (D9).
+  - **Tests:**
+    - `KnowledgePublication.ChangesWithdrawFirstDurablyAndNeverBroaden` runs against an in-process server ledger that replays operations. It checks:
+      - a new category member and a rename upload nothing;
+      - a forgotten source and a dispute are queued while offline and with the model failing, making no model calls, while June stays published and shows the offline error;
+      - the next version is refused while removals are pending;
+      - across two restarts, with the server committing the removals but the answers lost, the second pass replays only committed operations and the revision ends at 3;
+      - the next version keeps June's entry id, adds the new fact, keeps the Groups and names an added Group;
+      - an administrator's removal is shown with its reason, refuses the next version and is never uploaded again;
+      - a whole publication withdrawn offline is sent on reconnect and then reviewed as a new version.
+      Sending against the current revision instead of the stored one makes the test fail.
+    - `ShellKnowledge.SharingShowsPendingRemovalsAndReviewsTheNextVersion`, by keyboard, checks the pending-removal and new-facts labels, that they clear after reconnecting, the change counts and per-entry labels in Review changes, that the upload is against revision 2 with the same Groups, and that Withdraw offline shows as pending.
+    - 880 win, 95 UI and 8 analysis tests pass, except `ShellGolden.SettingsPage` and the excluded `ShellFeed.WorkDetailsAreHiddenByDefault…` (see the 10.2 note).
+  - **Limits:**
+    - A Source update that replaces a published fact's passage is covered by the same rule, but only forgetting and disputes are exercised by the tests.
+    - The outbox lives in the knowledge database. Delete all therefore refuses rather than handing publication withdrawals to the client/local-storage outbox file.
+    - The policy-change and admin-resolution paths of the server's list are not exercised by the shell test.
 - **Progress audit and triage, 2026-11-09:** code was compared with every task. Tasks were split or added where code and specification disagree (2.4, 4.5, 5.6, 6.6), where a prerequisite was implicit (7.5, 7.6, 7.7, 8.5, 9.5), and narrowed where two tasks claimed the same evidence (1.4, 5.5, 6.5). Publication code in the control plane is unmounted library code with unit tests; no publication route, schema installation or policy key exists. The earlier note that multi-pass summarization is not enabled is superseded by the multi-pass note above. tasks.md carries the per-task status and the delivery order.
 - Final immutable speech artifact URL/mirror and manifest digest, verified package sizes, proxy behavior and actual language-fixture timing.
 - Actual configured model ids and context metadata, token-count strategy supported by those models, and measured compaction coverage/latency.

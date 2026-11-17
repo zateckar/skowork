@@ -3004,6 +3004,266 @@ TEST(KnowledgePublication, PreviewIsTheExactEligiblePayloadAndOnlyItIsUploaded) 
     EXPECT_FALSE(call("knowledge.publication.preview", {{"categories", {*risks}}, {"groups", {"engineering"}}}));
     EXPECT_EQ(uploads.size(), 1u);
 }
+// control-plane/team-knowledge's publications, in process, with its revision ledger: an operation id replays its
+// committed result, a stale expected revision or an administrator removal is a conflict, a missing entry is not found.
+struct FakePublications {
+    struct Publication {
+        long long revision = 0;
+        bool blocked = false;
+        std::string removal;
+        std::set<std::string> entries;
+    };
+    std::map<std::string, Publication> pubs;
+    std::map<std::string, std::pair<std::string, long long>> ops;  // operation id -> request, committed revision
+    std::vector<std::string> log;                                   // "PUT id", "DELETE id/entry", "DELETE id"
+    std::vector<std::string> operations;                            // every DELETE's operation id, in order
+    bool online = true, lose_answer = false;
+
+    void remove_by_admin(const std::string& id, const std::string& reason) {
+        auto& p = pubs[id];
+        p.blocked = true;
+        p.removal = reason;
+        p.entries.clear();
+        ++p.revision;
+    }
+    Result<json> operator()(const std::string& method, const std::string& path, const std::string& body) {
+        if (!online) return make_error("offline", "The control plane is not available.");
+        const std::string base = "api/v1/knowledge/publications";
+        if (method == "GET" && path == "api/v1/knowledge/capabilities")
+            return json{{"publication_read_versions", {1}}, {"publication_mutation_versions", {1}}};
+        if (method == "GET" && path == base) {
+            json list = json::array();
+            for (const auto& [id, p] : pubs) {
+                json row = {{"publication_id", id}, {"revision", p.revision},
+                            {"state", p.blocked ? "removed" : p.entries.empty() ? "withdrawn" : "published"}, {"entries", p.entries.size()}};
+                if (p.blocked) row["removal"] = {{"reason", p.removal}};
+                list.push_back(row);
+            }
+            return json{{"permitted_groups", {"all-staff", "engineering"}}, {"company_group", "all-staff"},
+                        {"derived_sources", {"files", "notes"}}, {"publications", list}};
+        }
+        std::string rest = path.substr(base.size() + 1), id = rest, entry;
+        if (const auto at = rest.find("/entries/"); at != std::string::npos) {
+            id = rest.substr(0, at);
+            entry = rest.substr(at + 9);
+        }
+        const json in = json::parse(body);
+        const std::string op = in["operation_id"].get<std::string>();
+        auto& p = pubs[id];
+        if (method == "DELETE") operations.push_back(op);
+        const std::string request = method + " " + path + " " + std::to_string(in["expected_revision"].get<long long>()) + (method == "PUT" ? body : "");
+        if (const auto known = ops.find(op); known != ops.end()) {
+            if (known->second.first != request) return make_error("CONFLICT", "This operation id was already used for a different request.");
+            return json{{"revision", known->second.second}, {"current_revision", p.revision}, {"replayed", true}};
+        }
+        if (in["expected_revision"].get<long long>() != p.revision) return make_error("CONFLICT", "The publication changed; review it again.");
+        if (method == "PUT") {
+            if (p.blocked) return make_error("CONFLICT", "An administrator removed this publication.");
+            p.entries.clear();
+            for (const auto& e : in["entries"]) p.entries.insert(e["id"].get<std::string>());
+        } else if (!entry.empty()) {
+            if (!p.entries.erase(entry)) return make_error("NOT_FOUND", "The publication has no such entry.");
+        } else {
+            p.entries.clear();
+        }
+        ++p.revision;
+        ops[op] = {request, p.revision};
+        log.push_back(method + " " + rest);
+        if (lose_answer) return make_error("offline", "The connection was lost before the answer arrived.");
+        return json{{"revision", p.revision}, {"current_revision", p.revision}, {"replayed", false}};
+    }
+};
+
+// improve-skowork-and-knowledge-control 10.3: a published version changes only by review or withdrawal. New category
+// members stay private and a category rename changes nothing published; forgotten and disputed entries are queued for
+// withdrawal at once, without a model, and the rest stays published; offline, the withdrawal is visibly pending and
+// survives restarts, also one after the server committed it but before its answer arrived (the same operation is
+// replayed, not applied twice); the next version keeps unchanged entries' ids and adds only reviewed ones; an
+// administrator's removal is not undone; a whole publication withdrawn offline is sent on reconnect.
+TEST(KnowledgePublication, ChangesWithdrawFirstDurablyAndNeverBroaden) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}, {"knowledge.sharing.groups", {"engineering", "all-staff"}}});
+    RpcRegistry rpc;
+    register_knowledge_rpc(rpc, [&kg] { return kg.svc.get(); }, nullptr);
+    const auto call = [&](const char* method, const json& params) { return (*rpc.find(method, false))(params); };
+    FakePublications server;
+    kg.publication = [&server](const std::string& m, const std::string& p, const std::string& b) { return server(m, p, b); };
+    const auto store = [&]() -> KgStore& { return kg.svc->store(); };
+    for (const auto& [name, text] : std::map<std::string, std::string>{{"approved.txt", "The approved Phoenix deadline is June."},
+                                                                       {"owner.txt", "Petr Novotný owns the Phoenix budget."},
+                                                                       {"kickoff.txt", "The Phoenix kickoff is in May."},
+                                                                       {"kickoff2.txt", "Phoenix kicks off in April."},
+                                                                       {"budget.txt", "The Phoenix budget is 5 million EUR."},
+                                                                       {"risk.txt", "The Phoenix supplier is late."}}) {
+        write_file(kg.folder / name, text);
+        ASSERT_TRUE(kg.svc->add_document(kg.file_path(name)));
+        kg.idle();
+    }
+    const auto chunk = [&](const std::string& name) { return store().chunks_of_item(store().item("files", kg.file_path(name))->id).at(0); };
+    const auto entity = [&](const char* type, const char* name) { return store().resolve_entity(type, name, "", 1); };
+    const auto fact = [&](long long subject, const char* predicate, long long object, const std::string& file) -> long long {
+        const long long relation = store().add_relation(subject, predicate, object, 0.9, "", "", chunk(file).id);
+        const auto f = relation ? store().fact_of_relation(*store().relation(relation)) : std::nullopt;
+        EXPECT_TRUE(f);
+        return f.value_or(0);
+    };
+    const long long phoenix = entity("Project", "Phoenix");
+    const long long june = fact(phoenix, "deadline", entity("Date", "June"), "approved.txt");
+    const long long owner = fact(phoenix, "budget_owner", entity("Person", "Petr Novotný"), "owner.txt");
+    const long long may = fact(phoenix, "kickoff", entity("Date", "May"), "kickoff.txt");
+    const long long april = fact(phoenix, "kickoff", entity("Date", "April"), "kickoff2.txt");
+    const long long risk = fact(phoenix, "risk", entity("Topic", "late supplier"), "risk.txt");
+    const auto generation = [&] { return store().knowledge_generation().value_or(0); };
+    const auto span = [](const ChunkRow& c, const std::string& word) {
+        const auto at = c.text.find(word);
+        return AnalysisSpan{c.id, at, at + word.size()};
+    };
+    ASSERT_TRUE(store().bind_analysis_evidence(june, span(chunk("approved.txt"), "June"), generation()));
+    const auto planning = store().create_category("Planning"), risks = store().create_category("Risks");
+    ASSERT_TRUE(planning && risks);
+    for (long long f : {june, owner, may}) ASSERT_TRUE(store().set_category_assignment(f, *planning, "manual", "Planning"));
+    ASSERT_TRUE(store().set_category_assignment(risk, *risks, "manual", "Risks"));
+    kg.idle();
+    const auto publish = [&](const json& request) -> json {
+        auto p = call("knowledge.publication.preview", request);
+        EXPECT_TRUE(p) << (p ? "" : p.error().message);
+        if (!p || !p->contains("token")) return p ? *p : json();
+        auto done = call("knowledge.publication.confirm", {{"token", (*p)["token"]}});
+        EXPECT_TRUE(done) << (done ? "" : done.error().message);
+        return *p;
+    };
+    const json first = publish({{"categories", {*planning}}, {"groups", {"engineering"}}});
+    const std::string id = first["publication_id"].get<std::string>();
+    ASSERT_EQ(server.pubs[id].entries.size(), 3u);
+    std::string june_entry;
+    for (const auto& e : first["entries"])
+        if (e["fact_id"] == june) june_entry = e["entry_id"].get<std::string>();
+    ASSERT_FALSE(june_entry.empty());
+    const auto mine = [&]() -> json {
+        auto r = call("knowledge.publications", json::object());
+        EXPECT_TRUE(r);
+        for (const auto& p : (*r)["publications"])
+            if (p["publication_id"] == id) return p;
+        return json();
+    };
+
+    // A new member of the category waits for review; renaming the category publishes nothing.
+    const long long budget = fact(phoenix, "budget", entity("Amount", "5 million EUR"), "budget.txt");
+    ASSERT_TRUE(store().set_category_assignment(budget, *planning, "manual", "Planning"));
+    ASSERT_TRUE(kg.svc->rename_category(*planning, "Phoenix planning"));
+    kg.idle();
+    EXPECT_TRUE(server.log == std::vector<std::string>{"PUT " + id});
+    EXPECT_EQ(mine()["new"], 1);
+    EXPECT_EQ(mine()["entries"], 3);
+    EXPECT_EQ(mine()["groups"], json{"engineering"});
+
+    // Offline, and no model answers: the owner's file is forgotten and the kickoff becomes disputed. Both are queued
+    // for withdrawal at once; June stays published.
+    server.online = false;
+    kg.gw.chat_failure = model::code::model_unavailable;
+    const int chats = kg.gw.chat_calls;
+    ASSERT_TRUE(kg.svc->forget_item(store().item("files", kg.file_path("owner.txt"))->id));
+    const auto may_excerpt = store().bind_analysis_evidence(may, span(chunk("kickoff.txt"), "May"), generation());
+    const auto april_excerpt = store().bind_analysis_evidence(april, span(chunk("kickoff2.txt"), "April"), generation());
+    ASSERT_TRUE(may_excerpt && april_excerpt);
+    ASSERT_TRUE(store().record_conflict(may, april, may_excerpt->evidence_id, april_excerpt->evidence_id, "Two kickoffs", generation()));
+    kg.svc->step();
+    EXPECT_EQ(kg.gw.chat_calls, chats);
+    json pending = mine();
+    ASSERT_EQ(pending["withdrawing"].size(), 2u) << pending.dump();
+    std::set<std::string> reasons;
+    for (const auto& w : pending["withdrawing"]) reasons.insert(w["reason"].get<std::string>());
+    EXPECT_TRUE((reasons == std::set<std::string>{"disputed", "unsupported"}) || (reasons == std::set<std::string>{"disputed", "forgotten"}))
+        << pending.dump();
+    EXPECT_EQ(pending["entries"], 1);
+    EXPECT_FALSE(pending.value("error", "").empty());
+    EXPECT_EQ(server.pubs[id].entries.size(), 3u);
+    // The next version waits until the server confirmed the removals.
+    auto refused = call("knowledge.publication.preview", {{"publication_id", id}});
+    EXPECT_FALSE(refused);
+
+    // Restart; the server commits the removals but the answers are lost; restart again; then they are acknowledged.
+    kg.make(false);
+    server.online = true;
+    server.lose_answer = true;
+    kg.svc->sync_sharing(true);
+    EXPECT_EQ(server.pubs[id].entries.size(), 1u);
+    EXPECT_EQ(server.pubs[id].revision, 3);
+    EXPECT_EQ(mine()["withdrawing"].size(), 2u);
+    std::set<std::string> committed;
+    for (const auto& [op, result] : server.ops) committed.insert(op);
+    const size_t before = server.operations.size();
+    kg.make(false);
+    server.lose_answer = false;
+    kg.svc->sync_sharing(false);
+    EXPECT_EQ(server.pubs[id].revision, 3);  // replayed, not applied again
+    ASSERT_EQ(server.operations.size() - before, 2u);
+    for (size_t i = before; i < server.operations.size(); ++i) EXPECT_TRUE(committed.count(server.operations[i])) << server.operations[i];
+    pending = mine();
+    EXPECT_EQ(pending["withdrawing"].size(), 0u);
+    EXPECT_EQ(pending["entries"], 1);
+    EXPECT_EQ(pending["revision"], 3);
+    EXPECT_FALSE(pending.contains("error"));
+
+    // The next version: June keeps its entry id, the budget is new, nothing else is added; Groups stay unless chosen.
+    kg.gw.chat_failure.clear();
+    auto next = call("knowledge.publication.preview", {{"publication_id", id}});
+    ASSERT_TRUE(next) << next.error().message;
+    EXPECT_EQ((*next)["kept"], 1);
+    EXPECT_EQ((*next)["new"], 1);
+    EXPECT_EQ((*next)["removed"], 0);
+    EXPECT_EQ((*next)["added_groups"], json::array());
+    const json payload = json::parse((*next)["payload"].get<std::string>());
+    EXPECT_EQ(payload["expected_revision"], 3);
+    EXPECT_EQ(payload["groups"], json{"engineering"});
+    ASSERT_EQ(payload["entries"].size(), 2u);
+    std::set<std::string> next_ids;
+    for (const auto& e : payload["entries"]) next_ids.insert(e["id"].get<std::string>());
+    EXPECT_TRUE(next_ids.count(june_entry));
+    // A broader audience is a difference the preview names.
+    auto broader = call("knowledge.publication.preview", {{"publication_id", id}, {"groups", {"engineering", "all-staff"}}});
+    ASSERT_TRUE(broader);
+    EXPECT_EQ((*broader)["added_groups"], json{"all-staff"});
+    ASSERT_TRUE(call("knowledge.publication.cancel", {{"token", (*broader)["token"]}}));
+    ASSERT_TRUE(call("knowledge.publication.confirm", {{"token", (*next)["token"]}}));
+    EXPECT_EQ(server.pubs[id].entries, next_ids);
+    EXPECT_EQ(mine()["new"], 0);
+
+    // An administrator removes it: it is shown as removed with the reason, and no review or sync publishes it again.
+    server.remove_by_admin(id, "Contains a draft deadline");
+    kg.svc->sync_sharing(true);
+    EXPECT_EQ(mine()["state"], "removed");
+    EXPECT_EQ(mine()["removal"], "Contains a draft deadline");
+    refused = call("knowledge.publication.preview", {{"publication_id", id}});
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "removed");
+    // Its entries still withdraw when they stop holding; nothing is uploaded again.
+    ASSERT_TRUE(kg.svc->forget_item(store().item("files", kg.file_path("approved.txt"))->id));
+    kg.idle();
+    EXPECT_EQ(mine()["withdrawing"].size(), 0u);
+    EXPECT_EQ(std::count(server.log.begin(), server.log.end(), "PUT " + id), 2);
+    EXPECT_TRUE(server.pubs[id].blocked);
+
+    // A whole publication withdrawn offline: pending, sent on reconnect, then withdrawn.
+    const json second = publish({{"categories", {*risks}}, {"groups", {"engineering"}}});
+    const std::string other = second["publication_id"].get<std::string>();
+    ASSERT_EQ(server.pubs[other].entries.size(), 1u);
+    server.online = false;
+    auto withdrawn = call("knowledge.publication.withdraw", {{"publication_id", other}});
+    ASSERT_TRUE(withdrawn);
+    EXPECT_EQ((*withdrawn)["state"], "withdrawing");
+    EXPECT_TRUE((*withdrawn)["pending"].get<bool>());
+    EXPECT_EQ(server.pubs[other].entries.size(), 1u);
+    server.online = true;
+    kg.svc->sync_sharing(false);
+    EXPECT_TRUE(server.pubs[other].entries.empty());
+    EXPECT_EQ(store().publication(other)->state, "withdrawn");
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_publication_entries WHERE publication_id='" + other + "'"), 0);
+    // Withdrawn: the next version is a new review, and the risk is new in it.
+    next = call("knowledge.publication.preview", {{"publication_id", other}});
+    ASSERT_TRUE(next) << next.error().message;
+    EXPECT_EQ((*next)["new"], 1);
+    EXPECT_EQ(json::parse((*next)["payload"].get<std::string>())["expected_revision"], server.pubs[other].revision);
+}
 // 8.3: a confirmation applies only to what was analyzed: changed bytes, policy or effects require a new preview, an
 // expired or cancelled preview is gone, and a large preview is read in pages.
 TEST(KnowledgeImpactPreview, ChangedFilePolicyOrGraphRequiresAFreshConfirmation) {

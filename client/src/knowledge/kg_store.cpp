@@ -649,7 +649,7 @@ ALTER TABLE knowledge_operation_previews ADD COLUMN analysis TEXT NOT NULL DEFAU
         // Task 10.2: what was published from categories, without its text: the published version's ids and digests,
         // and for each entry the fact and the local excerpts it was published from (for the differences of 10.3).
         // An entry outlives its fact (fact_id becomes NULL), so a forgotten fact can still be withdrawn.
-        {kKgSchemaVersion, R"sql(
+        {kKgPublicationSchemaVersion, R"sql(
 CREATE TABLE knowledge_publications(
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
@@ -678,6 +678,22 @@ CREATE TABLE knowledge_publication_previews(
   generation INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL);
+)sql"},
+        // Task 10.3: the withdrawal outbox. A published entry or a whole publication queued for removal from the
+        // server keeps its row, with an operation id that makes a retry idempotent and the revision it was first sent
+        // against, until the server acknowledges it; forgetting knowledge never deletes it.
+        {kKgSchemaVersion, R"sql(
+ALTER TABLE knowledge_publications ADD COLUMN state TEXT NOT NULL DEFAULT 'published'
+  CHECK(state IN ('published','withdrawing','withdrawn','removed'));
+ALTER TABLE knowledge_publications ADD COLUMN operation_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_publications ADD COLUMN expected_revision INTEGER;
+ALTER TABLE knowledge_publications ADD COLUMN error TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_publications ADD COLUMN removal TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_publication_entries ADD COLUMN state TEXT NOT NULL DEFAULT 'published'
+  CHECK(state IN ('published','withdrawing'));
+ALTER TABLE knowledge_publication_entries ADD COLUMN reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_publication_entries ADD COLUMN operation_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_publication_entries ADD COLUMN expected_revision INTEGER;
 )sql"},    };
     return m;
 }
@@ -2805,7 +2821,7 @@ Status KgStore::delete_item_previews(const std::string& source, const std::strin
     s.bind(1, source).bind(2, ext_id);
     if (auto done = s.run(); !done) return done;
     // A publication preview quotes excerpts of many items: forgetting any item drops every open one.
-    if (db_->user_version() < kKgSchemaVersion) return {};
+    if (db_->user_version() < kKgPublicationSchemaVersion) return {};
     auto p = db_->prepare("DELETE FROM knowledge_publication_previews");
     return p.run();
 }
@@ -2935,9 +2951,10 @@ Status KgStore::record_publication(const PublicationRow& p) {
         auto del = db_->prepare("DELETE FROM knowledge_publications WHERE id=?1");
         del.bind(1, p.id);
         if (auto s = del.run(); !s) return s;
-        auto put = db_->prepare("INSERT INTO knowledge_publications(id,title,groups,categories,revision,payload_sha256,published_at) "
-                                "VALUES(?1,?2,?3,?4,?5,?6,?7)");
-        put.bind(1, p.id).bind(2, p.title).bind(3, groups.dump()).bind(4, categories.dump()).bind(5, p.revision).bind(6, p.payload_sha256).bind(7, p.published_at);
+        auto put = db_->prepare("INSERT INTO knowledge_publications(id,title,groups,categories,revision,payload_sha256,published_at,state) "
+                                "VALUES(?1,?2,?3,?4,?5,?6,?7,?8)");
+        put.bind(1, p.id).bind(2, p.title).bind(3, groups.dump()).bind(4, categories.dump()).bind(5, p.revision).bind(6, p.payload_sha256)
+            .bind(7, p.published_at).bind(8, p.state);
         if (auto s = put.run(); !s) return s;
         auto entry = db_->prepare("INSERT INTO knowledge_publication_entries(publication_id,entry_id,fact_id,text_sha256,evidence) "
                                   "VALUES(?1,?2,(SELECT id FROM knowledge_facts WHERE id=?3),?4,?5)");
@@ -2950,6 +2967,121 @@ Status KgStore::record_publication(const PublicationRow& p) {
     });
 }
 
+namespace {
+// A new operation id for a withdrawal: its retries repeat it, so the server applies it once.
+std::string withdrawal_operation() { return "w-" + random_urlsafe(12); }
+}  // namespace
+
+Status KgStore::queue_entry_withdrawals(const std::vector<PublicationWithdrawal>& w) {
+    if (w.empty()) return {};
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return {};
+    return db_->transaction([&]() -> Status {
+        auto s = db_->prepare("UPDATE knowledge_publication_entries SET state='withdrawing',reason=?3,operation_id=?4,expected_revision=NULL "
+                              "WHERE publication_id=?1 AND entry_id=?2 AND state='published'");
+        for (const auto& x : w) {
+            s.reset();
+            s.bind(1, x.publication_id).bind(2, x.entry_id).bind(3, x.reason).bind(4, withdrawal_operation());
+            if (auto r = s.run(); !r) return r;
+        }
+        return {};
+    });
+}
+
+Status KgStore::queue_publication_withdrawal(const std::string& id) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Publications are not available yet.");
+    auto s = db_->prepare("UPDATE knowledge_publications SET state='withdrawing',operation_id=?2,expected_revision=NULL,error='' "
+                          "WHERE id=?1 AND state='published'");
+    s.bind(1, id).bind(2, withdrawal_operation());
+    return s.run();
+}
+
+Result<long long> KgStore::withdrawal_revision(const std::string& id, const std::string& entry_id) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Publications are not available yet.");
+    long long revision = 0;
+    const auto status = db_->transaction([&]() -> Status {
+        auto fix = entry_id.empty()
+                       ? db_->prepare("UPDATE knowledge_publications SET expected_revision=revision WHERE id=?1 AND expected_revision IS NULL")
+                       : db_->prepare("UPDATE knowledge_publication_entries SET expected_revision=(SELECT revision FROM knowledge_publications "
+                                      "WHERE id=?1) WHERE publication_id=?1 AND entry_id=?2 AND expected_revision IS NULL");
+        fix.bind(1, id);
+        if (!entry_id.empty()) fix.bind(2, entry_id);
+        if (auto s = fix.run(); !s) return s;
+        auto get = entry_id.empty()
+                       ? db_->prepare("SELECT expected_revision FROM knowledge_publications WHERE id=?1 AND state='withdrawing'")
+                       : db_->prepare("SELECT expected_revision FROM knowledge_publication_entries WHERE publication_id=?1 AND entry_id=?2 "
+                                      "AND state='withdrawing'");
+        get.bind(1, id);
+        if (!entry_id.empty()) get.bind(2, entry_id);
+        if (!get.step()) return make_error("not_found", "The withdrawal is no longer queued.");
+        revision = get.col_int(0);
+        return {};
+    });
+    if (!status) return status.error();
+    return revision;
+}
+
+Status KgStore::acknowledge_withdrawal(const std::string& id, const std::string& entry_id, long long revision) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return {};
+    return db_->transaction([&]() -> Status {
+        auto del = entry_id.empty() ? db_->prepare("DELETE FROM knowledge_publication_entries WHERE publication_id=?1")
+                                    : db_->prepare("DELETE FROM knowledge_publication_entries WHERE publication_id=?1 AND entry_id=?2");
+        del.bind(1, id);
+        if (!entry_id.empty()) del.bind(2, entry_id);
+        if (auto s = del.run(); !s) return s;
+        // Withdrawn when nothing is left on the server: the whole publication, or its last entry.
+        auto up = db_->prepare(
+            "UPDATE knowledge_publications SET revision=max(revision,?2),error='',"
+            "state=CASE WHEN state='removed' THEN 'removed' WHEN ?3 OR NOT EXISTS(SELECT 1 FROM knowledge_publication_entries "
+            "WHERE publication_id=?1) THEN 'withdrawn' ELSE state END,"
+            "operation_id=CASE WHEN ?3 THEN '' ELSE operation_id END,expected_revision=CASE WHEN ?3 THEN NULL ELSE expected_revision END "
+            "WHERE id=?1");
+        up.bind(1, id).bind(2, revision).bind(3, entry_id.empty() ? 1LL : 0LL);
+        return up.run();
+    });
+}
+
+Status KgStore::restart_withdrawal(const std::string& id, const std::string& entry_id) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return {};
+    auto s = entry_id.empty()
+                 ? db_->prepare("UPDATE knowledge_publications SET operation_id=?3,expected_revision=NULL WHERE id=?1 AND state='withdrawing'")
+                 : db_->prepare("UPDATE knowledge_publication_entries SET operation_id=?3,expected_revision=NULL WHERE publication_id=?1 "
+                                "AND entry_id=?2 AND state='withdrawing'");
+    s.bind(1, id).bind(2, entry_id).bind(3, withdrawal_operation());
+    return s.run();
+}
+
+Status KgStore::set_publication_server_state(const std::string& id, long long revision, const std::string& state, const std::string& removal) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return {};
+    return db_->transaction([&]() -> Status {
+        auto up = db_->prepare("UPDATE knowledge_publications SET revision=?2,removal=?4,"
+                               "state=CASE WHEN ?3='removed' THEN 'removed' WHEN ?3='withdrawn' THEN 'withdrawn' "
+                               "WHEN state='removed' THEN 'published' ELSE state END WHERE id=?1");
+        up.bind(1, id).bind(2, revision).bind(3, state).bind(4, state == "removed" ? removal : std::string());
+        if (auto s = up.run(); !s) return s;
+        if (state != "withdrawn") return {};
+        // Nothing of it is on the server any more: no entry is left to withdraw.
+        auto del = db_->prepare("DELETE FROM knowledge_publication_entries WHERE publication_id=?1");
+        del.bind(1, id);
+        if (auto s = del.run(); !s) return s;
+        auto clear = db_->prepare("UPDATE knowledge_publications SET operation_id='',expected_revision=NULL,error='' WHERE id=?1");
+        clear.bind(1, id);
+        return clear.run();
+    });
+}
+
+Status KgStore::set_publication_error(const std::string& id, const std::string& error) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return {};
+    auto s = db_->prepare("UPDATE knowledge_publications SET error=?2 WHERE id=?1");
+    s.bind(1, id).bind(2, error);
+    return s.run();
+}
 Result<std::string> KgStore::save_publication_preview(OperationPreview p) {
     constexpr long long kLifetime = 30 * 60 * 1000;
     const auto token = random_urlsafe(24);
@@ -3008,7 +3140,8 @@ std::vector<PublicationRow> KgStore::publications() {
     const std::lock_guard lock(db_->mutex());
     std::vector<PublicationRow> out;
     if (db_->user_version() < kKgSchemaVersion) return out;
-    auto s = db_->prepare("SELECT id,title,groups,categories,revision,payload_sha256,published_at FROM knowledge_publications ORDER BY published_at DESC,id");
+    auto s = db_->prepare("SELECT id,title,groups,categories,revision,payload_sha256,published_at,state,operation_id,expected_revision,error,removal "
+                          "FROM knowledge_publications ORDER BY published_at DESC,id");
     while (s.step()) {
         PublicationRow p;
         p.id = s.col_text(0);
@@ -3020,15 +3153,38 @@ std::vector<PublicationRow> KgStore::publications() {
         p.revision = s.col_int(4);
         p.payload_sha256 = s.col_text(5);
         p.published_at = s.col_int(6);
+        p.state = s.col_text(7);
+        p.operation_id = s.col_text(8);
+        if (!s.col_null(9)) p.expected_revision = s.col_int(9);
+        p.error = s.col_text(10);
+        p.removal = s.col_text(11);
         out.push_back(std::move(p));
     }
-    auto e = db_->prepare("SELECT entry_id,ifnull(fact_id,0),text_sha256,evidence FROM knowledge_publication_entries WHERE publication_id=?1 ORDER BY rowid");
+    auto e = db_->prepare("SELECT entry_id,ifnull(fact_id,0),text_sha256,evidence,state,reason,operation_id,expected_revision "
+                          "FROM knowledge_publication_entries WHERE publication_id=?1 ORDER BY rowid");
     for (auto& p : out) {
         e.reset();
         e.bind(1, p.id);
-        while (e.step()) p.entries.push_back({e.col_text(0), e.col_int(1), e.col_text(2), json::parse(e.col_text(3), nullptr, false)});
+        while (e.step()) {
+            PublicationEntryRow row;
+            row.entry_id = e.col_text(0);
+            row.fact_id = e.col_int(1);
+            row.text_sha256 = e.col_text(2);
+            row.evidence = json::parse(e.col_text(3), nullptr, false);
+            row.state = e.col_text(4);
+            row.reason = e.col_text(5);
+            row.operation_id = e.col_text(6);
+            if (!e.col_null(7)) row.expected_revision = e.col_int(7);
+            p.entries.push_back(std::move(row));
+        }
     }
     return out;
+}
+
+std::optional<PublicationRow> KgStore::publication(const std::string& id) {
+    for (auto& p : publications())
+        if (p.id == id) return std::move(p);
+    return std::nullopt;
 }
 Status KgStore::purge_expired_previews(long long now) {
     const std::lock_guard lock(db_->mutex());

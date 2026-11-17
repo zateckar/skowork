@@ -338,12 +338,27 @@ public:
     Result<json> publication_options();
     // The exact payload publishing would upload for {categories, groups, title, exclude (fact ids)}: eligible entries,
     // exclusions with reasons, copied-origin notices and the serialized payload, saved as a short-lived preview whose
-    // token confirm_publication takes; cancel_publication deletes it.
+    // token confirm_publication takes; cancel_publication deletes it. With publication_id, the next version of that
+    // publication (task 10.3): its categories, Groups and title unless given, entries still published kept with their
+    // ids (change "kept") and new ones marked "new"; refused while earlier withdrawals from it are unacknowledged or
+    // after an administrator removed it.
     Result<json> preview_publication(const json& request);
     // Uploads the previewed payload byte for byte, unless knowledge or the sharing policy changed since (stale).
     Result<json> confirm_publication(const std::string& token);
     Status cancel_publication(const std::string& token);
+    // The owner's publications with their pending differences: {publications: [{publication_id, title, groups,
+    // categories, revision, published_at, state, removal, error, entries, withdrawing: [{entry_id, reason, text}],
+    // new}]}; new counts the eligible facts of its categories that are not published (they wait for review).
     json publications();
+    // Withdraws a whole publication: queued at once, sent now when possible ({state, pending}).
+    Result<json> withdraw_publication(const std::string& id);
+    // Queues the withdrawal of every published entry that would not be published the same way now (forgotten,
+    // excluded, no longer in its categories, disputed, unsupported, changed, Source kind no longer permitted). Reads
+    // the store only: never waits for a model or the extraction budget. Whether anything was queued.
+    bool review_publications(bool always = true);
+    // Sends queued withdrawals (only those of `only` when given), whole publications first, each retried with its own
+    // operation id; lists the server's publications when `list`. Whether none of them remains queued.
+    bool sync_publications(bool list, const std::string& only = {});
     json sharing();
     Status share_item(long long item_id, const std::vector<std::string>& groups);
     Status unshare_item(long long item_id);
@@ -387,8 +402,14 @@ private:
     std::vector<std::string> permitted_groups();
     std::vector<std::string> derived_sources_policy();  // knowledge.sharing.derived_sources (default files, notes)
     struct Eligibility;
+    // checked: a fact not yet compared for inconsistencies is ineligible (pending); a published one is reviewed without.
     const Eligibility& publication_eligibility(long long fact_id, const std::set<std::string>& permitted, std::map<long long, Eligibility>& memo,
-                                               int depth);
+                                               int depth, bool checked = true);
+    void refresh_publications(const json& mine);  // the server's states and revisions of the owner's publications
+    // Withdraws every publication before Delete all; an error when one could not be withdrawn.
+    Status withdraw_publications_for_delete_all();
+    std::mutex publication_mx_;  // one withdrawal pass at a time
+    long long reviewed_generation_ = -1;  // the knowledge generation published entries were last reviewed at
     // The text published for a shareable item: a note's text, or a file's (extracted) text.
     Result<std::string> share_text(const std::string& source, const std::string& ext_id);
     Status publish(ShareRow row, const ItemRow& item);

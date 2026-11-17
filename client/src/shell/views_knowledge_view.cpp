@@ -326,6 +326,19 @@ void KnowledgeView::load_sharing() {
         if (r) sharing_ = *r;
         rebuild();
     });
+    shell_.call("knowledge.publications", json::object(), [this, alive, request](Result<json> r) {
+        if (!alive.lock() || request != sharing_request_) return;
+        if (r) publications_ = *r;
+        rebuild();
+    });
+}
+
+void KnowledgeView::withdraw_publication(const std::string& id, const std::u16string& title) {
+    act("knowledge.publication.withdraw", {{"publication_id", id}}, [this, title](const json& r) {
+        notice_ = shell_.t(jbool(r, "pending") ? "knowledge.publication.withdraw_pending" : "knowledge.publication.withdraw_done", {{"title", title}});
+        shell_.announce(notice_);
+        load_sharing();
+    });
 }
 
 void KnowledgeView::open_item(long long id, const std::string& key) {
@@ -897,16 +910,27 @@ void KnowledgeView::end_preview(bool cancel) {
 
 // ---- publishing categories (task 10.2) -----------------------------------------------------------------------------
 
-void KnowledgeView::start_publish(long long category) {
+void KnowledgeView::start_publish(long long category, const json& publication) {
     if (publish_dialog_) return;
-    act("knowledge.publication.options", json::object(), [this, category](const json& options) {
+    act("knowledge.publication.options", json::object(), [this, category, publication](const json& options) {
         ++publish_request_;
         publish_ = Publish{};
         publish_->options = options;
         if (category) publish_->categories.insert(category);
-        // One permitted Group is chosen for the user; with several, nobody is chosen for them.
-        if (const json* g = jobj(options, "groups"); g && g->size() == 1) publish_->groups.insert((*g)[0].get<std::string>());
-        auto d = std::make_unique<ui::Dialog>(shell_.ui(), "knowledge-publish", shell_.t("knowledge.publish.title"), 600);
+        if (publication.is_object()) {
+            // The next version starts from what is published: its categories, Groups and title.
+            publish_->publication_id = jstr(publication, "publication_id");
+            for (const auto& c : publication.value("categories", json::array()))
+                if (c.is_number_integer()) publish_->categories.insert(c.get<long long>());
+            for (const auto& g : publication.value("groups", json::array()))
+                if (g.is_string()) publish_->groups.insert(g.get<std::string>());
+            publish_->title = u16(jstr(publication, "title"));
+        } else if (const json* g = jobj(options, "groups"); g && g->size() == 1) {
+            // One permitted Group is chosen for the user; with several, nobody is chosen for them.
+            publish_->groups.insert((*g)[0].get<std::string>());
+        }
+        auto d = std::make_unique<ui::Dialog>(shell_.ui(), "knowledge-publish",
+                                              shell_.t(publication.is_object() ? "knowledge.publish.update_title" : "knowledge.publish.title"), 600);
         d->on_cancel = [this] { end_publish(); };
         publish_dialog_ = shell_.window().modal().show(std::move(d));
         fill_publish();
@@ -998,6 +1022,16 @@ void KnowledgeView::fill_publish() {
         if (v.contains("company"))
             label(shell_.t("knowledge.publish.company_about", {{"group", u16(jstr(v, "company"))}}), "knowledge-publish-company-about", Paint::warning);
         label(shell_.t("knowledge.publish.update"), "knowledge-publish-update", Paint::text_secondary);
+        // The next version: what changes for recipients.
+        if (v.contains("kept"))
+            label(shell_.t("knowledge.publish.changes", {{"kept", u16(std::to_string(jint(v, "kept")))}, {"new", u16(std::to_string(jint(v, "new")))},
+                                                         {"removed", u16(std::to_string(jint(v, "removed")))}}),
+                  "knowledge-publish-changes");
+        if (const json* added = jobj(v, "added_groups"); added && added->is_array() && !added->empty()) {
+            std::u16string names;
+            for (const auto& g : *added) names += (names.empty() ? u"" : u", ") + group_name(g.get<std::string>());
+            label(shell_.t("knowledge.publish.added_groups", {{"groups", names}}), "knowledge-publish-added-groups", Paint::warning);
+        }
         for (const auto& n : v.value("notices", json::array()))
             label(shell_.t("knowledge.publish.notice." + jstr(n, "kind"), {{"n", u16(std::to_string(jint(n, "entries")))}}),
                   "knowledge-publish-notice-" + jstr(n, "kind"), Paint::warning);
@@ -1017,6 +1051,9 @@ void KnowledgeView::fill_publish() {
                 else publish_->exclude.insert(fact);
                 preview_publish();  // the payload is always the one previewed
             };
+            if (e.contains("change"))
+                list->emplace<ui::Label>(u, shell_.t("knowledge.publish.change." + jstr(e, "change")), TextStyle::caption, Paint::text_secondary, true,
+                                         "knowledge-publish-change-" + sid);
             size_t j = 0;
             for (const auto& x : e.value("evidence", json::array()))
                 list->emplace<ui::Label>(u, u"“" + u16(jstr(x, "text")) + u"” — " + u16(jstr(x, "title")), TextStyle::caption, Paint::text_secondary, true,
@@ -1067,6 +1104,7 @@ void KnowledgeView::preview_publish() {
                     {"groups", std::vector<std::string>(p.groups.begin(), p.groups.end())},
                     {"title", ui::to_utf8(p.title)},
                     {"exclude", std::vector<long long>(p.exclude.begin(), p.exclude.end())}};
+    if (!p.publication_id.empty()) request["publication_id"] = p.publication_id;
     p.busy = true;
     const size_t request_id = ++publish_request_;
     std::weak_ptr<int> alive = alive_;
@@ -1120,7 +1158,7 @@ void KnowledgeView::confirm_publish() {
         shell_.announce(notice_);
         publish_->preview = nullptr;  // confirmed: nothing to cancel
         end_publish();
-        rebuild();
+        load_sharing();
     });
 }
 
@@ -1848,7 +1886,43 @@ void KnowledgeView::build_section_list() {
     list_->name = shell_.t("knowledge.section.sharing");
     if (!sharing_.is_object()) return loading();
     const json items = sharing_.value("items", json::array()), rules = sharing_.value("rules", json::array());
-    if (items.empty() && rules.empty()) text(*list_, shell_.t("knowledge.nothing_shared"), Paint::text_secondary, "knowledge-nothing-shared");
+    const json pubs = publications_.is_object() ? publications_.value("publications", json::array()) : json::array();
+    if (items.empty() && rules.empty() && pubs.empty())
+        text(*list_, shell_.t("knowledge.nothing_shared"), Paint::text_secondary, "knowledge-nothing-shared");
+    // Category publications: the published version, what waits for review and what is not yet removed from the server.
+    size_t pn = 0;
+    for (const auto& pj : pubs) {
+        const std::string sid = std::to_string(pn++), id = jstr(pj, "publication_id"), state = jstr(pj, "state");
+        const std::u16string title = u16(jstr(pj, "title"));
+        const auto n = [&](long long v) { return u16(std::to_string(v)); };
+        std::u16string meta;
+        if (state == "published")
+            meta = shell_.t("knowledge.publication.meta", {{"groups", joined(pj.value("groups", json::array()))}, {"n", n(jint(pj, "entries"))}});
+        else if (state == "withdrawing") meta = shell_.t("knowledge.publication.withdrawing");
+        else if (state == "removed") meta = shell_.t("knowledge.publication.removed", {{"reason", u16(jstr(pj, "removal"))}});
+        else meta = shell_.t("knowledge.publication.withdrawn");
+        auto* row = list_->add(std::make_unique<Row>(u, "knowledge-publication-" + sid, title + u" · " + meta, false, std::function<void()>()));
+        row->emplace<ui::Label>(u, title, TextStyle::body, Paint::text, false)->role = ui::Role::none;
+        row->emplace<ui::Label>(u, meta, TextStyle::caption, Paint::text_secondary, true)->role = ui::Role::none;
+        if (const size_t pending = pj.value("withdrawing", json::array()).size())
+            text(*list_, shell_.t("knowledge.publication.pending", {{"n", n(static_cast<long long>(pending))}}), Paint::warning,
+                 "knowledge-publication-pending-" + sid);
+        if (jint(pj, "new") > 0) text(*list_, shell_.t("knowledge.publication.new", {{"n", n(jint(pj, "new"))}}), Paint::text_secondary, "knowledge-publication-new-" + sid);
+        if (pj.contains("error"))
+            text(*list_, shell_.t("knowledge.publication.error", {{"error", u16(jstr(pj, "error"))}}), Paint::text_secondary, "knowledge-publication-error-" + sid);
+        if (state == "published" || state == "withdrawn") {
+            auto* b = button(*list_, "knowledge-publication-review-" + sid, shell_.t("knowledge.publication.review"), [this, pj] { start_publish(0, pj); },
+                             ui::Button::Kind::subtle);
+            b->name = shell_.t("knowledge.publication.review_named", {{"title", title}});
+            b->enabled = true;
+        }
+        if (state == "published") {
+            auto* b = button(*list_, "knowledge-publication-withdraw-" + sid, shell_.t("knowledge.publication.withdraw"),
+                             [this, id, title] { withdraw_publication(id, title); }, ui::Button::Kind::subtle);
+            b->name = shell_.t("knowledge.publication.withdraw_named", {{"title", title}});
+            b->enabled = true;
+        }
+    }
     for (const auto& it : items) {
         const long long id = jint(it, "item_id");
         const std::string key = std::to_string(id);

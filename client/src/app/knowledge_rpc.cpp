@@ -222,6 +222,7 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
     add("knowledge.publication.confirm", [](Svc& s, const json& p) { return s.confirm_publication(jstr(p, "token")); });
     add("knowledge.publication.cancel", [done](Svc& s, const json& p) { return done(s.cancel_publication(jstr(p, "token"))); });
     add("knowledge.publications", [](Svc& s, const json&) -> Result<json> { return s.publications(); });
+    add("knowledge.publication.withdraw", [](Svc& s, const json& p) { return s.withdraw_publication(jstr(p, "publication_id")); });
     add("knowledge.sharing", [](Svc& s, const json&) -> Result<json> { return s.sharing(); });
     add("knowledge.share", [done, groups_of](Svc& s, const json& p) { return done(s.share_item(jint(p, "item_id"), groups_of(p))); });
     add("knowledge.unshare", [done](Svc& s, const json& p) { return done(s.unshare_item(jint(p, "item_id"))); });

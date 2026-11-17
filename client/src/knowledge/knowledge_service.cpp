@@ -1545,6 +1545,9 @@ bool KnowledgeService::step() {
         if (batch == &KnowledgeService::extract_step) extracted = done;
         if (done) did = true;
     }
+    // Knowledge that changed in any way (here, or by the user) may withdraw published entries: queued at the next step,
+    // without waiting for a model or the extraction budget.
+    if (review_publications(false)) sync_publications(false);
     if (did) notify();
     return did;
 }
@@ -3500,6 +3503,10 @@ bool withdrawal_confirmed(const Result<json>& response) { return response || res
 Result<std::vector<std::string>> KnowledgeService::withdraw_for_delete_all() {
     auto ids = freeze_for_delete_all();
     if (!ids) return ids.error();
+    if (Status s = withdraw_publications_for_delete_all(); !s) {
+        deleting_all_ = false;
+        return s.error();
+    }
     const std::lock_guard lock(share_mx_);
     std::vector<std::string> pending;
     for (const auto& row : store_->shares()) {
@@ -3546,6 +3553,10 @@ void KnowledgeService::cancel_delete_all() { deleting_all_ = false; }
 Status KnowledgeService::prepare_delete_all() {
     auto ids = freeze_for_delete_all();
     if (!ids) return ids.error();
+    if (Status s = withdraw_publications_for_delete_all(); !s) {
+        deleting_all_ = false;
+        return s;
+    }
     const std::lock_guard lock(share_mx_);
     for (const auto& row : store_->shares()) {
         if (row.state == "removed" || row.state == "withdrawn") continue;
@@ -4333,6 +4344,9 @@ void KnowledgeService::sync_sharing(bool list) {
     std::unique_lock lock(share_mx_, std::try_to_lock);
     if (!lock.owns_lock()) return;
     if (deleting_all_) return;
+    // Published entries that no longer hold are queued for withdrawal first, then sent (task 10.3).
+    review_publications();
+    sync_publications(list);
     if (!store_->repair_ambiguous_shares()) return;
     const bool enabled = !sharing_policy().empty();
     // Record withdrawals before contacting the server, so an offline list request

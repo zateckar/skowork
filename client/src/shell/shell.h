@@ -742,8 +742,12 @@ private:
         json preview = nullptr;  // knowledge.publication.preview; null while choosing
         bool stale = false, busy = false;
         std::u16string problem;
+        std::string publication_id;  // reviewing the next version of this publication (task 10.3)
     };
-    void start_publish(long long category);  // 0: no category chosen yet
+    // category 0: no category chosen yet; publication: the next version of that publication (knowledge.publications row)
+    void start_publish(long long category, const json& publication = nullptr);
+    void withdraw_publication(const std::string& id, const std::u16string& title);
+    json publications_ = nullptr;  // knowledge.publications, shown under Sharing
     void fill_publish();
     void preview_publish();
     void confirm_publish();

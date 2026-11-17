@@ -6528,6 +6528,196 @@ TEST(ShellKnowledge, PublishCategoriesPreviewsExactlyWhatIsUploaded) {
     ASSERT_TRUE(w.until([&] { return w.exists("knowledge-notice") && has("knowledge-notice", u"Published 1 entries to engineering"); }));
     window = nullptr;
 }
+// improve-skowork-and-knowledge-control 10.3: Sharing lists the publication with what it is waiting for. Offline, a
+// forgotten source's entry is shown as a pending removal that may remain available; a new category member waits for
+// review; once the removal is acknowledged, Review changes (by keyboard) previews the next version with what stays,
+// what is new and nothing broader, and uploads it against the current revision; Withdraw offline says it is pending.
+TEST(ShellKnowledge, SharingShowsPendingRemovalsAndReviewsTheNextVersion) {
+    struct Dir {
+        ~Dir() {
+            std::error_code ec;
+            std::filesystem::remove_all(path, ec);
+        }
+        std::filesystem::path path = std::filesystem::temp_directory_path() / L"workbench-test" / wb::widen(wb::random_urlsafe(6));
+    } dir;
+    const auto docs = dir.path / L"docs";
+    std::filesystem::create_directories(docs);
+    const auto write = [](const std::filesystem::path& p, const std::string& text) {
+        std::ofstream out(p, std::ios::binary | std::ios::trunc);
+        out << text;
+    };
+    write(docs / L"approved.txt", "The approved Phoenix deadline is June.");
+    write(docs / L"owner.txt", "Petr Novotný owns the Phoenix budget.");
+    write(docs / L"budget.txt", "The Phoenix budget is 5 million EUR.");
+    auto root = DataRoot::open(dir.path / L"data");
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto k = keys.get_or_create("kg.db");
+    ASSERT_TRUE(k);
+    MigrationOutcome o;
+    auto db = knowledge::open_kg_database(root->file("kg.db"), *k, o);
+    ASSERT_TRUE(db);
+    std::atomic<ShellThread*> window{nullptr};
+    std::mutex mx;
+    // control-plane/team-knowledge, in process: revisions and entries per publication.
+    bool online = true;
+    std::map<std::string, std::pair<long long, std::set<std::string>>> server;
+    std::vector<std::string> puts;
+    knowledge::KnowledgeEnv e;
+    e.clock = &system_clock();
+    e.policy = [](const std::string& key) -> std::optional<json> {
+        if (key == "knowledge.extraction") return json("off");
+        if (key == "knowledge.directory_enrichment") return json("off");
+        if (key == "knowledge.sharing.groups") return json::array({"engineering", "all-staff"});
+        return std::nullopt;
+    };
+    e.index = [](const std::string& m, const json& p) { return knowledge::index_request(m, p); };
+    e.read_permitted = [](const std::string&) { return true; };
+    e.publication = [&](const std::string& method, const std::string& path, const std::string& body) -> Result<json> {
+        const std::lock_guard lock(mx);
+        if (!online) return make_error("offline", "The control plane is not available.");
+        if (path == "api/v1/knowledge/capabilities") return json{{"publication_read_versions", {1}}, {"publication_mutation_versions", {1}}};
+        if (method == "GET") {
+            json list = json::array();
+            for (const auto& [id, p] : server)
+                list.push_back({{"publication_id", id}, {"revision", p.first}, {"state", p.second.empty() ? "withdrawn" : "published"}});
+            return json{{"permitted_groups", {"all-staff", "engineering"}}, {"company_group", "all-staff"},
+                        {"derived_sources", {"files", "notes"}}, {"publications", list}};
+        }
+        const std::string rest = path.substr(std::string("api/v1/knowledge/publications/").size());
+        const auto at = rest.find("/entries/");
+        auto& p = server[rest.substr(0, at)];
+        const json in = json::parse(body);
+        if (in["expected_revision"].get<long long>() != p.first) return make_error("CONFLICT", "The publication changed; review it again.");
+        if (method == "PUT") {
+            puts.push_back(body);
+            p.second.clear();
+            for (const auto& x : in["entries"]) p.second.insert(x["id"].get<std::string>());
+        } else if (at != std::string::npos) {
+            if (!p.second.erase(rest.substr(at + 9))) return make_error("NOT_FOUND", "The publication has no such entry.");
+        } else {
+            p.second.clear();
+        }
+        ++p.first;
+        return json{{"revision", p.first}, {"current_revision", p.first}};
+    };
+    e.changed = [&window] {
+        if (ShellThread* w = window.load()) w->post([w] { w->main().emit("knowledge.changed", json::object()); });
+    };
+    knowledge::KnowledgeService svc(std::move(e), std::make_unique<knowledge::KgStore>(std::move(*db)));
+    auto& store = svc.store();
+    const auto path = [&](const wchar_t* name) { return wb::narrow((docs / name).wstring()); };
+    for (const wchar_t* name : {L"approved.txt", L"owner.txt", L"budget.txt"}) {
+        ASSERT_TRUE(svc.add_document(path(name)));
+        svc.run_until_idle();
+    }
+    const auto chunk = [&](const wchar_t* name) { return store.chunks_of_item(store.item("files", path(name))->id).at(0); };
+    const auto fact = [&](long long s, const char* p, long long ob, long long c) {
+        const long long relation = store.add_relation(s, p, ob, 0.9, "", "", c);
+        const auto f = relation ? store.fact_of_relation(*store.relation(relation)) : std::nullopt;
+        EXPECT_TRUE(f);
+        return f.value_or(0);
+    };
+    const long long phoenix = store.resolve_entity("Project", "Phoenix", "", 1);
+    const auto approved = chunk(L"approved.txt");
+    const long long june = fact(phoenix, "deadline", store.resolve_entity("Date", "June", "", 1), approved.id);
+    const long long owner = fact(phoenix, "budget_owner", store.resolve_entity("Person", "Petr Novotný", "", 1), chunk(L"owner.txt").id);
+    const auto at = approved.text.find("June");
+    ASSERT_TRUE(store.bind_analysis_evidence(june, {approved.id, at, at + 4}, store.knowledge_generation().value_or(0)));
+    const auto planning = store.create_category("Planning");
+    ASSERT_TRUE(planning);
+    for (long long f : {june, owner}) ASSERT_TRUE(store.set_category_assignment(f, *planning, "manual", "Planning"));
+    auto first = svc.preview_publication({{"categories", {*planning}}, {"groups", {"engineering"}}});
+    ASSERT_TRUE(first && first->contains("token"));
+    ASSERT_TRUE(svc.confirm_publication((*first)["token"].get<std::string>()));
+    const std::string id = (*first)["publication_id"].get<std::string>();
+    std::string june_entry;
+    for (const auto& x : (*first)["entries"])
+        if (x["fact_id"] == june) june_entry = x["entry_id"].get<std::string>();
+    // Offline: the owner's file is forgotten; the budget joins the category.
+    {
+        const std::lock_guard lock(mx);
+        online = false;
+    }
+    ASSERT_TRUE(svc.forget_item(store.item("files", path(L"owner.txt"))->id));
+    const long long budget = fact(phoenix, "budget", store.resolve_entity("Amount", "5 million EUR", "", 1), chunk(L"budget.txt").id);
+    ASSERT_TRUE(store.set_category_assignment(budget, *planning, "manual", "Planning"));
+    svc.run_until_idle();
+
+    Fixture f;
+    register_knowledge_rpc(f.rpc, [&svc] { return &svc; }, nullptr);
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    window = &w;
+    const auto focused = [&w] {
+        std::string fid;
+        w.run([&] {
+            const ui::Node* n = w.main().window()->tree().focused();
+            fid = n ? n->automation_id() : "";
+        });
+        return fid;
+    };
+    const auto press = [&](const std::string& target, unsigned key) {
+        for (int i = 0; i < 40 && focused() != target; ++i) w.key(ui::kKeyTab);
+        if (focused() != target) return false;
+        w.key(key);
+        return true;
+    };
+    const auto has = [&w](const std::string& lid, const std::u16string& part) { return label_text(w, lid).find(part) != std::u16string::npos; };
+    w.run([&] { w.main().open("#/knowledge"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-section-sharing"); }));
+    ASSERT_TRUE(w.invoke("knowledge-section-sharing"));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-publication-pending-0"); }));
+    EXPECT_TRUE(has("knowledge-publication-pending-0", u"1 removals are pending. The previously published text may remain available"));
+    EXPECT_TRUE(has("knowledge-publication-new-0", u"1 new facts"));
+    EXPECT_TRUE(w.exists("knowledge-publication-error-0"));
+    {
+        const std::lock_guard lock(mx);
+        EXPECT_EQ(server[id].second.size(), 2u);
+        online = true;
+    }
+    // Reconnected: the removal is sent and acknowledged; the list says so.
+    svc.sync_sharing(false);
+    ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-publication-pending-0"); }));
+    EXPECT_FALSE(w.exists("knowledge-publication-error-0"));
+    // Review changes, by keyboard: June stays, the budget is new, the audience is what it was.
+    ASSERT_TRUE(press("knowledge-publication-review-0", ui::kKeyEnter));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-publish-preview"); }));
+    ASSERT_TRUE(press("knowledge-publish-preview", ui::kKeyEnter));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-publish-changes"); }));
+    EXPECT_EQ(label_text(w, "knowledge-publish-changes"), u"1 entries stay as published, 1 are new and 0 will no longer be published.");
+    EXPECT_FALSE(w.exists("knowledge-publish-added-groups"));
+    std::set<std::u16string> changes = {label_text(w, "knowledge-publish-change-0"), label_text(w, "knowledge-publish-change-1")};
+    EXPECT_EQ(changes, (std::set<std::u16string>{u"Already published", u"New: waits for your review here"}));
+    ASSERT_TRUE(press("knowledge-publish-ok", ui::kKeyEnter));
+    ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-publish-ok"); }));
+    {
+        const std::lock_guard lock(mx);
+        ASSERT_EQ(puts.size(), 2u);
+        const json body = json::parse(puts[1]);
+        EXPECT_EQ(body["expected_revision"], 2);
+        EXPECT_EQ(body["groups"], json{"engineering"});
+        EXPECT_EQ(body["entries"].size(), 2u);
+        EXPECT_TRUE(server[id].second.count(june_entry));
+        online = false;
+    }
+    ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-publication-new-0"); }));
+    // Withdraw while offline: pending, and said so.
+    ASSERT_TRUE(press("knowledge-publication-withdraw-0", ui::kKeyEnter));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-notice") && has("knowledge-notice", u"will be withdrawn when the server can be reached"); }));
+    const auto row_name = [&w](const std::string& rid) {
+        std::u16string out;
+        w.with(rid, [&](ui::Node& n) {
+            out = n.name;
+            return true;
+        });
+        return out;
+    };
+    ASSERT_TRUE(w.until([&] { return row_name("knowledge-publication-0").find(u"Withdrawal pending. The previously published text may remain available") != std::u16string::npos; }));
+    EXPECT_FALSE(w.exists("knowledge-publication-withdraw-0"));
+    window = nullptr;
+}
 // improve-skowork-and-knowledge-control 10.5: import, exclude and forget show the host's impact preview first, in a
 // dialog operated by keyboard. Over the real service with a scripted model:
 // - the passage counts and the import's analysis (pending with its reason, then the findings) are those of the RPCs;

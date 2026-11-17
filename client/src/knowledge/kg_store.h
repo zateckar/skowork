@@ -45,8 +45,10 @@ inline constexpr int kKgChangeReportSchemaVersion = 10;
 inline constexpr int kKgCategoryNamesSchemaVersion = 11;
 // The analysis of an import preview (task 8.8).
 inline constexpr int kKgPreviewAnalysisSchemaVersion = 12;
-// The latest schema: local records of category publications (task 10.2).
-inline constexpr int kKgSchemaVersion = 13;
+// Local records of category publications (task 10.2).
+inline constexpr int kKgPublicationSchemaVersion = 13;
+// The latest schema: their withdrawal outbox (task 10.3).
+inline constexpr int kKgSchemaVersion = 14;
 // Open suggested category names, and facts in one, at most.
 inline constexpr int kMaxCategoryNameSuggestions = 20;
 inline constexpr int kMaxCategoryNameFacts = 50;
@@ -230,18 +232,31 @@ struct SupportSetRow {
 // A category publication as recorded locally once the server accepted it (task 10.2). It holds no published text:
 // the id, title, audience and revision, a digest of the uploaded payload, and for each entry its fact (0 when the
 // fact is gone), a digest of its text and evidence, and the local excerpts it quoted ({"id": remote id, "evidence_id"}).
+// state: published, or withdrawing (queued for removal from the server, with the reason, the operation id that makes
+// its retry idempotent and, once first sent, the revision it was sent against). The row is the outbox record and is
+// deleted when the server acknowledges the removal.
 struct PublicationEntryRow {
     std::string entry_id;
     long long fact_id = 0;
     std::string text_sha256;
     json evidence = json::array();
+    std::string state = "published", reason, operation_id;
+    std::optional<long long> expected_revision;
 };
+// state: published, withdrawing (the whole publication is queued for removal), withdrawn (acknowledged; no entries
+// remain) or removed (by an administrator; removal is its reason). error: why the last withdrawal attempt failed.
 struct PublicationRow {
     std::string id, title, payload_sha256;
     std::vector<std::string> groups;
     std::vector<long long> categories;
     long long revision = 0, published_at = 0;
     std::vector<PublicationEntryRow> entries;
+    std::string state = "published", operation_id, error, removal;
+    std::optional<long long> expected_revision;
+};
+// An entry to withdraw and why.
+struct PublicationWithdrawal {
+    std::string publication_id, entry_id, reason;
 };
 
 struct ShareRow {
@@ -505,6 +520,22 @@ public:
     // Records (or replaces) a publication the server accepted, with its entries, in one transaction.
     Status record_publication(const PublicationRow& p);
     std::vector<PublicationRow> publications();
+    std::optional<PublicationRow> publication(const std::string& id);
+    // Queues entry withdrawals (published entries only), each with a new operation id, in one transaction.
+    Status queue_entry_withdrawals(const std::vector<PublicationWithdrawal>& w);
+    // Queues the withdrawal of a whole publication (not one withdrawn or removed); its entry withdrawals wait behind it.
+    Status queue_publication_withdrawal(const std::string& id);
+    // Fixes the revision a queued withdrawal is sent against, once, before it is first sent (entry_id empty: whole).
+    Result<long long> withdrawal_revision(const std::string& id, const std::string& entry_id);
+    // The server acknowledged a withdrawal; revision is its current revision. An entry's row is deleted (the
+    // publication is withdrawn when none is left); a whole withdrawal deletes every entry.
+    Status acknowledge_withdrawal(const std::string& id, const std::string& entry_id, long long revision);
+    // After a revision conflict: a new operation, sent against the publication's revision when it is next sent.
+    Status restart_withdrawal(const std::string& id, const std::string& entry_id);
+    // The server's state of a publication: its revision and published, withdrawn (no content: entries deleted) or
+    // removed (by an administrator, with the reason). Queued withdrawals stay queued.
+    Status set_publication_server_state(const std::string& id, long long revision, const std::string& state, const std::string& removal);
+    Status set_publication_error(const std::string& id, const std::string& error);
     // An open publication preview (content: the exact payload; content_hash: its SHA-256), for 30 minutes; at most 8.
     Result<std::string> save_publication_preview(OperationPreview p);
     std::optional<OperationPreview> publication_preview(const std::string& token);
