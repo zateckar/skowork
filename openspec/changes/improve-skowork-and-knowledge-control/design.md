@@ -665,6 +665,46 @@ Add speech to the Policy bundle top-level glossary and also reconcile the alread
     - Importing a folder adds a watched folder and is not previewed; its files are indexed by the watcher. The folder preview with processed/total counts of D7 is not built.
     - Exclusions added in Settings (by path or type) and removing an import in Manage imports do not show the preview.
     - Pending, failed, off and too-large analysis labels other than waiting are not exercised by the shell test; the service states are covered by 8.8's test.
+- **Category publication preview, 10.2, 2026-11-17:**
+  - **Where:** in the Knowledge section, Publish (on the category list and in a category's head) opens one dialog. Step 1 chooses categories, Groups and a title. Step 2 shows the preview. The host RPCs are `knowledge.publication.options`, `.preview`, `.confirm` and `.cancel`, plus `knowledge.publications` for the local record. The app sends the publication calls with the header `skowork-publication-version: 1`.
+  - **Options:**
+    - Groups are the server's permitted Groups filtered by the `knowledge.sharing.groups` policy (`*` means all).
+    - Company is the server's company Group, when it is offered. It is labelled "Company (<group>)" and explained as reaching everyone in it.
+    - Derived sources are the server's list intersected with local policy; the default is files and notes.
+    - Publishing is unavailable, with the reason shown, when policy allows no Group, the server is offline, or it supports no publication version 1.
+  - **Eligibility:** a fact qualifies when all of the following hold:
+    - it is current; otherwise it is excluded as disputed, unsupported or rejected;
+    - it has been consistency-checked whenever extraction and consistency are on; otherwise it is excluded as pending;
+    - some support set has only visible evidence, all its required facts are eligible in turn, and all its source kinds are permitted.
+  - **Choosing a support set:** among the usable sets, the one with the most exact excerpts wins, then the one with the fewest source kinds. When no set has only permitted kinds, the fact is excluded as `source_not_permitted`, naming the forbidden kinds of the closest set. A fact supported by a file and by mail is therefore withheld when mail is not a derived source.
+  - **Notices:** copied mail, Chat, thread and meeting-transcript origins are shown as notices with counts.
+  - **Payload:** the preview builds the exact request body once and stores it with its SHA-256 in `knowledge_publication_previews` (schema 13). That table is separate from operation previews: they expire after 30 minutes, at most 8 are kept open, and they are rebuilt when an entry is removed.
+    - Entry text is the fact's statement.
+    - Evidence is only exact excerpts, titled by the file's leaf name or the item title, never a path.
+    - Ids are random per preview.
+    - Facts in several chosen categories appear once.
+  - **Confirming:**
+    - The stored bytes are PUT unchanged.
+    - The confirmation is refused as stale when the preview expired, the knowledge generation changed or the policy changed. A server CONFLICT also counts as stale. The dialog then previews again with a warning.
+    - On success the local record keeps only ids, digests, Groups, categories and the revision, no text, and the preview is deleted.
+    - Cancel, Escape and Back delete the preview. Forget deletes every open publication preview.
+  - **Tests:**
+    - `KnowledgePublication.PreviewIsTheExactEligiblePayloadAndOnlyItIsUploaded` checks:
+      - eligibility, including mail-only and mixed file-and-mail exclusions, disputed and pending facts, and two categories;
+      - the copied-mail notice, the payload keys, and the absence of private paths and text;
+      - Company and `GROUP_NOT_PERMITTED`;
+      - deselection, the title, cancellation, staleness after a change and after a server CONFLICT;
+      - the exact uploaded bytes and path, the local record, and forget.
+      The test fails when forbidden kinds are ignored.
+    - `ShellKnowledge.PublishCategoriesPreviewsExactlyWhatIsUploaded` operates the dialog by keyboard over the real service. It checks the Company label and explanation, the entries, the excerpt and file name, the mixed-mail exclusion and the mail notice. It also checks that Escape deletes the preview and uploads nothing, that an entry removed by Space is not uploaded, and that the uploaded text and excerpt equal what the dialog showed.
+    - 880 win, 95 UI and 8 analysis tests pass on the debug build, except two failures outside this work:
+      - `ShellGolden.SettingsPage`: the golden predates the "Generated visuals in chat" option and the Skowork name from a18fe3c;
+      - `ShellFeed.WorkDetailsAreHiddenByDefaultWithAStatusLineAndShowDetailsPerRun`: crashes in the feed code being changed by improve-proactive-durable-work.
+  - **Limits:**
+    - Every confirmed preview creates a new publication. Republishing, differences and withdrawal are 10.3.
+    - Only the publication title can be edited. Evidence titles and entry text cannot.
+    - The version header is set in the app's hook and is not covered by a unit test.
+    - Folders and live-share labels are not changed by publishing.
 - **Progress audit and triage, 2026-11-09:** code was compared with every task. Tasks were split or added where code and specification disagree (2.4, 4.5, 5.6, 6.6), where a prerequisite was implicit (7.5, 7.6, 7.7, 8.5, 9.5), and narrowed where two tasks claimed the same evidence (1.4, 5.5, 6.5). Publication code in the control plane is unmounted library code with unit tests; no publication route, schema installation or policy key exists. The earlier note that multi-pass summarization is not enabled is superseded by the multi-pass note above. tasks.md carries the per-task status and the delivery order.
 - Final immutable speech artifact URL/mirror and manifest digest, verified package sizes, proxy behavior and actual language-fixture timing.
 - Actual configured model ids and context metadata, token-count strategy supported by those models, and measured compaction coverage/latency.

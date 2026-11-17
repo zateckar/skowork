@@ -643,8 +643,41 @@ BEGIN
 END;)sql"},
         // Task 8.8: the analysis of an import preview (findings of its new passages and their possible
         // inconsistencies), kept with the preview and deleted with it.
-        {kKgSchemaVersion, R"sql(
+        {kKgPreviewAnalysisSchemaVersion, R"sql(
 ALTER TABLE knowledge_operation_previews ADD COLUMN analysis TEXT NOT NULL DEFAULT '';
+)sql"},
+        // Task 10.2: what was published from categories, without its text: the published version's ids and digests,
+        // and for each entry the fact and the local excerpts it was published from (for the differences of 10.3).
+        // An entry outlives its fact (fact_id becomes NULL), so a forgotten fact can still be withdrawn.
+        {kKgSchemaVersion, R"sql(
+CREATE TABLE knowledge_publications(
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  groups TEXT NOT NULL,
+  categories TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  payload_sha256 TEXT NOT NULL,
+  published_at INTEGER NOT NULL);
+CREATE TABLE knowledge_publication_entries(
+  publication_id TEXT NOT NULL REFERENCES knowledge_publications(id) ON DELETE CASCADE,
+  entry_id TEXT NOT NULL,
+  fact_id INTEGER REFERENCES knowledge_facts(id) ON DELETE SET NULL,
+  text_sha256 TEXT NOT NULL,
+  evidence TEXT NOT NULL,
+  PRIMARY KEY(publication_id,entry_id));
+CREATE INDEX knowledge_publication_fact ON knowledge_publication_entries(fact_id);
+-- An open publication preview: the exact payload to upload and what was shown. It quotes excerpts, so forgetting
+-- any item deletes every open one.
+CREATE TABLE knowledge_publication_previews(
+  token TEXT PRIMARY KEY,
+  target TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  payload_sha256 TEXT NOT NULL,
+  policy TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL);
 )sql"},    };
     return m;
 }
@@ -2727,7 +2760,7 @@ Result<std::string> KgStore::save_operation_preview(OperationPreview p, const st
 std::optional<OperationPreview> KgStore::operation_preview(const std::string& token) {
     const std::lock_guard lock(db_->mutex());
     if (db_->user_version() < kKgPreviewSchemaVersion || token.size() != 32) return std::nullopt;
-    const bool analyzed = db_->user_version() >= kKgSchemaVersion;
+    const bool analyzed = db_->user_version() >= kKgPreviewAnalysisSchemaVersion;
     auto s = db_->prepare(std::string("SELECT token,operation,target,content,content_hash,policy,summary,generation,created_at,expires_at,") +
                           (analyzed ? "analysis" : "'") + " FROM knowledge_operation_previews WHERE token=?1");
     s.bind(1, token);
@@ -2770,13 +2803,17 @@ Status KgStore::delete_item_previews(const std::string& source, const std::strin
     auto s = db_->prepare("DELETE FROM knowledge_operation_previews WHERE json_extract(target,'$.source')=?1 "
                           "AND (?2='' OR json_extract(target,'$.ext_id')=?2)");
     s.bind(1, source).bind(2, ext_id);
-    return s.run();
+    if (auto done = s.run(); !done) return done;
+    // A publication preview quotes excerpts of many items: forgetting any item drops every open one.
+    if (db_->user_version() < kKgSchemaVersion) return {};
+    auto p = db_->prepare("DELETE FROM knowledge_publication_previews");
+    return p.run();
 }
 
 std::vector<std::string> KgStore::previews_awaiting_analysis(long long now) {
     const std::lock_guard lock(db_->mutex());
     std::vector<std::string> out;
-    if (db_->user_version() < kKgSchemaVersion) return out;
+    if (db_->user_version() < kKgPreviewAnalysisSchemaVersion) return out;
     auto s = db_->prepare("SELECT token FROM knowledge_operation_previews WHERE operation IN ('import','update') AND expires_at>?1 "
                           "AND (analysis='' OR json_extract(analysis,'$.state')='waiting') ORDER BY created_at LIMIT 32");
     s.bind(1, now);
@@ -2786,7 +2823,7 @@ std::vector<std::string> KgStore::previews_awaiting_analysis(long long now) {
 
 Status KgStore::set_preview_analysis(const std::string& token, const std::string& analysis) {
     const std::lock_guard lock(db_->mutex());
-    if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Preview analysis is not available yet.");
+    if (db_->user_version() < kKgPreviewAnalysisSchemaVersion) return make_error("schema", "Preview analysis is not available yet.");
     // A preview confirmed, cancelled or expired meanwhile is gone: its analysis is discarded.
     auto s = db_->prepare("UPDATE knowledge_operation_previews SET analysis=?2 WHERE token=?1");
     s.bind(1, token).bind(2, analysis);
@@ -2843,6 +2880,153 @@ std::map<long long, CategoryCandidate> KgStore::facts_related_to(long long subje
         while (passages.step())
             f.passages.push_back({passages.col_int(0), passages.col_int(1), passages.col_text(2), passages.col_text(3), passages.col_int(4)});
         if (!f.passages.empty()) out.emplace(id, std::move(f));
+    }
+    return out;
+}
+std::vector<SupportSetRow> KgStore::support_sets(long long fact_id) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<SupportSetRow> out;
+    if (db_->user_version() < kKgEvidenceSchemaVersion) return out;
+    std::map<long long, SupportSetRow> sets;
+    std::set<long long> stale;  // a support citing a revision that is not current is not usable now
+    {
+        auto s = db_->prepare(
+            "SELECT s.id,e.id,v.item_id,i.source,i.ext_id,i.title,e.excerpt,e.precision,v.current FROM knowledge_support_sets s "
+            "JOIN knowledge_support_evidence se ON se.support_id=s.id JOIN knowledge_evidence e ON e.id=se.evidence_id "
+            "JOIN knowledge_revisions v ON v.id=e.revision_id JOIN items i ON i.id=v.item_id "
+            "WHERE s.fact_id=?1 AND s.state IN ('current','unverified') ORDER BY s.id,e.id");
+        s.bind(1, fact_id);
+        while (s.step()) {
+            const long long id = s.col_int(0);
+            if (!s.col_int(8)) stale.insert(id);
+            auto& set = sets[id];
+            set.id = id;
+            set.evidence.push_back({s.col_int(1), s.col_int(2), s.col_text(3), s.col_text(4), s.col_text(5), s.col_text(6), s.col_text(7)});
+        }
+    }
+    {
+        auto s = db_->prepare("SELECT s.id,sf.required_fact_id FROM knowledge_support_sets s JOIN knowledge_support_facts sf ON sf.support_id=s.id "
+                              "WHERE s.fact_id=?1 AND s.state IN ('current','unverified') ORDER BY s.id,sf.required_fact_id");
+        s.bind(1, fact_id);
+        while (s.step()) {
+            auto& set = sets[s.col_int(0)];
+            set.id = s.col_int(0);
+            set.required.push_back(s.col_int(1));
+        }
+    }
+    for (auto& [id, set] : sets)
+        if (!stale.count(id)) out.push_back(std::move(set));
+    return out;
+}
+
+bool KgStore::consistency_checked(long long fact_id) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgConsistencySchemaVersion) return true;
+    auto s = db_->prepare("SELECT 1 FROM knowledge_consistency_checks WHERE fact_id=?1");
+    s.bind(1, fact_id);
+    return s.step();
+}
+
+Status KgStore::record_publication(const PublicationRow& p) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Publications are not available yet.");
+    json groups = p.groups, categories = p.categories;
+    return db_->transaction([&]() -> Status {
+        auto del = db_->prepare("DELETE FROM knowledge_publications WHERE id=?1");
+        del.bind(1, p.id);
+        if (auto s = del.run(); !s) return s;
+        auto put = db_->prepare("INSERT INTO knowledge_publications(id,title,groups,categories,revision,payload_sha256,published_at) "
+                                "VALUES(?1,?2,?3,?4,?5,?6,?7)");
+        put.bind(1, p.id).bind(2, p.title).bind(3, groups.dump()).bind(4, categories.dump()).bind(5, p.revision).bind(6, p.payload_sha256).bind(7, p.published_at);
+        if (auto s = put.run(); !s) return s;
+        auto entry = db_->prepare("INSERT INTO knowledge_publication_entries(publication_id,entry_id,fact_id,text_sha256,evidence) "
+                                  "VALUES(?1,?2,(SELECT id FROM knowledge_facts WHERE id=?3),?4,?5)");
+        for (const auto& e : p.entries) {
+            entry.reset();
+            entry.bind(1, p.id).bind(2, e.entry_id).bind(3, e.fact_id).bind(4, e.text_sha256).bind(5, e.evidence.dump());
+            if (auto s = entry.run(); !s) return s;
+        }
+        return {};
+    });
+}
+
+Result<std::string> KgStore::save_publication_preview(OperationPreview p) {
+    constexpr long long kLifetime = 30 * 60 * 1000;
+    const auto token = random_urlsafe(24);
+    if (token.size() != 32) return make_error("crypto", "Could not create a preview token.");
+    if (p.created_at <= 0 || p.created_at > std::numeric_limits<long long>::max() - kLifetime) return make_error("invalid", "Invalid preview time.");
+    p.token = token;
+    p.expires_at = p.created_at + kLifetime;
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return make_error("schema", "Publications are not available yet.");
+    const auto status = db_->transaction([&]() -> Status {
+        auto expired = db_->prepare("DELETE FROM knowledge_publication_previews WHERE expires_at<=?1");
+        expired.bind(1, p.created_at);
+        if (auto s = expired.run(); !s) return s;
+        auto count = db_->prepare("SELECT count(*) FROM knowledge_publication_previews");
+        if (!count.step()) return make_error("storage", "Could not count publication previews.");
+        if (count.col_int(0) >= 8) return make_error("capacity", "Too many open publication previews; confirm or cancel one first.");
+        auto insert = db_->prepare("INSERT INTO knowledge_publication_previews(token,target,payload,payload_sha256,policy,summary,generation,"
+                                   "created_at,expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)");
+        insert.bind(1, p.token).bind(2, p.target).bind(3, p.content).bind(4, p.content_hash).bind(5, p.policy).bind(6, p.summary)
+            .bind(7, p.generation).bind(8, p.created_at).bind(9, p.expires_at);
+        return insert.run();
+    });
+    if (!status) return status.error();
+    return token;
+}
+
+std::optional<OperationPreview> KgStore::publication_preview(const std::string& token) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return std::nullopt;
+    auto s = db_->prepare("SELECT target,payload,payload_sha256,policy,summary,generation,created_at,expires_at FROM knowledge_publication_previews "
+                          "WHERE token=?1");
+    s.bind(1, token);
+    if (!s.step()) return std::nullopt;
+    OperationPreview p;
+    p.token = token;
+    p.operation = "publish";
+    p.target = s.col_text(0);
+    p.content = s.col_text(1);
+    p.content_hash = s.col_text(2);
+    p.policy = s.col_text(3);
+    p.summary = s.col_text(4);
+    p.generation = s.col_int(5);
+    p.created_at = s.col_int(6);
+    p.expires_at = s.col_int(7);
+    return p;
+}
+
+Status KgStore::delete_publication_preview(const std::string& token) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSchemaVersion) return {};
+    auto s = db_->prepare("DELETE FROM knowledge_publication_previews WHERE token=?1");
+    s.bind(1, token);
+    return s.run();
+}
+std::vector<PublicationRow> KgStore::publications() {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<PublicationRow> out;
+    if (db_->user_version() < kKgSchemaVersion) return out;
+    auto s = db_->prepare("SELECT id,title,groups,categories,revision,payload_sha256,published_at FROM knowledge_publications ORDER BY published_at DESC,id");
+    while (s.step()) {
+        PublicationRow p;
+        p.id = s.col_text(0);
+        p.title = s.col_text(1);
+        for (const auto& g : json::parse(s.col_text(2), nullptr, false))
+            if (g.is_string()) p.groups.push_back(g.get<std::string>());
+        for (const auto& c : json::parse(s.col_text(3), nullptr, false))
+            if (c.is_number_integer()) p.categories.push_back(c.get<long long>());
+        p.revision = s.col_int(4);
+        p.payload_sha256 = s.col_text(5);
+        p.published_at = s.col_int(6);
+        out.push_back(std::move(p));
+    }
+    auto e = db_->prepare("SELECT entry_id,ifnull(fact_id,0),text_sha256,evidence FROM knowledge_publication_entries WHERE publication_id=?1 ORDER BY rowid");
+    for (auto& p : out) {
+        e.reset();
+        e.bind(1, p.id);
+        while (e.step()) p.entries.push_back({e.col_text(0), e.col_int(1), e.col_text(2), json::parse(e.col_text(3), nullptr, false)});
     }
     return out;
 }

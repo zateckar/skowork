@@ -84,6 +84,10 @@ struct KnowledgeEnv {
     // JSON answer. Error codes: offline when the control plane is not connected, else the server's code
     // (GROUP_NOT_PERMITTED, TOO_LARGE, QUOTA_EXCEEDED) or http_<status>. Unset: no sharing and no team search.
     std::function<Result<json>(const std::string& method, const std::string& path, const json& body)> team;
+    // Category publications of control-plane/team-knowledge (task 10.2): the same connection, sending `body` exactly as
+    // given (no re-serialization) with the publication schema version header the server advertises (1). Errors as for
+    // team. Unset: publication is unavailable and ordinary item sharing is unaffected.
+    std::function<Result<json>(const std::string& method, const std::string& path, const std::string& body)> publication;
     // Refuse to re-upload an item while an earlier withdrawal for this account is pending.
     std::function<Result<bool>(const std::string& remote_id)> pending_item_withdrawal;
     // Sends the item removals Delete all left pending for the signed-in account (client/local-storage Pending Shared
@@ -327,6 +331,19 @@ public:
 
     // ---- Sharing (Sharing Knowledge Items, design D1, D3) ----
     // {enabled, policy_groups, permitted_groups, connected, items: [...], rules: [...]}
+    // ---- Category publications (Category Publication Eligibility and Preview; task 10.2) ----
+    // Whether publishing is possible now and to whom: {available, reason (policy | unavailable | offline |
+    // unsupported), groups, company, derived_sources, categories}. Asks the server for its capabilities and the
+    // Groups it permits.
+    Result<json> publication_options();
+    // The exact payload publishing would upload for {categories, groups, title, exclude (fact ids)}: eligible entries,
+    // exclusions with reasons, copied-origin notices and the serialized payload, saved as a short-lived preview whose
+    // token confirm_publication takes; cancel_publication deletes it.
+    Result<json> preview_publication(const json& request);
+    // Uploads the previewed payload byte for byte, unless knowledge or the sharing policy changed since (stale).
+    Result<json> confirm_publication(const std::string& token);
+    Status cancel_publication(const std::string& token);
+    json publications();
     json sharing();
     Status share_item(long long item_id, const std::vector<std::string>& groups);
     Status unshare_item(long long item_id);
@@ -368,6 +385,10 @@ private:
     void search_team(const std::string& query, const SearchOptions& opt, SearchResult& out);
     std::vector<std::string> sharing_policy();
     std::vector<std::string> permitted_groups();
+    std::vector<std::string> derived_sources_policy();  // knowledge.sharing.derived_sources (default files, notes)
+    struct Eligibility;
+    const Eligibility& publication_eligibility(long long fact_id, const std::set<std::string>& permitted, std::map<long long, Eligibility>& memo,
+                                               int depth);
     // The text published for a shareable item: a note's text, or a file's (extracted) text.
     Result<std::string> share_text(const std::string& source, const std::string& ext_id);
     Status publish(ShareRow row, const ItemRow& item);

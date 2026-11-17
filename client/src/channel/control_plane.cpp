@@ -49,7 +49,12 @@ Result<HttpResponse> ControlPlaneClient::call(const std::string& method, const s
 }
 
 Result<json> ControlPlaneClient::call_json(const std::string& method, const std::string& url, const json& body) {
-    auto resp = call(method, url, body.is_null() ? std::string{} : body.dump());
+    return call_json_raw(method, url, body.is_null() ? std::string{} : body.dump(), {});
+}
+
+Result<json> ControlPlaneClient::call_json_raw(const std::string& method, const std::string& url, const std::string& body,
+                                               const CallOptions& options) {
+    auto resp = call(method, url, body, options);
     if (!resp) return resp.error();
     auto j = parse_json(resp->body);
     if (resp->status < 200 || resp->status >= 300) {

@@ -6339,6 +6339,195 @@ TEST(ShellPages, ConnectorsShowApiStatesAndTakeAPersonalTokenOnce) {
     EXPECT_TRUE(problems.empty()) << problems.front();
 }
 
+// improve-skowork-and-knowledge-control 10.2: Publish in the Knowledge section, by keyboard, over the real service and
+// an in-process control-plane/team-knowledge. Company is named with its Group; the preview shows the exact entries and
+// excerpts, the mixed mail exclusion and the copied-mail notice; Escape cancels and uploads nothing; an entry removed
+// in the preview is not uploaded; and what is uploaded is what the dialog showed.
+TEST(ShellKnowledge, PublishCategoriesPreviewsExactlyWhatIsUploaded) {
+    struct Dir {
+        ~Dir() {
+            std::error_code ec;
+            std::filesystem::remove_all(path, ec);
+        }
+        std::filesystem::path path = std::filesystem::temp_directory_path() / L"workbench-test" / wb::widen(wb::random_urlsafe(6));
+    } dir;
+    const auto docs = dir.path / L"docs";
+    std::filesystem::create_directories(docs);
+    const auto write = [](const std::filesystem::path& p, const std::string& text) {
+        std::ofstream out(p, std::ios::binary | std::ios::trunc);
+        out << text;
+    };
+    write(docs / L"approved.txt", "The approved Phoenix deadline is June.");
+    write(docs / L"owner.txt", "Petr Novotný owns the Phoenix budget.");
+    auto root = DataRoot::open(dir.path / L"data");
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto k = keys.get_or_create("kg.db");
+    ASSERT_TRUE(k);
+    MigrationOutcome o;
+    auto db = knowledge::open_kg_database(root->file("kg.db"), *k, o);
+    ASSERT_TRUE(db);
+    std::atomic<ShellThread*> window{nullptr};
+    std::mutex mx;
+    std::vector<std::string> uploads;
+    knowledge::KnowledgeEnv e;
+    e.clock = &system_clock();
+    e.policy = [](const std::string& key) -> std::optional<json> {
+        if (key == "knowledge.extraction") return json("off");
+        if (key == "knowledge.directory_enrichment") return json("off");
+        if (key == "knowledge.sharing.groups") return json::array({"engineering", "all-staff"});
+        return std::nullopt;
+    };
+    e.index = [](const std::string& m, const json& p) { return knowledge::index_request(m, p); };
+    e.read_permitted = [](const std::string&) { return true; };
+    e.publication = [&](const std::string& method, const std::string& path, const std::string& body) -> Result<json> {
+        if (path == "api/v1/knowledge/capabilities") return json{{"publication_read_versions", {1}}, {"publication_mutation_versions", {1}}};
+        if (method == "GET") return json{{"permitted_groups", {"all-staff", "engineering"}}, {"company_group", "all-staff"},
+                                         {"derived_sources", {"files", "notes"}}, {"publications", json::array()}};
+        const std::lock_guard lock(mx);
+        uploads.push_back(body);
+        return json{{"revision", 1}};
+    };
+    e.changed = [&window] {
+        if (ShellThread* w = window.load()) w->post([w] { w->main().emit("knowledge.changed", json::object()); });
+    };
+    knowledge::KnowledgeService svc(std::move(e), std::make_unique<knowledge::KgStore>(std::move(*db)));
+    auto& store = svc.store();
+    const auto path = [&](const wchar_t* name) { return wb::narrow((docs / name).wstring()); };
+    for (const wchar_t* name : {L"approved.txt", L"owner.txt"}) {
+        ASSERT_TRUE(svc.add_document(path(name)));
+        svc.run_until_idle();
+    }
+    ASSERT_TRUE(svc.save_note(0, "Phoenix lead", "Jana Nováková leads Phoenix.", {{"kind", "mail"}, {"ref", "m1"}, {"title", "Phoenix"}}));
+    svc.run_until_idle();
+    const auto note = store.item("notes", std::to_string(store.notes().at(0).id));
+    ASSERT_TRUE(note);
+    const auto chunk = [&](long long item) { return store.chunks_of_item(item).at(0); };
+    const auto fact = [&](long long s, const char* p, long long ob, long long c) {
+        const long long relation = store.add_relation(s, p, ob, 0.9, "", "", c);
+        const auto f = relation ? store.fact_of_relation(*store.relation(relation)) : std::nullopt;
+        EXPECT_TRUE(f);
+        return f.value_or(0);
+    };
+    const long long phoenix = store.resolve_entity("Project", "Phoenix", "", 1);
+    const auto approved = chunk(store.item("files", path(L"approved.txt"))->id);
+    const long long june = fact(phoenix, "deadline", store.resolve_entity("Date", "June", "", 1), approved.id);
+    const long long owner = fact(phoenix, "budget_owner", store.resolve_entity("Person", "Petr Novotný", "", 1), chunk(store.item("files", path(L"owner.txt"))->id).id);
+    const long long lead = fact(store.resolve_entity("Person", "Jana Nováková", "", 1), "leads", phoenix, chunk(note->id).id);
+    const auto at = approved.text.find("June");
+    ASSERT_TRUE(store.bind_analysis_evidence(june, {approved.id, at, at + 4}, store.knowledge_generation().value_or(0)));
+    // The owner's support also needs a mail excerpt: a mail item indexed directly in the store.
+    knowledge::ItemInput mail{"mail", "m1", "Phoenix", "mail:m1", "h1", 1, 1, 2, {{"", "Petr Novotný owns the budget, says the mail.", 0}}, true};
+    ASSERT_TRUE(store.put_item(mail, 1));
+    const long long mail_fact = fact(phoenix, "budget_mail", store.resolve_entity("Person", "Petr Novotný", "", 1), chunk(store.item("mail", "m1")->id).id);
+    ASSERT_TRUE(store.db().exec("INSERT INTO knowledge_support_evidence(support_id,evidence_id) SELECT s.id," +
+                                std::to_string(store.fact_state(mail_fact, false)->citations.at(0).evidence_id) +
+                                " FROM knowledge_support_sets s WHERE s.fact_id=" + std::to_string(owner)));
+    const auto planning = store.create_category("Planning");
+    ASSERT_TRUE(planning);
+    for (long long f : {june, owner, lead}) ASSERT_TRUE(store.set_category_assignment(f, *planning, "manual", "Planning"));
+    const std::string category = std::to_string(*planning);
+    const auto previews = [&] {
+        auto q = store.db().prepare("SELECT count(*) FROM knowledge_publication_previews");
+        return q.step() ? q.col_int(0) : -1;
+    };
+
+    Fixture f;
+    register_knowledge_rpc(f.rpc, [&svc] { return &svc; }, nullptr);
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    window = &w;
+    const auto focused = [&w] {
+        std::string id;
+        w.run([&] {
+            const ui::Node* n = w.main().window()->tree().focused();
+            id = n ? n->automation_id() : "";
+        });
+        return id;
+    };
+    const auto tab_to = [&](const std::string& id) {
+        for (int i = 0; i < 20 && focused() != id; ++i) w.key(ui::kKeyTab);
+        return focused() == id;
+    };
+    const auto press = [&](const std::string& id, unsigned key) {
+        if (!tab_to(id)) return false;
+        w.key(key);
+        return true;
+    };
+    const auto name_of = [&w](const std::string& id) {
+        std::u16string out;
+        w.with(id, [&](ui::Node& n) {
+            out = n.name;
+            return true;
+        });
+        return out;
+    };
+    const auto checked = [&w](const std::string& id) {
+        int state = -1;
+        w.with(id, [&](ui::Node& n) {
+            state = n.toggle_state();
+            return true;
+        });
+        return state;
+    };
+    const auto has = [&w](const std::string& id, const std::u16string& part) { return label_text(w, id).find(part) != std::u16string::npos; };
+    w.run([&] { w.main().open("#/knowledge"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-section-knowledge"); }));
+    ASSERT_TRUE(w.invoke("knowledge-section-knowledge"));
+    const auto choose_and_preview = [&] {
+        if (!w.invoke("knowledge-publish") || !w.until([&] { return w.exists("knowledge-publish-category-" + category); })) return false;
+        // Company is named with the Group behind it, and how broad it is.
+        if (name_of("knowledge-publish-group-all-staff") != u"Company (all-staff)") return false;
+        if (!has("knowledge-publish-company-about", u"everyone in it")) return false;
+        return press("knowledge-publish-category-" + category, ui::kKeySpace) && press("knowledge-publish-group-engineering", ui::kKeySpace) &&
+               press("knowledge-publish-preview", ui::kKeyEnter) && w.until([&] { return w.exists("knowledge-publish-entry-1"); });
+    };
+
+    // The preview: two entries with the excerpt and the file's name, the mail exclusion, the copied-mail notice.
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-publish"); }));
+    ASSERT_TRUE(choose_and_preview());
+    EXPECT_EQ(name_of("knowledge-publish-entry-0"), u"Jana Nováková leads Phoenix");
+    EXPECT_EQ(name_of("knowledge-publish-entry-1"), u"Phoenix deadline June");
+    EXPECT_EQ(label_text(w, "knowledge-publish-evidence-1-0"), u"“June” — approved.txt");
+    EXPECT_TRUE(has("knowledge-publish-excluded-0", u"Phoenix budget owner Petr Novotný. It depends on mail"));
+    EXPECT_TRUE(has("knowledge-publish-notice-mail", u"1 entries come from content copied from mail"));
+    EXPECT_TRUE(has("knowledge-publish-audience", u"Recipients: engineering"));
+    EXPECT_TRUE(has("knowledge-publish-update", u"waits for your review"));
+    EXPECT_EQ(previews(), 1);
+    // Escape cancels: the preview is deleted and nothing is uploaded.
+    w.key(ui::kKeyEscape);
+    ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-publish-ok") && previews() == 0; }));
+
+    // Again; the note's entry is removed in the preview by keyboard, and only June is published.
+    ASSERT_TRUE(choose_and_preview());
+    ASSERT_TRUE(press("knowledge-publish-entry-0", ui::kKeySpace));
+    ASSERT_TRUE(w.until([&] { return checked("knowledge-publish-entry-0") == 0 && !w.exists("knowledge-publish-notice-mail"); }));
+    EXPECT_EQ(checked("knowledge-publish-entry-1"), 1);
+    EXPECT_EQ(focused(), "knowledge-publish-entry-0");
+    EXPECT_EQ(previews(), 1);  // the earlier preview was cancelled
+    const std::u16string shown = name_of("knowledge-publish-entry-1"), quoted = label_text(w, "knowledge-publish-evidence-1-0");
+    ASSERT_TRUE(press("knowledge-publish-ok", ui::kKeyEnter));
+    ASSERT_TRUE(w.until([&] { return !w.exists("knowledge-publish-ok"); }));
+    std::string uploaded;
+    {
+        const std::lock_guard lock(mx);
+        ASSERT_EQ(uploads.size(), 1u);
+        uploaded = uploads[0];
+    }
+    const json body = json::parse(uploaded);
+    ASSERT_EQ(body["entries"].size(), 1u);
+    EXPECT_EQ(wb::ui::to_utf16(body["entries"][0]["text"].get<std::string>()), shown);
+    const json& evidence = body["entries"][0]["evidence"][0];
+    EXPECT_EQ(u"“" + wb::ui::to_utf16(evidence["text"].get<std::string>()) + u"” — " + wb::ui::to_utf16(evidence["title"].get<std::string>()), quoted);
+    EXPECT_EQ(body["groups"], json{"engineering"});
+    EXPECT_EQ(uploaded.find(wb::narrow(docs.wstring())), std::string::npos);
+    EXPECT_EQ(uploaded.find("Jana"), std::string::npos);
+    EXPECT_EQ(previews(), 0);
+    ASSERT_EQ(store.publications().size(), 1u);
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-notice") && has("knowledge-notice", u"Published 1 entries to engineering"); }));
+    window = nullptr;
+}
 // improve-skowork-and-knowledge-control 10.5: import, exclude and forget show the host's impact preview first, in a
 // dialog operated by keyboard. Over the real service with a scripted model:
 // - the passage counts and the import's analysis (pending with its reason, then the findings) are those of the RPCs;

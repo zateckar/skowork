@@ -43,8 +43,10 @@ inline constexpr int kKgPreviewSchemaVersion = 9;
 inline constexpr int kKgChangeReportSchemaVersion = 10;
 // Suggested category names and their dismissals (task 8.6).
 inline constexpr int kKgCategoryNamesSchemaVersion = 11;
-// The latest schema: the analysis of an import preview (task 8.8).
-inline constexpr int kKgSchemaVersion = 12;
+// The analysis of an import preview (task 8.8).
+inline constexpr int kKgPreviewAnalysisSchemaVersion = 12;
+// The latest schema: local records of category publications (task 10.2).
+inline constexpr int kKgSchemaVersion = 13;
 // Open suggested category names, and facts in one, at most.
 inline constexpr int kMaxCategoryNameSuggestions = 20;
 inline constexpr int kMaxCategoryNameFacts = 50;
@@ -213,6 +215,35 @@ struct NoteRow {
 
 // A shared item (add-knowledge-sharing design D3): the local item, its id in control-plane/team-knowledge, the Groups,
 // the item version and content hash last published, and the share rule (a folder) it came from.
+// One way a fact is supported now (task 10.2): a current or unverified support set whose excerpts all lie in current
+// revisions, with the item each excerpt comes from, and the facts the support requires.
+struct SupportEvidence {
+    long long evidence_id = 0, item_id = 0;
+    std::string source, ext_id, title, excerpt, precision;
+};
+struct SupportSetRow {
+    long long id = 0;
+    std::vector<SupportEvidence> evidence;
+    std::vector<long long> required;
+};
+
+// A category publication as recorded locally once the server accepted it (task 10.2). It holds no published text:
+// the id, title, audience and revision, a digest of the uploaded payload, and for each entry its fact (0 when the
+// fact is gone), a digest of its text and evidence, and the local excerpts it quoted ({"id": remote id, "evidence_id"}).
+struct PublicationEntryRow {
+    std::string entry_id;
+    long long fact_id = 0;
+    std::string text_sha256;
+    json evidence = json::array();
+};
+struct PublicationRow {
+    std::string id, title, payload_sha256;
+    std::vector<std::string> groups;
+    std::vector<long long> categories;
+    long long revision = 0, published_at = 0;
+    std::vector<PublicationEntryRow> entries;
+};
+
 struct ShareRow {
     std::string source, ext_id, remote_id, title;
     std::vector<std::string> groups;
@@ -465,6 +496,19 @@ public:
     // Previews whose target is the item (an import or update preview holds its passages), when it is forgotten.
     Status delete_item_previews(const std::string& source, const std::string& ext_id);
     Status purge_expired_previews(long long now);
+
+    // ---- Category publications (task 10.2) ----
+    // The usable supports of a fact, as SupportSetRow describes; empty before the evidence schema.
+    std::vector<SupportSetRow> support_sets(long long fact_id);
+    // Consistency analysis has checked the fact since its evidence last changed (true before that schema).
+    bool consistency_checked(long long fact_id);
+    // Records (or replaces) a publication the server accepted, with its entries, in one transaction.
+    Status record_publication(const PublicationRow& p);
+    std::vector<PublicationRow> publications();
+    // An open publication preview (content: the exact payload; content_hash: its SHA-256), for 30 minutes; at most 8.
+    Result<std::string> save_publication_preview(OperationPreview p);
+    std::optional<OperationPreview> publication_preview(const std::string& token);
+    Status delete_publication_preview(const std::string& token);
     // Import and update previews whose analysis has not started or waits (for budget), oldest first, not expired.
     std::vector<std::string> previews_awaiting_analysis(long long now);
     // Stores a preview's analysis; nothing when the preview is gone (confirmed, cancelled or expired).

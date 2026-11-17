@@ -215,6 +215,13 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
             if (x.is_string()) g.push_back(x.get<std::string>());
         return g;
     };
+    // Category publications (task 10.2): options, the exact payload preview, its confirmation or cancellation, and the
+    // publications made. UI only, never agent tools.
+    add("knowledge.publication.options", [](Svc& s, const json&) { return s.publication_options(); });
+    add("knowledge.publication.preview", [](Svc& s, const json& p) { return s.preview_publication(p); });
+    add("knowledge.publication.confirm", [](Svc& s, const json& p) { return s.confirm_publication(jstr(p, "token")); });
+    add("knowledge.publication.cancel", [done](Svc& s, const json& p) { return done(s.cancel_publication(jstr(p, "token"))); });
+    add("knowledge.publications", [](Svc& s, const json&) -> Result<json> { return s.publications(); });
     add("knowledge.sharing", [](Svc& s, const json&) -> Result<json> { return s.sharing(); });
     add("knowledge.share", [done, groups_of](Svc& s, const json& p) { return done(s.share_item(jint(p, "item_id"), groups_of(p))); });
     add("knowledge.unshare", [done](Svc& s, const json& p) { return done(s.unshare_item(jint(p, "item_id"))); });

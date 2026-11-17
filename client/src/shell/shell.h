@@ -732,6 +732,25 @@ private:
     std::optional<Preview> preview_;
     ui::Dialog* preview_dialog_ = nullptr;
     size_t preview_request_ = 0;
+    // The Publish dialog (client/knowledge-graph Category Publication Preview; task 10.2): categories, Groups and a
+    // title are chosen, then the host's exact payload is reviewed, entries removed, and confirmed or cancelled.
+    struct Publish {
+        json options = nullptr;  // knowledge.publication.options
+        std::set<long long> categories, exclude;
+        std::set<std::string> groups;
+        std::u16string title;
+        json preview = nullptr;  // knowledge.publication.preview; null while choosing
+        bool stale = false, busy = false;
+        std::u16string problem;
+    };
+    void start_publish(long long category);  // 0: no category chosen yet
+    void fill_publish();
+    void preview_publish();
+    void confirm_publish();
+    void end_publish();
+    std::optional<Publish> publish_;
+    ui::Dialog* publish_dialog_ = nullptr;
+    size_t publish_request_ = 0;
     void build_item(ui::Node& parent);
     void build_details(ui::Node& parent, long long id);
     void build_editor(ui::Node& parent);

@@ -1625,6 +1625,13 @@ void App::start_knowledge() {
         if (!cp || !channel || !channel->connected()) return make_error("offline", "The control plane is not connected.");
         return cp->call_json(method, path, body);
     };
+    // Category publications send their previewed bytes unchanged, with the schema version they are written in.
+    ke.publication = [this](const std::string& method, const std::string& path, const std::string& body) -> Result<json> {
+        if (!cp || !channel || !channel->connected()) return make_error("offline", "The control plane is not connected.");
+        CallOptions o;
+        o.headers.emplace_back("skowork-publication-version", "1");
+        return cp->call_json_raw(method, path, body, o);
+    };
     ke.pending_item_withdrawal = [this](const std::string& remote_id) -> Result<bool> {
         if (!root || !tokens) return make_error("unavailable", "Cannot check pending shared-data removal.");
         return WithdrawalOutbox(root->file("withdrawals.dpapi")).has_item(cfg.idp_issuer, cfg.control_plane_url,

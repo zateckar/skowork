@@ -895,6 +895,244 @@ void KnowledgeView::end_preview(bool cancel) {
     shell_.window().render();
 }
 
+// ---- publishing categories (task 10.2) -----------------------------------------------------------------------------
+
+void KnowledgeView::start_publish(long long category) {
+    if (publish_dialog_) return;
+    act("knowledge.publication.options", json::object(), [this, category](const json& options) {
+        ++publish_request_;
+        publish_ = Publish{};
+        publish_->options = options;
+        if (category) publish_->categories.insert(category);
+        // One permitted Group is chosen for the user; with several, nobody is chosen for them.
+        if (const json* g = jobj(options, "groups"); g && g->size() == 1) publish_->groups.insert((*g)[0].get<std::string>());
+        auto d = std::make_unique<ui::Dialog>(shell_.ui(), "knowledge-publish", shell_.t("knowledge.publish.title"), 600);
+        d->on_cancel = [this] { end_publish(); };
+        publish_dialog_ = shell_.window().modal().show(std::move(d));
+        fill_publish();
+    });
+}
+
+// The dialog's body and buttons for its step: choosing, or reviewing the exact payload. The keyboard stays on the
+// control it was on, by automation id, when a new preview arrives.
+void KnowledgeView::fill_publish() {
+    if (!publish_ || !publish_dialog_) return;
+    Publish& p = *publish_;
+    ui::Ui& u = shell_.ui();
+    ui::Dialog& d = *publish_dialog_;
+    ui::Tree* tree = d.tree();
+    std::string focused;
+    if (tree && tree->focused())
+        for (const Node* n = tree->focused(); n; n = n->parent())
+            if (n == &d) focused = tree->focused()->automation_id();
+    Node& body = d.body();
+    body.clear_children();
+    if (Node* footer = d.children().back().get()) footer->clear_children();
+    const auto label = [&](const std::u16string& s, const std::string& id, Paint paint = Paint::text, TextStyle style = TextStyle::body) {
+        return body.emplace<ui::Label>(u, s, style, paint, true, id);
+    };
+    const std::string company = jstr(p.options, "company");
+    const auto group_name = [&](const std::string& g) {
+        return g == company ? shell_.t("knowledge.publish.company", {{"group", u16(g)}}) : u16(g);
+    };
+    if (!jbool(p.options, "available")) {
+        const std::string reason = jstr(p.options, "reason", "unavailable");
+        label(shell_.t("knowledge.publish.unavailable." + reason), "knowledge-publish-unavailable", Paint::warning);
+        d.add_button("knowledge-publish-cancel", shell_.t("knowledge.publish.close"), ui::Button::Kind::standard, [this] { end_publish(); });
+    } else if (p.preview.is_null()) {
+        // Step 1: what and to whom.
+        label(shell_.t("knowledge.publish.choose"), "knowledge-publish-intro");
+        body.emplace<ui::Label>(u, shell_.t("knowledge.categories"), TextStyle::body_strong)->role = ui::Role::heading;
+        for (const auto& c : p.options.value("categories", json::array())) {
+            const long long id = jint(c, "id");
+            auto* box = body.emplace<ui::Checkbox>(u, "knowledge-publish-category-" + std::to_string(id), u16(jstr(c, "name")), p.categories.count(id) > 0);
+            box->on_change = [this, id](bool on) {
+                if (!publish_) return;
+                if (on) publish_->categories.insert(id);
+                else publish_->categories.erase(id);
+            };
+        }
+        body.emplace<ui::Label>(u, shell_.t("knowledge.publish.groups"), TextStyle::body_strong)->role = ui::Role::heading;
+        const json groups = p.options.value("groups", json::array());
+        if (groups.empty()) label(shell_.t("knowledge.publish.no_groups"), "knowledge-publish-no-groups", Paint::text_secondary);
+        for (const auto& gj : groups) {
+            const std::string g = gj.get<std::string>();
+            auto* box = body.emplace<ui::Checkbox>(u, "knowledge-publish-group-" + g, group_name(g), p.groups.count(g) > 0);
+            box->on_change = [this, g](bool on) {
+                if (!publish_) return;
+                if (on) publish_->groups.insert(g);
+                else publish_->groups.erase(g);
+            };
+        }
+        if (!company.empty())
+            label(shell_.t("knowledge.publish.company_about", {{"group", u16(company)}}), "knowledge-publish-company-about", Paint::text_secondary,
+                  TextStyle::caption);
+        ui::TextField::Options o;
+        o.placeholder = shell_.t("knowledge.publish.title_placeholder");
+        auto* title = body.emplace<ui::TextField>(u, "knowledge-publish-name", shell_.t("knowledge.publish.name"), o);
+        title->set_text(p.title);
+        title->on_change = [this, title] {
+            if (publish_) publish_->title = title->text();
+        };
+        if (!p.problem.empty()) label(p.problem, "knowledge-publish-problem", Paint::error, TextStyle::caption);
+        d.add_button("knowledge-publish-cancel", shell_.t("knowledge.cancel"), ui::Button::Kind::standard, [this] { end_publish(); });
+        d.add_button("knowledge-publish-preview", shell_.t("knowledge.publish.preview"), ui::Button::Kind::primary, [this] {
+            if (!publish_) return;
+            if (publish_->categories.empty() || publish_->groups.empty()) {
+                publish_->problem = shell_.t("knowledge.publish.choose_missing");
+                shell_.announce(publish_->problem);
+                fill_publish();
+                return;
+            }
+            publish_->exclude.clear();
+            preview_publish();
+        });
+    } else {
+        // Step 2: exactly what recipients will see, what is left out and why.
+        const json& v = p.preview;
+        if (p.stale) label(shell_.t("knowledge.publish.stale"), "knowledge-publish-stale", Paint::warning);
+        label(shell_.t("knowledge.publish.shown_title", {{"title", u16(jstr(v, "title"))}}), "knowledge-publish-shown-title");
+        std::u16string audience;
+        for (const auto& g : v.value("groups", json::array())) audience += (audience.empty() ? u"" : u", ") + group_name(g.get<std::string>());
+        label(shell_.t("knowledge.publish.audience", {{"groups", audience}}), "knowledge-publish-audience");
+        if (v.contains("company"))
+            label(shell_.t("knowledge.publish.company_about", {{"group", u16(jstr(v, "company"))}}), "knowledge-publish-company-about", Paint::warning);
+        label(shell_.t("knowledge.publish.update"), "knowledge-publish-update", Paint::text_secondary);
+        for (const auto& n : v.value("notices", json::array()))
+            label(shell_.t("knowledge.publish.notice." + jstr(n, "kind"), {{"n", u16(std::to_string(jint(n, "entries")))}}),
+                  "knowledge-publish-notice-" + jstr(n, "kind"), Paint::warning);
+        auto* list = body.emplace<ui::ScrollView>("knowledge-publish-entries");
+        list->height = ui::Sizing::fixed;
+        list->fixed_h = 260;
+        list->gap = 6;
+        list->name = shell_.t("knowledge.publish.entries", {{"n", u16(std::to_string(jint(v, "selected")))}});
+        size_t i = 0;
+        for (const auto& e : v.value("entries", json::array())) {
+            const std::string sid = std::to_string(i++);
+            const long long fact = jint(e, "fact_id");
+            auto* box = list->emplace<ui::Checkbox>(u, "knowledge-publish-entry-" + sid, u16(jstr(e, "text")), jbool(e, "selected"));
+            box->on_change = [this, fact](bool on) {
+                if (!publish_ || publish_->busy) return;
+                if (on) publish_->exclude.erase(fact);
+                else publish_->exclude.insert(fact);
+                preview_publish();  // the payload is always the one previewed
+            };
+            size_t j = 0;
+            for (const auto& x : e.value("evidence", json::array()))
+                list->emplace<ui::Label>(u, u"“" + u16(jstr(x, "text")) + u"” — " + u16(jstr(x, "title")), TextStyle::caption, Paint::text_secondary, true,
+                                         "knowledge-publish-evidence-" + sid + "-" + std::to_string(j++));
+        }
+        i = 0;
+        for (const auto& x : v.value("excluded", json::array())) {
+            const std::string reason = jstr(x, "reason");
+            std::u16string kinds;
+            for (const auto& k : x.value("kinds", json::array())) kinds += (kinds.empty() ? u"" : u", ") + shell_.t("knowledge.publish.kind." + k.get<std::string>());
+            const std::u16string what = x.contains("text") ? u16(jstr(x, "text")) : shell_.t("knowledge.publish.withheld_fact");
+            list->emplace<ui::Label>(u, shell_.t("knowledge.publish.excluded." + reason, {{"fact", what}, {"kinds", kinds}}), TextStyle::caption, Paint::warning,
+                                     true, "knowledge-publish-excluded-" + std::to_string(i++));
+        }
+        if (!p.problem.empty()) label(p.problem, "knowledge-publish-problem", Paint::error, TextStyle::caption);
+        d.add_button("knowledge-publish-back", shell_.t("knowledge.publish.back"), ui::Button::Kind::standard, [this] {
+            if (!publish_) return;
+            if (publish_->preview.contains("token")) shell_.call("knowledge.publication.cancel", {{"token", jstr(publish_->preview, "token")}});
+            ++publish_request_;
+            publish_->preview = nullptr;
+            publish_->problem.clear();
+            publish_->stale = false;
+            fill_publish();
+        });
+        d.add_button("knowledge-publish-cancel", shell_.t("knowledge.cancel"), ui::Button::Kind::standard, [this] { end_publish(); });
+        d.add_button("knowledge-publish-ok", shell_.t("knowledge.publish.confirm"), ui::Button::Kind::primary, [this] { confirm_publish(); });
+    }
+    d.relayout();
+    if (tree) {
+        std::function<Node*(Node&)> find = [&](Node& n) -> Node* {
+            if (!focused.empty() && n.automation_id() == focused) return &n;
+            for (const auto& c : n.children())
+                if (Node* f = find(*c)) return f;
+            return nullptr;
+        };
+        tree->layout_if_needed();
+        if (Node* again = find(d)) tree->set_focus(again);
+        else if (Node* first = tree->next_focus(nullptr)) tree->set_focus(first);
+    }
+    shell_.window().render();
+}
+
+void KnowledgeView::preview_publish() {
+    if (!publish_) return;
+    Publish& p = *publish_;
+    if (p.preview.is_object() && p.preview.contains("token")) shell_.call("knowledge.publication.cancel", {{"token", jstr(p.preview, "token")}});
+    json request = {{"categories", std::vector<long long>(p.categories.begin(), p.categories.end())},
+                    {"groups", std::vector<std::string>(p.groups.begin(), p.groups.end())},
+                    {"title", ui::to_utf8(p.title)},
+                    {"exclude", std::vector<long long>(p.exclude.begin(), p.exclude.end())}};
+    p.busy = true;
+    const size_t request_id = ++publish_request_;
+    std::weak_ptr<int> alive = alive_;
+    shell_.call("knowledge.publication.preview", request, [this, alive, request_id](Result<json> r) {
+        if (!alive.lock() || !publish_ || request_id != publish_request_) return;
+        publish_->busy = false;
+        if (!r) {
+            publish_->problem = u16(r.error().message);
+            shell_.announce(shell_.t("common.error_prefix") + u" " + publish_->problem);
+        } else {
+            publish_->problem.clear();
+            publish_->preview = *r;
+            if (publish_->preview.is_object() && !publish_->preview.contains("token")) publish_->problem = shell_.t("knowledge.publish.nothing");
+        }
+        fill_publish();
+    });
+}
+
+void KnowledgeView::confirm_publish() {
+    if (!publish_ || publish_->busy || !publish_->preview.is_object()) return;
+    const std::string token = jstr(publish_->preview, "token");
+    if (token.empty()) {
+        publish_->problem = shell_.t("knowledge.publish.nothing");
+        shell_.announce(publish_->problem);
+        fill_publish();
+        return;
+    }
+    publish_->busy = true;
+    const size_t request_id = publish_request_;
+    std::weak_ptr<int> alive = alive_;
+    shell_.call("knowledge.publication.confirm", {{"token", token}}, [this, alive, request_id](Result<json> r) {
+        if (!alive.lock() || !publish_ || request_id != publish_request_) return;
+        publish_->busy = false;
+        if (!r && r.error().code == "stale") {
+            // What was reviewed no longer holds: the new preview is shown and must be confirmed again.
+            publish_->stale = true;
+            publish_->preview = json::object();
+            shell_.announce(shell_.t("knowledge.publish.stale"));
+            preview_publish();
+            return;
+        }
+        if (!r) {
+            publish_->problem = u16(r.error().message);
+            shell_.announce(shell_.t("common.error_prefix") + u" " + publish_->problem);
+            fill_publish();
+            return;
+        }
+        std::u16string groups;
+        for (const auto& g : r->value("groups", json::array())) groups += (groups.empty() ? u"" : u", ") + u16(g.get<std::string>());
+        notice_ = shell_.t("knowledge.publish.done", {{"n", u16(std::to_string(jint(*r, "entries")))}, {"groups", groups}});
+        shell_.announce(notice_);
+        publish_->preview = nullptr;  // confirmed: nothing to cancel
+        end_publish();
+        rebuild();
+    });
+}
+
+void KnowledgeView::end_publish() {
+    ++publish_request_;
+    if (publish_ && publish_->preview.is_object() && publish_->preview.contains("token"))
+        shell_.call("knowledge.publication.cancel", {{"token", jstr(publish_->preview, "token")}});
+    if (ui::Dialog* d = std::exchange(publish_dialog_, nullptr)) d->close();
+    publish_.reset();
+    shell_.window().render();
+}
+
 // ---- the view ------------------------------------------------------------------------------------------------------
 
 void KnowledgeView::rebuild() {
@@ -2107,6 +2345,8 @@ void KnowledgeView::build_knowledge_list() {
             r->emplace<ui::Label>(u, title, TextStyle::body, Paint::text, false)->role = ui::Role::none;
             r->emplace<ui::Label>(u, meta, TextStyle::caption, Paint::text_secondary, true)->role = ui::Role::none;
         };
+        if (cats->size() > 1)  // more than Uncategorized
+            button(*list_, "knowledge-publish", shell_.t("knowledge.publish.open") + u"…", [this] { start_publish(0); }, ui::Button::Kind::subtle);
         row("all", shell_.t("knowledge.all_knowledge"), shell_.t("knowledge.all_knowledge_meta"));
         for (const auto& c : *cats) {
             const long long id = jint(c, "id");
@@ -2126,6 +2366,11 @@ void KnowledgeView::build_knowledge_list() {
     h->role = ui::Role::heading;
     h->padding.top = 6;
     list_->name = scope_name(knowledge_scope_);
+    if (knowledge_scope_.size() > 1 && knowledge_scope_[0] == 'c' && knowledge_scope_ != "c0") {
+        const long long category = std::atoll(knowledge_scope_.c_str() + 1);
+        button(*head, "knowledge-publish-category", shell_.t("knowledge.publish.open") + u"…", [this, category] { start_publish(category); },
+               ui::Button::Kind::subtle)->name = shell_.t("knowledge.publish.open_named", {{"name", scope_name(knowledge_scope_)}});
+    }
 
     if (knowledge_scope_ == "entities") {
         const json* list = jobj(entities_, "entities");

@@ -52,6 +52,8 @@ public:
     Result<HttpResponse> call(const std::string& method, const std::string& url, const std::string& body = {},
                               const CallOptions& options = {});
     Result<json> call_json(const std::string& method, const std::string& url, const json& body = nullptr);
+    // As call_json, with ody sent as given and the extra headers of options (a request whose bytes must not change).
+    Result<json> call_json_raw(const std::string& method, const std::string& url, const std::string& body, const CallOptions& options);
 
     Result<RegistrationResult> register_installation(const RegistrationInfo& info);
     Result<HeartbeatResult> heartbeat(const std::string& installation_id, const std::string& policy_version,

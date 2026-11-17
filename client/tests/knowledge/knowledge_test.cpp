@@ -298,6 +298,10 @@ struct Kg {
         e.user = [] { return std::pair<std::string, std::string>{"Jan Novák", "jan.novak@acme-test.example"}; };
         e.deferred = [this] { return deferred.load(); };
         if (team) e.team = [this](const std::string& m, const std::string& p, const json& b) { return team(m, p, b); };
+        e.publication = [this](const std::string& m, const std::string& p, const std::string& b) -> Result<json> {
+            if (!publication) return make_error("offline", "The control plane is not connected.");
+            return publication(m, p, b);
+        };
         if (pending_withdrawal) e.pending_item_withdrawal = [this](const std::string& id) { return pending_withdrawal(id); };
         if (retry_withdrawals) e.retry_withdrawals = [this](const std::function<Status(const std::string&)>& remove) { retry_withdrawals(remove); };
         e.background = background;
@@ -359,6 +363,7 @@ struct Kg {
     int directory_calls = 0;
     // control-plane/team-knowledge (add-knowledge-sharing); set it, then make() again.
     std::function<Result<json>(const std::string&, const std::string&, const json&)> team;
+    std::function<Result<json>(const std::string&, const std::string&, const std::string&)> publication;
     std::function<Result<bool>(const std::string&)> pending_withdrawal;
     std::function<void(const std::function<Status(const std::string&)>&)> retry_withdrawals;
     std::unique_ptr<KnowledgeService> svc;
@@ -2792,6 +2797,212 @@ TEST(KnowledgeImpactPreview, AnalyzedImportIsRecordedAsPreviewedAndPendingAnalys
     EXPECT_FALSE(kg.svc->store().item("files", kg.file_path("expired.txt")));
     EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_facts"), 2);
     EXPECT_EQ(supports(jana), 3u);
+}
+// improve-skowork-and-knowledge-control 10.2: publishing categories offers the Groups the server and policy permit,
+// with Company named; previews exactly what would be uploaded; excludes facts whose support needs a Source kind the
+// policy does not permit (also in a second category), disputed and unchecked facts; says when content was copied from
+// mail; uploads no paths, passages or local ids; and uploads, after confirmation only, the previewed bytes.
+TEST(KnowledgePublication, PreviewIsTheExactEligiblePayloadAndOnlyItIsUploaded) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}, {"knowledge.sharing.groups", {"engineering", "all-staff"}}});
+    RpcRegistry rpc;
+    register_knowledge_rpc(rpc, [&kg] { return kg.svc.get(); }, nullptr);
+    const auto call = [&](const char* method, const json& params) { return (*rpc.find(method, false))(params); };
+    // control-plane/team-knowledge, in process.
+    bool supported = true, conflict = false;
+    std::vector<std::pair<std::string, std::string>> uploads;  // path, body
+    kg.publication = [&](const std::string& method, const std::string& path, const std::string& body) -> Result<json> {
+        if (method == "GET" && path == "api/v1/knowledge/capabilities")
+            return json{{"publication_read_versions", supported ? json{1} : json::array()},
+                        {"publication_mutation_versions", supported ? json{1} : json::array()}};
+        if (method == "GET" && path == "api/v1/knowledge/publications")
+            return json{{"permitted_groups", {"all-staff", "engineering", "sales"}}, {"company_group", "all-staff"},
+                        {"derived_sources", {"files", "notes"}}, {"publications", json::array()}};
+        if (method == "PUT") {
+            if (conflict) return make_error("CONFLICT", "The publication changed; review it again.");
+            uploads.emplace_back(path, body);
+            return json{{"revision", 1}, {"replayed", false}};
+        }
+        return make_error("http_404", "No such endpoint.");
+    };
+    auto& store = kg.svc->store();
+    const std::map<std::string, std::string> files = {{"approved.txt", "The approved Phoenix deadline is June."},
+                                                      {"owner.txt", "Petr Novotný owns the Phoenix budget."},
+                                                      {"kickoff.txt", "The Phoenix kickoff is in May."},
+                                                      {"kickoff2.txt", "Phoenix kicks off in April."}};
+    for (const auto& [name, text] : files) {
+        write_file(kg.folder / name, text);
+        ASSERT_TRUE(kg.svc->add_document(kg.file_path(name)));
+        kg.idle();
+    }
+    kg.add_mail("mail", "m1", {{"title", "Phoenix"}, {"body", "Draft: the Phoenix deadline is July."}, {"at", kg.clock.unix_millis()}, {"ref", "mail:m1"}});
+    kg.svc->mail_event("mail.received", "m1");
+    // A note copied from that mail; extraction finds that Jana Nováková leads Phoenix in it.
+    ASSERT_TRUE(kg.svc->save_note(0, "Phoenix lead", "Jana Nováková leads Phoenix.", {{"kind", "mail"}, {"ref", "m1"}, {"title", "Phoenix"}}));
+    kg.idle();
+    const auto mail = store.item("mail", "m1");
+    ASSERT_TRUE(mail);
+    const auto chunk_of = [&](long long item) { return store.chunks_of_item(item).at(0); };
+    const auto file_chunk = [&](const std::string& name) { return chunk_of(store.item("files", kg.file_path(name))->id); };
+    const auto entity = [&](const char* type, const char* name) { return store.resolve_entity(type, name, "", 1); };
+    const auto fact = [&](long long subject, const char* predicate, long long object, long long chunk) -> long long {
+        const long long relation = store.add_relation(subject, predicate, object, 0.9, "", "", chunk);
+        const auto f = relation ? store.fact_of_relation(*store.relation(relation)) : std::nullopt;
+        EXPECT_TRUE(f);
+        return f.value_or(0);
+    };
+    const long long phoenix = entity("Project", "Phoenix");
+    const long long june = fact(phoenix, "deadline", entity("Date", "June"), file_chunk("approved.txt").id);
+    const long long july = fact(phoenix, "deadline", entity("Date", "July"), chunk_of(mail->id).id);
+    const long long owner = fact(phoenix, "budget_owner", entity("Person", "Petr Novotný"), file_chunk("owner.txt").id);
+    const long long may = fact(phoenix, "kickoff", entity("Date", "May"), file_chunk("kickoff.txt").id);
+    const long long april = fact(phoenix, "kickoff", entity("Date", "April"), file_chunk("kickoff2.txt").id);
+    const long long lead = kg.count("SELECT id FROM knowledge_facts WHERE predicate='leads'");
+    ASSERT_TRUE(june && july && owner && may && april && lead > 0);
+    const auto generation = [&] { return store.knowledge_generation().value_or(0); };
+    const auto span = [](const ChunkRow& c, const std::string& word) {
+        const auto at = c.text.find(word);
+        return AnalysisSpan{c.id, at, at + word.size()};
+    };
+    // June has an exact excerpt; the owner's support needs the mail too.
+    ASSERT_TRUE(store.bind_analysis_evidence(june, span(file_chunk("approved.txt"), "June"), generation()));
+    const long long mail_evidence = store.fact_state(july, false)->citations.at(0).evidence_id;
+    ASSERT_TRUE(store.db().exec("INSERT INTO knowledge_support_evidence(support_id,evidence_id) SELECT id," + std::to_string(mail_evidence) +
+                                " FROM knowledge_support_sets WHERE fact_id=" + std::to_string(owner)));
+    const auto planning = store.create_category("Planning"), risks = store.create_category("Risks");
+    ASSERT_TRUE(planning && risks);
+    for (long long f : {june, july, owner, may, lead}) ASSERT_TRUE(store.set_category_assignment(f, *planning, "manual", "Planning"));
+    for (long long f : {june, owner}) ASSERT_TRUE(store.set_category_assignment(f, *risks, "manual", "Risk"));
+    kg.idle();  // every fact compared for inconsistencies; none found
+    const auto may_excerpt = store.bind_analysis_evidence(may, span(file_chunk("kickoff.txt"), "May"), generation());
+    const auto april_excerpt = store.bind_analysis_evidence(april, span(file_chunk("kickoff2.txt"), "April"), generation());
+    ASSERT_TRUE(may_excerpt && april_excerpt);
+    ASSERT_TRUE(store.record_conflict(may, april, may_excerpt->evidence_id, april_excerpt->evidence_id, "Two kickoffs", generation()));
+    // A fact categorized but not yet compared.
+    write_file(kg.folder / "budget.txt", "The Phoenix budget is 5 million EUR.");
+    ASSERT_TRUE(kg.svc->add_document(kg.file_path("budget.txt")));
+    kg.svc->step();
+    const long long budget = fact(phoenix, "budget", entity("Amount", "5 million EUR"), file_chunk("budget.txt").id);
+    ASSERT_TRUE(store.set_category_assignment(budget, *planning, "manual", "Planning"));
+    ASSERT_FALSE(store.consistency_checked(budget));
+
+    // The options: the Groups both policy and server permit, Company named, the permitted Source kinds.
+    auto options = call("knowledge.publication.options", json::object());
+    ASSERT_TRUE(options) << options.error().message;
+    EXPECT_TRUE((*options)["available"].get<bool>());
+    EXPECT_EQ((*options)["groups"], (json{"all-staff", "engineering"}));
+    EXPECT_EQ((*options)["company"], "all-staff");
+    EXPECT_EQ((*options)["derived_sources"], (json{"files", "notes"}));
+    EXPECT_EQ((*options)["categories"].size(), 2u);
+
+    const auto preview = [&](json request) {
+        auto r = call("knowledge.publication.preview", request);
+        EXPECT_TRUE(r) << r.error().message;
+        return r ? *r : json();
+    };
+    json p = preview({{"categories", {*planning, *risks}}, {"groups", {"engineering"}}});
+    std::map<long long, json> entries, excluded;
+    for (const auto& e : p["entries"]) entries[e["fact_id"].get<long long>()] = e;
+    for (const auto& e : p["excluded"]) excluded[e["fact_id"].get<long long>()] = e;
+    ASSERT_EQ(entries.size(), 2u) << p.dump(2);
+    // June once, though in both categories, with its exact excerpt titled by the file's name alone.
+    EXPECT_EQ(entries[june]["categories"], (json{"Planning", "Risks"}));
+    EXPECT_EQ(entries[june]["text"], "Phoenix deadline June");
+    EXPECT_EQ(entries[june]["source_kinds"], json{"files"});
+    EXPECT_EQ(entries[june]["evidence"], (json{{{"title", "approved.txt"}, {"text", "June"}, {"source", "files"}}}));
+    // The note copied from mail is publishable, and the copy is stated.
+    EXPECT_EQ(entries[lead]["source_kinds"], json{"notes"});
+    EXPECT_EQ(entries[lead]["notices"], json{"mail"});
+    EXPECT_EQ(p["notices"], (json{{{"kind", "mail"}, {"entries", 1}}}));
+    // Mail evidence, alone or beside a document, is excluded and explained, in every category the fact is in.
+    EXPECT_EQ(excluded[july]["reason"], "source_not_permitted");
+    EXPECT_EQ(excluded[july]["kinds"], json{"mail"});
+    EXPECT_EQ(excluded[owner]["reason"], "source_not_permitted");
+    EXPECT_EQ(excluded[owner]["kinds"], json{"mail"});
+    EXPECT_EQ(excluded[owner]["categories"], (json{"Planning", "Risks"}));
+    EXPECT_EQ(excluded[may]["reason"], "disputed");
+    EXPECT_EQ(excluded[budget]["reason"], "pending");
+    EXPECT_EQ(p["update"], "review");
+    EXPECT_FALSE(p.contains("company"));
+    // The payload: the selected entries only, in the server's envelope, without paths, passages or local ids.
+    const std::string payload = p["payload"].get<std::string>();
+    const json body = json::parse(payload);
+    EXPECT_EQ(body.size(), 5u);
+    EXPECT_EQ(body["expected_revision"], 0);
+    EXPECT_EQ(body["title"], "Planning, Risks");
+    EXPECT_EQ(body["groups"], json{"engineering"});
+    ASSERT_EQ(body["entries"].size(), 2u);
+    for (const auto& e : body["entries"]) {
+        EXPECT_EQ(e.size(), 4u);  // id, text, source_kinds, evidence
+        for (const auto& x : e["evidence"]) EXPECT_EQ(x.size(), 3u);  // id, title, text
+    }
+    const std::string folder = u8(kg.folder);
+    for (const std::string& secret : {folder, std::string("approved Phoenix"), std::string("July"), std::string("Petr"), std::string("May"),
+                                      std::string("fact_id"), std::string("\\\\")})
+        EXPECT_EQ(payload.find(secret), std::string::npos) << secret;
+
+    // Company names the Group behind it; a Group the policy does not permit is refused.
+    EXPECT_EQ(preview({{"categories", {*risks}}, {"groups", {"all-staff"}}})["company"], "all-staff");
+    auto refused = call("knowledge.publication.preview", {{"categories", {*risks}}, {"groups", {"sales"}}});
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "GROUP_NOT_PERMITTED");
+
+    // Removing an entry previews again without it.
+    json fewer = preview({{"categories", {*planning, *risks}}, {"groups", {"engineering"}}, {"exclude", {lead}}, {"title", "Phoenix plan"}});
+    EXPECT_EQ(json::parse(fewer["payload"].get<std::string>())["entries"].size(), 1u);
+    EXPECT_EQ(json::parse(fewer["payload"].get<std::string>())["title"], "Phoenix plan");
+    for (const auto& e : fewer["entries"])
+        if (e["fact_id"] == lead) EXPECT_FALSE(e["selected"].get<bool>());
+
+    // Cancelled: nothing is uploaded and the preview cannot be confirmed. The generic confirmation refuses it too.
+    EXPECT_FALSE(call("knowledge.preview.confirm", {{"token", fewer["token"]}, {"accept_incomplete", true}}));
+    ASSERT_TRUE(call("knowledge.publication.cancel", {{"token", fewer["token"]}}));
+    EXPECT_FALSE(call("knowledge.publication.confirm", {{"token", fewer["token"]}}));
+    // Knowledge changed since the preview: refused as stale, nothing uploaded.
+    p = preview({{"categories", {*planning, *risks}}, {"groups", {"engineering"}}});
+    ASSERT_TRUE(store.set_category_assignment(april, *risks, "manual", "Risk"));
+    auto stale = call("knowledge.publication.confirm", {{"token", p["token"]}});
+    ASSERT_FALSE(stale);
+    EXPECT_EQ(stale.error().code, "stale");
+    // The server's conflict means another device changed it: a fresh preview is needed.
+    p = preview({{"categories", {*planning, *risks}}, {"groups", {"engineering"}}});
+    conflict = true;
+    stale = call("knowledge.publication.confirm", {{"token", p["token"]}});
+    ASSERT_FALSE(stale);
+    EXPECT_EQ(stale.error().code, "stale");
+    conflict = false;
+    EXPECT_TRUE(uploads.empty());
+
+    // Confirmed: the previewed bytes are uploaded unchanged, and recorded locally without their text.
+    p = preview({{"categories", {*planning, *risks}}, {"groups", {"engineering"}}});
+    auto done = call("knowledge.publication.confirm", {{"token", p["token"]}});
+    ASSERT_TRUE(done) << done.error().message;
+    ASSERT_EQ(uploads.size(), 1u);
+    EXPECT_EQ(uploads[0].first, "api/v1/knowledge/publications/" + p["publication_id"].get<std::string>());
+    EXPECT_EQ(uploads[0].second, p["payload"].get<std::string>());
+    EXPECT_EQ((*done)["revision"], 1);
+    const auto published = store.publications();
+    ASSERT_EQ(published.size(), 1u);
+    EXPECT_EQ(published[0].entries.size(), 2u);
+    EXPECT_EQ(published[0].groups, std::vector<std::string>{"engineering"});
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_publications WHERE title LIKE '%June%' OR payload_sha256 LIKE '%June%'"), 0);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_publication_entries WHERE fact_id=" + std::to_string(june)), 1);
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_publication_previews WHERE token='" + p["token"].get<std::string>() + "'"), 0);
+
+    // An open publication preview quotes excerpts: forgetting any item deletes it.
+    p = preview({{"categories", {*risks}}, {"groups", {"engineering"}}});
+    ASSERT_TRUE(p.contains("token"));
+    ASSERT_GT(kg.count("SELECT count(*) FROM knowledge_publication_previews"), 0);
+    ASSERT_TRUE(kg.svc->forget_item(store.item("files", kg.file_path("kickoff2.txt"))->id));
+    EXPECT_EQ(kg.count("SELECT count(*) FROM knowledge_publication_previews"), 0);
+
+    // A server without publication support: not offered, nothing previewed.
+    supported = false;
+    options = call("knowledge.publication.options", json::object());
+    ASSERT_TRUE(options);
+    EXPECT_FALSE((*options)["available"].get<bool>());
+    EXPECT_EQ((*options)["reason"], "unsupported");
+    EXPECT_FALSE(call("knowledge.publication.preview", {{"categories", {*risks}}, {"groups", {"engineering"}}}));
+    EXPECT_EQ(uploads.size(), 1u);
 }
 // 8.3: a confirmation applies only to what was analyzed: changed bytes, policy or effects require a new preview, an
 // expired or cancelled preview is gone, and a large preview is read in pages.
