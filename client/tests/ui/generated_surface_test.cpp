@@ -6,6 +6,19 @@
 
 using wb::ui::parse_generated_surface;
 
+// improve-generated-surface-guidance: the quoted ask_user form example is a valid form with one button.
+TEST(GeneratedSurface, InstructionsQuoteAValidQuestionFormExample) {
+    const auto form = parse_generated_surface(wb::ui::generated_question_form_example());
+    ASSERT_TRUE(form.has_value());
+    int buttons = 0;
+    for (const auto& c : (*form)["components"]) buttons += c["type"] == "button";
+    EXPECT_EQ(buttons, 1);
+    const std::string instructions(wb::ui::generated_surface_instructions());
+    EXPECT_NE(instructions.find(std::string(wb::ui::generated_question_form_example())), std::string::npos);
+    EXPECT_NE(instructions.find("ask_user"), std::string::npos);
+    EXPECT_NE(instructions.find("next message"), std::string::npos);
+}
+
 TEST(GeneratedSurface, AcceptsACompositeSurfaceAndCellCitation) {
     EXPECT_TRUE(parse_generated_surface(wb::ui::generated_surface_example()).has_value());
     const char* example = R"({"version":1,"id":"sample","summary":"Comparison","components":[

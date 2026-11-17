@@ -3,7 +3,7 @@
 // accounting and the usage audit. Nothing about the upstream (address, key, error text) reaches the client.
 import { Router, type Request, type Response } from 'express';
 import type { Config, ModelCapability } from '../config.ts';
-import { type Backend, Connections, FALLBACK_AFTER_DEFAULT_S } from './connections.ts';
+import { type Backend, Connections, FALLBACK_AFTER_DEFAULT_S, type Sampling } from './connections.ts';
 import type { Audit } from '../identity/audit.ts';
 import type { Db } from '../db.ts';
 import { nowIso } from '../db.ts';
@@ -107,13 +107,16 @@ class StreamLimit extends Error {
 /**
  * The SSE response of a streamed chat request (fix-long-thread-model-calls D1). The headers are sent when a backend has
  * been acquired; a keep-alive comment follows whenever nothing was written for keepAliveMs. Comments are not upstream
- * bytes, so they do not count against failover.
+ * bytes, so they do not count against failover. A keep-alive is written only between events, never inside an upstream
+ * event that is still arriving (fix-stream-gaps-and-parallel-file-edits D1).
  */
 class EventStream {
   readonly #res: Response;
   readonly #keepAliveMs: number;
   #started = false;
   #timer: NodeJS.Timeout | undefined;
+  /** The last bytes written, to tell whether the stream is at an event boundary (a blank line). */
+  #tail = '';
   constructor(res: Response, keepAliveMs: number) {
     this.#res = res;
     this.#keepAliveMs = keepAliveMs;
@@ -136,7 +139,15 @@ class EventStream {
   write(data: Buffer | string) {
     if (this.closed) return;
     this.#res.write(data);
+    if (data.length > 0) {
+      const s = typeof data === 'string' ? data.slice(-4) : data.subarray(Math.max(0, data.length - 4)).toString('latin1');
+      this.#tail = (this.#tail + s).slice(-4);
+    }
     this.#arm();
+  }
+  /** True before any byte and after a complete event (its blank line). */
+  get #atBoundary() {
+    return this.#tail === '' || this.#tail.endsWith('\n\n') || this.#tail.endsWith('\r\n\r\n') || this.#tail.endsWith('\r\r');
   }
   /** One error event, in the shape of the error body (sendError), then the end of the stream without [DONE]. */
   error(code: string, message: string, extra: ErrorExtra) {
@@ -152,7 +163,7 @@ class EventStream {
     clearTimeout(this.#timer);
     this.#timer = setTimeout(() => {
       if (this.closed) return;
-      this.#res.write(': keep-alive\n\n');
+      if (this.#atBoundary) this.#res.write(': keep-alive\n\n');
       this.#arm();
     }, this.#keepAliveMs);
   }
@@ -498,12 +509,13 @@ export class Gateway {
   }
 
   /** The fallback of a model, when it fits the request: its route and its effort (D3). Null when it cannot take the request. */
-  #fallbackTo(ref: string, root: Record<string, unknown>, estimate: number): { ref: string; route: Route; effort: string | null } | null {
+  #fallbackTo(ref: string, root: Record<string, unknown>, estimate: number): { ref: string; route: Route; effort: string | null; sampling: Sampling | null } | null {
     const route = this.connections.route(ref);
     if (!route.backends.length) return null;
     const cap = this.#capability(ref);
     const fits = estimate <= cap.context_window && (!hasTools(root) || Boolean(cap.tools)) && (!hasImageParts(root) || Boolean(cap.images));
-    return fits ? { ref, route, effort: this.connections.settings(ref).reasoning_effort } : null;
+    const s = this.connections.settings(ref);
+    return fits ? { ref, route, effort: s.reasoning_effort, sampling: s.sampling } : null;
   }
 
   async handle(req: Request, res: Response, kind: Kind): Promise<void> {
@@ -597,15 +609,18 @@ export class Gateway {
       const normalFirst = stream ? g.firstTokenTimeoutMs : total;
       // The body for a route: the routed model id, the effort (null removes it; undefined keeps the client's body) and,
       // for a streamed request, the usage option. An image request forwards only its prompt, count and size.
-      const body = (model: string, effort: string | null | undefined) => {
+      // The answering model's sampling defaults fill the fields the client did not send (add-model-sampling-settings D1).
+      const body = (model: string, effort: string | null | undefined, sampling: Sampling | null | undefined) => {
         const forwarded: Record<string, unknown> = imageRequest ? { model, ...imageRequest } : { ...root, model };
         if (effort === null) delete forwarded.reasoning_effort;
         else if (effort !== undefined) forwarded.reasoning_effort = effort;
+        if (kind === 'chat' && sampling) for (const [k, v] of Object.entries(sampling)) if (!(k in root)) forwarded[k] = v;
         if (stream) forwarded.stream_options = { ...((root.stream_options as object) ?? {}), include_usage: true };
         return JSON.stringify(forwarded);
       };
-      const call = (model: string, effort: string | null | undefined, firstByteMs: number, rescue = false): Call => ({
-        path, payload: body(model, effort), kind, estimate, capture, out, res, firstByteMs, totalMs: total, signal: abort.signal, rescue,
+      const call = (model: string, effort: string | null | undefined, firstByteMs: number, rescue = false,
+        sampling: Sampling | null | undefined = msettings?.sampling): Call => ({
+        path, payload: body(model, effort, sampling), kind, estimate, capture, out, res, firstByteMs, totalMs: total, signal: abort.signal, rescue,
       });
 
       // The leg that answers: the model itself, or its fallback (D3) while it is cooling down (D4) or after it failed.
@@ -614,7 +629,7 @@ export class Gateway {
       if (fb && (this.#cooldown.get(upstream) ?? 0) > Date.now()) {
         fallback = 'cooldown';
         servedBy = fb.ref;
-        leg = await this.#leg(fb.route, call(fb.route.model, fb.effort ?? null, normalFirst, true));
+        leg = await this.#leg(fb.route, call(fb.route.model, fb.effort ?? null, normalFirst, true, fb.sampling));
       } else if (fb) {
         const afterMs = (msettings!.fallback_after_s ?? FALLBACK_AFTER_DEFAULT_S) * 1000;
         leg = await this.#leg(route, call(route.model, msettings!.reasoning_effort ?? undefined, afterMs));
@@ -623,7 +638,7 @@ export class Gateway {
           servedBy = fb.ref;
           this.#cooldown.set(upstream, Date.now() + g.fallbackCooldownMs);
           this.#log(`${upstream} fell back to ${fb.ref} (${fallback})`);
-          leg = await this.#leg(fb.route, call(fb.route.model, fb.effort ?? null, normalFirst, true));
+          leg = await this.#leg(fb.route, call(fb.route.model, fb.effort ?? null, normalFirst, true, fb.sampling));
         }
       } else {
         leg = await this.#leg(route, call(route.model, msettings?.reasoning_effort ?? undefined, normalFirst));

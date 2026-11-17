@@ -350,7 +350,11 @@ void RailPane::rebuild() {
                                                               : shell_.t("rail.skill", {{"skill", ui::to_utf16(re.skill)}, {"task", ui::to_utf16(re.task)}});
                 auto* entry = card->body().emplace<ui::Card>(shell_.ui(), eid, title, true, expanded_.contains(run));
                 entry->background = Paint::none;
-                const std::u16string state = shell_.t("rail.states." + re.state);
+                std::u16string state = shell_.t("rail.states." + re.state);
+                if (re.active_tools > 0)
+                    state += u" · " + shell_.t("feed.working_tools", {{"count", ui::to_utf16(std::to_string(re.active_tools))}});
+                else if (re.model_active)
+                    state += u" · " + shell_.t("feed.working_model");
                 const std::u16string elapsed = ui::to_utf16(format_elapsed(re.duration_ms));
                 entry->header().emplace<ui::Label>(shell_.ui(), state + u" · " + elapsed, TextStyle::caption, Paint::text_secondary,
                                                    false, eid + "-state");

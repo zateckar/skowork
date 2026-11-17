@@ -53,8 +53,13 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         for (const auto& e : x->entities)
             for (const int c : e.chunks)
                 if (c < 0 || c >= chunk_count) __builtin_trap();
-        for (const auto& r : x->relations)
+        for (const auto& r : x->relations) {
             if (r.confidence < 0.0 || r.confidence > 1.0 || r.chunk < -1 || r.chunk >= chunk_count) __builtin_trap();
+            // add-knowledge-salience: salience is 0..1, durability is one of three words, statements are bounded.
+            if (!(r.salience >= 0.0 && r.salience <= 1.0)) __builtin_trap();
+            if (r.durability != "lasting" && r.durability != "temporary" && r.durability != "trivial") __builtin_trap();
+            if (r.statement.size() > kMaxStatementBytes) __builtin_trap();
+        }
     }
     const AnalysisEvidence evidence = {{1, {{10, "Projekt začne v červnu."}}}, {2, {{20, "The project starts in July."}}}};
     if (const auto x = parse_analysis_proposals(bytes, evidence, {7})) {

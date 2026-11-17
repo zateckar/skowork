@@ -367,6 +367,20 @@ std::vector<StoredEvent> RunStore::events(const std::string& run_id, long long a
     return out;
 }
 
+std::optional<StoredEvent> RunStore::latest_event(const std::string& run_id, const std::string& kind) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare("SELECT seq,at,kind,payload FROM run_events WHERE run_id=?1 AND kind=?2 ORDER BY seq DESC LIMIT 1");
+    st.bind(1, run_id).bind(2, kind);
+    if (!st.step()) return std::nullopt;
+    StoredEvent e;
+    e.seq = st.col_int(0);
+    e.at = st.col_text(1);
+    e.kind = st.col_text(2);
+    e.payload = json::parse(st.col_text(3), nullptr, false);
+    if (e.payload.is_discarded()) e.payload = nullptr;
+    return e;
+}
+
 // ---- Counters -----------------------------------------------------------------------------------------------------
 
 Status RunStore::set_active_ms(const std::string& run_id, long long ms) {

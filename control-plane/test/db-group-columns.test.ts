@@ -18,8 +18,9 @@ test('a database created with the earlier Group column names is renamed on start
       ALTER TABLE role_mappings RENAME COLUMN skowork_group TO workbench_group;
       ALTER TABLE group_members RENAME COLUMN skowork_group TO workbench_group;
       ALTER TABLE mcp_assignments RENAME COLUMN skowork_group TO workbench_group;
+      ALTER TABLE llm_models DROP COLUMN sampling; -- the later add-model-sampling-settings migration runs again too
     `);
-    db.prepare('UPDATE schema_version SET version = ?').run(version - 1);
+    db.prepare('UPDATE schema_version SET version = ?').run(version - 2);
     db.close();
 
     db = openDb(path);

@@ -1,5 +1,6 @@
 #include "runtime/context.h"
 
+#include "base/strings.h"
 #include "platform/crypto.h"
 #include "runtime/tools.h"
 
@@ -58,13 +59,7 @@ std::string wrap_untrusted(std::string_view content, std::string_view nonce, std
     return out;
 }
 
-size_t estimate_context_tokens(std::string_view text) {
-    size_t ascii = 0;
-    for (const unsigned char c : text)
-        if (c < 0x80) ++ascii;
-    const size_t non_ascii = text.size() - ascii;
-    return non_ascii + ascii / 3 + (ascii % 3 != 0);
-}
+size_t estimate_context_tokens(std::string_view text) { return estimate_text_tokens(text); }
 
 size_t estimate_request_tokens(const std::vector<model::ChatMessage>& messages, const std::vector<model::ToolSpec>& tools) {
     size_t n = 0;

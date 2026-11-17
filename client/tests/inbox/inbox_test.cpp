@@ -13,6 +13,7 @@
 namespace {
 
 using wb::inbox::ThreadEntry;
+json call(RpcRegistry& rpc, const std::string& method, const json& params);
 
 }  // namespace
 
@@ -189,6 +190,36 @@ TEST(InboxViews, ChangeEventsCarryTheEntryAndCounts) {
     EXPECT_EQ(jstr(data, "thread_id"), t);
     EXPECT_EQ(data["counts"]["unread"], 1);
     EXPECT_EQ(data["entry"]["id"], t);
+}
+
+TEST(InboxViews, RunningProgressIsReconstructedAndAnnouncedWithoutPayloadContent) {
+    Inbox in;
+    Gate gate;
+    struct Release { Gate& gate; ~Release() { gate.release(); } } release{gate};
+    in.env.start();
+    in.env.model.push_blocking(gate, text_response("secret-answer"));
+    const auto thread = in.env.thread();
+    const auto run = in.env.run(thread, "secret-request");
+    ASSERT_TRUE(in.env.wait_for([&] { return in.entry(thread).activity_phase == "model"; }));
+    ASSERT_TRUE(in.env.wait_for([&] {
+        const std::lock_guard lock(in.mx);
+        for (const auto& [event, data] : in.emitted)
+            if (event == "inbox.changed" && jstr(data, "thread_id") == thread && data.contains("entry") &&
+                jstr(data["entry"], "activity_phase") == "model") return true;
+        return false;
+    }));
+    RpcRegistry rpc;
+    in.svc->register_rpc(rpc, false);
+    const auto listing = call(rpc, "inbox.list", {{"view", "running"}});
+    ASSERT_EQ(listing["entries"].size(), 1u);
+    EXPECT_EQ(listing["entries"][0]["activity_phase"], "model");
+    ASSERT_TRUE(in.env.rt->store().append_event(run, "progress", {{"phase", "model"}, {"active_tools", 9000}, {"output", "secret-output"}}));
+    const auto safe = call(rpc, "inbox.list", {{"view", "running"}})["entries"][0];
+    EXPECT_EQ(safe["active_tools"], 1024);
+    EXPECT_EQ(safe.dump().find("secret-output"), std::string::npos);
+    gate.release();
+    ASSERT_TRUE(in.env.wait(run, RunState::succeeded));
+    EXPECT_TRUE(in.entry(thread).activity_phase.empty());
 }
 
 // ==== 2.3 Folders and pinning ===========================================================================================
@@ -749,4 +780,47 @@ TEST(InboxFeed, WaitingSubagentEventsAreLoadedOthersAreNot) {
     }
     EXPECT_EQ(waiting, 1);
     EXPECT_EQ(finished, 1);
+}
+
+TEST(InboxFeed, ActiveSubagentSnapshotContainsOnlyLatestSanitizedProgress) {
+    Inbox in;
+    Gate gate;
+    struct Release { Gate& gate; ~Release() { gate.release(); } } release{gate};
+    in.env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (req.messages.empty() || req.messages[0].content.rfind("You are a subagent", 0) != 0) return std::nullopt;
+        gate.wait();
+        return model::ModelResult<model::ChatResponse>(text_response("secret-answer"));
+    });
+    in.env.start();
+    RpcRegistry rpc;
+    in.svc->register_rpc(rpc, false);
+    const auto thread = in.env.thread();
+    in.env.model.push_calls({{"child-call", "delegate", {{"task", "secret-child-task"}}}});
+    in.env.model.push_text("done");
+    const auto parent = in.env.run(thread, "start");
+    const bool running = in.env.wait_for([&] {
+        for (const auto& child : in.env.rt->runs(thread)) {
+            if (child.parent_run_id != parent) continue;
+            for (const auto& e : in.env.rt->events(child.id))
+                if (e.kind == "progress" && jstr(e.payload, "phase") == "model") return true;
+        }
+        return false;
+    });
+    ASSERT_TRUE(running);
+    const json feed = call(rpc, "threads.feed", {{"thread_id", thread}});
+    ASSERT_EQ(feed["subagents"].size(), 1u);
+    const auto& child = feed["subagents"][0];
+    ASSERT_TRUE(child.contains("events"));
+    ASSERT_EQ(child["events"].size(), 1u);
+    EXPECT_EQ(child["events"][0]["kind"], "progress");
+    EXPECT_EQ(child["events"][0]["payload"]["phase"], "model");
+    EXPECT_EQ(child["events"].dump().find("secret"), std::string::npos);
+    ASSERT_TRUE(in.env.rt->store().append_event(child["id"].get<std::string>(), "progress",
+                                               {{"phase", "model"}, {"active_tools", 99999}, {"output", "secret-output"}}));
+    const json sanitized = call(rpc, "threads.feed", {{"thread_id", thread}})["subagents"][0]["events"];
+    ASSERT_EQ(sanitized.size(), 1u);
+    EXPECT_EQ(sanitized[0]["payload"].dump().find("secret"), std::string::npos);
+    EXPECT_EQ(sanitized[0]["payload"]["active_tools"], 1024);
+    gate.release();
+    ASSERT_TRUE(in.env.wait(parent, RunState::succeeded));
 }

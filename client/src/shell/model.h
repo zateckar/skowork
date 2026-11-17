@@ -25,6 +25,8 @@ struct ThreadEntry {
     bool has_action = false, running = false;
     long long open_actions = 0;
     std::string last_run_state;
+    std::string activity_phase;
+    long long active_tools = 0;
     // A Chat's Inbox entry (client/work-inbox Chat Entries): id "chat:<chat id>".
     std::string kind = "thread";  // thread | chat
     long long unread_count = 0;   // unread messages

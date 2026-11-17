@@ -407,6 +407,7 @@ private:
     std::optional<MessageRef> jumped_;
     std::string highlighted_;
     UINT_PTR jump_timer_ = 0, highlight_timer_ = 0;
+    UINT_PTR speed_timer_ = 0;  // counts the waiting time and the speed estimate on (Generation Speed Under Answers)
     std::shared_ptr<int> alive_ = std::make_shared<int>(0);
 };
 
@@ -902,6 +903,8 @@ public:
     void meetings_changed();
     // Local apps changed (apps.changed): the Apps view loads again.
     void apps_changed();
+    // The Agenda changed (agenda.changed): the Agenda view or the Agenda settings section loads again.
+    void agenda_changed();
     // Speech setup moved on (speech.changed): the speech recognition block of Settings shows the new state.
     void speech_changed(const json& event);
     // The window's dictation moved on: the microphone check of the speech block follows it.
@@ -936,6 +939,10 @@ private:
     void load_meetings();
     void build_apps();
     void load_apps();
+    void build_agenda();
+    void load_agenda();
+    void build_agenda_settings(ui::Node& card);
+    void load_agenda_status();
     void open_app(const std::string& id, const std::u16string& title);
     void ask_delete_app(const std::string& id, const std::u16string& title);
     void ask_change_app(const std::string& id, const std::u16string& title);
@@ -999,6 +1006,8 @@ private:
     json policy_ = nullptr;               // policy.summary
     json meetings_ = nullptr;             // meetings.status
     json apps_ = nullptr;                 // apps.list
+    json agenda_ = nullptr;               // agenda.list
+    json agenda_status_ = nullptr;        // agenda.status
     std::string meetings_open_;           // the meeting whose transcript is shown
     std::map<std::string, std::u16string> speaker_drafts_;  // "<meeting>-<speaker>" -> the name being typed
     std::string meetings_echo_open_;      // the meeting whose echo segments are listed

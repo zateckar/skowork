@@ -12,7 +12,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $bin = Join-Path $BuildDir 'bin'
-$files = 'Skowork.exe', 'Skowork-legacy.exe', 'skowork-worker.exe', 'pdfium.dll' | ForEach-Object { Get-Item (Join-Path $bin $_) }
+$files = 'Skowork.exe', 'skowork-worker.exe', 'pdfium.dll' | ForEach-Object { Get-Item (Join-Path $bin $_) }
 $installMB = ($files | Measure-Object Length -Sum).Sum / 1MB
 $failures = @()
 Write-Host ("Install size: {0:N2} MB (budget {1} MB)" -f $installMB, $MaxInstallMB)

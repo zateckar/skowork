@@ -101,6 +101,12 @@ std::map<long long, double> reciprocal_rank_fusion(const std::vector<std::vector
 
 // ---- Extraction (design D4) -----------------------------------------------------------------------------------------
 
+// Salience of a fact nobody has rated (design D7), the days a temporary fact stays current (design D4) and the longest
+// statement (design D3, in bytes so that it is also at most 200 characters).
+inline constexpr double kDefaultSalience = 0.5;
+inline constexpr int kTemporaryDays = 30;
+inline constexpr size_t kMaxStatementBytes = 200;
+
 // Person, Project, Organization, Document, Meeting, Topic, System.
 const std::vector<std::string>& entity_types();
 
@@ -113,6 +119,11 @@ struct ExtractedRelation {
     double confidence = 0.5;
     std::string valid_from, valid_to;  // YYYY-MM-DD or empty
     int chunk = -1;
+    // add-knowledge-salience design D2/D3: importance for the user's future work (0..1), durability (lasting, temporary,
+    // trivial) and a self-contained statement of at most kMaxStatementBytes bytes.
+    double salience = kDefaultSalience;
+    std::string durability = "lasting";
+    std::string statement;
 };
 struct Extraction {
     std::vector<ExtractedEntity> entities;
@@ -123,6 +134,49 @@ struct Extraction {
 const json& extraction_schema();
 // The model's answer (JSON, possibly in a ``` fence) checked against the schema: unknown types, out-of-range chunk
 // indexes and relations between unknown entities are dropped, names and predicates are bounded. nullopt: not JSON.
+// Salience is clamped to 0..1, an unknown durability becomes lasting, and a statement is cut at a word boundary.
 std::optional<Extraction> parse_extraction(std::string_view text, int chunk_count);
+
+// ---- Source context (add-knowledge-salience design D1) ----------------------------------------------------------------
+
+// What the client knows about the Source of a passage. It comes from the item's metadata, never from the passage text.
+struct SourceContext {
+    std::string source;     // a Source kind: threads, files, mail, calendar, meetings, notes
+    std::string title;      // the item title (mail subject, meeting title, file name)
+    std::string author;     // the author's display name, or address when there is none
+    bool author_is_user = false;
+    int recipients = 0;     // mail: recipients; calendar and meetings: attendees; 0 when unknown
+    std::string breadth;    // direct, group, broadcast; empty when unknown
+    std::string folder;     // files: the folder name
+    bool organization_sender = false;  // the author is in the signed-in user's organization domain (retrieval boost D5)
+};
+// One rating of the background pass for an existing fact (design D7): its index in the request, salience, durability.
+struct RelationScore {
+    int index = -1;
+    double salience = kDefaultSalience;
+    std::string durability = "lasting";
+};
+// The answer to a scoring request: {"ratings": [{"i", "salience", "durability"}]}. Entries outside 0..count-1 are
+// ignored; nullopt when the answer is not JSON.
+std::optional<std::vector<RelationScore>> parse_relation_scores(std::string_view text, int count);
+// Addressing breadth (design D1): one recipient or a direct Chat is direct, 2 to 10 group, more broadcast.
+std::string addressing_breadth(const std::string& source, int recipients);
+json source_context_json(const SourceContext& c);
+SourceContext source_context_from_json(const json& j);
+// The passage as the extraction request shows it: `<passage ...>` with client-derived attributes and the text. Text that
+// would open or close a passage tag is neutralised, so a passage cannot forge a header.
+std::string render_passage(int index, const std::string& date, const SourceContext& context, std::string_view text);
+// A durability word, lower-cased; anything but temporary and trivial is lasting.
+std::string normalize_durability(std::string_view durability);
+
+// ---- Retrieval weights (add-knowledge-salience design D5) ---------------------------------------------------------------
+
+// w = (0.6 + 0.4 * salience) times the breadth factor (a broadcast from the organization 1.15, a Chat 0.9, else 1.0).
+double salience_weight(double salience, const SourceContext& context, bool organization_sender);
+// Applies a weight to a score that may be negative: a higher weight always moves a result up.
+double weighted_score(double score, double weight);
+
+// The importance level the Knowledge view shows (design D6): high, normal or low, never a number.
+std::string importance_level(double salience);
 
 }  // namespace wb::knowledge

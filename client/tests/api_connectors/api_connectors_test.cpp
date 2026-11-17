@@ -324,6 +324,34 @@ TEST(ApiConnectorTools, AnUnreachableControlPlaneIsAFailureWithoutRetry) {
     EXPECT_EQ(calls, 1);
 }
 
+TEST(ApiConnectorTools, LostResponseDoesNotClaimTheRequestWasNotMade) {
+    Registry reg;
+    policy::PolicyBundle b;
+    b.ver = 1;
+    b.exp = 4102444800;
+    b.policy = bundle_with(json::array({orders_connector()}));
+    auto current = std::make_shared<policy::EffectivePolicy>(b);
+    int dispatched = 0;
+    ManagerEnv env;
+    env.policy = [&] { return current; };
+    env.request = [&](const std::string&, const std::string&, const std::string&) -> Result<HttpResponse> {
+        ++dispatched;  // The receiver may have applied the operation before its response was lost.
+        return make_error("timeout", "response timed out");
+    };
+    env.add_tool = [&](ToolDef d) { return reg.add(std::move(d)); };
+    env.remove_tool = [&](const std::string& id) { return reg.remove(id); };
+    ConnectorManager manager(std::move(env));
+    manager.apply();
+    const auto tool = reg.get("api:orders-api/createOrder");
+    ASSERT_TRUE(tool);
+    ToolContext ctx;
+    const auto out = tool->run(ctx, json{{"id", "42"}});
+    EXPECT_FALSE(out.ok);
+    EXPECT_NE(out.content.find("unknown"), std::string::npos) << out.content;
+    EXPECT_EQ(out.content.find("not made"), std::string::npos) << out.content;
+    EXPECT_EQ(dispatched, 1);
+}
+
 TEST(ApiConnectorTools, PolicyDenyAndRemovalWithdrawTheTools) {
     ManagerFixture f;
     f.set_policy(bundle_with(json::array({orders_connector()}), {{"api:orders-api/createOrder", "deny"}}));

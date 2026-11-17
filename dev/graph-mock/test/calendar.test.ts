@@ -11,6 +11,27 @@ after(async () => { await m.close(); });
 
 const WEEK = 'startDateTime=2026-10-26T00:00:00Z&endDateTime=2026-11-02T00:00:00Z';
 
+test('delta continuation keeps its snapshot across an event update and reports the revision later', async () => {
+  const mock = await startMock();
+  try {
+    const client = await as(mock, 'jan');
+    const c = control(mock);
+    const created = await c.post('/users/jan/events', { subject: 'snapshot event', start: '+2d 15:00' });
+    assert.equal(created.status, 201);
+    const headers = { prefer: 'odata.maxpagesize=1' };
+    const first = await client.get(`/me/calendarView/delta?${WEEK}`, headers);
+    assert.equal(first.status, 200);
+    assert.ok(first.json['@odata.nextLink']);
+    const before = await all(client, first.json['@odata.nextLink'], headers);
+    assert.ok(before.items.some((x) => x.id === created.json.id));
+    assert.equal((await c.patch(`/users/jan/events/${created.json.id}`, { subject: 'changed event' })).status, 200);
+    const after = await all(client, first.json['@odata.nextLink'], headers);
+    assert.deepEqual(after.items, before.items);
+    const next = await all(client, after.deltaLink!, headers);
+    assert.ok(next.items.some((x) => x.id === created.json.id && x.subject === 'changed event'));
+  } finally { await mock.close(); }
+});
+
 test('calendarView expands the recurring stand-up and keeps single events', async () => {
   const v = (await all(g, `/me/calendarView?${WEEK}&$top=50`)).items;
   const standups = v.filter((e) => e.subject === 'Daily stand-up');

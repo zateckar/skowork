@@ -1,5 +1,7 @@
 #include "shell/feed.h"
 
+#include "base/strings.h"
+
 #include <algorithm>
 #include <chrono>
 #include <charconv>
@@ -11,6 +13,20 @@ namespace wb::shell {
 namespace {
 
 std::string str(const json& j, const char* k) { return jstr(j, k); }
+
+int active_tool_count(const RunInfo& run) {
+    if (run.state != "running") return 0;
+    for (auto event = run.events.rbegin(); event != run.events.rend(); ++event)
+        if (event->kind == "progress") return static_cast<int>(std::clamp(jint(event->payload, "active_tools"), 0LL, 1024LL));
+    return 0;
+}
+
+bool model_active(const RunInfo& run) {
+    if (run.state != "running") return false;
+    for (auto event = run.events.rbegin(); event != run.events.rend(); ++event)
+        if (event->kind == "progress") return str(event->payload, "phase") == "model";
+    return false;
+}
 
 std::string trim(const std::string& s) {
     const auto b = s.find_first_not_of(" \t\r\n");
@@ -121,6 +137,24 @@ void stream_delta(std::map<std::string, std::string>& text, std::map<std::string
     std::string& streamed = text[run_id];
     if (streamed.empty()) after[run_id] = last_seq;
     streamed += delta;
+}
+
+// The first streamed output of a model call starts its live speed estimate (show-generation-speed design D2).
+void mark_output(LiveText& live, const std::string& run_id, long long last_seq, const std::string& at, const std::string& delta) {
+    if (delta.empty() || live.output_since.contains(run_id)) return;
+    live.output_since[run_id] = iso_millis(at).value_or(now_millis());
+    live.output_after[run_id] = last_seq;
+}
+
+void forget_output(LiveText& live, const std::string& run_id) {
+    live.output_since.erase(run_id);
+    live.output_after.erase(run_id);
+}
+
+bool model_call_after(const RunInfo& run, long long after) {
+    for (auto e = run.events.rbegin(); e != run.events.rend() && e->seq > after; ++e)
+        if (e->kind == "model_call") return true;
+    return false;
 }
 
 // Drops the streamed text of a Run once a stored event of that model call exists. An event at or below the recorded
@@ -334,12 +368,63 @@ struct FoldedRun {
 FeedFold::FeedFold() = default;
 FeedFold::~FeedFold() = default;
 
-std::vector<FeedItem> build_feed(const FeedSnapshot& snap, const LiveText& live) {
-    FeedFold fold;
-    return fold.build(snap, live);
+std::optional<RunSpeed> run_speed(const RunInfo& run, const LiveText& live, long long now_ms) {
+    // Measured: the stored model calls with streamed output (design D1). Waiting before the first token and Tool time
+    // do not count.
+    long long tokens = 0, generating_ms = 0;
+    bool approximate = false;
+    for (const StoredEvent& e : run.events) {
+        if (e.kind != "model_call" || !e.payload.is_object()) continue;
+        const auto first = e.payload.find("first_token_ms");
+        if (first == e.payload.end() || !first->is_number()) continue;  // no streamed output: not measurable
+        const long long output = jint(e.payload, "output_tokens");
+        const long long ms = jint(e.payload, "duration_ms") - first->get<long long>();
+        if (output <= 0 || ms < 0) continue;
+        tokens += output;
+        generating_ms += ms;
+        if (!jbool(e.payload, "exact")) approximate = true;
+    }
+    RunSpeed speed;
+    const bool active = is_active_state(run.state);
+    // Estimated: the model call that is streaming now, until its model_call event is stored (design D2).
+    const auto since = live.output_since.find(run.id);
+    const auto after = live.output_after.find(run.id);
+    const bool streaming = active && since != live.output_since.end() &&
+                           !model_call_after(run, after == live.output_after.end() ? 0 : after->second);
+    if (streaming) {
+        std::string produced;
+        if (const auto t = live.text.find(run.id); t != live.text.end()) produced += t->second;
+        if (const auto r = live.reasoning.find(run.id); r != live.reasoning.end()) produced += r->second;
+        const auto estimate = static_cast<long long>(estimate_text_tokens(produced));
+        const long long elapsed = std::max(0LL, now_ms - since->second);
+        // Too early for a meaningful rate: under one second and under 20 tokens.
+        if (elapsed >= 1000 || estimate >= 20) {
+            tokens += estimate;
+            generating_ms += elapsed;
+            approximate = true;
+        }
+    }
+    if (tokens > 0 && generating_ms > 0) {
+        speed.tokens_per_s = (tokens * 1000 + generating_ms / 2) / generating_ms;
+        speed.approximate = approximate;
+    }
+    // Waiting for the first token of the current model call.
+    if (active && !streaming && model_active(run))
+        for (auto e = run.events.rbegin(); e != run.events.rend(); ++e)
+            if (e->kind == "progress") {
+                if (const auto at = iso_millis(e->at)) speed.waiting_ms = std::max(0LL, now_ms - *at);
+                break;
+            }
+    if (speed.tokens_per_s < 0 && speed.waiting_ms < 0) return std::nullopt;
+    return speed;
 }
 
-std::vector<FeedItem> FeedFold::build(const FeedSnapshot& snap, const LiveText& live) {
+std::vector<FeedItem> build_feed(const FeedSnapshot& snap, const LiveText& live, long long now_ms) {
+    FeedFold fold;
+    return fold.build(snap, live, now_ms);
+}
+
+std::vector<FeedItem> FeedFold::build(const FeedSnapshot& snap, const LiveText& live, long long now_ms) {
     std::map<std::string, const ActionItem*> actions;
     for (const ActionItem& a : snap.actions) actions[a.id] = &a;
     // The fold of an interrupt copies its Action item, so the cache is kept only while the Action items are unchanged.
@@ -390,6 +475,16 @@ std::vector<FeedItem> FeedFold::build(const FeedSnapshot& snap, const LiveText& 
             it.type = ItemType::working;
             it.key = run.id + ":working";
             it.run_id = run.id;
+            if (const int count = active_tool_count(run); count > 0) it.text = "feed.working_tools|" + std::to_string(count);
+            else if (model_active(run)) it.text = "feed.working_model";
+            items.push_back(std::move(it));
+        }
+        if (auto speed = run_speed(run, live, now_ms)) {  // Generation Speed Under Answers
+            FeedItem it;
+            it.type = ItemType::speed;
+            it.key = run.id + ":speed";
+            it.run_id = run.id;
+            it.speed = *speed;
             items.push_back(std::move(it));
         }
         if (!is_active_state(run.state) && run.state != "interrupted" && run.usage.calls > 0) {  // the Run ended
@@ -570,6 +665,15 @@ Apply apply_live_event(FeedSnapshot& snap, LiveText& live, const LiveRunEvent& e
                     child.state = str(d, "state");
                     child.reason = str(d, "reason");
                 }
+                if (ev.kind == "progress" && ev.seq > 0) {
+                    long long last_progress = 0;
+                    for (const auto& e : child.events)
+                        if (e.kind == "progress") last_progress = std::max(last_progress, e.seq);
+                    if (ev.seq > last_progress) {
+                        std::erase_if(child.events, [](const StoredEvent& e) { return e.kind == "progress"; });
+                        child.events.push_back({ev.seq, ev.at, "progress", d});
+                    }
+                }
                 // The card of a subagent's Action item needs the subagent's log, which the snapshot loads (Child Run Action
                 // Items): the feed reloads.
                 if (ev.kind == "action.created") return Apply::refetch;
@@ -579,19 +683,24 @@ Apply apply_live_event(FeedSnapshot& snap, LiveText& live, const LiveRunEvent& e
         // stored events are not known, so the recorded sequence number is 0.
         if (ev.kind == "text.delta") stream_delta(live.text, live.text_after, ev.run_id, live.seen[ev.run_id], str(d, "text"));
         if (ev.kind == "reasoning.delta") stream_delta(live.reasoning, live.reasoning_after, ev.run_id, live.seen[ev.run_id], str(d, "text"));
+        if (ev.kind == "text.delta" || ev.kind == "reasoning.delta") mark_output(live, ev.run_id, live.seen[ev.run_id], ev.at, str(d, "text"));
         return Apply::refetch;
     }
     const long long last_seq = run->events.empty() ? 0 : run->events.back().seq;  // the snapshot's stored log
     const long long delta_base = std::max(last_seq, live.seen[run->id]);           // the newest event that arrived
     if (ev.kind == "text.delta") {
         stream_delta(live.text, live.text_after, run->id, delta_base, str(d, "text"));
+        mark_output(live, run->id, delta_base, ev.at, str(d, "text"));
         return Apply::ok;
     }
     if (ev.kind == "reasoning.delta") {
         stream_delta(live.reasoning, live.reasoning_after, run->id, delta_base, str(d, "text"));
+        mark_output(live, run->id, delta_base, ev.at, str(d, "text"));
         return Apply::ok;
     }
+    if (ev.kind == "model_call") forget_output(live, run->id);  // the call's measured values replace its estimate
     if (ev.kind == "discard") {
+        forget_output(live, run->id);
         live.text.erase(run->id);
         live.text_after.erase(run->id);
         live.reasoning.erase(run->id);
@@ -611,6 +720,7 @@ Apply apply_live_event(FeedSnapshot& snap, LiveText& live, const LiveRunEvent& e
         run->state = str(d, "state");
         run->reason = str(d, "reason");
         if (!is_active_state(run->state)) {
+            forget_output(live, run->id);
             live.text.erase(run->id);
             live.text_after.erase(run->id);
             live.reasoning.erase(run->id);
@@ -648,6 +758,8 @@ Apply apply_live_event(FeedSnapshot& snap, LiveText& live, const LiveRunEvent& e
 
 void settle_live(const FeedSnapshot& snap, LiveText& live) {
     for (const RunInfo& run : snap.runs) {
+        if (const auto a = live.output_after.find(run.id); a != live.output_after.end() && model_call_after(run, a->second))
+            forget_output(live, run.id);
         if (streamed_into_stored(run, live.text_after, false)) {
             live.text.erase(run.id);
             live.text_after.erase(run.id);
@@ -683,7 +795,9 @@ std::vector<RailGroup> build_rail(const FeedSnapshot& snap, long long now_ms) {
             const auto c = children.find(child_id);
             groups[g->second].entries.push_back({child_id, str(e.payload, "task"),
                                                  c != children.end() ? c->second->state : "queued",
-                                                 c != children.end() ? duration_of(*c->second, now_ms) : 0, str(e.payload, "skill")});
+                                                 c != children.end() ? duration_of(*c->second, now_ms) : 0, str(e.payload, "skill"),
+                                                 c != children.end() ? active_tool_count(*c->second) : 0,
+                                                 c != children.end() && model_active(*c->second)});
         }
     }
     return groups;

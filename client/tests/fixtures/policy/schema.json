@@ -2,6 +2,46 @@
   "version": 1,
   "keys": [
     {
+      "path": "agenda.auto_prepare",
+      "owner": "client/agenda",
+      "type": {
+        "kind": "boolean"
+      },
+      "default": false
+    },
+    {
+      "path": "agenda.daily_preparations",
+      "owner": "client/agenda",
+      "type": {
+        "kind": "integer",
+        "min": 0,
+        "max": 100
+      },
+      "default": 10
+    },
+    {
+      "path": "agenda.min_confidence",
+      "owner": "client/agenda",
+      "type": {
+        "kind": "number",
+        "min": 0.5,
+        "max": 0.95
+      },
+      "default": 0.7
+    },
+    {
+      "path": "agenda.mode",
+      "owner": "client/agenda",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "available"
+        ]
+      },
+      "default": "available"
+    },
+    {
       "path": "apps.mcp",
       "owner": "client/local-apps",
       "type": {
@@ -187,6 +227,16 @@
         "min": 1
       },
       "default": 2
+    },
+    {
+      "path": "knowledge.min_salience",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "number",
+        "min": 0,
+        "max": 0.9
+      },
+      "default": 0.35
     },
     {
       "path": "knowledge.save_as_note",
@@ -1330,6 +1380,48 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "agenda": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "auto_prepare": {
+            "type": "boolean",
+            "x-owner": "client/agenda",
+            "x-merge": "scalar",
+            "default": false,
+            "x-guardrail": "force"
+          },
+          "daily_preparations": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "x-owner": "client/agenda",
+            "x-merge": "scalar",
+            "default": 10,
+            "x-guardrail": "cap"
+          },
+          "min_confidence": {
+            "type": "number",
+            "minimum": 0.5,
+            "maximum": 0.95,
+            "x-owner": "client/agenda",
+            "x-merge": "scalar",
+            "default": 0.7,
+            "x-guardrail": "floor"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "available"
+            ],
+            "x-owner": "client/agenda",
+            "x-merge": "scalar",
+            "default": "available",
+            "x-guardrail": "max-level"
+          }
+        }
+      },
       "apps": {
         "type": "object",
         "additionalProperties": false,
@@ -1524,6 +1616,15 @@
             "x-merge": "scalar",
             "default": 2,
             "x-guardrail": "cap"
+          },
+          "min_salience": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 0.9,
+            "x-owner": "client/knowledge-graph",
+            "x-merge": "scalar",
+            "default": 0.35,
+            "x-guardrail": "floor"
           },
           "save_as_note": {
             "type": "string",

@@ -19,6 +19,9 @@ struct MachineConfig {
     // Test builds only (SKOWORK_DEV_ENDPOINTS): "record" replaces the system browser with a launcher that only
     // records the authorize URL; the end-to-end test completes the sign-in itself.
     std::string dev_browser;
+    // Test builds only: "record" keeps local app launch URLs (apps.open) out of the user's browser; dev.opened_urls
+    // lists them.
+    std::string dev_open_urls;
 };
 
 // HKLM\SOFTWARE\Policies\Skowork, then skowork.machine.json next to the executable.

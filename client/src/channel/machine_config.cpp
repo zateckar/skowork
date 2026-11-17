@@ -104,6 +104,7 @@ Result<MachineConfig> load_machine_config_file(const std::filesystem::path& file
     c.channel = jstr(*j, "channel", c.channel);
 #ifdef SKOWORK_DEV_ENDPOINTS
     c.dev_browser = jstr(*j, "dev_browser");
+    c.dev_open_urls = jstr(*j, "dev_open_urls");
 #endif
     if (Status s = validate(c, source, true); !s) return s.error();
     return c;

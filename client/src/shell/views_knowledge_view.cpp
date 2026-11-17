@@ -1293,6 +1293,10 @@ void KnowledgeView::rebuild_list() {
                                                          id && reader_mode_ == Reader::item && selected_ == key, std::move(open)));
             row->emplace<ui::Label>(u, title, TextStyle::body_strong, Paint::text, false)->role = ui::Role::none;
             row->emplace<ui::Label>(u, meta, TextStyle::caption, Paint::text_secondary, false)->role = ui::Role::none;
+            // The fact the passage was extracted to, in one sentence, above the passage it comes from (add-knowledge-salience D3).
+            if (const std::string statement = jstr(p, "statement"); !statement.empty())
+                row->emplace<ui::Label>(u, u16(statement), TextStyle::body, Paint::text, true, "knowledge-result-statement-" + std::to_string(n))
+                    ->role = ui::Role::none;
             std::string passage = jstr(p, "text");
             if (passage.size() > 220) passage = utf8_truncate(passage, 220) + "…";
             row->emplace<ui::Label>(u, u16(passage), TextStyle::caption, Paint::text_secondary, true)->role = ui::Role::none;
@@ -1827,6 +1831,7 @@ void KnowledgeView::load_section(bool more) {
             });
         if (scope == "entities") fetch("knowledge.entities", {{"query", ""}, {"limit", 50}}, &entities_, "entities", "after");
         else if (scope == "all") fetch("knowledge.facts", {{"limit", 50}}, &facts_, "facts", "before");
+        else if (scope == "low") fetch("knowledge.facts", {{"limit", 50}, {"importance", "low"}}, &facts_, "facts", "before");
         else if (scope.rfind("c", 0) == 0) fetch("knowledge.facts", {{"limit", 50}, {"category", std::atoll(scope.c_str() + 1)}}, &facts_, "facts", "before");
     } else if (section == "review") {
         if (kind == "changes") fetch("knowledge.changes", {{"limit", 50}}, &review_changes_, "items", "before");
@@ -2131,6 +2136,41 @@ void KnowledgeView::build_fact(Node& parent) {
     const std::string state = jstr(detail_, "state");
     box->emplace<ui::Label>(u, shell_.t("knowledge.fact_state." + state), TextStyle::caption,
                             state == "current" ? Paint::text_secondary : Paint::warning, true, "knowledge-fact-state");
+    // The statement is the fact in one sentence; the excerpt below stays the evidence (add-knowledge-salience D3).
+    if (const std::string statement = jstr(detail_, "statement"); !statement.empty())
+        box->emplace<ui::Label>(u, u16(statement), TextStyle::body, Paint::text, true, "knowledge-fact-statement");
+    // Importance is a level, and the user can mark a fact important or unimportant; neither deletes it (design D6).
+    if (const long long relation = jint(detail_, "relation_id"); relation) {
+        const std::string level = jstr(detail_, "importance");
+        box->emplace<ui::Label>(u, shell_.t("knowledge.importance." + (level.empty() ? std::string("normal") : level)), TextStyle::caption,
+                                Paint::text_secondary, true, "knowledge-fact-importance");
+        const long long fact = jint(detail_, "fact_id");
+        auto* marks = box->emplace<Node>("knowledge-fact-marks");
+        marks->role = ui::Role::group;
+        marks->gap = 6;
+        const auto mark = [this, relation, fact](const char* to_level) {
+            act("knowledge.fact.importance", {{"id", relation}, {"level", to_level}}, [this, fact](const json&) { open_fact(fact); });
+        };
+        auto* up = button(*marks, "knowledge-fact-mark-important", shell_.t("knowledge.mark_important"), [mark] { mark("high"); },
+                          ui::Button::Kind::subtle);
+        up->name = shell_.t("knowledge.mark_important_named", {{"fact", title}});
+        up->enabled = true;
+        auto* down = button(*marks, "knowledge-fact-mark-unimportant", shell_.t("knowledge.mark_unimportant"), [mark] { mark("low"); },
+                            ui::Button::Kind::subtle);
+        down->name = shell_.t("knowledge.mark_unimportant_named", {{"fact", title}});
+        down->enabled = true;
+        // A low-importance fact can also be forgotten; marking it important restores it to current answers.
+        if (level == "low") {
+            auto* forget = button(*marks, "knowledge-fact-forget", shell_.t("knowledge.forget_fact"), [this, relation] {
+                act("knowledge.fact.delete", {{"kind", "relation"}, {"id", relation}}, [this](const json&) {
+                    close_reader();
+                    load_section();
+                });
+            }, ui::Button::Kind::subtle);
+            forget->name = shell_.t("knowledge.forget_fact_named", {{"fact", title}});
+            forget->enabled = true;
+        }
+    }
     const std::string from = jstr(detail_, "valid_from"), to = jstr(detail_, "valid_to");
     if (!from.empty() || !to.empty())
         box->emplace<ui::Label>(u, shell_.t("knowledge.valid", {{"from", from.empty() ? u"…" : day(from)}, {"to", to.empty() ? u"…" : day(to)}}),
@@ -2393,6 +2433,7 @@ void KnowledgeView::build_knowledge_list() {
     const auto scope_name = [this](const std::string& scope) -> std::u16string {
         if (scope == "all") return shell_.t("knowledge.all_knowledge");
         if (scope == "entities") return shell_.t("knowledge.entities");
+        if (scope == "low") return shell_.t("knowledge.low_importance");
         const long long id = std::atoll(scope.c_str() + 1);
         if (const json* cats = jobj(categories_, "categories"))
             for (const auto& c : *cats)
@@ -2429,6 +2470,8 @@ void KnowledgeView::build_knowledge_list() {
         }
         row("c0", shell_.t("knowledge.uncategorized"), shell_.t("knowledge.uncategorized_meta"));
         row("entities", shell_.t("knowledge.entities"), shell_.t("knowledge.entities_meta"));
+        // Facts left out of current answers as low importance, where the user can restore or forget them (design D6, D7).
+        row("low", shell_.t("knowledge.low_importance"), shell_.t("knowledge.low_importance_meta"));
         return;
     }
     auto* head = row_box(*list_head_, "knowledge-scope-head");

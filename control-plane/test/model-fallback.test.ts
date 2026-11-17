@@ -61,7 +61,7 @@ describe('model settings, fallback and effort', () => {
     a.requests.length = 0;
     healthy();
     h.cp.db.exec(
-      "UPDATE llm_models SET reasoning_effort = NULL, fallback_model = NULL, fallback_after_s = NULL, tools = 1, " +
+      "UPDATE llm_models SET reasoning_effort = NULL, fallback_model = NULL, fallback_after_s = NULL, sampling = NULL, tools = 1, " +
         "images = CASE WHEN model_id = 'acme-llm-primary' THEN 1 ELSE 0 END",
     );
     h.cfg.gateway.fallbackCooldownMs = 0;
@@ -108,6 +108,45 @@ describe('model settings, fallback and effort', () => {
       json(res, code, { error: { message } });
   const setFallback = (fallback: string | null, after: number | null = 1) =>
     h.cp.db.prepare('UPDATE llm_models SET fallback_model = ?, fallback_after_s = ? WHERE model_id = ?').run(fallback, after, 'acme-llm-primary');
+
+  // ---- add-model-sampling-settings 1.1: sampling defaults ----------------------------------------------------------
+
+  it('adds stored sampling defaults to chat requests and keeps the values the client sent', async () => {
+    const saved = await put('acme-llm-primary', { sampling: { temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0, repetition_penalty: 1 } });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    assert.deepEqual((await modelRow('acme-llm-primary')).sampling, { temperature: 1, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0, repetition_penalty: 1 });
+    assert.equal((await chat('samp1')).status, 200);
+    const sent = served('acme-llm-primary').at(-1)!.body;
+    assert.deepEqual([sent.temperature, sent.top_p, sent.top_k, sent.min_p, sent.presence_penalty, sent.repetition_penalty], [1, 0.95, 20, 0, 0, 1]);
+    assert.equal((await chat('samp1', { temperature: 0 })).status, 200);
+    const kept = served('acme-llm-primary').at(-1)!.body;
+    assert.equal(kept.temperature, 0);
+    assert.equal(kept.top_k, 20);
+  });
+
+  it('refuses sampling values out of range or with unknown keys and keeps the stored ones', async () => {
+    assert.equal((await put('acme-llm-primary', { sampling: { top_k: 20 } })).status, 200);
+    for (const bad of [{ top_p: 1.5 }, { top_k: 0 }, { top_k: 2.5 }, { seed: 1 }, { temperature: '1' }, [1]]) {
+      const r = await put('acme-llm-primary', { sampling: bad });
+      assert.equal(r.status, 400, JSON.stringify(bad));
+      assert.equal(r.body.error.code, 'INVALID_REQUEST');
+    }
+    assert.deepEqual((await modelRow('acme-llm-primary')).sampling, { top_k: 20 });
+    assert.equal((await put('acme-llm-primary', { sampling: null })).status, 200);
+    assert.equal((await modelRow('acme-llm-primary')).sampling, null);
+    await chat('samp2');
+    assert.equal(served('acme-llm-primary').at(-1)!.body.top_k, undefined);
+  });
+
+  it('applies the fallback model its own sampling defaults', async () => {
+    h.cp.db.prepare('UPDATE llm_models SET sampling = ? WHERE model_id = ?').run(JSON.stringify({ temperature: 0.7 }), 'acme-llm-primary');
+    h.cp.db.prepare('UPDATE llm_models SET sampling = ? WHERE model_id = ?').run(JSON.stringify({ temperature: 0.3, top_k: 5 }), 'acme-llm-secondary');
+    setFallback('acme-llm-secondary');
+    script = primaryDoes(status(503, 'down'));
+    assert.equal((await chat('samp3')).status, 200);
+    const fb = served('acme-llm-secondary').at(-1)!.body;
+    assert.deepEqual([fb.temperature, fb.top_k], [0.3, 5]);
+  });
 
   // ---- 2.1 model settings: the effort check, validation and the Test ------------------------------------------------
 

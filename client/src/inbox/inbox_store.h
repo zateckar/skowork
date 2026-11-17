@@ -39,6 +39,8 @@ struct ThreadEntry {
     bool has_action = false, running = false;
     int open_actions = 0;
     std::string last_run_state;        // of the latest top-level Run; empty without one
+    std::string activity_phase;        // fixed sanitized phase of the active top-level Run
+    int active_tools = 0;
 };
 
 struct Page {

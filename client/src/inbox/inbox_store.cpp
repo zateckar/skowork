@@ -1,13 +1,16 @@
 #include "inbox/inbox_store.h"
 
+#include "base/json.h"
 #include "base/strings.h"
 #include "platform/crypto.h"
+
+#include <algorithm>
 
 namespace wb::inbox {
 
 namespace {
 
-constexpr const char* kOrigins[] = {"user", "trigger", "remote", "meeting", "fork", "system"};
+constexpr const char* kOrigins[] = {"user", "trigger", "remote", "meeting", "agenda", "fork", "system"};
 
 // The columns of a ThreadEntry; derived flags come from Runs and Action items. The names are those the merged list
 // orders and pages by.
@@ -18,13 +21,16 @@ constexpr const char* kEntrySelect =
     "EXISTS(SELECT 1 FROM runs r WHERE r.thread_id=t.id AND r.parent_run_id IS NULL AND r.state IN ('queued','running')), "
     "EXISTS(SELECT 1 FROM runs r WHERE r.thread_id=t.id AND r.parent_run_id IS NULL AND r.state='interrupted'), "
     "COALESCE((SELECT r.state FROM runs r WHERE r.thread_id=t.id AND r.parent_run_id IS NULL ORDER BY r.queue_seq DESC LIMIT 1),''), "
-    "'thread', 0, '', '' "
+    "'thread', 0, '', '', "
+    "COALESCE((SELECT e.payload FROM run_events e WHERE e.kind='progress' AND e.run_id=("
+    "SELECT r.id FROM runs r WHERE r.thread_id=t.id AND r.parent_run_id IS NULL AND r.state='running' "
+    "ORDER BY r.queue_seq DESC LIMIT 1) ORDER BY e.seq DESC LIMIT 1),'') "
     "FROM threads t";
 
 // The same columns for a Chat's entry (add-chats-in-inbox design D2).
 constexpr const char* kChatSelect =
     "SELECT 'chat:'||c.chat_id, c.title, c.preview, c.last_activity, '', 'user', 'null', c.unread>0, c.archived, c.pinned, "
-    "COALESCE(c.folder_id,''), 0, 0, 0, '', 'chat', c.unread, c.kind, c.presence "
+    "COALESCE(c.folder_id,''), 0, 0, 0, '', 'chat', c.unread, c.kind, c.presence, '' "
     "FROM chat_inbox c";
 
 ThreadEntry read_entry(Statement& st) {
@@ -49,6 +55,12 @@ ThreadEntry read_entry(Statement& st) {
     e.unread_count = st.col_int(16);
     e.chat_kind = st.col_text(17);
     e.presence = st.col_text(18);
+    const auto progress = json::parse(st.col_text(19), nullptr, false);
+    if (progress.is_object()) {
+        const auto phase = jstr(progress, "phase");
+        if (phase == "model" || phase == "tools" || phase == "idle") e.activity_phase = phase;
+        e.active_tools = static_cast<int>(std::clamp(jint(progress, "active_tools"), 0LL, 1024LL));
+    }
     return e;
 }
 

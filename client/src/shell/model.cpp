@@ -1,5 +1,6 @@
 #include "shell/model.h"
 
+#include <algorithm>
 #include <cctype>
 
 namespace wb::shell {
@@ -87,6 +88,9 @@ ThreadEntry entry_from(const json& j) {
     e.running = jbool(j, "running");
     e.open_actions = jint(j, "open_actions");
     e.last_run_state = s(j, "last_run_state");
+    const auto phase = s(j, "activity_phase");
+    if (phase == "model" || phase == "tools" || phase == "idle") e.activity_phase = phase;
+    e.active_tools = std::clamp(jint(j, "active_tools"), 0LL, 1024LL);
     e.kind = jstr(j, "kind", "thread");
     e.unread_count = jint(j, "unread_count");
     e.chat_kind = s(j, "chat_kind");

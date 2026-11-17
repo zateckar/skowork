@@ -60,15 +60,24 @@ std::string join_errors(const std::vector<std::string>& errors) {
 }  // namespace
 
 void validate_tool_calls(ChatResponse& response, const std::vector<ToolSpec>& tools) {
+    const bool cut = response.finish_reason == "length";
+    constexpr const char* kCut = "the call was cut off at the output limit; send shorter arguments, for example split the "
+                                 "content over several calls";
     for (auto& call : response.tool_calls) {
         auto parsed = parse_tool_arguments(call.raw_arguments);
         if (!parsed.value) {
             call.valid = false;
-            call.validation_error = "the arguments are not valid JSON (" + parsed.error + ")";
+            call.validation_error = cut ? std::string(kCut) : "the arguments are not valid JSON (" + parsed.error + ")";
             continue;
         }
         call.arguments = std::move(*parsed.value);
         call.repaired = parsed.repaired;
+        // Repair would close a call the output limit cut off (handle-output-limit D3): never run it.
+        if (call.repaired && cut) {
+            call.valid = false;
+            call.validation_error = kCut;
+            continue;
+        }
         const auto spec = std::find_if(tools.begin(), tools.end(), [&](const ToolSpec& t) { return t.id == call.tool; });
         if (spec == tools.end()) {
             call.valid = false;
@@ -111,7 +120,7 @@ ModelResult<HttpRequest> ModelClient::make_request(const std::string& method, co
     return req;
 }
 
-ModelResult<HttpResponse> ModelClient::send(HttpRequest request, const std::shared_ptr<CancelToken>& cancel) {
+ModelResult<HttpResponse> ModelClient::send(HttpRequest request, const std::shared_ptr<CancelToken>& cancel, bool single_attempt) {
     (void)cancel;
     auto token = auth_.access_token();
     if (!token) {
@@ -135,6 +144,7 @@ ModelResult<HttpResponse> ModelClient::send(HttpRequest request, const std::shar
             f.http_status = 401;
             return f;
         }
+        if (single_attempt) return std::move(*resp);  // Token is refreshed; the caller schedules any later request.
         request.headers[auth_index].second = "Bearer " + *fresh;
         ++requests_sent_;
         resp = transport_.send(request);
@@ -274,7 +284,7 @@ ModelResult<ChatResponse> ModelClient::chat_attempt(const ChatRequest& request, 
         };
     }
 
-    auto resp = send(std::move(http_req), request.cancel);
+    auto resp = send(std::move(http_req), request.cancel, request.single_attempt);
     if (!resp.ok()) {
         if (acc.stream_error()) return *acc.stream_error();
         ModelFailure f = resp.failure();
@@ -297,10 +307,11 @@ ModelResult<ChatResponse> ModelClient::chat_attempt(const ChatRequest& request, 
 }
 
 ModelResult<ChatResponse> ModelClient::chat_with_retries(const ChatRequest& request, const ChatSink& sink) {
-    auto r = with_retries<ChatResponse>(request.cancel, &sink, [&]() -> ModelResult<ChatResponse> {
+    const auto attempt = [&]() -> ModelResult<ChatResponse> {
         if (request.input_budget_check && !request.input_budget_check(request)) return input_budget_failure();
         return chat_attempt(request, sink);
-    });
+    };
+    auto r = request.single_attempt ? attempt() : with_retries<ChatResponse>(request.cancel, &sink, attempt);
     if (r.ok()) {
         r.value().usage.requests = 1;
         record(request.run_id, request.thread_id, request.feature, request.role, r.value().usage);
@@ -314,6 +325,10 @@ ModelResult<ChatResponse> ModelClient::chat(const ChatRequest& original, const C
     if (request.cancel && request.cancel->cancelled()) return cancelled_failure();
     auto first = chat_with_retries(request, sink);
     if (!first.ok() || !request.validate_tool_calls || first.value().tool_calls.empty()) return first;
+    if (request.single_attempt) {
+        validate_tool_calls(first.value(), request.tools);
+        return first;
+    }
 
     ChatResponse resp = std::move(first.value());
     validate_tool_calls(resp, request.tools);

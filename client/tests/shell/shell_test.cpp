@@ -531,6 +531,7 @@ TEST(ShellList, SmartViewsWithCountsAndFoldersOrthogonalToThem) {
     f.in.env.model.push_blocking(gate);
     const auto running = f.in.env.run(busy, "long work");
     ASSERT_TRUE(f.in.env.wait(running, RunState::running));
+    ASSERT_TRUE(f.in.env.wait_for([&] { return f.in.entry(busy).activity_phase == "model"; }));
     f.in.svc->wait_idle();
     ASSERT_TRUE(f.in.svc->store().rename(plain, "Budget summary"));
     ASSERT_TRUE(f.in.svc->store().rename(filed, "Send the offer"));
@@ -562,7 +563,7 @@ TEST(ShellList, SmartViewsWithCountsAndFoldersOrthogonalToThem) {
     EXPECT_TRUE(contains(uia.rows(w.hwnd()), L"Send the offer"));
     w.run([&] { w.main().open("#/inbox/running"); });
     ASSERT_TRUE(w.until([&] { return w.shell().view() == "running" && w.shell().entries().size() == 1; }));
-    EXPECT_TRUE(contains(uia.rows(w.hwnd()), L"Long research, Running"));
+    EXPECT_TRUE(contains(uia.rows(w.hwnd()), L"Long research, Running · Contacting the model"));
 
     // The Run ends: the live update takes the Thread out of the Running view and the count follows.
     gate.release();
@@ -2294,6 +2295,16 @@ TEST(ShellComposer, EnterQueuesWhileRunningCtrlEnterSteersAndStopCancels) {
             if (q.mode == "steer_now" && q.text == "Focus on Q4") return true;
         return false;
     }));
+    long long steering_id = 0;
+    w.run([&] {
+        for (const auto& q : w.shell().feed()->queued)
+            if (q.mode == "steer_now") steering_id = q.id;
+    });
+    ASSERT_NE(steering_id, 0);
+    const auto steering_status = "queued-" + std::to_string(steering_id) + "-status";
+    EXPECT_TRUE(w.until([&] { return w.exists(steering_status); }));
+    m = uia.by_id(w.hwnd());
+    EXPECT_EQ(m[wide(steering_status)].name, L"Steering queued until the next safe boundary");
 
     // When the Run finishes, the queued message is sent as the next turn.
     f.in.env.model.push_text("Done.");  // the next turn (the steering message joins it)
@@ -5178,6 +5189,185 @@ TEST(ShellApps, ListOpensWithConfirmationStopsRevealsChangesAndDeletes) {
     }, 10000));
 }
 
+// client/work-inbox Agenda View (add-agenda 6.1) over a scripted agenda.* host: the view is listed while the Agenda is
+// enabled, groups open items as Overdue, Today and Later with named rows and actions, and Mark done, Dismiss and Prepare
+// call the host; the settings section turns the Agenda off.
+TEST(ShellAgenda, ViewGroupsItemsAndOffersNamedActions) {
+    std::mutex mx;
+    bool enabled = true;
+    std::vector<std::pair<std::string, json>> calls;
+    Fixture f;
+    const long long now = *parse_iso8601_ms("2026-11-17T10:00:00Z");  // Tuesday 11:00 local (UTC+1)
+    const auto item = [now](const std::string& id, const std::string& title, const char* due, bool timed, bool inferred) {
+        return json{{"id", id},           {"title", title}, {"action", "Do " + title}, {"due_at", *parse_iso8601_ms(due)},
+                    {"has_time", timed},  {"inferred", inferred}, {"state", "open"},  {"draft_kind", "reply"},
+                    {"prep_thread_id", ""}, {"notice", ""},
+                    {"sources", json::array({{{"kind", "mail"}, {"source_id", "m-" + id}, {"title", "Mail"}, {"quote", "please " + title},
+                                              {"link", "https://outlook.example/" + id}, {"at", now}}})}};
+    };
+    json items = json::array({item("a1", "Send the Q4 slides", "2026-11-17T21:59:00Z", false, true),
+                              item("a2", "Review the budget", "2026-11-26T13:00:00Z", true, false),
+                              item("a3", "Sign the travel form", "2026-11-16T22:59:00Z", false, false)});
+    f.rpc.add("app.status", RpcExposure::ui, [&](const json&) -> Result<json> {
+        const std::lock_guard l(mx);
+        return json{{"version", {{"version", "0.1.0"}}},
+                    {"auth", {{"state", "signed_in"}}},
+                    {"control_plane", {{"configured", true}, {"connected", true}}},
+                    {"background", {{"paused_until", 0}}},
+                    {"storage", {{"read_only", false}, {"degraded", false}}},
+                    {"agenda", {{"available", true}, {"enabled", enabled}}}};
+    });
+    const auto status = [&] {
+        return json{{"available", true}, {"enabled", enabled}, {"mail", true}, {"calendar", true}, {"meetings", true}, {"chats", true},
+                    {"auto_prepare", false}, {"auto_prepare_allowed", false}, {"remind_day_before", true}, {"remind_hour_before", true},
+                    {"pending", 2}, {"dropped_total", 5}, {"last_error", ""}};
+    };
+    f.rpc.add("agenda.list", RpcExposure::ui, [&](const json&) -> Result<json> {
+        const std::lock_guard l(mx);
+        return json{{"items", items}, {"now", now}, {"tz_offset_min", 60}, {"status", status()}};
+    });
+    f.rpc.add("agenda.status", RpcExposure::ui, [&](const json&) -> Result<json> {
+        const std::lock_guard l(mx);
+        return status();
+    });
+    for (const char* m : {"agenda.done", "agenda.dismiss", "agenda.prepare", "agenda.set"}) {
+        const std::string method = m;
+        f.rpc.add(method, RpcExposure::ui, [&, method](const json& p) -> Result<json> {
+            const std::lock_guard l(mx);
+            calls.emplace_back(method, p);
+            if (method == "agenda.set") {
+                enabled = jbool(p, "enabled", enabled);
+                return status();
+            }
+            const std::string id = jstr(p, "id");
+            if (method != "agenda.prepare")
+                items.erase(std::remove_if(items.begin(), items.end(), [&](const json& a) { return jstr(a, "id") == id; }), items.end());
+            return json{{"id", id}, {"prep_thread_id", ""}};
+        });
+    }
+    const auto count = [&](const std::string& method) {
+        const std::lock_guard l(mx);
+        return std::count_if(calls.begin(), calls.end(), [&](const auto& c) { return c.first == method; });
+    };
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/agenda"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("agenda-item-a1") && w.exists("agenda-item-a2") && w.exists("agenda-item-a3"); }));
+    ASSERT_TRUE(w.until([&] { return w.exists("nav-agenda"); }));
+    Uia uia;
+    auto m = uia.by_id(w.hwnd());
+    EXPECT_EQ(m[L"nav-agenda"].name, L"Agenda");
+    EXPECT_TRUE(w.exists("agenda-group-overdue"));
+    EXPECT_TRUE(w.exists("agenda-group-today"));
+    EXPECT_TRUE(w.exists("agenda-group-later"));
+    EXPECT_FALSE(w.exists("agenda-group-tomorrow"));
+    EXPECT_EQ(m[L"agenda-item-a1"].name, L"Send the Q4 slides, due 2026-11-17");
+    EXPECT_EQ(m[L"agenda-meta-a1"].name, L"Due 2026-11-17 (inferred) · Mail");
+    EXPECT_EQ(m[L"agenda-meta-a2"].name, L"Due 2026-11-26 14:00 · Mail");
+    EXPECT_EQ(m[L"agenda-prepare-a2"].name, L"Prepare Review the budget");
+    EXPECT_EQ(m[L"agenda-done-a3"].name, L"Mark Sign the travel form done");
+    EXPECT_TRUE(w.exists("agenda-source-a1"));
+    std::vector<std::string> problems;
+    w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
+    EXPECT_TRUE(problems.empty()) << problems.front();
+
+    ASSERT_TRUE(w.invoke("agenda-done-a3"));
+    ASSERT_TRUE(w.until([&] { return !w.exists("agenda-item-a3"); }));
+    ASSERT_TRUE(w.invoke("agenda-dismiss-a1"));
+    ASSERT_TRUE(w.until([&] { return !w.exists("agenda-item-a1"); }));
+    ASSERT_TRUE(w.invoke("agenda-prepare-a2"));
+    ASSERT_TRUE(w.until([&] { return count("agenda.prepare") == 1; }));
+    EXPECT_EQ(count("agenda.done"), 1);
+    EXPECT_EQ(count("agenda.dismiss"), 1);
+
+    // Settings: the Agenda section turns the Agenda off; the view leaves the navigation.
+    w.run([&] { w.main().open("#/settings"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("agenda-enabled") && w.exists("agenda-diagnostics"); }));
+    ASSERT_TRUE(w.with("agenda-enabled", [](ui::Node& node) {
+        auto* checkbox = dynamic_cast<ui::Checkbox*>(&node);
+        if (!checkbox) return false;
+        checkbox->set_checked(false);
+        return true;
+    }));
+    ASSERT_TRUE(w.until([&] { return count("agenda.set") == 1; }));
+    {
+        const std::lock_guard l(mx);
+        EXPECT_FALSE(jbool(calls.back().second, "enabled", true));
+    }
+    ASSERT_TRUE(w.until([&] { return !w.exists("nav-agenda"); }, 10000));
+}
+
+// add-knowledge-salience 3.2 over a scripted knowledge.* host: the Low importance list asks for low facts only; a fact
+// shows its importance as a level with named Mark important, Mark unimportant and Forget; restoring and forgetting call
+// the host.
+TEST(ShellKnowledge, LowImportanceListRestoresAndForgetsFacts) {
+    std::mutex mx;
+    std::vector<std::pair<std::string, json>> calls;
+    Fixture f;
+    const json fact = {{"fact_id", 7}, {"subject", "Jana"}, {"predicate", "likes"}, {"object", "pizza"}, {"state", "current"},
+                       {"categories", json::array()}};
+    f.rpc.add("knowledge.categories", RpcExposure::ui, [&](const json&) -> Result<json> {
+        return json{{"categories", json::array({{{"id", 0}, {"name", ""}}})}};
+    });
+    for (const char* m : {"knowledge.facts", "knowledge.fact", "knowledge.fact.importance", "knowledge.fact.delete"}) {
+        const std::string method = m;
+        f.rpc.add(method, RpcExposure::ui, [&, method](const json& p) -> Result<json> {
+            const std::lock_guard l(mx);
+            calls.emplace_back(method, p);
+            if (method == "knowledge.facts") return json{{"facts", jstr(p, "importance") == "low" ? json::array({fact}) : json::array()}};
+            if (method == "knowledge.fact") {
+                json d = fact;
+                d["relation_id"] = 70;
+                d["importance"] = "low";
+                d["statement"] = "Jana likes pizza.";
+                d["citations"] = json::array();
+                return d;
+            }
+            return json{{"ok", true}};
+        });
+    }
+    const auto count = [&](const std::string& method) {
+        const std::lock_guard l(mx);
+        return std::count_if(calls.begin(), calls.end(), [&](const auto& c) { return c.first == method; });
+    };
+    const auto last = [&](const std::string& method) {
+        const std::lock_guard l(mx);
+        for (auto it = calls.rbegin(); it != calls.rend(); ++it)
+            if (it->first == method) return it->second;
+        return json();
+    };
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/knowledge"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-section-knowledge"); }));
+    ASSERT_TRUE(w.invoke("knowledge-section-knowledge"));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-category-row-low"); }));
+    ASSERT_TRUE(w.invoke("knowledge-category-row-low"));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-facts-row-7"); }));
+    EXPECT_EQ(jstr(last("knowledge.facts"), "importance"), "low");
+    ASSERT_TRUE(w.invoke("knowledge-facts-row-7"));
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-forget"); }));
+    Uia uia;
+    auto m = uia.by_id(w.hwnd());
+    EXPECT_EQ(m[L"knowledge-fact-importance"].name, L"Low importance");
+    EXPECT_NE(m[L"knowledge-fact-mark-important"].name.find(L"important"), std::wstring::npos);
+    EXPECT_NE(m[L"knowledge-fact-mark-important"].name, L"Mark important");  // names the fact
+    EXPECT_NE(m[L"knowledge-fact-forget"].name.find(L"Forget"), std::wstring::npos);
+    std::vector<std::string> problems;
+    w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
+    EXPECT_TRUE(problems.empty()) << problems.front();
+
+    ASSERT_TRUE(w.invoke("knowledge-fact-mark-important"));
+    ASSERT_TRUE(w.until([&] { return count("knowledge.fact.importance") == 1; }));
+    EXPECT_EQ(jstr(last("knowledge.fact.importance"), "level"), "high");
+    EXPECT_EQ(jint(last("knowledge.fact.importance"), "id"), 70);
+    ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-forget"); }));
+    ASSERT_TRUE(w.invoke("knowledge-fact-forget"));
+    ASSERT_TRUE(w.until([&] { return count("knowledge.fact.delete") == 1; }));
+    EXPECT_EQ(jstr(last("knowledge.fact.delete"), "kind"), "relation");
+    EXPECT_EQ(jint(last("knowledge.fact.delete"), "id"), 70);
+}
+
 // add-save-as-note 2.1: Save as note from a mail item in the reader and from a Chat with a period (D3); the draft opens
 // in the editor and nothing is stored until Save; the note shows its origin as a link (D4), and sharing it names the
 // copied content; with policy.knowledge.save_as_note off, neither action is offered.
@@ -5855,6 +6045,35 @@ TEST(ShellUsability, RunUsageTotalsAreShownWhenTheRunEnds) {
     EXPECT_TRUE(problems.empty()) << problems.front();
 }
 
+// client/work-inbox Generation Speed Under Answers: the measured speed shows under the answer while work details are
+// hidden; the detailed token usage stays a work detail.
+TEST(ShellUsability, GenerationSpeedShowsUnderTheAnswerWithWorkDetailsHidden) {
+    Fixture f;
+    const auto t = f.in.env.thread();
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + t); });
+    ASSERT_TRUE(w.until([&] { return w.shell().feed().has_value(); }));
+    f.in.env.model.push([&f](const model::ChatRequest&, const model::ChatSink& sink) {
+        f.in.env.clock.advance(std::chrono::milliseconds(1500));  // waiting: not counted
+        sink.on_text("Here");
+        f.in.env.clock.advance(std::chrono::milliseconds(2000));
+        sink.on_text(" it is.");
+        auto r = text_response("Here it is.");
+        r.usage.completion = 100;
+        return model::ModelResult<model::ChatResponse>(r);
+    });
+    const auto run = f.in.env.run(t, "hello");
+    ASSERT_TRUE(f.in.env.wait(run, RunState::succeeded));
+    // The measured value replaces the live estimate once the call's stored timing reaches the feed.
+    ASSERT_TRUE(w.until([&] { return w.exists("speed-" + run) && label_text(w, "speed-" + run) == u"50 t/s"; }))
+        << "100 tokens in the 2 s after the first token";
+    EXPECT_FALSE(w.exists("usage-" + run));
+    std::vector<std::string> problems;
+    w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
+    EXPECT_TRUE(problems.empty()) << problems.front();
+}
+
 // control-plane/skill-registry Author Withdrawal: the editor withdraws a published version after asking; a withdrawn
 // version offers nothing.
 TEST(ShellUsability, AuthorWithdrawsAPublishedSkillVersion) {
@@ -6242,7 +6461,6 @@ TEST(ShellDictation, SpeechBlockVerifiesRepairsAndTestsTheMicrophoneOnlyWhenAske
     EXPECT_EQ(composer_text(w), u"Draft before the check");
     EXPECT_TRUE(w.until([&] { return f.in.svc->store().draft(t).text == "Draft before the check"; }));
 }
-
 // Keyed feed updates (Live Feed Updates, design D4): when a later Run adds items, the elements of the earlier items are
 // the same objects as before, so their text layout, selection and reading position stay.
 TEST(ShellFeed, AnEarlierMessageKeepsItsElementWhenALaterRunArrives) {
@@ -6907,9 +7125,10 @@ TEST(ShellKnowledge, ImpactPreviewDialogShowsAnalysisAndAsksAgainWhenStale) {
         const std::string& user = req.messages.back().content;
         json entities = json::array(), relations = json::array();
         for (int i = 0; i < 16; ++i) {
-            const size_t at = user.find("[" + std::to_string(i) + "]");
+            // Passages are <passage index="i" ...> elements (add-knowledge-salience design D1).
+            const size_t at = user.find("<passage index=\"" + std::to_string(i) + "\"");
             if (at == std::string::npos) break;
-            const size_t end = user.find("\n[" + std::to_string(i + 1) + "]", at);
+            const size_t end = user.find("<passage index=\"" + std::to_string(i + 1) + "\"", at);
             const std::string passage = user.substr(at, end == std::string::npos ? std::string::npos : end - at);
             if (passage.find("leads Phoenix") == std::string::npos) continue;
             entities.push_back({{"name", "Jana Nováková"}, {"type", "Person"}, {"chunks", {i}}});

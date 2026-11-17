@@ -89,6 +89,10 @@ std::string signature(const FeedItem& it) {
                    std::to_string(it.usage->reasoning) + "|" + std::to_string(it.usage->calls);
         return s + it.text;
     case ItemType::working: return s + it.text;
+    case ItemType::speed:
+        if (!it.speed) return s;
+        return s + std::to_string(it.speed->tokens_per_s) + (it.speed->approximate ? "~" : "") + "|" +
+               std::to_string(it.speed->waiting_ms < 0 ? -1 : it.speed->waiting_ms / 1000);
     }
     return s;
 }
@@ -598,7 +602,7 @@ std::vector<FeedItem> FeedView::visible(std::vector<FeedItem> items) const {
                 out.push_back(std::move(w));
             }
         } else {
-            if (it.type == ItemType::working)
+            if (it.type == ItemType::working && it.text.empty())
                 if (const auto s = step.find(it.run_id); s != step.end()) it.text = s->second.first + "|" + s->second.second;
             out.push_back(std::move(it));
         }
@@ -616,7 +620,19 @@ std::vector<FeedItem> FeedView::visible(std::vector<FeedItem> items) const {
 
 void FeedView::update() {
     const auto& snap = shell_.feed();
-    std::vector<FeedItem> items = visible(snap ? shell_.fold().build(*snap, shell_.live()) : std::vector<FeedItem>{});
+    std::vector<FeedItem> items = visible(snap ? shell_.fold().build(*snap, shell_.live(), shell_.now()) : std::vector<FeedItem>{});
+    // A speed line that is waiting for the model or estimating a stream counts on by itself: once a second.
+    const bool ticking = std::any_of(items.begin(), items.end(), [](const FeedItem& it) {
+        return it.type == ItemType::speed && it.speed && (it.speed->waiting_ms >= 0 || it.speed->approximate);
+    });
+    if (ticking && !speed_timer_) {
+        std::weak_ptr<int> alive = alive_;
+        speed_timer_ = shell_.window().set_timer(1000, [this, alive] {
+            if (!alive.lock()) return;
+            speed_timer_ = 0;  // one-shot
+            update();
+        });
+    }
     // Keyed reconciliation (Live Feed Updates): an element is kept while its key and content signature stay the same,
     // wherever it sits. A change rebuilds only its own item, so other messages keep their text layout, selection and
     // reading position. Streaming text updates in place.
@@ -995,8 +1011,28 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
         const auto bar = it.text.find('|');
         const std::string k = it.text.empty() ? "feed.working" : it.text.substr(0, bar);
         const std::u16string server = bar == std::string::npos ? u"" : ui::to_utf16(it.text.substr(bar + 1));
-        auto l = std::make_unique<ui::Label>(u, shell_.t(k, {{"server", server}}), TextStyle::caption, Paint::text_secondary, true,
+        auto l = std::make_unique<ui::Label>(u, shell_.t(k, {{"server", server}, {"count", server}}), TextStyle::caption, Paint::text_secondary, true,
                                              id_of("working-", it.key));
+        return l;
+    }
+    case ItemType::speed: {  // Generation Speed Under Answers: plain text, not a live region (design D4)
+        const RunSpeed sp = it.speed.value_or(RunSpeed{});
+        const std::u16string rate = ui::to_utf16(std::to_string(std::max(0LL, sp.tokens_per_s)));
+        std::u16string text, spoken;
+        if (sp.waiting_ms >= 0) {
+            text = shell_.t("feed.speed_waiting", {{"seconds", ui::to_utf16(std::to_string(sp.waiting_ms / 1000))}});
+            spoken = text;
+            if (sp.tokens_per_s >= 0) {
+                const std::u16string done = shell_.t(sp.approximate ? "feed.speed_approx" : "feed.speed", {{"rate", rate}});
+                text = done + u" · " + text;
+                spoken = shell_.t(sp.approximate ? "feed.speed_approx_name" : "feed.speed_name", {{"rate", rate}}) + u". " + spoken;
+            }
+        } else {
+            text = shell_.t(sp.approximate ? "feed.speed_approx" : "feed.speed", {{"rate", rate}});
+            spoken = shell_.t(sp.approximate ? "feed.speed_approx_name" : "feed.speed_name", {{"rate", rate}});
+        }
+        auto l = std::make_unique<ui::Label>(u, text, TextStyle::caption, Paint::text_secondary, true, id_of("speed-", it.run_id));
+        l->name = spoken;
         return l;
     }
     case ItemType::details: {

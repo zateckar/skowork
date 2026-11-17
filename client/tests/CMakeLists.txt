@@ -12,7 +12,7 @@ add_executable(base_tests
 target_link_libraries(base_tests PRIVATE wb_base GTest::gtest_main)
 add_test(NAME base_tests COMMAND base_tests)
 
-add_executable(knowledge_analysis_tests knowledge/analysis_test.cpp knowledge/reconcile_test.cpp)
+add_executable(knowledge_analysis_tests knowledge/analysis_test.cpp knowledge/reconcile_test.cpp knowledge/salience_test.cpp)
 target_link_libraries(knowledge_analysis_tests PRIVATE wb_knowledge_core GTest::gtest_main)
 if(WIN32)
   target_link_options(knowledge_analysis_tests PRIVATE -Wl,--subsystem,console)
@@ -94,6 +94,22 @@ if(WIN32)
   set_target_properties(ui_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 add_test(NAME ui_tests COMMAND ui_tests)
+
+add_executable(agenda_tests agenda/core_test.cpp)
+target_link_libraries(agenda_tests PRIVATE wb_agenda_core GTest::gtest_main)
+if(WIN32)
+  target_link_options(agenda_tests PRIVATE -Wl,--subsystem,console)
+  set_target_properties(agenda_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+add_test(NAME agenda_tests COMMAND agenda_tests)
+
+add_executable(triage_tests triage/classifier_test.cpp)
+target_link_libraries(triage_tests PRIVATE wb_triage GTest::gtest_main)
+if(WIN32)
+  target_link_options(triage_tests PRIVATE -Wl,--subsystem,console)
+  set_target_properties(triage_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+add_test(NAME triage_tests COMMAND triage_tests)
 # The build-time string check fails on a bundle with a missing key (design D9).
 add_test(NAME ui_strings_check_missing_key COMMAND ui_strings_check ${CMAKE_CURRENT_SOURCE_DIR}/ui/fixtures/strings_missing_key)
 set_tests_properties(ui_strings_check_missing_key PROPERTIES WILL_FAIL TRUE)
@@ -118,6 +134,12 @@ endforeach()
 target_compile_definitions(telemetry_unknown_field PRIVATE SKOWORK_UNKNOWN_FIELD)
 set_tests_properties(telemetry_unknown_field_compiles PROPERTIES WILL_FAIL TRUE)
 if(WIN32)
+  add_executable(model_single_attempt_tests model/single_attempt_test.cpp)
+  target_include_directories(model_single_attempt_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/model)
+  target_link_libraries(model_single_attempt_tests PRIVATE wb_model GTest::gtest_main)
+  target_link_options(model_single_attempt_tests PRIVATE -Wl,--subsystem,console)
+  set_target_properties(model_single_attempt_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  add_test(NAME model_single_attempt_tests COMMAND model_single_attempt_tests)
   # Real machine-config loader with a registry reader double; never touches the host registry or user profile.
   add_executable(machine_config_tests channel/machine_config_test.cpp)
   target_link_libraries(machine_config_tests PRIVATE wb_channel GTest::gtest)
@@ -175,8 +197,9 @@ if(WIN32)
     knowledge/knowledge_test.cpp
     meeting/meeting_test.cpp
     apps/apps_test.cpp
-    messaging/messaging_test.cpp)
-  target_link_libraries(win_tests PRIVATE wb_api_connectors wb_messaging wb_apps wb_meeting wb_knowledge wb_mail wb_telemetry wb_shell wb_ui wb_app wb_scheduler wb_browser wb_inbox wb_mcp wb_tools wb_extract miniz wb_sandbox wb_model wb_runtime GTest::gtest_main bcrypt ws2_32 iphlpapi)
+    messaging/messaging_test.cpp
+    agenda/service_test.cpp)
+  target_link_libraries(win_tests PRIVATE wb_agenda wb_api_connectors wb_messaging wb_apps wb_meeting wb_knowledge wb_mail wb_telemetry wb_shell wb_ui wb_app wb_scheduler wb_browser wb_inbox wb_mcp wb_tools wb_extract miniz wb_sandbox wb_model wb_runtime GTest::gtest_main bcrypt ws2_32 iphlpapi)
   # The stdio MCP server the client/mcp-client tests package; the official SDK server lives in dev/mcp-test-server.
   # The retrieval benchmark of client/knowledge-graph (add-knowledge-graph spike 1.1), run by hand.
   add_executable(kg_bench knowledge/kg_bench.cpp)

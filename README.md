@@ -181,7 +181,7 @@ If the registry key has no `ControlPlaneUrl`, the client reads `skowork.machine.
 
 Optional keys are `idp_redirect_uri`, `idp_scope` and `channel`.
 
-The client reads only `HKLM\SOFTWARE\Policies\Skowork` and `skowork.machine.json`. The package also contains `Skowork-legacy.exe`, a small launcher that starts `Skowork.exe`, for existing shortcuts and scripts. Settings and identity-provider client names use the `SKOWORK_` and `skowork-` prefixes. Install the client in a folder users cannot write to, for example `C:\Program Files\Skowork`, so they cannot replace this file. The values must match the server: `ControlPlaneUrl` = `SKOWORK_PUBLIC_BASE_URL`, `IdpIssuer` = the issuer of `OIDC_DISCOVERY_URL`, and `IdpClientId` = `OIDC_CLIENT_ID`. Both URLs must be https.
+The client reads only `HKLM\SOFTWARE\Policies\Skowork` and `skowork.machine.json`. Settings and identity-provider client names use the `SKOWORK_` and `skowork-` prefixes. Install the client in a folder users cannot write to, for example `C:\Program Files\Skowork`, so they cannot replace this file. The values must match the server: `ControlPlaneUrl` = `SKOWORK_PUBLIC_BASE_URL`, `IdpIssuer` = the issuer of `OIDC_DISCOVERY_URL`, and `IdpClientId` = `OIDC_CLIENT_ID`. Both URLs must be https.
 
 ## Desktop client
 

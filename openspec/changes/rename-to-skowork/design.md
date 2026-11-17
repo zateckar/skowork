@@ -17,7 +17,7 @@ The user chose "Rename everything" (2026-11-13) after being told that the existi
 
 ## D3: Legacy launcher
 
-`Workbench-legacy.exe` is renamed to `Skowork-legacy.exe`. It is a small launcher that starts `Skowork.exe`. It is shipped only under its own name. Earlier packaging copied it as the product executable, which would overwrite `Skowork.exe`, so that copy is removed. Shortcuts to the former `Workbench.exe` no longer resolve to anything, so they must be recreated or pointed at `Skowork-legacy.exe`. Whether to keep this launcher at all is a separate product decision and is not decided here.
+`Workbench-legacy.exe` is renamed to `Skowork-legacy.exe`. It is a small launcher that starts `Skowork.exe`. It is shipped only under its own name. Earlier packaging copied it as the product executable, which would overwrite `Skowork.exe`, so that copy is removed. Shortcuts to the former `Workbench.exe` no longer resolve to anything, so they must be recreated or pointed at `Skowork-legacy.exe`. Whether to keep this launcher at all is a separate product decision and is not decided here. Decided 2026-11-17 in improve-skowork-and-knowledge-control D1: the launcher is removed.
 
 ## D4: Duplicates from merged names
 

@@ -26,7 +26,52 @@ export interface ModelSettings {
   reasoning_effort: string | null;
   fallback_model: string | null;
   fallback_after_s: number | null;
+  /** Sampling defaults added to requests that lack the field (add-model-sampling-settings D1). */
+  sampling: Sampling | null;
 }
+
+export type Sampling = Partial<Record<(typeof SAMPLING_KEYS)[number], number>>;
+
+/** The sampling fields and their allowed ranges (Sampling Defaults Setting); `above` excludes the lower bound. */
+export const SAMPLING_KEYS = ['temperature', 'top_p', 'top_k', 'min_p', 'presence_penalty', 'repetition_penalty'] as const;
+const SAMPLING_RANGES: Record<(typeof SAMPLING_KEYS)[number], { min: number; max: number; above?: boolean; int?: boolean }> = {
+  temperature: { min: 0, max: 2 },
+  top_p: { min: 0, max: 1, above: true },
+  top_k: { min: -1, max: 1000, int: true },
+  min_p: { min: 0, max: 1 },
+  presence_penalty: { min: -2, max: 2 },
+  repetition_penalty: { min: 0, max: 2, above: true },
+};
+
+/** sampling: an object of the known keys; undefined keeps the stored value; null or {} clears it. */
+export function samplingField(v: unknown, cur: Sampling | null): Sampling | null {
+  if (v === undefined) return cur;
+  if (v === null) return null;
+  const bad = (msg: string) => new ApiError(400, 'INVALID_REQUEST', msg, { field: 'sampling' });
+  if (typeof v !== 'object' || Array.isArray(v)) throw bad(`sampling must be an object with ${SAMPLING_KEYS.join(', ')}.`);
+  const out: Sampling = {};
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    const range = SAMPLING_RANGES[k as (typeof SAMPLING_KEYS)[number]];
+    if (!range) throw bad(`sampling has an unknown key ${k}; allowed: ${SAMPLING_KEYS.join(', ')}.`);
+    if (x === null) continue;
+    const n = x as number;
+    const ok = typeof x === 'number' && Number.isFinite(n) && (range.above ? n > range.min : n >= range.min) && n <= range.max &&
+      (!range.int || Number.isInteger(n)) && !(k === 'top_k' && n === 0);
+    if (!ok) throw bad(`sampling.${k} must be ${range.int ? 'an integer' : 'a number'} ${range.above ? 'above' : 'from'} ${range.min} ${range.above ? 'up ' : ''}to ${range.max}${k === 'top_k' ? ' (not 0; -1 disables it)' : ''}.`);
+    out[k as (typeof SAMPLING_KEYS)[number]] = n;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+const parseSampling = (s: string | null): Sampling | null => {
+  if (!s) return null;
+  try {
+    const v = JSON.parse(s) as unknown;
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Sampling) : null;
+  } catch {
+    return null;
+  }
+};
 
 export class Backend {
   readonly id: number;
@@ -80,6 +125,7 @@ interface ModelRow {
   reasoning_effort: string | null;
   fallback_model: string | null;
   fallback_after_s: number | null;
+  sampling: string | null;
 }
 
 /** A stored model row with the name and state of its connection. */
@@ -181,6 +227,7 @@ const settingsOf = (m: ModelRow): ModelSettings => ({
   reasoning_effort: m.reasoning_effort,
   fallback_model: m.fallback_model,
   fallback_after_s: m.fallback_after_s,
+  sampling: parseSampling(m.sampling),
 });
 
 /** reasoning_effort: undefined keeps the stored value; null or empty clears it (the model's own default). */
@@ -404,7 +451,7 @@ export class Connections {
   /** The stored effort, fallback model and fallback wait of a mapped model; empty when none is stored. */
   settings(ref: string): ModelSettings {
     const row = this.#resolve(ref);
-    return row ? settingsOf(row) : { reasoning_effort: null, fallback_model: null, fallback_after_s: null };
+    return row ? settingsOf(row) : { reasoning_effort: null, fallback_model: null, fallback_after_s: null, sampling: null };
   }
 
   /** The labels (`connection/id`) of the models whose fallback is each model, keyed by connection and model id. */
@@ -723,8 +770,10 @@ export class Connections {
     const effort = effortField(body.reasoning_effort, before.reasoning_effort);
     const fallback = fallbackField(body.fallback_model, before.fallback_model);
     const afterS = afterField(body.fallback_after_s, before.fallback_after_s);
-    if (kind !== 'chat' && (effort !== null || fallback !== null)) {
-      throw new ApiError(400, 'INVALID_REQUEST', 'reasoning_effort and fallback_model apply to chat models only.', { field: effort !== null ? 'reasoning_effort' : 'fallback_model' });
+    const sampling = samplingField(body.sampling, parseSampling(before.sampling));
+    if (kind !== 'chat' && (effort !== null || fallback !== null || sampling !== null)) {
+      const field = effort !== null ? 'reasoning_effort' : fallback !== null ? 'fallback_model' : 'sampling';
+      throw new ApiError(400, 'INVALID_REQUEST', 'reasoning_effort, fallback_model and sampling apply to chat models only.', { field });
     }
     const int = (k: string, min: number, max: number, cur: number | null, nullable: boolean) => {
       const v = body[k];
@@ -752,14 +801,14 @@ export class Connections {
     if (fallback !== null && fallback !== before.fallback_model) this.#checkFallback(before, fallback);
     // The effort is checked on every save that submits one, so an admin can re-check it by saving (design Risks).
     if (effort !== null && typeof body.reasoning_effort === 'string') await this.#checkEffort(a, before, effort);
-    const settings = { reasoning_effort: effort, fallback_model: fallback, fallback_after_s: afterS };
+    const settings = { reasoning_effort: effort, fallback_model: fallback, fallback_after_s: afterS, sampling };
     this.#db
       .prepare(
         `UPDATE llm_models SET kind = ?, context_window = ?, max_output_tokens = ?, tools = ?, images = ?, reasoning = ?, dimension = ?,
-           reasoning_effort = ?, fallback_model = ?, fallback_after_s = ? WHERE connection_id = ? AND model_id = ?`,
+           reasoning_effort = ?, fallback_model = ?, fallback_after_s = ?, sampling = ? WHERE connection_id = ? AND model_id = ?`,
       )
       .run(next.kind, next.context_window, next.max_output_tokens, next.tools, next.images, next.reasoning, next.dimension,
-        settings.reasoning_effort, settings.fallback_model, settings.fallback_after_s, id, model);
+        settings.reasoning_effort, settings.fallback_model, settings.fallback_after_s, sampling ? JSON.stringify(sampling) : null, id, model);
     this.#record(a, 'llm.model.update', {
       connection: r.name,
       model,

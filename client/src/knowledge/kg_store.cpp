@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <functional>
 #include <map>
 #include <limits>
@@ -682,7 +683,7 @@ CREATE TABLE knowledge_publication_previews(
         // Task 10.3: the withdrawal outbox. A published entry or a whole publication queued for removal from the
         // server keeps its row, with an operation id that makes a retry idempotent and the revision it was first sent
         // against, until the server acknowledges it; forgetting knowledge never deletes it.
-        {kKgSchemaVersion, R"sql(
+        {kKgPublicationWithdrawalSchemaVersion, R"sql(
 ALTER TABLE knowledge_publications ADD COLUMN state TEXT NOT NULL DEFAULT 'published'
   CHECK(state IN ('published','withdrawing','withdrawn','removed'));
 ALTER TABLE knowledge_publications ADD COLUMN operation_id TEXT NOT NULL DEFAULT '';
@@ -694,7 +695,29 @@ ALTER TABLE knowledge_publication_entries ADD COLUMN state TEXT NOT NULL DEFAULT
 ALTER TABLE knowledge_publication_entries ADD COLUMN reason TEXT NOT NULL DEFAULT '';
 ALTER TABLE knowledge_publication_entries ADD COLUMN operation_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE knowledge_publication_entries ADD COLUMN expected_revision INTEGER;
-)sql"},    };
+)sql"},
+        // add-knowledge-salience (design D2-D7): relations are rated for importance and durability and carry a
+        // statement; a user's importance mark is kept by the names of its relation so re-extraction keeps it; items
+        // keep the Source context that extraction shows the model. Existing relations read as unrated (scored = 0).
+        {kKgSalienceSchemaVersion, R"sql(
+ALTER TABLE relations ADD COLUMN salience REAL NOT NULL DEFAULT 0.5 CHECK(salience BETWEEN 0 AND 1);
+ALTER TABLE relations ADD COLUMN durability TEXT NOT NULL DEFAULT 'lasting' CHECK(durability IN ('lasting','temporary','trivial'));
+ALTER TABLE relations ADD COLUMN statement TEXT NOT NULL DEFAULT '';
+ALTER TABLE relations ADD COLUMN scored INTEGER NOT NULL DEFAULT 0 CHECK(scored IN (0,1));
+ALTER TABLE items ADD COLUMN context TEXT NOT NULL DEFAULT '';
+CREATE TABLE importance_marks(
+  subject TEXT NOT NULL,
+  predicate TEXT NOT NULL,
+  object TEXT NOT NULL,
+  mark INTEGER NOT NULL CHECK(mark IN (-1,1)),
+  PRIMARY KEY(subject, predicate, object)) WITHOUT ROWID;
+CREATE TABLE dropped_candidates(
+  day TEXT NOT NULL,
+  source TEXT NOT NULL,
+  dropped INTEGER NOT NULL,
+  PRIMARY KEY(day, source)) WITHOUT ROWID;
+)sql"},
+    };
     return m;
 }
 
@@ -3536,12 +3559,22 @@ Result<long long> KgStore::put_prepared_item(const ItemInput& in, long long now)
             carry.bind(1, in.hash).bind(2, in.source).bind(3, in.ext_id).bind(4, in.legacy_tombstone_hash);
             if (Status s = carry.run(); !s) return s;
         }
+        // items.context exists from the salience schema on; an older database keeps writing without it.
+        const bool context_column = db_->user_version() >= kKgSalienceSchemaVersion;
         auto i = db_->prepare(
-            "INSERT INTO items(source, ext_id, title, ref, hash, created_at, updated_at, indexed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) "
-            "ON CONFLICT(source, ext_id) DO UPDATE SET title=excluded.title, ref=excluded.ref, hash=excluded.hash, "
-            "created_at=excluded.created_at, updated_at=excluded.updated_at, indexed_at=excluded.indexed_at");
+            context_column
+                ? "INSERT INTO items(source, ext_id, title, ref, hash, created_at, updated_at, indexed_at, context) "
+                  "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) "
+                  "ON CONFLICT(source, ext_id) DO UPDATE SET title=excluded.title, ref=excluded.ref, hash=excluded.hash, "
+                  "created_at=excluded.created_at, updated_at=excluded.updated_at, indexed_at=excluded.indexed_at, "
+                  "context=CASE WHEN excluded.context<>'' THEN excluded.context ELSE items.context END"
+                : "INSERT INTO items(source, ext_id, title, ref, hash, created_at, updated_at, indexed_at) "
+                  "VALUES(?1,?2,?3,?4,?5,?6,?7,?8) "
+                  "ON CONFLICT(source, ext_id) DO UPDATE SET title=excluded.title, ref=excluded.ref, hash=excluded.hash, "
+                  "created_at=excluded.created_at, updated_at=excluded.updated_at, indexed_at=excluded.indexed_at");
         i.bind(1, in.source).bind(2, in.ext_id).bind(3, in.title).bind(4, in.ref).bind(5, in.hash).bind(6, in.created_at);
         i.bind(7, in.updated_at).bind(8, now);
+        if (context_column) i.bind(9, in.context);
         if (Status s = i.run(); !s) return s;
         auto existing = db_->prepare("SELECT id FROM items WHERE source=?1 AND ext_id=?2");
         existing.bind(1, in.source).bind(2, in.ext_id);
@@ -4392,16 +4425,32 @@ void KgStore::add_mention(long long chunk_id, long long entity_id, const std::st
     (void)s.run();
 }
 
+namespace {
+double rating_salience(double v) { return std::isfinite(v) ? std::clamp(v, 0.0, 1.0) : kDefaultSalience; }
+}  // namespace
+
 long long KgStore::add_relation(long long subject, const std::string& predicate, long long object, double confidence,
-                                const std::string& valid_from, const std::string& valid_to, long long chunk_id) {
+                                const std::string& valid_from, const std::string& valid_to, long long chunk_id,
+                                const RelationRating& rating) {
     const std::lock_guard lock(db_->mutex());
     long long id = 0;
     const auto write = [&]() -> Status {
+        // The rating columns exist from the salience schema on; an older database keeps the original columns only.
+        const bool rating_columns = db_->user_version() >= kKgSalienceSchemaVersion;
         auto s = db_->prepare(
-            "INSERT INTO relations(subject, predicate, object, confidence, valid_from, valid_to, chunk_id) VALUES(?1,?2,?3,?4,?5,?6,?7)");
+            rating_columns
+                ? "INSERT INTO relations(subject, predicate, object, confidence, valid_from, valid_to, chunk_id, salience, durability, "
+                  "statement, scored) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"
+                : "INSERT INTO relations(subject, predicate, object, confidence, valid_from, valid_to, chunk_id) "
+                  "VALUES(?1,?2,?3,?4,?5,?6,?7)");
         s.bind(1, subject).bind(2, predicate).bind(3, object).bind(4, confidence).bind(5, valid_from).bind(6, valid_to);
         if (chunk_id) s.bind(7, chunk_id);
         else s.bind_null(7);
+        if (rating_columns)
+            s.bind(8, rating_salience(rating.salience))
+                .bind(9, normalize_durability(rating.durability))
+                .bind(10, utf8_truncate(rating.statement, kMaxStatementBytes))
+                .bind(11, static_cast<long long>(rating.scored ? 1 : 0));
         if (Status st = s.run(); !st) return st;
         id = db_->last_insert_id();
         // A relation without a passage (directory enrichment) has no item evidence to record.
@@ -4421,7 +4470,8 @@ long long KgStore::add_relation(long long subject, const std::string& predicate,
 
 namespace {
 constexpr const char* kRelationSelect =
-    "SELECT r.id, r.subject, r.object, ifnull(r.chunk_id, 0), r.predicate, r.valid_from, r.valid_to, r.confidence, s.name, o.name "
+    "SELECT r.id, r.subject, r.object, ifnull(r.chunk_id, 0), r.predicate, r.valid_from, r.valid_to, r.confidence, s.name, o.name, "
+    "r.salience, r.durability, r.statement, r.scored "
     "FROM relations r JOIN entities s ON s.id=r.subject JOIN entities o ON o.id=r.object ";
 RelationRow read_relation(const Statement& s) {
     RelationRow r;
@@ -4435,6 +4485,10 @@ RelationRow read_relation(const Statement& s) {
     r.confidence = s.col_double(7);
     r.subject_name = s.col_text(8);
     r.object_name = s.col_text(9);
+    r.salience = s.col_double(10);
+    r.durability = s.col_text(11);
+    r.statement = s.col_text(12);
+    r.scored = s.col_int(13) != 0;
     return r;
 }
 }  // namespace
@@ -4464,6 +4518,142 @@ bool KgStore::delete_relation(long long id) {
     const bool removed = db_->changes() > 0;
     if (removed) delete_orphan_entities(*db_);
     return removed;
+}
+
+// The salience a user mark gives (design D6): important facts rank as 1.0, unimportant ones as 0.1.
+namespace {
+constexpr double kImportantSalience = 1.0, kUnimportantSalience = 0.1;
+}  // namespace
+
+std::optional<int> KgStore::importance_mark(const std::string& subject_name, const std::string& predicate,
+                                            const std::string& object_name) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSalienceSchemaVersion) return std::nullopt;
+    auto s = db_->prepare("SELECT mark FROM importance_marks WHERE subject=?1 AND predicate=?2 AND object=?3");
+    s.bind(1, normalize_name(subject_name)).bind(2, predicate).bind(3, normalize_name(object_name));
+    if (!s.step()) return std::nullopt;
+    return static_cast<int>(s.col_int(0));
+}
+
+Status KgStore::set_importance(long long relation_id, int mark) {
+    const std::lock_guard lock(db_->mutex());
+    if (mark != 1 && mark != -1 && mark != 0) return make_error("invalid", "Importance is high, normal or low.");
+    if (db_->user_version() < kKgSalienceSchemaVersion) return make_error("schema", "Knowledge importance is not available yet.");
+    return db_->transaction([&]() -> Status {
+        RelationRow row;
+        {
+            auto r = db_->prepare(std::string(kRelationSelect) + "WHERE r.id=?1");
+            r.bind(1, relation_id);
+            if (!r.step()) return make_error("not_found", "This fact is no longer in your knowledge.");
+            row = read_relation(r);
+        }
+        const std::string subject = normalize_name(row.subject_name), object = normalize_name(row.object_name);
+        if (mark == 0) {
+            auto d = db_->prepare("DELETE FROM importance_marks WHERE subject=?1 AND predicate=?2 AND object=?3");
+            d.bind(1, subject).bind(2, row.predicate).bind(3, object);
+            if (Status s = d.run(); !s) return s;
+        } else {
+            auto u = db_->prepare(
+                "INSERT INTO importance_marks(subject, predicate, object, mark) VALUES(?1,?2,?3,?4) "
+                "ON CONFLICT(subject, predicate, object) DO UPDATE SET mark=excluded.mark");
+            u.bind(1, subject).bind(2, row.predicate).bind(3, object).bind(4, static_cast<long long>(mark));
+            if (Status s = u.run(); !s) return s;
+        }
+        // The rating of the stored relations of these two entities follows the mark; clearing it leaves them unrated.
+        auto up = db_->prepare("UPDATE relations SET salience=?1, scored=?2 WHERE subject=?3 AND predicate=?4 AND object=?5");
+        up.bind(1, mark == 1 ? kImportantSalience : mark == -1 ? kUnimportantSalience : kDefaultSalience)
+            .bind(2, static_cast<long long>(mark == 0 ? 0 : 1))
+            .bind(3, row.subject)
+            .bind(4, row.predicate)
+            .bind(5, row.object);
+        return up.run();
+    });
+}
+
+void KgStore::set_relation_rating(long long relation_id, const RelationRating& rating) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSalienceSchemaVersion) return;
+    auto s = db_->prepare("UPDATE relations SET salience=?2, durability=?3, statement=?4, scored=?5 WHERE id=?1");
+    s.bind(1, relation_id)
+        .bind(2, rating_salience(rating.salience))
+        .bind(3, normalize_durability(rating.durability))
+        .bind(4, utf8_truncate(rating.statement, kMaxStatementBytes))
+        .bind(5, static_cast<long long>(rating.scored ? 1 : 0));
+    (void)s.run();
+}
+
+std::vector<RelationRow> KgStore::unscored_relations(int limit) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<RelationRow> out;
+    if (limit <= 0 || db_->user_version() < kKgSalienceSchemaVersion) return out;
+    auto s = db_->prepare(std::string(kRelationSelect) +
+                          "JOIN chunks c ON c.id=r.chunk_id JOIN items i ON i.id=c.item_id "
+                          "WHERE r.scored=0 AND r.chunk_id IS NOT NULL ORDER BY i.updated_at DESC, r.id DESC LIMIT ?1");
+    s.bind(1, limit);
+    while (s.step()) out.push_back(read_relation(s));
+    return out;
+}
+
+std::map<long long, double> KgStore::chunk_salience(const std::vector<long long>& chunk_ids) {
+    const std::lock_guard lock(db_->mutex());
+    std::map<long long, double> out;
+    if (chunk_ids.empty() || db_->user_version() < kKgSalienceSchemaVersion) return out;
+    auto s = db_->prepare("SELECT chunk_id, max(salience) FROM relations WHERE chunk_id IN (" + id_list(chunk_ids) +
+                          ") GROUP BY chunk_id");
+    while (s.step()) out[s.col_int(0)] = s.col_double(1);
+    return out;
+}
+
+std::map<long long, std::string> KgStore::chunk_statements(const std::vector<long long>& chunk_ids) {
+    const std::lock_guard lock(db_->mutex());
+    std::map<long long, std::string> out;
+    if (chunk_ids.empty() || db_->user_version() < kKgSalienceSchemaVersion) return out;
+    auto s = db_->prepare("SELECT chunk_id, statement FROM relations WHERE chunk_id IN (" + id_list(chunk_ids) +
+                          ") AND statement<>'' ORDER BY chunk_id, salience DESC, id");
+    while (s.step()) out.emplace(s.col_int(0), s.col_text(1));  // emplace keeps the first, the most important
+    return out;
+}
+
+std::string KgStore::item_context(long long item_id) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSalienceSchemaVersion) return {};
+    auto s = db_->prepare("SELECT context FROM items WHERE id=?1");
+    s.bind(1, item_id);
+    return s.step() ? s.col_text(0) : std::string{};
+}
+
+std::map<std::string, long long> KgStore::dropped_candidates(const std::string& day) {
+    const std::lock_guard lock(db_->mutex());
+    std::map<std::string, long long> out;
+    if (db_->user_version() < kKgSalienceSchemaVersion) return out;
+    auto s = db_->prepare("SELECT source, dropped FROM dropped_candidates WHERE day=?1");
+    s.bind(1, day);
+    while (s.step()) out[s.col_text(0)] = s.col_int(1);
+    return out;
+}
+
+void KgStore::add_dropped_candidates(const std::string& day, const std::string& source, long long n) {
+    const std::lock_guard lock(db_->mutex());
+    if (n <= 0 || db_->user_version() < kKgSalienceSchemaVersion) return;
+    auto s = db_->prepare(
+        "INSERT INTO dropped_candidates(day, source, dropped) VALUES(?1,?2,?3) ON CONFLICT(day, source) DO UPDATE SET dropped=dropped+?3");
+    s.bind(1, day).bind(2, source).bind(3, n);
+    (void)s.run();
+    auto d = db_->prepare("DELETE FROM dropped_candidates WHERE day<>?1");
+    d.bind(1, day);
+    (void)d.run();
+}
+
+std::optional<RelationRow> KgStore::relation_of_fact(long long fact_id) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSalienceSchemaVersion) return std::nullopt;
+    auto s = db_->prepare(std::string(kRelationSelect) +
+                          "JOIN knowledge_facts f ON f.subject=r.subject AND f.predicate=r.predicate AND f.object=r.object "
+                          "AND f.valid_from=r.valid_from AND f.valid_to=r.valid_to AND f.unit='' AND f.scope='' "
+                          "WHERE f.id=?1 AND r.chunk_id IS NOT NULL ORDER BY r.id DESC LIMIT 1");
+    s.bind(1, fact_id);
+    if (!s.step()) return std::nullopt;
+    return read_relation(s);
 }
 
 std::vector<RelationRow> KgStore::relations_of_item(long long item_id) {

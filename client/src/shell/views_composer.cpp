@@ -453,12 +453,16 @@ void ComposerView::rebuild_queued() {
         h->role = ui::Role::heading;
         for (const QueuedMessage& q : snap->queued) {
             const std::string qid = std::to_string(q.id);
-            auto* row = queued_->emplace<ui::Box>("queued-" + qid, Paint::none, 4, Paint::border);
+            auto* group = queued_->emplace<ui::Box>("queued-" + qid, Paint::none, 4, Paint::border);
+            group->axis = ui::Axis::column;
+            group->gap = 4;
+            group->padding = ui::Insets::xy(8, 4);
+            if (q.mode == "steer_now")
+                group->emplace<ui::Label>(u, shell_.t("composer.steering"), TextStyle::caption, Paint::text_secondary, true,
+                                          "queued-" + qid + "-status");
+            auto* row = group->emplace<ui::Box>("queued-" + qid + "-row");
             row->axis = ui::Axis::row;
             row->gap = 8;
-            row->padding = ui::Insets::xy(8, 2);
-            if (q.mode == "steer_now")
-                row->emplace<ui::Badge>(u, shell_.t("composer.steering"), Paint::surface_alt, Paint::text_secondary);
             // The text wraps, so Edit and Remove stay inside a narrow reading pane.
             auto* l = row->emplace<ui::Label>(u, ui::to_utf16(q.text), TextStyle::body, Paint::text, true, "queued-" + qid + "-text");
             l->width = Sizing::fill;

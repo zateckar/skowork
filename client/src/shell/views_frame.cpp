@@ -18,7 +18,7 @@ namespace {
 namespace glyph {
 constexpr char16_t inbox = 0xE715, unread = 0xE8BD, action = 0xE7BA, running = 0xE768, all = 0xE8FD, archive = 0xE7B8,
                    status = 0xE9D9, settings = 0xE713, about = 0xE946, folder = 0xE8B7, add = 0xE710, knowledge = 0xE8F1, apps = 0xE71D,
-                   chats = 0xE8F2;
+                   chats = 0xE8F2, agenda = 0xE787;
 }
 
 // One entry of the navigation: an icon, a label (hidden when compact), a count; selected for the current place.
@@ -170,6 +170,10 @@ void NavPane::rebuild() {
                              inbox_route && shell_.view() == view, compact_,
                              [this, view] { shell_.navigate(view_hash(view)); });
     }
+    // The Agenda view while the user has the Agenda enabled (client/work-inbox Agenda View).
+    if (const json* ag = jobj(shell_.status(), "agenda"); ag && jbool(*ag, "available") && jbool(*ag, "enabled"))
+        vs->emplace<NavItem>(shell_.ui(), "nav-agenda", glyph::agenda, shell_.t("views.agenda"), 0, r.name == RouteName::agenda, compact_,
+                             [this] { shell_.navigate("#/agenda"); });
 
     auto* fh = emplace<Node>("nav-folders-header");
     fh->axis = ui::Axis::row;
@@ -198,11 +202,13 @@ void NavPane::rebuild() {
         char16_t g;
         RouteName route;
     };
-    const P ps[] = {{"knowledge", "#/knowledge", glyph::knowledge, RouteName::knowledge},
-                    {"apps", "#/apps", glyph::apps, RouteName::apps},
-                    {"status", "#/status", glyph::status, RouteName::status},
-                    {"settings", "#/settings", glyph::settings, RouteName::settings},
-                    {"about", "#/about", glyph::about, RouteName::about}};
+    std::vector<P> ps;
+    for (const P& p : {P{"knowledge", "#/knowledge", glyph::knowledge, RouteName::knowledge},
+                       P{"apps", "#/apps", glyph::apps, RouteName::apps},
+                       P{"status", "#/status", glyph::status, RouteName::status},
+                       P{"settings", "#/settings", glyph::settings, RouteName::settings},
+                       P{"about", "#/about", glyph::about, RouteName::about}})
+        ps.push_back(p);
     for (const P& p : ps) {
         const std::string hash = p.hash;
         pages->emplace<NavItem>(shell_.ui(), std::string("nav-") + p.key, p.g, shell_.t(std::string("nav.") + p.key), 0,

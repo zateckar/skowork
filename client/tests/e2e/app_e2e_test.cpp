@@ -11,7 +11,12 @@
 #include "base/encoding.h"
 #include "base/strings.h"
 #include "shell/feed.h"
+#include "storage/app_store.h"
+#include "storage/data_root.h"
+#include "storage/keystore.h"
+#include "../support/dev_endpoints.h"
 #include "tools/image_info.h"
+#include "ui/generated_surface.h"
 
 #include <sqlite3mc_amalgamation.h>
 
@@ -56,6 +61,7 @@ struct Instance {
     std::wstring pipe = L"\\\\.\\pipe\\" + pipe_short;
     std::filesystem::path dir = std::filesystem::temp_directory_path() / L"skowork-test" / widen("app-" + random_urlsafe(6));
     AppProcess main;
+    bool keep = false;  // keep the data root (and its sign-in) after the test
 
     std::wstring common_args() const {
         return L"--data-root \"" + (dir / L"data").wstring() + L"\" --pipe-name " + pipe_short + L" --no-register --config \"" +
@@ -86,6 +92,7 @@ struct Instance {
             (void)call("app.quit");
             if (::WaitForSingleObject(main.process.get(), 10000) != WAIT_OBJECT_0) ::TerminateProcess(main.process.get(), 1);
         }
+        if (keep) return;
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
     }
@@ -149,6 +156,34 @@ json stack_config() {
 
 }  // namespace
 
+TEST(AppE2E, ExistingClientOpensProfileWithNewerAdditiveSchema) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    // Characterizes the current local binary. Replace with the actual previous-release barrier test when available.
+    Instance a;
+    a.write_config(json{{"control_plane_url", ""}});
+    {
+        auto root = DataRoot::open(a.dir / L"data");
+        ASSERT_TRUE(root);
+        KeyStore keys(root->keys());
+        ASSERT_TRUE(keys.load());
+        auto key = keys.get_or_create("app.db");
+        ASSERT_TRUE(key);
+        auto migrations = app_migrations();
+        ASSERT_FALSE(migrations.empty());
+        migrations.push_back({migrations.back().version + 1, "CREATE TABLE prototype_recovery_ledger(id INTEGER PRIMARY KEY);"});
+        MigrationOutcome outcome;
+        auto db = open_and_migrate(root->file("app.db"), *key, migrations, outcome);
+        ASSERT_TRUE(db);
+        ASSERT_FALSE(outcome.degraded);
+    }
+    ASSERT_TRUE(a.start());
+    auto status = a.call("app.status");
+    ASSERT_TRUE(status);
+    ASSERT_TRUE(status->contains("storage"));
+    EXPECT_FALSE(jbool((*status)["storage"], "read_only", true));
+    EXPECT_TRUE(jstr((*status)["storage"], "error").empty());
+}
+
 TEST(AppE2E, SecondLaunchHandsOverAndExits) {
     Instance a;
     a.write_config(json{{"control_plane_url", ""}});
@@ -161,30 +196,6 @@ TEST(AppE2E, SecondLaunchHandsOverAndExits) {
     AppProcess second = launch(a.common_args());
     DWORD code = 99;
     ASSERT_TRUE(exited_within(second, 10000, &code));
-    EXPECT_EQ(code, 0u);
-    EXPECT_TRUE(process_alive(a.main.pid));
-    bool opened = false;
-    for (int i = 0; i < 50 && !opened; ++i) {
-        auto s = a.call("dev.ui", {{"action", "status"}});
-        opened = s && jbool(*s, "open");
-        if (!opened) std::this_thread::sleep_for(100ms);
-    }
-    EXPECT_TRUE(opened);
-    (void)a.call("dev.ui", {{"action", "close"}});
-}
-
-TEST(AppE2E, LegacyLauncherHandsOverToExistingInstance) {
-    Instance a;
-    a.write_config(json{{"control_plane_url", ""}});
-    ASSERT_TRUE(a.start());
-    auto ui = a.call("dev.ui", {{"action", "status"}});
-    ASSERT_TRUE(ui);
-    ASSERT_FALSE(jbool(*ui, "open"));
-
-    AppProcess legacy = launch(a.common_args(), L"Skowork-legacy.exe");
-    ASSERT_TRUE(legacy.process);
-    DWORD code = 99;
-    ASSERT_TRUE(exited_within(legacy, 10000, &code));
     EXPECT_EQ(code, 0u);
     EXPECT_TRUE(process_alive(a.main.pid));
     bool opened = false;
@@ -1207,4 +1218,271 @@ TEST(AppE2E, ComputerUseOperatesACustomDrawnApplicationThroughVision) {
     auto feed = a.call("threads.get", {{"thread_id", thread}});
     ASSERT_TRUE(feed);
     EXPECT_NE(feed->dump().find(std::to_string(code)), std::string::npos) << "the model read the code from the pixels: " << feed->dump();
+}
+
+// Model evaluation against the real gateway (not a regression test; run by hand): the agent builds three Local apps of
+// increasing complexity, and answers six chat requests with generated surfaces enabled, including a form submitted back
+// and a generated Question answered. Everything lands in SKOWORK_E2E_REPORT (default %TEMP%\skowork-e2e-report) for
+// review. With SKOWORK_E2E_HOLD set, the client keeps running until <report>\release exists (up to 30 minutes), so the
+// apps can be opened from dev.opened_urls. App launches are recorded, never opened in the user's browser.
+TEST(AppE2E, ModelBuildsLocalAppsAndUsesGeneratedSurfaces) {
+    SKOWORK_REQUIRE_STACK();
+    if (!std::getenv("SKOWORK_E2E_MODEL_EVAL")) GTEST_SKIP() << "set SKOWORK_E2E_MODEL_EVAL to run the model evaluation";
+    const char* rep = std::getenv("SKOWORK_E2E_REPORT");
+    const std::filesystem::path report = rep ? std::filesystem::path(rep) : std::filesystem::temp_directory_path() / L"skowork-e2e-report";
+    std::filesystem::create_directories(report);
+    const auto save = [&report](const std::string& name, const std::string& text) { std::ofstream(report / widen(name), std::ios::binary) << text; };
+
+    Instance a;
+    // SKOWORK_E2E_KEEP_ROOT: reuse one data root across evaluation runs, so its refresh token spares the next sign-in.
+    if (const char* keep = std::getenv("SKOWORK_E2E_KEEP_ROOT")) {
+        a.dir = std::filesystem::path(keep);
+        a.keep = true;
+    }
+    json cfg = stack_config();
+    cfg["dev_open_urls"] = "record";
+    a.write_config(cfg);
+    ASSERT_TRUE(a.start());
+    json st;
+    for (int i = 0; i < 1800; ++i) {
+        if (auto s = a.call("app.status")) {
+            st = *s;
+            if (st.contains("agent") && jstr(st["agent"], "start_blocked").empty()) break;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    ASSERT_TRUE(jstr(st["agent"], "start_blocked").empty()) << st.dump();
+    ASSERT_TRUE(a.call("settings.set", {{"key", "ui.generated_surfaces"}, {"value", true}}));
+    // The setting applies to the agent on restart.
+    ASSERT_TRUE(a.call("app.quit"));
+    ASSERT_TRUE(exited_within(a.main, 20000));
+    a.main = {};
+    ASSERT_TRUE(a.start());
+    for (int i = 0; i < 1800; ++i) {
+        if (auto s = a.call("app.status")) {
+            st = *s;
+            if (st.contains("agent") && jstr(st["agent"], "start_blocked").empty()) break;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    ASSERT_TRUE(jstr(st["agent"], "start_blocked").empty()) << st.dump();
+
+    json summary = json::object();
+    // Drives the Thread until no Run is active: approves every approval, answers plain Questions with their first
+    // choice, and answers generated Questions with their defaults through the window's method.
+    const auto drive = [&a](const std::string& thread, int minutes, json& log) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(minutes);
+        int idle = 0;
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto t = a.call("threads.get", {{"thread_id", thread}});
+            if (!t) { std::this_thread::sleep_for(500ms); continue; }
+            bool active = false;
+            for (const auto& r : (*t)["runs"]) {
+                const std::string s = jstr(r, "state");
+                if (s != "succeeded" && s != "failed" && s != "cancelled") active = true;
+            }
+            for (const auto& x : (*t)["actions"]) {
+                if (!x["resolution"].is_null()) continue;
+                const std::string id = jstr(x, "id"), kind = jstr(x, "kind");
+                const json& p = x["payload"];
+                if (kind == "approval") {
+                    log["approvals"].push_back(jstr(p, "tool"));
+                    (void)a.call("actions.resolve", {{"action_id", id}, {"decision", "approve"}});
+                } else if (kind == "question" && p.contains("surface")) {
+                    std::string button;
+                    std::function<void(const json&)> find = [&](const json& cs) {
+                        for (const auto& c : cs) {
+                            if (jstr(c, "type") == "button" && button.empty()) button = jstr(c, "id");
+                            if (c.contains("components")) find(c["components"]);
+                        }
+                    };
+                    find(p["surface"]["components"]);
+                    auto r = a.call("dev.call", {{"method", "surfaces.answer_question"},
+                                                 {"params", {{"action_id", id}, {"thread_id", thread}, {"run_id", jstr(x, "run_id")},
+                                                             {"revision", jstr(p, "surface_revision")}, {"token", jstr(p, "surface_token")},
+                                                             {"button_id", button}, {"draft", json::object()}}}});
+                    log["generated_questions"].push_back({{"surface", p["surface"]}, {"answered", r.ok()}, {"error", r ? "" : r.error().message}});
+                    if (!r) (void)a.call("actions.answer", {{"action_id", id}, {"answer", "Use your best judgment."}});
+                } else if (kind == "question") {
+                    std::string answer = "Use your best judgment.";
+                    if (const json* c = jobj(p, "choices"); c && c->is_array() && !c->empty()) answer = (*c)[0].get<std::string>();
+                    log["questions"].push_back({{"prompt", jstr(p, "prompt")}, {"answer", answer}});
+                    (void)a.call("actions.answer", {{"action_id", id}, {"answer", answer}});
+                }
+            }
+            if (!active && (*t)["queued"].empty()) {
+                if (++idle >= 3) return *t;
+            } else {
+                idle = 0;
+            }
+            std::this_thread::sleep_for(1s);
+        }
+        auto t = a.call("threads.get", {{"thread_id", thread}});
+        return t ? *t : json::object();
+    };
+    const auto tools_of = [&a](const json& thread) {
+        json tools = json::array();
+        for (const auto& r : thread["runs"]) {
+            auto ev = a.call("runs.events", {{"run_id", jstr(r, "id")}});
+            if (!ev) continue;
+            for (const auto& e : (*ev)["events"])
+                if (jstr(e, "kind") == "tool_call" || jstr(e, "kind") == "tool.call") tools.push_back(jstr(e["payload"], "tool"));
+        }
+        return tools;
+    };
+    const auto last_assistant = [](const json& thread) {
+        std::string text;
+        for (const auto& m : thread["messages"]) if (jstr(m, "role") == "assistant" && !jstr(m, "content").empty()) text = jstr(m, "content");
+        return text;
+    };
+
+    // ---- Local apps ----
+    const std::vector<std::pair<std::string, std::string>> apps_prompts = {
+        {"app1-presentation",
+         "Build me a Local app: a 6-slide presentation for a fleet manager about moving a company car fleet to electric cars "
+         "(costs, charging, range, incentives, a rollout plan, next steps). Next/previous buttons, arrow-key navigation, a "
+         "slide counter and a clean modern look. Do not ask me anything first; open it when it is done."},
+        {"app2-reading-list",
+         "Build me a Local app to track my reading list. I add books with title, author, status (to read, reading, done) and "
+         "a 1-5 rating; I can see the list, filter it by status, change a book's status and delete a book. Keep the books in "
+         "the app's database so they survive a restart. Do not ask me anything first; open it when it is done."},
+        {"app3-team-expenses",
+         "Build me a Local app for my team's expenses. Each expense has a date, a person, a category, an amount in CZK and a "
+         "note, stored in the app's database. I can add, edit and delete expenses; filter by person, category and month; see a "
+         "summary with totals per category and per person and a bar chart of the category totals; and export the filtered "
+         "list as CSV. Seed it with 12 realistic sample expenses for 4 people over the last 3 months. Do not ask me anything "
+         "first; open it when it is done."}};
+    // SKOWORK_E2E_ONLY: a comma-separated list of scenario names (for example app3-team-expenses) to run alone.
+    const char* only = std::getenv("SKOWORK_E2E_ONLY");
+    const auto wanted = [only](const std::string& name) { return !only || (std::string(",") + only + ",").find("," + name + ",") != std::string::npos; };
+    for (const auto& [name, prompt] : apps_prompts) {
+        if (!wanted(name)) continue;
+        const auto started = std::chrono::steady_clock::now();
+        auto sent = a.call("threads.send", {{"text", prompt}});
+        ASSERT_TRUE(sent) << sent.error().message;
+        const std::string thread = jstr(*sent, "thread_id");
+        json log = {{"prompt", prompt}, {"approvals", json::array()}, {"questions", json::array()}};
+        // One model turn of a large app can take 15 minutes on the dev gateway (about 25 tokens per second).
+        const json t = drive(thread, 45, log);
+        log["seconds"] = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count();
+        log["runs"] = json::array();
+        for (const auto& r : t["runs"]) log["runs"].push_back({{"id", jstr(r, "id")}, {"state", jstr(r, "state")}, {"error", r.contains("error") ? r["error"] : json()}});
+        log["tools"] = tools_of(t);
+        log["answer"] = last_assistant(t);
+        save(name + ".thread.json", t.dump(2));
+        summary[name] = log;
+        save("summary.json", summary.dump(2));
+        EXPECT_TRUE(!t["runs"].empty() && jstr(t["runs"].back(), "state") == "succeeded") << name << ": " << log["runs"].dump();
+        EXPECT_NE(log["tools"].dump().find("apps.open"), std::string::npos) << name << " was not opened";
+    }
+    auto listed = a.call("dev.call", {{"method", "apps.list"}});
+    ASSERT_TRUE(listed) << listed.error().message;
+    summary["apps"] = *listed;
+    for (const auto& app : (*listed)["apps"]) {
+        std::error_code ec;
+        const auto dest = report / L"apps" / widen(jstr(app, "id"));
+        std::filesystem::create_directories(dest, ec);
+        std::filesystem::copy(widen(jstr(app, "folder")), dest,
+                              std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing, ec);
+    }
+    if (auto urls = a.call("dev.opened_urls")) summary["opened_urls"] = (*urls)["urls"];
+    save("summary.json", summary.dump(2));
+    if (!only) EXPECT_GE((*listed)["apps"].size(), 3u) << listed->dump(2);
+
+    // ---- Generated surfaces ----
+    const std::vector<std::pair<std::string, std::string>> ui_prompts = {
+        {"ui1-chart-table",
+         "Our support tickets per month: Jan 120, Feb 135, Mar 160, Apr 150, May 190, Jun 210. Resolved within SLA: Jan 95%, "
+         "Feb 93%, Mar 88%, Apr 91%, May 85%, Jun 82%. Show me the trend and what stands out."},
+        {"ui2-form",
+         "I am planning a 2-day offsite for 12 people. Let me set the budget per person, the type of location and the "
+         "activities I want, and then come back with a plan that fits my choices."},
+        {"ui3-diagram",
+         "Explain how a change gets from a developer's branch to production in a typical pipeline with code review, build, "
+         "automated tests, a staging deployment, a manual approval and the production rollout. Visualize it."},
+        {"ui4-question",
+         "Help me choose a laptop for work. Ask me what matters to me before you recommend anything."},
+        {"ui5-plain", "What is the capital of Austria?"},
+        {"ui6-comparison",
+         "Compare PostgreSQL, SQLite and MongoDB for a small internal tool on licensing, setup effort, concurrent writes and "
+         "backups. I need to decide quickly."}};
+    for (const auto& [name, prompt] : ui_prompts) {
+        if (!wanted(name)) continue;
+        const auto started = std::chrono::steady_clock::now();
+        auto sent = a.call("threads.send", {{"text", prompt}});
+        ASSERT_TRUE(sent) << sent.error().message;
+        const std::string thread = jstr(*sent, "thread_id");
+        json log = {{"prompt", prompt}, {"approvals", json::array()}, {"questions", json::array()}, {"generated_questions", json::array()}};
+        json t = drive(thread, 10, log);
+        log["seconds"] = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count();
+        log["answer"] = last_assistant(t);
+        // Every assistant message's surfaces: which parse, which were dropped.
+        json surfaces = json::array();
+        long long seq = 0;
+        std::string run_id;
+        int block_count = 0;
+        for (const auto& r : t["runs"]) {
+            auto ev = a.call("runs.events", {{"run_id", jstr(r, "id")}});
+            if (!ev) continue;
+            for (const auto& e : (*ev)["events"]) {
+                if (jstr(e, "kind") != "message" || jstr(e["payload"], "role") != "assistant") continue;
+                const std::string content = jstr(e["payload"], "content");
+                const auto blocks = ui::discover_generated_surfaces(content);
+                size_t fences = 0;
+                for (size_t p = content.find("```skowork-ui"); p != std::string::npos; p = content.find("```skowork-ui", p + 1)) ++fences;
+                for (const auto& b : blocks) surfaces.push_back(b.surface);
+                if (fences != blocks.size()) log["invalid_fences"] = static_cast<long long>(fences - blocks.size());
+                if (!blocks.empty()) {
+                    seq = jint(e, "seq");
+                    run_id = jstr(r, "id");
+                    block_count = static_cast<int>(blocks.size());
+                }
+            }
+        }
+        log["surfaces"] = surfaces;
+        // The form: submit it with changed values, as the user would, and record the follow-up answer.
+        if (name == "ui2-form" && !run_id.empty()) {
+            for (int idx = 0; idx < block_count; ++idx) {
+                const json& s = surfaces[surfaces.size() - static_cast<size_t>(block_count) + static_cast<size_t>(idx)];
+                json draft = json::object();
+                std::string button;
+                std::function<void(const json&)> walk = [&](const json& cs) {
+                    for (const auto& c : cs) {
+                        const std::string type = jstr(c, "type"), id = jstr(c, "id");
+                        if (type == "slider") draft[id] = c["max"].get<double>() * 0.6 + c["min"].get<double>() * 0.4;
+                        else if (type == "select" && !c["options"].empty()) draft[id] = c["options"].back();
+                        else if (type == "multiselect" && c["options"].size() >= 2) draft[id] = json::array({c["options"][0], c["options"][1]});
+                        else if (type == "switch") draft[id] = !jbool(c, "value");
+                        else if (type == "button" && button.empty()) button = id;
+                        if (c.contains("components")) walk(c["components"]);
+                    }
+                };
+                walk(s["components"]);
+                if (button.empty()) continue;
+                auto opened = a.call("dev.call", {{"method", "surfaces.open"},
+                                                  {"params", {{"thread_id", thread}, {"run_id", run_id}, {"event_seq", seq}, {"block_index", idx}}}});
+                if (!opened) { log["submit_error"] = opened.error().message; break; }
+                auto submitted = a.call("dev.call", {{"method", "surfaces.submit"},
+                                                     {"params", {{"thread_id", thread}, {"run_id", run_id}, {"event_seq", seq}, {"block_index", idx},
+                                                                 {"revision", jstr(*opened, "revision")}, {"button_id", button}, {"draft", draft}}}});
+                log["submitted"] = {{"draft", draft}, {"button", button}, {"ok", submitted.ok()}, {"error", submitted ? "" : submitted.error().message}};
+                if (submitted) {
+                    std::this_thread::sleep_for(2s);
+                    t = drive(thread, 10, log);
+                    log["follow_up"] = last_assistant(t);
+                    const auto& msgs = t["messages"];
+                    for (const auto& m : msgs) if (jstr(m, "role") == "user") log["submitted_message"] = jstr(m, "content");
+                }
+                break;
+            }
+        }
+        save(name + ".thread.json", t.dump(2));
+        summary[name] = log;
+        save("summary.json", summary.dump(2));
+    }
+
+    if (std::getenv("SKOWORK_E2E_HOLD")) {
+        std::printf("[ hold ] the client is running; create %s to finish\n", (report / L"release").string().c_str());
+        for (int i = 0; i < 1800 && !std::filesystem::exists(report / L"release"); ++i) std::this_thread::sleep_for(1s);
+    }
 }

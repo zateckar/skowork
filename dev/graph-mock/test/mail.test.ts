@@ -178,3 +178,22 @@ test('an endpoint the mock does not implement answers with a Graph-shaped error'
   assert.equal(r.json.error.code, 'NotMocked');
   assert.match(r.json.error.message, /GET \/v1.0\/me\/contacts/);
 });
+
+test('delta continuation keeps its snapshot across a deletion and reports the tombstone later', async () => {
+  const mock = await startMock();
+  try {
+    const client = await as(mock, 'jan');
+    const c = control(mock);
+    const headers = { prefer: 'odata.maxpagesize=1' };
+    const first = await client.get('/me/mailFolders/inbox/messages/delta', headers);
+    assert.equal(first.status, 200);
+    assert.ok(first.json['@odata.nextLink']);
+    const remainingBefore = await all(client, first.json['@odata.nextLink'], headers);
+    assert.ok(remainingBefore.items.length > 0);
+    assert.equal((await c.del(`/users/jan/messages/${first.json.value[0].id}`)).status, 204);
+    const remainingAfter = await all(client, first.json['@odata.nextLink'], headers);
+    assert.deepEqual(remainingAfter.items, remainingBefore.items);
+    const next = await all(client, remainingAfter.deltaLink!, headers);
+    assert.ok(next.items.some((x) => x.id === first.json.value[0].id && x['@removed']));
+  } finally { await mock.close(); }
+});

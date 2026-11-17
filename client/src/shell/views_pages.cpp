@@ -33,7 +33,8 @@ const Section kSections[] = {
     {"files", "settings.files.title", false},            {"connections", "settings.connectors.title", false},
     {"mail", "settings.mail.title", false},             {"skills", "settings.skills.title", false},
     {"automations", "settings.automations.title", false}, {"knowledge", "settings.knowledge.title", false},
-    {"meetings", "settings.meetings.title", false},      {"privacy", "settings.privacy.title", false},
+    {"meetings", "settings.meetings.title", false},      {"agenda", "settings.agenda.title", false},
+    {"privacy", "settings.privacy.title", false},
     {"policy", "settings.policy.title", false},          {"about", "settings.about_section.title", false},
 };
 
@@ -212,9 +213,12 @@ void PagePane::load() {
         load_speech();
         load_knowledge();
         load_meetings();
+        load_agenda_status();
         load_policy();
     } else if (r == RouteName::apps) {
         load_apps();
+    } else if (r == RouteName::agenda) {
+        load_agenda();
     } else if (r == RouteName::automation) {
         const std::string id = shell_.route().trigger;
         shell_.call("automations.get", {{"id", id}}, [this, alive, id](Result<json> res) {
@@ -277,6 +281,7 @@ void PagePane::rebuild() {
     const char* key = r.name == RouteName::status         ? "titles.status"
                       : r.name == RouteName::knowledge    ? "titles.knowledge"
                       : r.name == RouteName::apps         ? "titles.apps"
+                      : r.name == RouteName::agenda       ? "titles.agenda"
 
                       : r.name == RouteName::settings     ? "titles.settings"
                       : r.name == RouteName::telemetry    ? "titles.telemetry"
@@ -320,6 +325,9 @@ void PagePane::rebuild() {
     } else if (r.name == RouteName::apps) {
         button(*head, "apps-refresh", shell_.t("apps.refresh"), [this] { load_apps(); });
         build_apps();
+    } else if (r.name == RouteName::agenda) {
+        button(*head, "agenda-refresh", shell_.t("agenda.refresh"), [this] { load_agenda(); });
+        build_agenda();
     } else if (r.name == RouteName::knowledge) {
         std::unique_ptr<KnowledgeView> v = std::move(kept_knowledge_view_);
         if (!v) v = std::make_unique<KnowledgeView>(shell_);
@@ -635,6 +643,8 @@ void PagePane::build_settings() {
             build_knowledge(*c);
         } else if (id == "meetings") {
             build_meetings(*c);
+        } else if (id == "agenda") {
+            build_agenda_settings(*c);
         } else if (id == "skills") {
             build_skills(*c);
         } else if (id == "automations") {

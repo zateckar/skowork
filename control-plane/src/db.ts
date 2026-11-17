@@ -546,6 +546,8 @@ const migrations: string[] = [
   ALTER TABLE group_members RENAME COLUMN workbench_group TO skowork_group;
   ALTER TABLE mcp_assignments RENAME COLUMN workbench_group TO skowork_group;
   `,
+  // add-model-sampling-settings D2: a chat model's sampling defaults as JSON.
+  `ALTER TABLE llm_models ADD COLUMN sampling TEXT;`,
 ];
 
 export function openDb(path: string): Db {

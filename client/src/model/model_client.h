@@ -104,7 +104,7 @@ public:
     [[nodiscard]] int requests_sent() const { return requests_sent_; }
 
 private:
-    ModelResult<HttpResponse> send(HttpRequest request, const std::shared_ptr<CancelToken>& cancel);
+    ModelResult<HttpResponse> send(HttpRequest request, const std::shared_ptr<CancelToken>& cancel, bool single_attempt = false);
     ModelResult<HttpRequest> make_request(const std::string& method, const std::string& path, std::string body,
                                           const std::string& accept, const std::string& run_id,
                                           const std::shared_ptr<CancelToken>& cancel) const;

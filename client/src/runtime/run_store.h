@@ -100,6 +100,7 @@ public:
     // ---- Event log ----
     Result<long long> append_event(const std::string& run_id, const std::string& kind, const json& payload);
     [[nodiscard]] std::vector<StoredEvent> events(const std::string& run_id, long long after_seq = 0);
+    [[nodiscard]] std::optional<StoredEvent> latest_event(const std::string& run_id, const std::string& kind);
 
     // ---- Counters ----
     Status set_active_ms(const std::string& run_id, long long ms);

@@ -47,8 +47,12 @@ inline constexpr int kKgCategoryNamesSchemaVersion = 11;
 inline constexpr int kKgPreviewAnalysisSchemaVersion = 12;
 // Local records of category publications (task 10.2).
 inline constexpr int kKgPublicationSchemaVersion = 13;
-// The latest schema: their withdrawal outbox (task 10.3).
-inline constexpr int kKgSchemaVersion = 14;
+// Their withdrawal outbox (task 10.3).
+inline constexpr int kKgPublicationWithdrawalSchemaVersion = 14;
+// The latest schema: salience, durability and statements of relations, the user's importance marks, and the Source
+// context of items (add-knowledge-salience migration plan).
+inline constexpr int kKgSalienceSchemaVersion = 15;
+inline constexpr int kKgSchemaVersion = kKgSalienceSchemaVersion;
 // Open suggested category names, and facts in one, at most.
 inline constexpr int kMaxCategoryNameSuggestions = 20;
 inline constexpr int kMaxCategoryNameFacts = 50;
@@ -185,6 +189,7 @@ struct ItemInput {
     std::vector<Chunk> chunks;
     bool extract = true;  // queue the chunks for entity extraction
     std::string legacy_tombstone_hash = {};  // conservatively carry deleted-fact protections across fingerprint upgrade
+    std::string context = {};  // the Source context of the item as JSON (SourceContext; add-knowledge-salience design D1)
 };
 
 struct ItemRow {
@@ -297,6 +302,18 @@ struct RelationRow {
     std::string predicate, valid_from, valid_to;
     double confidence = 0;
     std::string subject_name, object_name;
+    // add-knowledge-salience: importance (0..1), durability (lasting, temporary, trivial), the statement, and whether
+    // the importance was rated (false: an older fact, treated as normal importance until the background pass rates it).
+    double salience = kDefaultSalience;
+    std::string durability = "lasting", statement;
+    bool scored = false;
+};
+
+// The importance rating of a relation as the model or the background pass gave it (add-knowledge-salience design D2).
+struct RelationRating {
+    double salience = kDefaultSalience;
+    std::string durability = "lasting", statement;
+    bool scored = true;
 };
 
 struct FactRow {
@@ -474,6 +491,8 @@ public:
     // ---- Knowledge state (Retrieval Respects Knowledge State) ----
     // The canonical fact an extracted relation supports; nullopt for a directory relation or before the evidence schema.
     std::optional<long long> fact_of_relation(const RelationRow& relation);
+    // The extracted relation a canonical fact stands for (the same match as fact_of_relation), most recent first.
+    std::optional<RelationRow> relation_of_fact(long long fact_id);
     // The fact's state, accepted categories, citations and unresolved reviews; nullopt when there is no such fact.
     // Without `history` only excerpts of current supports in current revisions are cited.
     std::optional<FactState> fact_state(long long fact_id, bool history);
@@ -683,7 +702,25 @@ public:
     std::vector<long long> entities_named_in(const std::string& text, int limit);
     void add_mention(long long chunk_id, long long entity_id, const std::string& alias);
     long long add_relation(long long subject, const std::string& predicate, long long object, double confidence,
-                           const std::string& valid_from, const std::string& valid_to, long long chunk_id);
+                           const std::string& valid_from, const std::string& valid_to, long long chunk_id,
+                           const RelationRating& rating = {});
+    // Importance (add-knowledge-salience design D2, D6, D7). A user mark is kept by the names of the relation's entities,
+    // so it survives re-extraction; set_importance also rates the stored relations with the same names.
+    // mark: 1 important, -1 unimportant, 0 none. The mark of a relation's names, if any.
+    std::optional<int> importance_mark(const std::string& subject_name, const std::string& predicate, const std::string& object_name);
+    Status set_importance(long long relation_id, int mark);
+    void set_relation_rating(long long relation_id, const RelationRating& rating);
+    // Up to `limit` relations not rated yet, from the newest Sources first, with their chunk id (background rating, D7).
+    std::vector<RelationRow> unscored_relations(int limit);
+    // The highest salience of the relations extracted from each chunk (only chunks with relations appear).
+    std::map<long long, double> chunk_salience(const std::vector<long long>& chunk_ids);
+    // The statement of the most important relation extracted from each chunk that has one.
+    std::map<long long, std::string> chunk_statements(const std::vector<long long>& chunk_ids);
+    // The Source context of an item as stored JSON; empty for items indexed before the context existed.
+    std::string item_context(long long item_id);
+    // Candidates dropped as trivial or below the threshold on a day, by Source (counts only, no content).
+    std::map<std::string, long long> dropped_candidates(const std::string& day);
+    void add_dropped_candidates(const std::string& day, const std::string& source, long long n);
     std::vector<RelationRow> relations_of(long long entity_id, int limit);
     std::optional<RelationRow> relation(long long id);
     bool delete_relation(long long id);

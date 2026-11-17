@@ -9,7 +9,10 @@
 #include <cctype>
 #include <cstdio>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <regex>
+#include <unordered_map>
 
 namespace wb::tools {
 
@@ -34,6 +37,33 @@ bool is_absolute(std::string_view p) {
 std::string arg_path(const json& args, const char* key, const std::string& workspace) {
     const std::string p = jstr(args, key);
     return absolute_path(p.empty() ? workspace : p, workspace);
+}
+
+// Calls of files.read, files.write and files.edit on one file run one at a time, so parallel edits of a turn each apply to
+// the content the previous one left (fix-stream-gaps-and-parallel-file-edits D3). One mutex per path, process-wide.
+struct PathLock {
+    std::shared_ptr<std::mutex> mutex;
+    std::unique_lock<std::mutex> lock;
+};
+
+PathLock lock_path(const std::string& path) {
+    static std::mutex registry_mx;
+    static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
+    std::string key = to_lower(path);
+    std::replace(key.begin(), key.end(), '/', '\\');
+    std::shared_ptr<std::mutex> m;
+    {
+        const std::lock_guard g(registry_mx);
+        if (registry.size() > 1024) std::erase_if(registry, [](const auto& e) { return e.second.expired(); });
+        auto& slot = registry[key];
+        m = slot.lock();
+        if (!m) {
+            m = std::make_shared<std::mutex>();
+            slot = m;
+        }
+    }
+    std::unique_lock<std::mutex> l(*m);
+    return {std::move(m), std::move(l)};
 }
 
 Provenance files_provenance(const std::string& id) { return {"files", id, "", false}; }
@@ -215,6 +245,7 @@ json schema(json properties, std::vector<std::string> required) {
 ToolOutput read_file(const FileToolsEnv& env, ToolContext& ctx, const json& args) {
     const std::string path = arg_path(args, "path", env.workspace);
     if (jstr(args, "path").empty()) return ToolOutput::failure("path is required.");
+    const PathLock locked = lock_path(path);
     auto h = policy::open_for_read(path, env.rules());
     if (!h) return path_failure(h.error(), path);
     if (is_directory(h->get())) return ToolOutput::failure(path + " is a folder; use files.list.");
@@ -421,6 +452,7 @@ ToolOutput write_file(const FileToolsEnv& env, const json& args) {
     if (!args.contains("content") || !args["content"].is_string()) return ToolOutput::failure("content is required.");
     const std::string path = arg_path(args, "path", env.workspace);
     const std::string& content = args["content"].get_ref<const std::string&>();
+    const PathLock locked = lock_path(path);
     auto written = policy::write_file_atomic(path, content, env.rules());
     if (!written) return path_failure(written.error(), path);
     return ToolOutput::success("Wrote " + std::to_string(content.size()) + " bytes to " + *written + ".");
@@ -434,6 +466,7 @@ ToolOutput edit_file(const FileToolsEnv& env, const json& args) {
     std::string new_text = jstr(args, "new_text");
     const std::string path = arg_path(args, "path", env.workspace);
     const auto rules = env.rules();
+    const PathLock locked = lock_path(path);  // read, change and write as one step
     std::string data;
     {
         auto h = policy::open_for_read(path, rules);

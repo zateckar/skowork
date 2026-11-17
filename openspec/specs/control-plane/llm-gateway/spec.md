@@ -48,3 +48,29 @@ The control plane SHALL derive the server key that encrypts LLM connection crede
 #### Scenario: Too short
 - **WHEN** SKOWORK_SECRET_KEY is `secret`
 - **THEN** the control plane exits with `refusing to start: SKOWORK_SECRET_KEY ...` and no stack trace
+
+### Requirement: Sampling Defaults Setting
+A platform-admin SHALL be able to store sampling defaults for each chat model: `temperature` (0 to 2), `top_p` (above 0 to 1), `top_k` (-1 or 1 to 1000), `min_p` (0 to 1), `presence_penalty` (-2 to 2) and `repetition_penalty` (above 0 to 2), each optional; other keys or values are refused with INVALID_REQUEST. The gateway SHALL add each stored value to a chat request routed to that model when the client's request does not contain that field. When a fallback model answers, its own defaults apply.
+
+#### Scenario: Defaults applied
+- **WHEN** the model mapped to `main` stores `temperature` 1.0 and `top_k` 20 and a client sends a chat request for `main` without sampling fields
+- **THEN** the upstream receives `temperature: 1.0` and `top_k: 20`
+
+#### Scenario: Client value kept
+- **WHEN** the client's request contains `temperature: 0`
+- **THEN** the upstream receives `temperature: 0` and the other stored defaults
+
+#### Scenario: Out of range
+- **WHEN** a platform-admin stores `top_p` 1.5
+- **THEN** the setting is refused with INVALID_REQUEST and the previous defaults stay
+
+### Requirement: Keep-Alive Between Events
+The gateway SHALL write a keep-alive comment to a streamed response only before the first upstream byte, or after a complete upstream event (an event that ends with a blank line). It MUST NOT write any bytes of its own inside an upstream event.
+
+#### Scenario: Upstream stalls inside an event
+- **WHEN** the upstream sends half of a `data:` line and then sends nothing for longer than the keep-alive interval
+- **THEN** no keep-alive is written until the event is complete, and the client receives the event unchanged
+
+#### Scenario: Upstream idle between events
+- **WHEN** the upstream sends nothing for longer than the keep-alive interval after a complete event
+- **THEN** the gateway writes a keep-alive comment

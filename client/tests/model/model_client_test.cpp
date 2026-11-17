@@ -370,6 +370,34 @@ TEST(ModelStreaming, KeepAliveCommentsBeforeTheFirstTokenCarryNoContent) {
     EXPECT_EQ(seen, "hello");
 }
 
+// fix-stream-gaps-and-parallel-file-edits D2: a damaged data payload fails the response instead of being skipped.
+TEST(ModelStreaming, DamagedDataEventFailsTheResponseAndIsRetriedWhenNothingWasStreamed) {
+    Rig rig;
+    rig.gateway.push(streamed({"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"pad: keep-alive\n\n", "Start\"}}]}\n\n"}));
+    rig.gateway.push(streamed(text_stream({"hel", "lo"})));
+    auto r = rig.client->chat(simple_request(), {});
+    ASSERT_TRUE(r.ok()) << r.failure().message;
+    EXPECT_EQ(r->text, "hello");
+    EXPECT_EQ(rig.gateway.request_count(), 2U);
+}
+
+TEST(ModelStreaming, DamagedDataEventAfterOutputFailsAsMalformedWithPartialOutput) {
+    Rig rig;
+    std::vector<std::string> chunks = {sse(delta_chunk({{"content", "hel"}})),
+                                       "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"pad\n\n",
+                                       sse(delta_chunk({{"content", "lo"}})), sse_done()};
+    rig.gateway.push(streamed(chunks));
+    std::string seen;
+    ChatSink sink;
+    sink.on_text = [&](std::string_view t) { seen += t; };
+    auto r = rig.client->chat(simple_request(), sink);
+    ASSERT_FALSE(r.ok());
+    EXPECT_EQ(r.failure().code, code::model_unavailable);
+    EXPECT_NE(r.failure().reason.find("malformed stream event"), std::string::npos) << r.failure().reason;
+    EXPECT_TRUE(r.failure().partial_output);
+    EXPECT_EQ(seen.find("lo"), std::string::npos) << seen;  // each attempt stops at the damaged event
+}
+
 TEST(ModelTimeouts, PolicyValuesApplyToTheNextRequest) {
     std::chrono::milliseconds idle{0};
     Rig rig([&](ModelClientConfig& c) {
@@ -458,6 +486,31 @@ TEST(ModelToolCalls, TrailingCommaIsRepairedWithoutAnExtraModelCall) {
     EXPECT_TRUE(r->tool_calls[0].repaired);
     EXPECT_FALSE(r->corrected);
     EXPECT_EQ(rig.gateway.request_count(), 1U);
+}
+
+// handle-output-limit D3: a call the output limit cut off is never repaired into a runnable one.
+TEST(ModelToolCalls, CallCutOffAtTheOutputLimitIsInvalidAndCompleteCallsStayValid) {
+    ToolSpec write;
+    write.id = "files.write";
+    write.parameters = json::parse(R"({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]})");
+    ChatResponse r;
+    r.finish_reason = "length";
+    ToolCall complete;
+    complete.id = "c1";
+    complete.tool = "files.write";
+    complete.raw_arguments = R"({"path":"a.txt","content":"all of it"})";
+    ToolCall cut = complete;
+    cut.id = "c2";
+    cut.raw_arguments = R"({"path":"b.html","content":"<html><body>half)";
+    r.tool_calls = {complete, cut};
+    validate_tool_calls(r, {write});
+    EXPECT_TRUE(r.tool_calls[0].valid) << r.tool_calls[0].validation_error;
+    EXPECT_FALSE(r.tool_calls[1].valid);
+    EXPECT_NE(r.tool_calls[1].validation_error.find("output limit"), std::string::npos) << r.tool_calls[1].validation_error;
+    // The same cut-off text in a reply that ended normally is repaired as before.
+    r.finish_reason = "tool_calls";
+    validate_tool_calls(r, {write});
+    EXPECT_EQ(r.tool_calls[1].valid, r.tool_calls[1].repaired) << "repair still applies outside the output limit";
 }
 
 TEST(ModelToolCalls, InvalidCallGetsOneCorrectiveRePrompt) {

@@ -138,6 +138,7 @@ struct ChatRequest {
     std::shared_ptr<CancelToken> cancel;
     // Validate tool-call arguments against the tool schemas, with one corrective re-prompt.
     bool validate_tool_calls = true;
+    bool single_attempt = false;  // Caller controls retries and spacing, including after token refresh.
     // Optional caller-supplied guard, reapplied when model access changes the request for tool-call repair.
     std::function<bool(const ChatRequest&)> input_budget_check;
 };

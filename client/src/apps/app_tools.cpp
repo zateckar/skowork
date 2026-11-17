@@ -4,6 +4,7 @@
 #include "apps/apps.h"
 
 #include "base/strings.h"
+#include "platform/log.h"
 
 namespace wb::apps {
 
@@ -84,8 +85,9 @@ public:
         return out;
     }
 
-    ToolOutput open(ToolContext&, const json& a) {
+    ToolOutput open(ToolContext& ctx, const json& a) {
         const std::string id = trim(jstr(a, "app"));
+        log::info("apps", "apps.open " + id + " in Run " + ctx.run_id + " call " + ctx.call_id);
         const auto app = env_.apps->get(id);
         if (!app) return ToolOutput::failure("No app with the id " + id + ".");
         if (app->needs_confirmation) {

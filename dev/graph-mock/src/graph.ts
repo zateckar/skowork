@@ -333,7 +333,7 @@ export function graphRouter(mock: GraphMock): Router {
     const f = mock.state.folder(user, String(req.params.folder));
     if (!f) return graphError(res, 404, 'ErrorItemNotFound', 'The specified folder was not found in the store.');
     const tokenId = (req.query.$deltatoken ?? req.query.$skiptoken) as string | undefined;
-    type Cont = { user: string; folder: string; since: number; upto: number; offset: number; generation: number; filter?: string; select?: string; label: boolean };
+    type Cont = { user: string; folder: string; since: number; upto: number; offset: number; generation: number; filter?: string; select?: string; label: boolean; snapshot?: Record<string, unknown>[] };
     let c: Cont;
     if (tokenId) {
       const found = mock.continuations.get(tokenId) as Cont | undefined;
@@ -341,7 +341,7 @@ export function graphRouter(mock: GraphMock): Router {
         res.locals.fault = 'delta_expired';
         return graphError(res, 410, 'syncStateNotFound', 'The sync state generation is not found. Discard the delta token and start a full sync.');
       }
-      c = req.query.$deltatoken ? { ...found, since: found.upto, upto: mock.state.seq, offset: 0 } : found;
+      c = req.query.$deltatoken ? { ...found, since: found.upto, upto: mock.state.seq, offset: 0, snapshot: undefined } : found;
     } else {
       c = { user, folder: f.id, since: 0, upto: mock.state.seq, offset: 0, generation: mock.state.generation, filter: req.query.$filter as string | undefined, select: req.query.$select as string | undefined, label: viewOf(req).label };
     }
@@ -351,19 +351,19 @@ export function graphRouter(mock: GraphMock): Router {
     if (c.filter && c.since === 0) { const n = parseFilter(c.filter); changed = changed.filter((m) => evaluate(n, messageJson(mock, m, { text: false, label: false }))); }
     changed.sort((a, b) => b.receivedDateTime.localeCompare(a.receivedDateTime)); // newest first
     const removed = c.since === 0 ? [] : mock.state.tombstones.filter((t) => t.kind === 'message' && t.user === user && t.folderId === f.id && t.seq > c.since && t.seq <= c.upto && !changed.some((m) => m.id === t.id));
-    const all: Record<string, unknown>[] = [
+    const all: Record<string, unknown>[] = c.snapshot ?? structuredClone([
       ...changed.map((m) => ({ '@odata.type': '#microsoft.graph.message', ...messageJson(mock, m, q) })),
       ...removed.map((t) => ({ '@odata.type': '#microsoft.graph.message', id: t.id, '@removed': { reason: 'deleted' } })),
-    ];
+    ]);
     const size = maxPageSize(req, 10);
     const slice = all.slice(c.offset, c.offset + size);
     const body: Record<string, unknown> = { '@odata.context': `${base(req)}/$metadata#Collection(message)`, value: slice };
     const token = mock.nextToken('delta');
     if (c.offset + size < all.length) {
-      mock.continuations.set(token, { ...c, offset: c.offset + size });
+      mock.continuations.set(token, { ...c, offset: c.offset + size, snapshot: all });
       body['@odata.nextLink'] = `${base(req)}/me/mailFolders/${encodeURIComponent(String(req.params.folder))}/messages/delta?$skiptoken=${token}`;
     } else {
-      mock.continuations.set(token, { ...c, since: c.upto, offset: 0 });
+      mock.continuations.set(token, { ...c, since: c.upto, offset: 0, snapshot: undefined });
       body['@odata.deltaLink'] = `${base(req)}/me/mailFolders/${encodeURIComponent(String(req.params.folder))}/messages/delta?$deltatoken=${token}`;
     }
     res.json(body);
@@ -538,7 +538,7 @@ export function graphRouter(mock: GraphMock): Router {
   r.get('/me/calendarView/delta', (req: Req, res) => {
     const user = req.user!.key;
     const tokenId = (req.query.$deltatoken ?? req.query.$skiptoken) as string | undefined;
-    type Cont = { user: string; from: number; to: number; since: number; upto: number; offset: number; generation: number; select?: string; label: boolean };
+    type Cont = { user: string; from: number; to: number; since: number; upto: number; offset: number; generation: number; select?: string; label: boolean; snapshot?: Record<string, unknown>[] };
     let c: Cont;
     if (tokenId) {
       const found = mock.continuations.get(tokenId) as Cont | undefined;
@@ -546,31 +546,35 @@ export function graphRouter(mock: GraphMock): Router {
         res.locals.fault = 'delta_expired';
         return graphError(res, 410, 'syncStateNotFound', 'The sync state generation is not found. Discard the delta token and start a full sync.');
       }
-      c = req.query.$deltatoken ? { ...found, since: found.upto, upto: mock.state.seq, offset: 0 } : found;
+      c = req.query.$deltatoken ? { ...found, since: found.upto, upto: mock.state.seq, offset: 0, snapshot: undefined } : found;
     } else {
       const w = windowOf(req, res);
       if (!w) return;
       c = { user, from: w[0], to: w[1], since: 0, upto: mock.state.seq, offset: 0, generation: mock.state.generation, select: req.query.$select as string | undefined, label: viewOf(req).label };
     }
     const q: View = { ...viewOf(req), select: c.select, label: c.label };
-    const changed = mock.state.events.filter((e) => e.user === user && e.seq > c.since && e.seq <= c.upto);
-    const all: Record<string, unknown>[] = [];
-    for (const e of changed) for (const i of instances(mock, e, c.from, c.to)) all.push({ '@odata.type': '#microsoft.graph.event', ...eventJson(mock, e, q, i.occurrence ? i : undefined) });
-    if (c.since > 0)
-      for (const t of mock.state.tombstones.filter((x) => x.kind === 'event' && x.user === user && x.seq > c.since && x.seq <= c.upto)) {
-        const gone = mock.state.removedEvents.get(t.id);
-        const ids = gone ? instances(mock, gone, c.from, c.to).map((i) => i.id) : [t.id];
-        for (const id of ids) all.push({ '@odata.type': '#microsoft.graph.event', id, '@removed': { reason: 'deleted' } });
-      }
+    let all = c.snapshot;
+    if (!all) {
+      const changed = mock.state.events.filter((e) => e.user === user && e.seq > c.since && e.seq <= c.upto);
+      const items: Record<string, unknown>[] = [];
+      for (const e of changed) for (const i of instances(mock, e, c.from, c.to)) items.push({ '@odata.type': '#microsoft.graph.event', ...eventJson(mock, e, q, i.occurrence ? i : undefined) });
+      if (c.since > 0)
+        for (const t of mock.state.tombstones.filter((x) => x.kind === 'event' && x.user === user && x.seq > c.since && x.seq <= c.upto)) {
+          const gone = mock.state.removedEvents.get(t.id);
+          const ids = gone ? instances(mock, gone, c.from, c.to).map((i) => i.id) : [t.id];
+          for (const id of ids) items.push({ '@odata.type': '#microsoft.graph.event', id, '@removed': { reason: 'deleted' } });
+        }
+      all = structuredClone(items);
+    }
     const size = maxPageSize(req, 10);
     const slice = all.slice(c.offset, c.offset + size);
     const body: Record<string, unknown> = { '@odata.context': `${base(req)}/$metadata#Collection(event)`, value: slice };
     const token = mock.nextToken('delta');
     if (c.offset + size < all.length) {
-      mock.continuations.set(token, { ...c, offset: c.offset + size });
+      mock.continuations.set(token, { ...c, offset: c.offset + size, snapshot: all });
       body['@odata.nextLink'] = `${base(req)}/me/calendarView/delta?$skiptoken=${token}`;
     } else {
-      mock.continuations.set(token, { ...c, since: c.upto, offset: 0 });
+      mock.continuations.set(token, { ...c, since: c.upto, offset: 0, snapshot: undefined });
       body['@odata.deltaLink'] = `${base(req)}/me/calendarView/delta?$deltatoken=${token}`;
     }
     res.json(body);

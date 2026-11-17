@@ -3,6 +3,7 @@
 // delimiters, large tool results, compaction and subagents, and the red-team pass of add-policy-and-sandbox (5.2). The
 // model is scripted; nothing here needs a network.
 #include "api_connectors/connectors.h"
+#include "base/strings.h"
 #include "app/skill_save_tool.h"
 #include "apps/apps.h"
 #include "tools/files.h"
@@ -312,6 +313,133 @@ TEST(RuntimeStates, EventLogIsAppendOnlyAndOrdered) {
     EXPECT_EQ(events.front().kind, "state");  // queued
 }
 
+TEST(RuntimeProgress, ToolActivityReportsBoundedProgressWithoutToolData) {
+    Env env;
+    Gate gate;
+    ToolDef tool = make_tool(env, "test.progress", Risk::read);
+    tool.core = true;
+    tool.run = [&](ToolContext& ctx, const json&) {
+        ctx.activity("secret-in-activity");
+        gate.wait();
+        return ToolOutput::success("secret-in-result");
+    };
+    env.add_tool(tool);
+    env.start();
+    env.model.push_calls({{"call-secret", "test.progress", {{"password", "secret-in-args"}}}});
+    env.model.push_text("done");
+    const auto run = env.run(env.thread(), "start");
+    const bool reported = env.wait_for([&] {
+        for (const auto& event : env.rt->events(run))
+            if (event.kind == "progress" && jint(event.payload, "active_tools") == 1) return true;
+        return false;
+    });
+    gate.release();
+    ASSERT_TRUE(reported);
+    ASSERT_TRUE(env.wait(run, RunState::succeeded));
+    bool saw_finished = false;
+    for (const auto& event : env.rt->events(run)) {
+        if (event.kind != "progress") continue;
+        const std::string payload = event.payload.dump();
+        EXPECT_EQ(payload.find("secret"), std::string::npos);
+        EXPECT_LE(payload.size(), 128u);
+        if (jint(event.payload, "active_tools", -1) > 0) EXPECT_EQ(jstr(event.payload, "phase"), "tools");
+        if (jint(event.payload, "active_tools", -1) == 0) saw_finished = true;
+    }
+    EXPECT_TRUE(saw_finished);
+}
+
+TEST(RuntimeProgress, ModelPhaseIsDurableAndContainsNoPromptOrResponse) {
+    Env env;
+    Gate gate;
+    env.model.push_blocking(gate, text_response("secret-response"));
+    env.start();
+    const auto run = env.run(env.thread(), "secret-prompt");
+    const bool reported = env.wait_for([&] {
+        for (const auto& e : env.rt->events(run))
+            if (e.kind == "progress" && jstr(e.payload, "phase") == "model") return true;
+        return false;
+    });
+    gate.release();
+    ASSERT_TRUE(reported);
+    ASSERT_TRUE(env.wait(run, RunState::succeeded));
+    bool idle = false;
+    for (const auto& e : env.rt->events(run)) {
+        if (e.kind != "progress") continue;
+        EXPECT_EQ(e.payload.dump().find("secret"), std::string::npos);
+        EXPECT_LE(e.payload.dump().size(), 128u);
+        if (jstr(e.payload, "phase") == "idle") idle = true;
+    }
+    EXPECT_TRUE(idle);
+    env.restart();
+    bool persisted = false;
+    for (const auto& e : env.rt->events(run))
+        if (e.kind == "progress" && jstr(e.payload, "phase") == "model") persisted = true;
+    EXPECT_TRUE(persisted);
+}
+
+TEST(RuntimeProgress, ParallelCallsReportTheirCombinedActivity) {
+    RuntimeConfig cfg;
+    cfg.max_parallel_tools = 2;
+    Env env(cfg);
+    Gate first, second;
+    for (const auto& [name, gate] : std::vector<std::pair<std::string, Gate*>>{{"test.first", &first}, {"test.second", &second}}) {
+        ToolDef tool = make_tool(env, name, Risk::read);
+        tool.core = true;
+        tool.run = [gate](ToolContext&, const json&) {
+            gate->wait();
+            return ToolOutput::success("done");
+        };
+        env.add_tool(tool);
+    }
+    env.start();
+    env.model.push_calls({{"a", "test.first", {}}, {"b", "test.second", {}}});
+    env.model.push_text("done");
+    const auto run = env.run(env.thread(), "start");
+    const auto latest_count = [&]() {
+        int result = -1;
+        for (const auto& e : env.rt->events(run))
+            if (e.kind == "progress") result = static_cast<int>(jint(e.payload, "active_tools", -1));
+        return result;
+    };
+    const bool both_running = env.wait_for([&] { return latest_count() == 2; });
+    first.release();
+    const bool one_running = env.wait_for([&] { return latest_count() == 1; });
+    second.release();
+    EXPECT_TRUE(both_running);
+    EXPECT_TRUE(one_running);
+    ASSERT_TRUE(env.wait(run, RunState::succeeded));
+    EXPECT_EQ(latest_count(), 0);
+}
+
+TEST(RuntimeProgress, CancellationClearsActivityAfterTheToolReturns) {
+    Env env;
+    Gate gate;
+    ToolDef tool = make_tool(env, "test.blocked", Risk::read);
+    tool.core = true;
+    tool.run = [&](ToolContext&, const json&) {
+        gate.wait();
+        return ToolOutput::success("done");
+    };
+    env.add_tool(tool);
+    env.start();
+    env.model.push_calls({{"call", "test.blocked", {}}});
+    const auto id = env.run(env.thread(), "start");
+    const bool started = env.wait_for([&] {
+        for (const auto& event : env.rt->events(id))
+            if (event.kind == "progress" && jint(event.payload, "active_tools") == 1) return true;
+        return false;
+    });
+    const auto cancelled = env.rt->cancel(id);
+    gate.release();
+    ASSERT_TRUE(started);
+    ASSERT_TRUE(cancelled);
+    ASSERT_TRUE(env.wait(id, RunState::cancelled));
+    int latest = -1;
+    for (const auto& event : env.rt->events(id))
+        if (event.kind == "progress") latest = static_cast<int>(jint(event.payload, "active_tools", -1));
+    EXPECT_EQ(latest, 0);
+}
+
 TEST(RuntimeRecovery, RunningRunsFailAsInterruptedByShutdownQueuedKeepTheirOrder) {
     Env env;
     auto& store = env.rt->store();
@@ -400,6 +528,377 @@ TEST(RuntimeRecovery, ShutdownLeavesRunningRunToBeFailedByNextStart) {
     EXPECT_EQ(r.state, RunState::failed);
     EXPECT_EQ(r.reason, "interrupted by shutdown");
     ASSERT_EQ(env.report.failed_running.size(), 1u);
+}
+
+// Explicitly launched by the parent below; a real effect is followed by an abrupt process stop.
+TEST(RuntimeCrashSpikeChild, EffectThenWaitForTermination) {
+    wchar_t coord[32768]{};
+    if (!::GetEnvironmentVariableW(L"SKOWORK_RUNTIME_SPIKE_COORD", coord, 32768)) GTEST_SKIP();
+    const std::filesystem::path folder(coord);
+    Env env;
+    ToolDef tool = make_tool(env, "spike.effect", Risk::external);
+    tool.core = true;
+    tool.run = [&env, folder](ToolContext& ctx, const json&) -> ToolOutput {
+        {
+            std::ofstream effect(folder / "effect.txt", std::ios::binary);
+            effect << "effect committed";
+            if (!effect) return ToolOutput::failure("test effect failed");
+        }
+        const json metadata = {{"root", narrow(env.tmp.path.wstring())}, {"run", ctx.run_id}};
+        const auto temp = folder / "ready.tmp";
+        {
+            std::ofstream ready(temp, std::ios::binary);
+            ready << metadata.dump();
+            if (!ready) return ToolOutput::failure("test metadata failed");
+        }
+        std::error_code ec;
+        std::filesystem::rename(temp, folder / "ready.json", ec);
+        if (ec) return ToolOutput::failure("test metadata rename failed");
+        ::Sleep(INFINITE);
+        return ToolOutput::success("unreachable");
+    };
+    env.add_tool(std::move(tool));
+    wchar_t delegate_mode[2]{};
+    const bool delegated = ::GetEnvironmentVariableW(L"SKOWORK_RUNTIME_SPIKE_DELEGATED", delegate_mode, 2) != 0;
+    if (delegated) {
+        env.model.set_responder([](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+            if (req.messages.empty() || req.messages[0].content.rfind("You are a subagent", 0) != 0) return std::nullopt;
+            return model::ModelResult<model::ChatResponse>(calls_response({{"crash-call", "spike.effect", {}}}));
+        });
+        env.model.push_calls({{"delegate-call", "delegate", {{"task", "perform test effect"}, {"tools", json::array({"spike.effect"})}}}});
+    } else {
+        env.model.push_calls({{"crash-call", "spike.effect", {}}});
+    }
+    env.start();
+    (void)env.run(env.thread(), "exercise the test effect");
+    ::Sleep(INFINITE);
+}
+
+TEST(RuntimeCrashSpikeChild, ParallelEffectThenWaitForTermination) {
+    wchar_t coord[32768]{};
+    if (!::GetEnvironmentVariableW(L"SKOWORK_RUNTIME_SPIKE_COORD", coord, 32768)) GTEST_SKIP();
+    const std::filesystem::path folder(coord);
+    RuntimeConfig cfg;
+    cfg.max_parallel_tools = 2;
+    Env env(cfg);
+    std::atomic<bool> slow_started{false}, effect_written{false};
+    auto fast = make_tool(env, "spike.fast", Risk::external);
+    fast.core = true;
+    fast.run = [&](ToolContext&, const json&) {
+        const auto deadline = std::chrono::steady_clock::now() + 10s;
+        while (!slow_started && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(2ms);
+        if (!slow_started) return ToolOutput::failure("slow call did not start");
+        {
+            std::ofstream effect(folder / "effect.txt", std::ios::binary);
+            effect << "parallel effect committed";
+            if (!effect) return ToolOutput::failure("test effect failed");
+        }
+        effect_written = true;
+        return ToolOutput::success("fast call finished");
+    };
+    auto slow = make_tool(env, "spike.slow", Risk::external);
+    slow.core = true;
+    slow.run = [&](ToolContext& ctx, const json&) -> ToolOutput {
+        slow_started = true;
+        bool fast_returned = false;
+        const auto deadline = std::chrono::steady_clock::now() + 10s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            int active = -1;
+            for (const auto& e : env.rt->events(ctx.run_id))
+                if (e.kind == "progress") active = static_cast<int>(jint(e.payload, "active_tools", -1));
+            if (effect_written && active == 1) { fast_returned = true; break; }
+            std::this_thread::sleep_for(2ms);
+        }
+        if (!fast_returned) return ToolOutput::failure("fast call did not finish while slow call remained active");
+        const json metadata = {{"root", narrow(env.tmp.path.wstring())}, {"run", ctx.run_id}};
+        {
+            std::ofstream ready(folder / "ready.tmp", std::ios::binary);
+            ready << metadata.dump();
+            if (!ready) return ToolOutput::failure("test metadata failed");
+        }
+        std::error_code ec;
+        std::filesystem::rename(folder / "ready.tmp", folder / "ready.json", ec);
+        if (ec) return ToolOutput::failure("test metadata rename failed");
+        ::Sleep(INFINITE);
+        return ToolOutput::success("unreachable");
+    };
+    env.add_tool(std::move(fast));
+    env.add_tool(std::move(slow));
+    env.model.push_calls({{"fast-call", "spike.fast", {}}, {"slow-call", "spike.slow", {}}});
+    env.start();
+    (void)env.run(env.thread(), "exercise parallel effects");
+    ::Sleep(INFINITE);
+}
+
+TEST(RuntimeRecovery, CrashAfterExternalEffectLeavesOutcomeUnconfirmed) {
+    TempRoot coordinator;
+    std::filesystem::create_directories(coordinator.path);
+    ASSERT_TRUE(::SetEnvironmentVariableW(L"SKOWORK_RUNTIME_SPIKE_COORD", coordinator.path.c_str()));
+    wchar_t executable[32768]{};
+    ASSERT_GT(::GetModuleFileNameW(nullptr, executable, 32768), 0u);
+    std::wstring command = L"\"" + std::wstring(executable) + L"\" --gtest_filter=RuntimeCrashSpikeChild.EffectThenWaitForTermination";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof startup;
+    PROCESS_INFORMATION process{};
+    const BOOL started = ::CreateProcessW(executable, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                                          nullptr, nullptr, &startup, &process);
+    ::SetEnvironmentVariableW(L"SKOWORK_RUNTIME_SPIKE_COORD", nullptr);
+    ASSERT_TRUE(started);
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (!std::filesystem::exists(coordinator.path / "ready.json") &&
+           ::WaitForSingleObject(process.hProcess, 0) == WAIT_TIMEOUT && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(5ms);
+    const bool ready = std::filesystem::exists(coordinator.path / "ready.json");
+    ::TerminateProcess(process.hProcess, 77);
+    const DWORD waited = ::WaitForSingleObject(process.hProcess, 5000);
+    ::CloseHandle(process.hThread);
+    ::CloseHandle(process.hProcess);
+    ASSERT_TRUE(ready) << "the child never reached the external effect";
+    ASSERT_EQ(waited, WAIT_OBJECT_0);
+    std::ifstream input(coordinator.path / "ready.json", std::ios::binary);
+    const std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    auto metadata = parse_json(contents);
+    ASSERT_TRUE(metadata);
+    const auto child_path = std::filesystem::path(widen(jstr(*metadata, "root")));
+    const auto expected_parent = std::filesystem::path(local_appdata()) / L"skowork-test";
+    ASSERT_EQ(child_path.parent_path().lexically_normal(), expected_parent.lexically_normal());
+    TempRoot cleanup;
+    cleanup.path = child_path;
+    ASSERT_TRUE(std::filesystem::exists(coordinator.path / "effect.txt"));
+    auto root = DataRoot::open(child_path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get("app.db");
+    ASSERT_TRUE(key);
+    auto db = Database::open(root->file("app.db"), *key);
+    ASSERT_TRUE(db);
+    FakeClock clock;
+    RunStore store(**db, clock);
+    const auto run_id = jstr(*metadata, "run");
+    const auto before = store.run(run_id);
+    ASSERT_TRUE(before);
+    ASSERT_EQ(before->state, RunState::running);
+    bool decided = false, result = false;
+    for (const auto& event : store.events(run_id)) {
+        if (jstr(event.payload, "call_id") != "crash-call") continue;
+        decided = decided || event.kind == "tool_call";
+        result = result || event.kind == "tool_result";
+    }
+    EXPECT_TRUE(decided);
+    EXPECT_FALSE(result);
+    const auto recovered = store.recover();
+    ASSERT_TRUE(recovered);
+    ASSERT_EQ(recovered->failed_running, std::vector<std::string>{run_id});
+    ASSERT_EQ(store.run(run_id)->state, RunState::failed);
+    EXPECT_EQ(store.run(run_id)->reason, "interrupted by shutdown");
+    EXPECT_TRUE(std::filesystem::exists(coordinator.path / "effect.txt"));
+}
+
+TEST(RuntimeRecovery, CrashAfterChildEffectLeavesBothHistoriesUnconfirmed) {
+    TempRoot coordinator;
+    std::filesystem::create_directories(coordinator.path);
+    ASSERT_TRUE(::SetEnvironmentVariableW(L"SKOWORK_RUNTIME_SPIKE_COORD", coordinator.path.c_str()));
+    ASSERT_TRUE(::SetEnvironmentVariableW(L"SKOWORK_RUNTIME_SPIKE_DELEGATED", L"1"));
+    wchar_t executable[32768]{};
+    ASSERT_GT(::GetModuleFileNameW(nullptr, executable, 32768), 0u);
+    std::wstring command = L"\"" + std::wstring(executable) + L"\" --gtest_filter=RuntimeCrashSpikeChild.EffectThenWaitForTermination";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof startup;
+    PROCESS_INFORMATION process{};
+    const BOOL started = ::CreateProcessW(executable, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                                          nullptr, nullptr, &startup, &process);
+    ::SetEnvironmentVariableW(L"SKOWORK_RUNTIME_SPIKE_COORD", nullptr);
+    ::SetEnvironmentVariableW(L"SKOWORK_RUNTIME_SPIKE_DELEGATED", nullptr);
+    ASSERT_TRUE(started);
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (!std::filesystem::exists(coordinator.path / "ready.json") &&
+           ::WaitForSingleObject(process.hProcess, 0) == WAIT_TIMEOUT && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(5ms);
+    const bool ready = std::filesystem::exists(coordinator.path / "ready.json");
+    ::TerminateProcess(process.hProcess, 77);
+    const DWORD waited = ::WaitForSingleObject(process.hProcess, 5000);
+    ::CloseHandle(process.hThread);
+    ::CloseHandle(process.hProcess);
+    ASSERT_TRUE(ready) << "the Child Run never reached the external effect";
+    ASSERT_EQ(waited, WAIT_OBJECT_0);
+    std::ifstream input(coordinator.path / "ready.json", std::ios::binary);
+    const std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    auto metadata = parse_json(contents);
+    ASSERT_TRUE(metadata);
+    const auto child_path = std::filesystem::path(widen(jstr(*metadata, "root")));
+    const auto expected_parent = std::filesystem::path(local_appdata()) / L"skowork-test";
+    ASSERT_EQ(child_path.parent_path().lexically_normal(), expected_parent.lexically_normal());
+    TempRoot cleanup;
+    cleanup.path = child_path;
+    ASSERT_TRUE(std::filesystem::exists(coordinator.path / "effect.txt"));
+    auto root = DataRoot::open(child_path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get("app.db");
+    ASSERT_TRUE(key);
+    auto db = Database::open(root->file("app.db"), *key);
+    ASSERT_TRUE(db);
+    FakeClock clock;
+    RunStore store(**db, clock);
+    const auto child_id = jstr(*metadata, "run");
+    const auto child = store.run(child_id);
+    ASSERT_TRUE(child);
+    ASSERT_EQ(child->state, RunState::running);
+    ASSERT_FALSE(child->parent_run_id.empty());
+    const auto parent = store.run(child->parent_run_id);
+    ASSERT_TRUE(parent);
+    ASSERT_EQ(parent->state, RunState::running);
+    bool child_decision = false, child_result = false, linked = false, parent_result = false;
+    for (const auto& event : store.events(child_id)) {
+        if (jstr(event.payload, "call_id") != "crash-call") continue;
+        child_decision |= event.kind == "tool_call";
+        child_result |= event.kind == "tool_result";
+    }
+    for (const auto& event : store.events(parent->id)) {
+        if (event.kind == "subagent" && jstr(event.payload, "child_run_id") == child_id) linked = true;
+        if (event.kind == "tool_result" && jstr(event.payload, "call_id") == "delegate-call") parent_result = true;
+    }
+    EXPECT_TRUE(child_decision);
+    EXPECT_FALSE(child_result);
+    EXPECT_TRUE(linked);
+    EXPECT_FALSE(parent_result);
+    const auto recovered = store.recover();
+    ASSERT_TRUE(recovered);
+    EXPECT_EQ(store.run(child_id)->state, RunState::failed);
+    EXPECT_EQ(store.run(parent->id)->state, RunState::failed);
+    EXPECT_EQ(store.run(child_id)->reason, "interrupted by shutdown");
+    EXPECT_EQ(store.run(parent->id)->reason, "interrupted by shutdown");
+    EXPECT_TRUE(std::filesystem::exists(coordinator.path / "effect.txt"));
+}
+
+TEST(RuntimeRecovery, CrashDuringParallelBatchLeavesFinishedEffectUnconfirmed) {
+    TempRoot coordinator;
+    std::filesystem::create_directories(coordinator.path);
+    ASSERT_TRUE(::SetEnvironmentVariableW(L"SKOWORK_RUNTIME_SPIKE_COORD", coordinator.path.c_str()));
+    wchar_t executable[32768]{};
+    ASSERT_GT(::GetModuleFileNameW(nullptr, executable, 32768), 0u);
+    std::wstring command = L"\"" + std::wstring(executable) + L"\" --gtest_filter=RuntimeCrashSpikeChild.ParallelEffectThenWaitForTermination";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof startup;
+    PROCESS_INFORMATION process{};
+    const BOOL started = ::CreateProcessW(executable, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                                          nullptr, nullptr, &startup, &process);
+    ::SetEnvironmentVariableW(L"SKOWORK_RUNTIME_SPIKE_COORD", nullptr);
+    ASSERT_TRUE(started);
+    const auto deadline = std::chrono::steady_clock::now() + 15s;
+    while (!std::filesystem::exists(coordinator.path / "ready.json") &&
+           ::WaitForSingleObject(process.hProcess, 0) == WAIT_TIMEOUT && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(5ms);
+    const bool ready = std::filesystem::exists(coordinator.path / "ready.json");
+    ::TerminateProcess(process.hProcess, 77);
+    const DWORD waited = ::WaitForSingleObject(process.hProcess, 5000);
+    ::CloseHandle(process.hThread);
+    ::CloseHandle(process.hProcess);
+    ASSERT_TRUE(ready) << "the parallel batch did not reach the intended crash boundary";
+    ASSERT_EQ(waited, WAIT_OBJECT_0);
+    std::ifstream input(coordinator.path / "ready.json", std::ios::binary);
+    const std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    auto metadata = parse_json(contents);
+    ASSERT_TRUE(metadata);
+    const auto child_path = std::filesystem::path(widen(jstr(*metadata, "root")));
+    const auto expected_parent = std::filesystem::path(local_appdata()) / L"skowork-test";
+    ASSERT_EQ(child_path.parent_path().lexically_normal(), expected_parent.lexically_normal());
+    TempRoot cleanup;
+    cleanup.path = child_path;
+    ASSERT_TRUE(std::filesystem::exists(coordinator.path / "effect.txt"));
+    auto root = DataRoot::open(child_path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get("app.db");
+    ASSERT_TRUE(key);
+    auto db = Database::open(root->file("app.db"), *key);
+    ASSERT_TRUE(db);
+    FakeClock clock;
+    RunStore store(**db, clock);
+    const auto run_id = jstr(*metadata, "run");
+    const auto run = store.run(run_id);
+    ASSERT_TRUE(run);
+    ASSERT_EQ(run->state, RunState::running);
+    std::set<std::string> decisions, results;
+    for (const auto& e : store.events(run_id)) {
+        const auto call = jstr(e.payload, "call_id");
+        if (e.kind == "tool_call") decisions.insert(call);
+        if (e.kind == "tool_result") results.insert(call);
+    }
+    EXPECT_TRUE(decisions.count("fast-call"));
+    EXPECT_TRUE(decisions.count("slow-call"));
+    EXPECT_FALSE(results.count("fast-call"));
+    EXPECT_FALSE(results.count("slow-call"));
+    ASSERT_TRUE(store.recover());
+    EXPECT_EQ(store.run(run_id)->state, RunState::failed);
+    EXPECT_EQ(store.run(run_id)->reason, "interrupted by shutdown");
+    EXPECT_TRUE(std::filesystem::exists(coordinator.path / "effect.txt"));
+}
+
+TEST(RuntimeRecovery, DecisionWriteFailureCurrentlyDoesNotPreventDispatch) {
+    // Characterization: task 3.1 must replace this with fail-closed behavior.
+    Env env;
+    ToolDef tool = make_tool(env, "spike.effect", Risk::external);
+    tool.core = true;
+    env.add_tool(std::move(tool));
+    ASSERT_TRUE(env.db->exec("CREATE TRIGGER spike_fail_decision BEFORE INSERT ON run_events "
+                             "WHEN NEW.kind='tool_call' BEGIN SELECT RAISE(ABORT,'test decision failure'); END;"));
+    env.model.push_calls({{"lost-decision", "spike.effect", {}}});
+    env.model.push_text("done");
+    env.start();
+    const auto run = env.run(env.thread(), "do the test effect");
+    ASSERT_TRUE(env.wait(run, RunState::succeeded));
+    EXPECT_EQ(env.calls.count("spike.effect"), 1);
+    bool decision = false, result = false;
+    for (const auto& event : env.rt->events(run)) {
+        if (jstr(event.payload, "call_id") != "lost-decision") continue;
+        decision = decision || event.kind == "tool_call";
+        result = result || event.kind == "tool_result";
+    }
+    EXPECT_FALSE(decision);
+    EXPECT_TRUE(result);
+}
+
+TEST(RuntimeRecovery, CompletedParallelCallIsNotRecordedUntilTheEntireBatchReturns) {
+    // Characterizes the current batch window; task 3.1 must account for every call independently.
+    RuntimeConfig cfg;
+    cfg.max_parallel_tools = 2;
+    Env env(cfg);
+    Gate gate;
+    std::atomic<bool> completed{false}, waiting{false};
+    auto fast = make_tool(env, "spike.fast", Risk::external);
+    fast.core = true;
+    fast.run = [&](ToolContext&, const json&) {
+        completed = true;
+        return ToolOutput::success("external effect completed");
+    };
+    auto slow = make_tool(env, "spike.slow", Risk::external);
+    slow.core = true;
+    slow.run = [&](ToolContext&, const json&) {
+        waiting = true;
+        gate.wait();
+        return ToolOutput::success("finished later");
+    };
+    env.add_tool(std::move(fast));
+    env.add_tool(std::move(slow));
+    env.model.push_calls({{"fast-call", "spike.fast", {}}, {"slow-call", "spike.slow", {}}});
+    env.model.push_text("done");
+    env.start();
+    const auto run = env.run(env.thread(), "parallel effects");
+    const bool both_started = env.wait_for([&] { return completed.load() && waiting.load(); });
+    if (both_started) std::this_thread::sleep_for(30ms);
+    bool result_recorded = false;
+    if (both_started)
+        for (const auto& event : env.rt->events(run))
+            if (event.kind == "tool_result" && jstr(event.payload, "call_id") == "fast-call") result_recorded = true;
+    gate.release();
+    ASSERT_TRUE(both_started);
+    EXPECT_FALSE(result_recorded);
+    ASSERT_TRUE(env.wait(run, RunState::succeeded));
+    EXPECT_NE(env.tool_content(run, "fast-call").find("external effect completed"), std::string::npos);
 }
 
 TEST(RuntimeRecovery, CancelAndRevokeEndQueuedRuns) {
@@ -492,6 +991,7 @@ TEST(RuntimeLoop, StoredAssistantMessagesRecordWhetherTheModelFinishedNormally) 
     auto truncated = text_response("truncated");
     truncated.finish_reason = "length";
     env.model.push_response(truncated);
+    env.model.push_text("rest");  // the continuation (Output Limit Continuation)
     const auto first = env.run(env.thread(), "first");
     ASSERT_TRUE(env.wait(first, RunState::succeeded));
     env.model.push_response(text_response("complete"));
@@ -512,6 +1012,73 @@ TEST(RuntimeLoop, StoredAssistantMessagesRecordWhetherTheModelFinishedNormally) 
     EXPECT_TRUE(persisted_complete);
 }
 
+// handle-output-limit: a reply cut at the output limit is not an answer.
+TEST(RuntimeLoop, ReplyCutAtTheOutputLimitIsContinuedWithARequestOnlyNote) {
+    Env env;
+    env.start();
+    model::RoleInfo info;
+    info.role = model::Role::main;
+    info.context_window = 65536;
+    info.max_output_tokens = 4096;
+    env.model.set_role_info(info);
+    auto cut = text_response("");
+    cut.reasoning = "HEAD" + std::string(9000, 'x') + "the drafted server.js";
+    cut.finish_reason = "length";
+    env.model.push_response(cut);
+    env.model.push_text("the answer");
+    env.model.push_text("second turn");
+    const std::string thread = env.thread();
+    const auto id = env.run(thread, "build it");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    const auto reqs = env.model.requests();
+    ASSERT_EQ(reqs.size(), 2u);
+    ASSERT_FALSE(reqs[1].messages.empty());
+    const auto& note = reqs[1].messages.back();
+    EXPECT_EQ(note.role, "user");
+    EXPECT_NE(note.content.find("output limit of 4096 tokens"), std::string::npos) << note.content;
+    // The end of the cut-off draft rides along, bounded to 8000 characters.
+    EXPECT_NE(note.content.find("the drafted server.js"), std::string::npos);
+    EXPECT_EQ(note.content.find("HEAD"), std::string::npos);
+    EXPECT_LT(note.content.size(), 8600u);
+    // Not stored: the Thread has the user message, the cut reply and the answer, and the next request has no note.
+    for (const auto& m : env.rt->conversation(thread)) EXPECT_EQ(m.content.find("output limit"), std::string::npos) << m.content;
+    const auto next = env.run(thread, "again");
+    ASSERT_TRUE(env.wait(next, RunState::succeeded));
+    for (const auto& m : env.model.requests().back().messages) EXPECT_EQ(m.content.find("output limit"), std::string::npos) << m.content;
+}
+
+TEST(RuntimeLoop, ThirdConsecutiveReplyAtTheOutputLimitFailsTheRun) {
+    Env env;
+    env.start();
+    auto cut = text_response("part");
+    cut.finish_reason = "length";
+    for (int i = 0; i < 3; ++i) env.model.push_response(cut);
+    const auto id = env.run(env.thread(), "build it");
+    ASSERT_TRUE(env.wait(id, RunState::failed));
+    EXPECT_EQ(env.model.request_count(), 3u);
+    bool saw = false;
+    for (const auto& e : env.rt->events(id))
+        if (e.kind == "error" && jstr(e.payload, "code") == "output_limit") saw = jbool(e.payload, "partial_output");
+    EXPECT_TRUE(saw);
+    EXPECT_NE(env.rec(id).reason.find("output limit"), std::string::npos) << env.rec(id).reason;
+}
+
+TEST(RuntimeLoop, NormalReplyResetsTheOutputLimitCount) {
+    Env env;
+    env.start();
+    auto cut = text_response("");
+    cut.finish_reason = "length";
+    env.model.push_response(cut);
+    env.model.push_response(cut);
+    env.model.push_calls({{"c1", "find_tools", {{"query", "files"}}}});  // ends normally: the count starts again
+    env.model.push_response(cut);
+    env.model.push_response(cut);
+    env.model.push_text("done");
+    const auto id = env.run(env.thread(), "work");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded)) << env.rec(id).reason;
+    EXPECT_EQ(env.model.request_count(), 6u);
+}
+
 TEST(RuntimeLoop, TextIsStreamedToTheListener) {
     Env env;
     env.start();
@@ -525,6 +1092,70 @@ TEST(RuntimeLoop, TextIsStreamedToTheListener) {
     std::string streamed;
     for (const auto& e : env.events.of("text.delta")) streamed += jstr(e.data, "text");
     EXPECT_EQ(streamed, "Hello");
+}
+
+// Model Call Timing (show-generation-speed design D1).
+TEST(RuntimeLoop, EveryModelCallStoresItsTimingBeforeItsAnswer) {
+    Env env;
+    env.start();
+    env.model.push([&env](const model::ChatRequest&, const model::ChatSink& sink) {
+        env.clock.advance(std::chrono::milliseconds(2000));  // waiting for the first token
+        sink.on_text("Hel");
+        env.clock.advance(std::chrono::milliseconds(3000));
+        sink.on_text("lo");
+        return model::ModelResult<model::ChatResponse>(text_response("Hello"));
+    });
+    const auto id = env.run(env.thread(), "hi");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    env.restart();
+    RunStore store(*env.db, env.clock);
+    long long call_seq = 0, answer_seq = 0;
+    json call;
+    for (const auto& e : store.events(id)) {
+        if (e.kind == "model_call") { call_seq = e.seq; call = e.payload; }
+        if (e.kind == "message" && jstr(e.payload, "role") == "assistant") answer_seq = e.seq;
+    }
+    ASSERT_GT(call_seq, 0);
+    EXPECT_LT(call_seq, answer_seq);
+    EXPECT_EQ(jint(call, "first_token_ms", -1), 2000);
+    EXPECT_EQ(jint(call, "duration_ms"), 5000);
+    EXPECT_EQ(jint(call, "output_tokens"), 5);  // the provider's completion figure
+    EXPECT_TRUE(jbool(call, "exact"));
+}
+
+TEST(RuntimeLoop, ModelCallWithoutUsageOrStreamedTextIsEstimatedAndHasNoFirstToken) {
+    Env env;
+    env.start();
+    auto silent = text_response("A reply of some length");
+    silent.usage = {};
+    env.model.push_response(silent);
+    const auto id = env.run(env.thread(), "hi");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    const auto calls = env.events.of("model_call");
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_TRUE(calls[0].data["first_token_ms"].is_null());
+    EXPECT_FALSE(jbool(calls[0].data, "exact", true));
+    EXPECT_EQ(jint(calls[0].data, "output_tokens"), static_cast<long long>(estimate_text_tokens("A reply of some length")));
+}
+
+TEST(RuntimeLoop, ARetriedAttemptRestartsTheModelCallTiming) {
+    Env env;
+    env.start();
+    env.model.push([&env](const model::ChatRequest&, const model::ChatSink& sink) {
+        sink.on_text("partial");
+        env.clock.advance(std::chrono::milliseconds(4000));
+        sink.on_retry(1, model::ModelFailure{}, std::chrono::milliseconds(0));
+        env.clock.advance(std::chrono::milliseconds(1000));
+        sink.on_text("Hello");
+        env.clock.advance(std::chrono::milliseconds(2000));
+        return model::ModelResult<model::ChatResponse>(text_response("Hello"));
+    });
+    const auto id = env.run(env.thread(), "hi");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    const auto calls = env.events.of("model_call");
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(jint(calls[0].data, "first_token_ms", -1), 1000);
+    EXPECT_EQ(jint(calls[0].data, "duration_ms"), 3000);
 }
 
 TEST(RuntimeGeneratedSurface, CancelledStreamKeepsDisplayOnlyFallbackAfterRestart) {
@@ -1809,8 +2440,15 @@ TEST(RuntimeQueue, SteerNowIsInjectedBeforeTheNextModelCall) {
     const auto id = env.run(thread, "do the slow thing");
     ASSERT_TRUE(env.wait_for([&] { return env.model.request_count() == 1u && env.rec(id).tool_calls == 1; }));
     ASSERT_TRUE(env.rt->send_message(thread, "actually do it differently", MessageMode::steer_now));
+    const auto pending = env.rt->queued_messages(thread);
+    EXPECT_EQ(pending.size(), 1u);
+    if (!pending.empty()) {
+        EXPECT_EQ(pending.front().mode, MessageMode::steer_now);
+        EXPECT_EQ(pending.front().text, "actually do it differently");
+    }
     gate.release();
     ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    EXPECT_TRUE(env.rt->queued_messages(thread).empty());
     ASSERT_EQ(env.rt->runs(thread).size(), 1u);  // no new Run
     const auto reqs = env.model.requests();
     ASSERT_EQ(reqs.size(), 2u);
@@ -3408,6 +4046,55 @@ TEST(RuntimeSubagents, ParallelDelegationRunsChildRunsConcurrentlyAndReturnsThei
     EXPECT_EQ(env.events.of("subagent").size(), 3u);
 }
 
+TEST(RuntimeProgress, ConcurrentChildModelProgressSurvivesCancellationAndRestart) {
+    Env env;
+    std::atomic<int> entered{0};
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (!is_subagent(req)) return std::nullopt;
+        ++entered;
+        const auto end = std::chrono::steady_clock::now() + 10s;
+        while (!(req.cancel && req.cancel->cancelled()) && std::chrono::steady_clock::now() < end)
+            std::this_thread::sleep_for(2ms);
+        return model::ModelResult<model::ChatResponse>(failure(model::code::cancelled));
+    });
+    env.start();
+    env.model.push_calls({{"first", "delegate", {{"task", "secret-first"}}},
+                          {"second", "delegate", {{"task", "secret-second"}}}});
+    const auto thread = env.thread();
+    const auto parent = env.run(thread, "secret-parent");
+    const bool both_entered = env.wait_for([&] { return entered.load() == 2; });
+    const auto children = children_of(env, thread, parent);
+    bool both_reported = children.size() == 2;
+    for (const auto& child : children) {
+        bool model_phase = false;
+        for (const auto& e : env.rt->events(child.id)) {
+            if (e.kind != "progress") continue;
+            model_phase |= jstr(e.payload, "phase") == "model";
+            EXPECT_EQ(e.payload.dump().find("secret"), std::string::npos);
+        }
+        both_reported &= model_phase;
+    }
+    const bool cancelled = static_cast<bool>(env.rt->cancel(parent));
+    ASSERT_TRUE(both_entered);
+    ASSERT_TRUE(both_reported);
+    ASSERT_TRUE(cancelled);
+    ASSERT_TRUE(env.wait(parent, RunState::cancelled));
+    for (const auto& child : children) ASSERT_TRUE(env.wait(child.id, RunState::cancelled));
+    env.restart();
+    for (const auto& child : children) {
+        EXPECT_EQ(env.rec(child.id).state, RunState::cancelled);
+        bool persisted_model = false, persisted_idle = false;
+        for (const auto& e : env.rt->events(child.id)) {
+            if (e.kind != "progress") continue;
+            persisted_model |= jstr(e.payload, "phase") == "model";
+            persisted_idle |= jstr(e.payload, "phase") == "idle";
+            EXPECT_EQ(e.payload.dump().find("secret"), std::string::npos);
+        }
+        EXPECT_TRUE(persisted_model);
+        EXPECT_TRUE(persisted_idle);
+    }
+}
+
 TEST(RuntimeSubagents, SubagentCannotObtainAToolItsParentLacks) {
     Env env;
     env.add_tool(make_tool(env, "files.read", Risk::read, "Read a file"));
@@ -4417,6 +5104,30 @@ TEST(RunRetry, AStartedCallWithoutAResultIsNotExecutedAgain) {
     ASSERT_TRUE(env.wait(id, RunState::succeeded));
     EXPECT_EQ(env.calls.count("notes.write"), 0);
     EXPECT_NE(env.tool_content(id, "c9").find("did not complete"), std::string::npos);
+}
+
+TEST(RunRetry, ModelCanIssueANewCallAfterAnUnfinishedCall) {
+    // Characterizes the current unsafe retry path; replace with the unknown-effect guard test during task 3.3.
+    Env env;
+    ToolDef t = make_tool(env, "notes.write", Risk::read);
+    t.core = true;
+    env.add_tool(t);
+    env.start();
+    env.model.push_failure(failure(model::code::timeout));
+    const auto thread = env.thread();
+    const auto id = env.run(thread, "write it");
+    ASSERT_TRUE(env.wait(id, RunState::failed));
+    model::ChatMessage assistant;
+    assistant.role = "assistant";
+    assistant.tool_calls.push_back({"c9", "notes.write", "{}"});
+    ASSERT_TRUE(env.rt->store().append_event(id, "message", message_to_event(assistant)));
+    ASSERT_TRUE(env.rt->store().append_event(id, "tool_call", {{"call_id", "c9"}, {"tool", "notes.write"}, {"decision", "allow"}}));
+    env.model.push_calls({{"c10", "notes.write", json::object()}});
+    env.model.push_text("done");
+    ASSERT_TRUE(env.rt->retry_run(thread));
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    EXPECT_EQ(env.calls.count("notes.write"), 1);
+    EXPECT_TRUE(env.rt->pending_actions(thread).empty());
 }
 
 TEST(RunContext, CollectsRealFolders) {

@@ -87,6 +87,30 @@ describe('gateway streams', () => {
     await waitUntil(() => audit('ka1')?.outcome === 'ok');
   });
 
+  it('writes no keep-alive inside an upstream event that stalls half-way (fix-stream-gaps-and-parallel-file-edits D1)', async () => {
+    const chunk = (text: string) => JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] });
+    a.handler = (_p, _b, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`data: ${chunk('one ')}\n\n`);
+      const second = `data: ${chunk("padStart(2, '0')")}\n\n`;
+      res.write(second.slice(0, 20));
+      setTimeout(() => {
+        res.write(second.slice(20));
+        // Idle between events: keep-alives are allowed again.
+        setTimeout(() => {
+          res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`);
+          res.end();
+        }, 350);
+      }, 350);
+    };
+    const r = await stream('ka-mid');
+    assert.equal(r.status, 200);
+    const evs = events(r.text);
+    assert.deepEqual(evs.slice(0, 2).map((e) => e.choices[0].delta.content), ['one ', "padStart(2, '0')"]);
+    assert.ok(!/padStart[^\n]*keep-alive/.test(r.text), 'no keep-alive inside the event');
+    assert.match(r.text.slice(r.text.indexOf('padStart')), /: keep-alive/);
+  });
+
   it('fails over when a backend dies before its first byte, and the client sees one normal stream', async () => {
     a.handler = (_p, _b, res) => setTimeout(() => res.socket?.destroy(), 250);
     const r = await stream('fo1');

@@ -168,7 +168,18 @@ ChatAccumulator::Step ChatAccumulator::feed(std::string_view data) {
         return Step::done;
     }
     const auto parsed = parse_json(data);
-    if (!parsed || !parsed->is_object()) return Step::more;  // keep-alive or garbage: ignore, truncation checks decide
+    if (!parsed || !parsed->is_object()) {
+        // Keep-alives are SSE comments and never get here; a data payload that does not parse is a damaged event, and
+        // skipping it would silently drop a delta (fix-stream-gaps-and-parallel-file-edits D2).
+        ModelFailure f;
+        f.code = code::model_unavailable;
+        f.message = "The gateway returned an unexpected response.";
+        f.reason = "malformed stream event (" + std::to_string(data.size()) + " bytes)";
+        f.retryable = true;
+        f.partial_output = has_output();
+        error_ = std::move(f);
+        return Step::failed;
+    }
     const json& chunk = *parsed;
 
     if (const json* e = jobj(chunk, "error"); e && e->is_object()) {

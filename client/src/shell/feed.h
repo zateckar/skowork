@@ -51,7 +51,17 @@ struct RunError {
 };
 
 // details: Show details / Hide details after a finished Run whose work is hidden (Work Details Visibility).
-enum class ItemType { user, assistant, reasoning, tool, activity, action, error, stopped, working, details };
+// speed: the generation speed line under a top-level Run's answer (Generation Speed Under Answers).
+enum class ItemType { user, assistant, reasoning, tool, activity, action, error, stopped, working, details, speed };
+
+// The generation speed of a Run (show-generation-speed design D1, D2): output tokens per second of model generation,
+// or, while a model call has produced no output yet, how long the Run has waited for it.
+struct RunSpeed {
+    long long tokens_per_s = -1;  // -1: no speed (nothing measured yet)
+    bool approximate = false;     // an estimate (still streaming, or the provider reported no usage)
+    long long waiting_ms = -1;    // >= 0: the current model call has produced no output for this long
+    bool operator==(const RunSpeed&) const = default;
+};
 
 struct FeedItem {
     ItemType type = ItemType::activity;
@@ -60,6 +70,7 @@ struct FeedItem {
     std::string at;
     std::string text;  // user, assistant, reasoning, activity
     std::optional<RunUsage> usage;  // activity: the Run's token totals, after it ended
+    std::optional<RunSpeed> speed;  // speed
     bool streaming = false;
     bool surface_eligible = false;  // completed, durable assistant message; not an activation by itself
     // assistant: the passages the answer cites with [n], in number order (Cited Sources In The Feed)
@@ -79,6 +90,8 @@ struct FeedItem {
     bool by_user = false;
 };
 
+long long now_millis();  // declared again with the Activity Rail below
+
 // This is deliberately a Thread feed API, not part of the shared Markdown or human Chat renderer.
 std::vector<ui::GeneratedSurfaceBlock> eligible_generated_surfaces(const FeedItem& item);
 
@@ -91,7 +104,14 @@ struct LiveText {
     // The highest sequence number of each Run that arrived live. A snapshot can be older than these events, so a delta
     // takes the later of this and the snapshot's last number as its recorded position.
     std::map<std::string, long long> seen;
+    // Per Run, when the first streamed text or reasoning of the current model call arrived (Unix milliseconds) and the
+    // Run's last sequence number then: a stored model_call event with a higher number ends that call's live estimate.
+    std::map<std::string, long long> output_since, output_after;
 };
+
+// The generation speed of a top-level Run at now_ms: measured from its stored model_call events plus an estimate of the
+// call that is streaming. Empty when there is nothing to show (no output yet and not waiting for the model).
+std::optional<RunSpeed> run_speed(const RunInfo& run, const LiveText& live, long long now_ms);
 
 bool is_active_state(const std::string& state);  // queued or running
 
@@ -116,7 +136,7 @@ class FeedFold {
 public:
     FeedFold();
     ~FeedFold();
-    std::vector<FeedItem> build(const FeedSnapshot& snap, const LiveText& live);
+    std::vector<FeedItem> build(const FeedSnapshot& snap, const LiveText& live, long long now_ms = now_millis());
     // Stored events folded so far, over all builds (tests check that a stream does not refold them).
     [[nodiscard]] size_t folded_events() const { return folded_; }
 
@@ -127,7 +147,7 @@ private:
 };
 
 // One fold of the snapshot; the Thread feed keeps a FeedFold instead.
-std::vector<FeedItem> build_feed(const FeedSnapshot& snap, const LiveText& live = {});
+std::vector<FeedItem> build_feed(const FeedSnapshot& snap, const LiveText& live = {}, long long now_ms = now_millis());
 
 // Limits repaints of the feed while text streams to one per interval (Live Feed Updates: at most 30 a second).
 // request() returns true when a repaint may run now; otherwise the repaint is pending until take_due() reports it due.
@@ -194,6 +214,8 @@ struct RailEntry {
     std::string run_id, task, state;
     long long duration_ms = 0;
     std::string skill;  // the Skill the subagent runs, when it is a Skill
+    int active_tools = 0;
+    bool model_active = false;
 };
 struct RailGroup {
     std::string key;

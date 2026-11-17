@@ -54,6 +54,8 @@ add_subdirectory(src/shell)  # likewise
 add_subdirectory(src/mail)  # likewise
 add_subdirectory(src/knowledge)  # likewise
 add_subdirectory(src/meeting)  # likewise
+add_subdirectory(src/triage)
+add_subdirectory(src/agenda)  # the Windows part is guarded inside
 
 if(WIN32)
   if(NOT MINGW OR NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

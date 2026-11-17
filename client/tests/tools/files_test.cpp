@@ -12,6 +12,8 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <thread>
+#include <vector>
 
 using namespace wb;
 using namespace wb::tools;
@@ -280,6 +282,32 @@ TEST(FileTools, EditReplacesExactlyOneSpan) {
     auto ro = f.call("files.edit", {{"path", s(f.docs / L"readme.txt")}, {"old_text", "line one"}, {"new_text", "changed"}});
     EXPECT_FALSE(ro.ok);
     EXPECT_EQ(get(f.docs / L"readme.txt"), "line one\nline two\nline three\n");
+}
+
+// fix-stream-gaps-and-parallel-file-edits D3: parallel calls on one file run one at a time, so every edit applies.
+TEST(FileTools, ParallelEditsOfOneFileAllApply) {
+    FileFixture f;
+    constexpr int kLines = 12;
+    std::string original;
+    for (int i = 0; i < kLines; ++i) original += "line " + std::to_string(i) + " old\n";
+    for (int round = 0; round < 5; ++round) {
+        put(f.out / L"shared.txt", original);
+        std::vector<ToolOutput> results(kLines);
+        std::vector<std::thread> threads;
+        for (int i = 0; i < kLines; ++i) {
+            threads.emplace_back([&, i] {
+                results[i] = f.call("files.edit", {{"path", s(f.out / L"shared.txt")},
+                                                   {"old_text", "line " + std::to_string(i) + " old"},
+                                                   {"new_text", "line " + std::to_string(i) + " new"}});
+            });
+            threads.emplace_back([&] { (void)f.call("files.read", {{"path", s(f.out / L"shared.txt")}}); });
+        }
+        for (auto& t : threads) t.join();
+        for (int i = 0; i < kLines; ++i) ASSERT_TRUE(results[i].ok) << "round " << round << " edit " << i << ": " << results[i].content;
+        std::string expected;
+        for (int i = 0; i < kLines; ++i) expected += "line " + std::to_string(i) + " new\n";
+        ASSERT_EQ(get(f.out / L"shared.txt"), expected) << "round " << round;
+    }
 }
 
 TEST(FileTools, EditKeepsLineEndingsAndEncoding) {

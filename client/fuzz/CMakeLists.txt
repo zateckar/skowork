@@ -18,6 +18,10 @@ endfunction()
 
 skowork_fuzz_target(fuzz_tool_args tool_args_fuzz.cpp)
 skowork_fuzz_target(fuzz_sse sse_fuzz.cpp)
+skowork_fuzz_target(fuzz_triage_classifier triage_classifier_fuzz.cpp)
+target_link_libraries(fuzz_triage_classifier PRIVATE wb_triage)
+skowork_fuzz_target(fuzz_agenda_detection agenda_detection_fuzz.cpp)
+target_link_libraries(fuzz_agenda_detection PRIVATE wb_agenda_core)
 skowork_fuzz_target(fuzz_policy_paths policy_paths_fuzz.cpp)
 target_link_libraries(fuzz_policy_paths PRIVATE wb_policy_core)
 skowork_fuzz_target(fuzz_html html_fuzz.cpp)
@@ -60,6 +64,10 @@ endif()
 
 # A short mutation run of each target as a test, with the standalone driver (ctest -L fuzz).
 if(SKOWORK_TESTS AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_test(NAME fuzz_triage_classifier_smoke COMMAND fuzz_triage_classifier -runs=50000 -seed=1 -max_len=65536
+           ${SKOWORK_FUZZ_CORPUS}/triage_classifier/valid.json)
+    add_test(NAME fuzz_agenda_detection_smoke COMMAND fuzz_agenda_detection -runs=50000 -seed=1 -max_len=65536
+             ${SKOWORK_FUZZ_CORPUS}/agenda_detection/valid.json)
   file(GLOB tool_args_seeds ${SKOWORK_FUZZ_CORPUS}/tool_args/*)
   add_test(NAME fuzz_tool_args_smoke
            COMMAND fuzz_tool_args -runs=200000 -seed=1 -dict=${SKOWORK_FUZZ_CORPUS}/tool_args.dict ${tool_args_seeds})
@@ -112,7 +120,7 @@ if(SKOWORK_TESTS AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_test(NAME fuzz_speech_manifest_smoke COMMAND fuzz_speech_manifest -runs=200000 -seed=1 -max_len=8192)
   file(GLOB speech_archive_seeds ${SKOWORK_FUZZ_CORPUS}/speech_archive/*)
   add_test(NAME fuzz_speech_archive_smoke COMMAND fuzz_speech_archive -runs=100000 -seed=1 -max_len=16384 ${speech_archive_seeds})
-  set_tests_properties(fuzz_tool_args_smoke fuzz_sse_smoke fuzz_policy_paths_smoke fuzz_html_smoke fuzz_ooxml_smoke fuzz_mcp_smoke
+  set_tests_properties(fuzz_triage_classifier_smoke fuzz_agenda_detection_smoke fuzz_tool_args_smoke fuzz_sse_smoke fuzz_policy_paths_smoke fuzz_html_smoke fuzz_ooxml_smoke fuzz_mcp_smoke
                        fuzz_cdp_smoke fuzz_markdown_smoke fuzz_telemetry_redaction_smoke fuzz_skill_md_smoke fuzz_skill_package_smoke
                        fuzz_graph_parse_smoke fuzz_kg_chunk_smoke fuzz_kg_analysis_smoke fuzz_meeting_container_smoke
                        fuzz_speech_manifest_smoke fuzz_speech_archive_smoke PROPERTIES LABELS fuzz TIMEOUT 600)

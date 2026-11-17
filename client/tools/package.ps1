@@ -18,7 +18,7 @@ $stage = Join-Path $OutDir $name
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $stage, (Join-Path $stage 'licenses') | Out-Null
 
-foreach ($f in 'Skowork.exe', 'Skowork-legacy.exe', 'skowork-worker.exe', 'pdfium.dll') {
+foreach ($f in 'Skowork.exe', 'skowork-worker.exe', 'pdfium.dll') {
     $src = Join-Path $bin $f
     if (-not (Test-Path $src)) { throw "missing $src" }
     Copy-Item $src $stage

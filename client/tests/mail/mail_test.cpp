@@ -474,6 +474,32 @@ TEST(MailSync, DeltaSyncLabelsExpiryAndEventsWithoutDuplicates) {
     EXPECT_EQ(count_kind(ev, "mail.deleted"), 1);
 }
 
+TEST(MailSync, FailedListenerIsNotReplayedAfterRestart) {
+    // Characterizes the current in-memory listener; replace when page-atomic intake is implemented.
+    WB_REQUIRES_DEV_ENDPOINTS();
+    REQUIRE_MOCK();
+    Fixture f;
+    ASSERT_TRUE(f.connect());
+    ASSERT_TRUE(f.svc->sync_now());
+    (void)f.take_events();
+    int attempts = 0;
+    f.svc->on_event([&](const MailEvent& event) {
+        if (event.kind == "mail.received" && !jbool(event.detail, "backfill", false)) {
+            ++attempts;
+            throw std::runtime_error("simulated subscriber storage failure");
+        }
+    });
+    f.mock.ctl("POST", "/users/jan/messages",
+               {{"from", "Petra Malá <petra.mala@dodavatel-test.example>"},
+                {"subject", "Subscriber failure"}, {"body", "test"}, {"label", "public"}});
+    ASSERT_TRUE(f.svc->sync_now());
+    EXPECT_EQ(attempts, 1);
+    f.restart();
+    ASSERT_TRUE(f.svc->sync_now());
+    const auto events = f.take_events();
+    EXPECT_EQ(count_kind(events, "mail.received", false), 1);
+}
+
 TEST(MailSync, UnlabelledExcludedAndOfflineSearchFromTheLocalCopy) {
     WB_REQUIRES_DEV_ENDPOINTS();
     REQUIRE_MOCK();
@@ -806,4 +832,584 @@ TEST(MailEndToEnd, ReplyToAThreadAndBookAMeeting) {
     const auto ev = f.take_events();
     EXPECT_EQ(count_kind(ev, "event.created", false), 1);
     EXPECT_EQ(count_kind(ev, "mail.received"), 0);
+}
+
+// Characterize the existing store boundary before wiring any durable intake to it.
+TEST(TriageSourceSpike, ExistingNestedMailWriteCanSilentlyAdvanceCursor) {
+    MailDb fixture;
+    auto& db = fixture.store->db();
+    MailStore store(db);
+    StoredMessage message;
+    message.id = "spike-message";
+    message.folder_id = "spike-folder";
+    message.change_key = "revision-1";
+    const auto committed = db.transaction([&]() -> Status {
+        EXPECT_EQ(store.upsert_message(message), MailStore::Change::created);
+        store.set_delta_link("spike", "advanced-cursor", 1);
+        return {};
+    });
+    ASSERT_TRUE(committed);
+    EXPECT_FALSE(store.message(message.id));
+    EXPECT_EQ(store.delta_link("spike"), "advanced-cursor");
+}
+
+namespace {
+Status spike_page(Database& db, int fail_after, int terminate_after = 0) {
+    return db.transaction([&]() -> Status {
+        const char* statements[] = {
+            "INSERT OR REPLACE INTO spike_source VALUES('message-1','revision-1')",
+            "INSERT OR IGNORE INTO spike_pending VALUES('message-1','revision-1')",
+            "INSERT OR REPLACE INTO spike_cursor VALUES('folder-1','next-page')",
+        };
+        for (int i = 0; i < 3; ++i) {
+            if (auto status = db.exec(statements[i]); !status) return status;
+            if (fail_after == i + 1) return make_error("injected_failure", "page interrupted");
+            if (terminate_after == i + 1) {
+                ::TerminateProcess(::GetCurrentProcess(), static_cast<UINT>(100 + terminate_after));
+                return make_error("termination_failed", "could not terminate test child");
+            }
+        }
+        return {};
+    });
+}
+long long spike_count(Database& db, const char* table) {
+    auto q = db.prepare(std::string("SELECT count(*) FROM ") + table);
+    EXPECT_TRUE(q.step());
+    return q.col_int(0);
+}
+}  // namespace
+
+TEST(TriageSourceSpike, PageAndCursorRollBackTogetherAndReplayOnce) {
+    MailDb fixture;
+    ASSERT_TRUE(fixture.store->db().exec(
+        "CREATE TABLE spike_source(id TEXT PRIMARY KEY, revision TEXT NOT NULL);"
+        "CREATE TABLE spike_pending(id TEXT NOT NULL, revision TEXT NOT NULL, PRIMARY KEY(id, revision));"
+        "CREATE TABLE spike_cursor(scope TEXT PRIMARY KEY, position TEXT NOT NULL);"));
+    for (int fail_after = 1; fail_after <= 3; ++fail_after) {
+        EXPECT_FALSE(spike_page(fixture.store->db(), fail_after));
+        fixture.open();
+        EXPECT_EQ(spike_count(fixture.store->db(), "spike_source"), 0);
+        EXPECT_EQ(spike_count(fixture.store->db(), "spike_pending"), 0);
+        EXPECT_EQ(spike_count(fixture.store->db(), "spike_cursor"), 0);
+    }
+    ASSERT_TRUE(spike_page(fixture.store->db(), 0));
+    fixture.open();
+    ASSERT_TRUE(spike_page(fixture.store->db(), 0));
+    EXPECT_EQ(spike_count(fixture.store->db(), "spike_source"), 1);
+    EXPECT_EQ(spike_count(fixture.store->db(), "spike_pending"), 1);
+    EXPECT_EQ(spike_count(fixture.store->db(), "spike_cursor"), 1);
+}
+
+// This child is selected explicitly by the parent and only uses its disposable encrypted profile.
+TEST(TriageSpikeCrashChild, Execute) {
+    wchar_t root_path[32768]{};
+    wchar_t phase_text[16]{};
+    if (!::GetEnvironmentVariableW(L"SKOWORK_TRIAGE_SPIKE_ROOT", root_path, 32768)) GTEST_SKIP();
+    ASSERT_GT(::GetEnvironmentVariableW(L"SKOWORK_TRIAGE_SPIKE_PHASE", phase_text, 16), 0u);
+    const int phase = _wtoi(phase_text);
+    ASSERT_GE(phase, 1);
+    ASSERT_LE(phase, 4);
+    auto root = DataRoot::open(std::filesystem::path(root_path));
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get("app.db");
+    ASSERT_TRUE(key);
+    auto opened = Database::open(root->file("app.db"), *key);
+    ASSERT_TRUE(opened);
+    ASSERT_TRUE(spike_page(**opened, 0, phase < 4 ? phase : 0));
+    ::TerminateProcess(::GetCurrentProcess(), static_cast<UINT>(100 + phase));
+}
+
+TEST(TriageSourceSpike, ProcessTerminationKeepsPageAtomicAndReplayable) {
+    MailDb fixture;
+    ASSERT_TRUE(fixture.store->db().exec(
+        "CREATE TABLE spike_source(id TEXT PRIMARY KEY, revision TEXT NOT NULL);"
+        "CREATE TABLE spike_pending(id TEXT NOT NULL, revision TEXT NOT NULL, PRIMARY KEY(id, revision));"
+        "CREATE TABLE spike_cursor(scope TEXT PRIMARY KEY, position TEXT NOT NULL);"));
+    wchar_t executable[32768]{};
+    ASSERT_GT(::GetModuleFileNameW(nullptr, executable, 32768), 0u);
+    for (int phase = 1; phase <= 4; ++phase) {
+        ASSERT_TRUE(fixture.store->db().exec("DELETE FROM spike_source; DELETE FROM spike_pending; DELETE FROM spike_cursor;"));
+        fixture.store.reset();
+        ASSERT_TRUE(::SetEnvironmentVariableW(L"SKOWORK_TRIAGE_SPIKE_ROOT", fixture.path.c_str()));
+        const std::wstring phase_text = std::to_wstring(phase);
+        ASSERT_TRUE(::SetEnvironmentVariableW(L"SKOWORK_TRIAGE_SPIKE_PHASE", phase_text.c_str()));
+        std::wstring command = L"\"" + std::wstring(executable) + L"\" --gtest_filter=TriageSpikeCrashChild.Execute";
+        STARTUPINFOW startup{};
+        startup.cb = sizeof startup;
+        PROCESS_INFORMATION process{};
+        const BOOL started = ::CreateProcessW(executable, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                                              nullptr, nullptr, &startup, &process);
+        ::SetEnvironmentVariableW(L"SKOWORK_TRIAGE_SPIKE_ROOT", nullptr);
+        ::SetEnvironmentVariableW(L"SKOWORK_TRIAGE_SPIKE_PHASE", nullptr);
+        ASSERT_TRUE(started);
+        const DWORD wait = ::WaitForSingleObject(process.hProcess, 10000);
+        if (wait != WAIT_OBJECT_0) {
+            ::TerminateProcess(process.hProcess, 1);
+            ::WaitForSingleObject(process.hProcess, 5000);
+        }
+        DWORD exit_code = 0;
+        ::GetExitCodeProcess(process.hProcess, &exit_code);
+        ::CloseHandle(process.hThread);
+        ::CloseHandle(process.hProcess);
+        ASSERT_EQ(wait, WAIT_OBJECT_0);
+        ASSERT_EQ(exit_code, static_cast<DWORD>(100 + phase));
+        fixture.open();
+        const int committed = phase == 4 ? 1 : 0;
+        EXPECT_EQ(spike_count(fixture.store->db(), "spike_source"), committed) << phase;
+        EXPECT_EQ(spike_count(fixture.store->db(), "spike_pending"), committed) << phase;
+        EXPECT_EQ(spike_count(fixture.store->db(), "spike_cursor"), committed) << phase;
+        ASSERT_TRUE(spike_page(fixture.store->db(), 0));
+        ASSERT_TRUE(spike_page(fixture.store->db(), 0));
+        EXPECT_EQ(spike_count(fixture.store->db(), "spike_pending"), 1) << phase;
+    }
+}
+
+TEST(TriageSourceSpike, GraphPageCanResumeAfterRestartAndExpiredCursorFails) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    REQUIRE_MOCK();
+    Fixture f;
+    ASSERT_TRUE(f.connect());
+    GraphCall call;
+    call.path = "/me/mailFolders/inbox/messages/delta";
+    call.page_size = 1;
+    auto first = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(first) << first.error().message;
+    ASSERT_EQ(first->items.size(), 1u);
+    ASSERT_FALSE(jstr(first->items[0], "id").empty());
+    ASSERT_FALSE(jstr(first->items[0], "changeKey").empty());
+    ASSERT_FALSE(first->next_link.empty());
+    call.path = first->next_link;
+    auto before = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(before) << before.error().message;
+    ASSERT_EQ(before->items.size(), 1u);
+    const auto expected = before->items[0];
+    f.restart();
+    ASSERT_TRUE(f.svc->connected());
+    auto resumed = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(resumed) << resumed.error().message;
+    ASSERT_EQ(resumed->items.size(), 1u);
+    EXPECT_EQ(jstr(resumed->items[0], "id"), jstr(expected, "id"));
+    EXPECT_EQ(jstr(resumed->items[0], "changeKey"), jstr(expected, "changeKey"));
+    f.mock.ctl("POST", "/delta/expire");
+    auto expired = f.svc->connection()->graph->page(call);
+    ASSERT_FALSE(expired);
+    EXPECT_EQ(expired.error().code, "sync_state_not_found");
+}
+
+TEST(TriageSourceSpike, MockPageKeepsUnchangedItemAfterConcurrentDeletion) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    REQUIRE_MOCK();
+    Fixture f;
+    ASSERT_TRUE(f.connect());
+    GraphCall call;
+    call.path = "/me/mailFolders/inbox/messages/delta";
+    call.page_size = 1;
+    auto first = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(first) << first.error().message;
+    ASSERT_EQ(first->items.size(), 1u);
+    const auto deleted_id = jstr(first->items[0], "id");
+    ASSERT_FALSE(first->next_link.empty());
+    call.path = first->next_link;
+    auto before = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(before) << before.error().message;
+    ASSERT_EQ(before->items.size(), 1u);
+    const auto skipped_id = jstr(before->items[0], "id");
+    ASSERT_FALSE(skipped_id.empty());
+    f.mock.ctl("DELETE", "/users/jan/messages/" + deleted_id);
+    auto after = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(after) << after.error().message;
+    ASSERT_EQ(after->items.size(), 1u);
+    EXPECT_EQ(jstr(after->items[0], "id"), skipped_id);
+    while (!after->next_link.empty()) {
+        call.path = after->next_link;
+        after = f.svc->connection()->graph->page(call);
+        ASSERT_TRUE(after) << after.error().message;
+        for (const auto& item : after->items) EXPECT_NE(jstr(item, "id"), skipped_id);
+    }
+    ASSERT_FALSE(after->delta_link.empty());
+    call.path = after->delta_link;
+    auto delta = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(delta) << delta.error().message;
+    bool saw_tombstone = false;
+    for (const auto& item : delta->items) {
+        EXPECT_NE(jstr(item, "id"), skipped_id);
+        if (jstr(item, "id") == deleted_id && item.contains("@removed")) saw_tombstone = true;
+    }
+    EXPECT_TRUE(saw_tombstone);
+}
+
+namespace {
+Status graph_spike_page(Database& db, const GraphPage& page, const std::string& requested = {}) {
+    const std::string position = page.next_link.empty() ? page.delta_link : page.next_link;
+    if (position.empty()) return make_error("invalid_page", "page lacks a cursor");
+    std::set<std::pair<std::string, std::string>> events;
+    std::map<std::string, std::string> revisions;
+    std::set<std::string> removed;
+    for (const auto& item : page.items) {
+        const auto id = jstr(item, "id"), revision = jstr(item, "changeKey");
+        if (id.empty()) return make_error("invalid_page", "item has no id");
+        if (item.contains("@removed")) { removed.insert(id); continue; }
+        if (revision.empty()) return make_error("invalid_page", "live item has no revision");
+        const auto [it, inserted] = revisions.emplace(id, revision);
+        if (!inserted && it->second != revision) return make_error("invalid_page", "conflicting revisions");
+        events.emplace(id, revision);
+    }
+    for (const auto& [id, revision] : events)
+        if (removed.count(id)) return make_error("invalid_page", "ambiguous item and tombstone");
+    return db.transaction([&]() -> Status {
+        {
+            auto scan = db.prepare("SELECT active FROM graph_spike_resync");
+            if (!scan.step()) return scan.status() ? make_error("missing_resync", "no test state") : scan.status();
+            if (scan.col_int(0)) return make_error("resync_active", "normal intake is paused during resync");
+        }
+        bool gap = false;
+        {
+            auto s = db.prepare("SELECT gap,cursor FROM graph_spike_state WHERE scope='inbox'");
+            if (!s.step()) return s.status() ? make_error("missing_scope", "no test state") : s.status();
+            gap = s.col_int(0) != 0;
+            const auto current = s.col_text(1);
+            if (current == position) return {};  // a committed page replay
+            if (current != requested) return make_error("stale_page", "source cursor changed");
+        }
+        if (!gap) {
+            auto count = db.prepare("SELECT COUNT(*) FROM graph_spike_pending");
+            if (!count.step()) return count.status() ? make_error("missing_count", "no count") : count.status();
+            long long pending = count.col_int(0);
+            for (const auto& [id, revision] : events) {
+                auto exists = db.prepare("SELECT 1 FROM graph_spike_pending WHERE id=?1 AND revision=?2");
+                exists.bind(1, id).bind(2, revision);
+                const bool found = exists.step();
+                if (!exists.status()) return exists.status();
+                if (!found) ++pending;
+            }
+            gap = pending > 1000;
+        }
+        for (const auto& id : removed) {
+            for (const char* sql : {"DELETE FROM graph_spike_source WHERE id=?1", "DELETE FROM graph_spike_pending WHERE id=?1",
+                                    "DELETE FROM graph_spike_suggestion WHERE id=?1", "INSERT OR IGNORE INTO graph_spike_tombstone VALUES(?1)"}) {
+                auto s = db.prepare(sql);
+                s.bind(1, id);
+                if (auto status = s.run(); !status) return status;
+            }
+        }
+        for (const auto& [id, revision] : events) {
+            for (const char* sql : {"DELETE FROM graph_spike_pending WHERE id=?1 AND revision<>?2",
+                                    "DELETE FROM graph_spike_suggestion WHERE id=?1 AND revision<>?2"}) {
+                auto s = db.prepare(sql);
+                s.bind(1, id).bind(2, revision);
+                if (auto status = s.run(); !status) return status;
+            }
+            auto tombstone = db.prepare("DELETE FROM graph_spike_tombstone WHERE id=?1");
+            tombstone.bind(1, id);
+            if (auto s = tombstone.run(); !s) return s;
+            auto source = db.prepare("INSERT OR REPLACE INTO graph_spike_source(id,revision) VALUES(?1,?2)");
+            source.bind(1, id).bind(2, revision);
+            if (auto s = source.run(); !s) return s;
+            if (!gap) {
+                auto pending = db.prepare("INSERT OR IGNORE INTO graph_spike_pending VALUES(?1,?2)");
+                pending.bind(1, id).bind(2, revision);
+                if (auto s = pending.run(); !s) return s;
+            }
+        }
+        auto state = db.prepare("UPDATE graph_spike_state SET cursor=?1,gap=?2 WHERE scope='inbox'");
+        state.bind(1, position).bind(2, gap ? 1 : 0);
+        return state.run();
+    });
+}
+long long graph_spike_scalar(Database& db, const char* sql) {
+    auto q = db.prepare(sql);
+    EXPECT_TRUE(q.step());
+    EXPECT_TRUE(q.status());
+    return q.col_int(0);
+}
+Status graph_spike_suggest(Database& db, const std::string& id, const std::string& revision) {
+    return db.transaction([&]() -> Status {
+        auto insert = db.prepare("INSERT OR IGNORE INTO graph_spike_suggestion SELECT p.id,p.revision FROM graph_spike_pending p "
+                                 "JOIN graph_spike_source s ON s.id=p.id AND s.revision=p.revision "
+                                 "WHERE p.id=?1 AND p.revision=?2");
+        insert.bind(1, id).bind(2, revision);
+        if (auto status = insert.run(); !status) return status;
+        auto done = db.prepare("DELETE FROM graph_spike_pending WHERE id=?1 AND revision=?2");
+        done.bind(1, id).bind(2, revision);
+        return done.run();
+    });
+}
+Status graph_spike_resync_begin(Database& db) {
+    return db.transaction([&]() -> Status {
+        auto active = db.prepare("SELECT active FROM graph_spike_resync");
+        if (!active.step()) return active.status() ? make_error("missing_resync", "no test state") : active.status();
+        if (active.col_int(0)) return make_error("resync_active", "scan already in progress");
+        return db.exec("UPDATE graph_spike_source SET seen=0; UPDATE graph_spike_state SET cursor='',gap=1 WHERE scope='inbox';"
+                       "UPDATE graph_spike_resync SET active=1;");
+    });
+}
+Status graph_spike_resync_page(Database& db, const GraphPage& page, const std::string& requested) {
+    const auto position = page.next_link.empty() ? page.delta_link : page.next_link;
+    if (position.empty() || (!page.next_link.empty() && !page.delta_link.empty()))
+        return make_error("invalid_page", "invalid resync cursor");
+    std::map<std::string, std::string> items;
+    for (const auto& item : page.items) {
+        const auto id = jstr(item, "id"), revision = jstr(item, "changeKey");
+        if (id.empty() || revision.empty() || item.contains("@removed")) return make_error("invalid_page", "invalid resync item");
+        const auto [it, inserted] = items.emplace(id, revision);
+        if (!inserted && it->second != revision) return make_error("invalid_page", "conflicting revisions");
+    }
+    return db.transaction([&]() -> Status {
+        auto state = db.prepare("SELECT cursor,active FROM graph_spike_state,graph_spike_resync WHERE scope='inbox'");
+        if (!state.step()) return state.status() ? make_error("missing_state", "no resync state") : state.status();
+        if (state.col_text(0) == position) return {};  // a previously committed page
+        if (!state.col_int(1) || state.col_text(0) != requested) return make_error("stale_page", "resync cursor changed");
+        for (const auto& [id, revision] : items) {
+            for (const char* sql : {"DELETE FROM graph_spike_pending WHERE id=?1 AND revision<>?2",
+                                    "DELETE FROM graph_spike_suggestion WHERE id=?1 AND revision<>?2"}) {
+                auto s = db.prepare(sql);
+                s.bind(1, id).bind(2, revision);
+                if (auto status = s.run(); !status) return status;
+            }
+            auto source = db.prepare("INSERT OR REPLACE INTO graph_spike_source(id,revision,seen) VALUES(?1,?2,1)");
+            source.bind(1, id).bind(2, revision);
+            if (auto status = source.run(); !status) return status;
+            auto tombstone = db.prepare("DELETE FROM graph_spike_tombstone WHERE id=?1");
+            tombstone.bind(1, id);
+            if (auto status = tombstone.run(); !status) return status;
+        }
+        if (!page.delta_link.empty()) {
+            if (auto status = db.exec(
+                    "INSERT OR IGNORE INTO graph_spike_tombstone SELECT id FROM graph_spike_source WHERE seen=0;"
+                    "DELETE FROM graph_spike_pending WHERE id IN (SELECT id FROM graph_spike_source WHERE seen=0);"
+                    "DELETE FROM graph_spike_suggestion WHERE id IN (SELECT id FROM graph_spike_source WHERE seen=0);"
+                    "DELETE FROM graph_spike_source WHERE seen=0;"
+                    "UPDATE graph_spike_resync SET active=0;"); !status) return status;
+        }
+        auto cursor = db.prepare("UPDATE graph_spike_state SET cursor=?1 WHERE scope='inbox'");
+        cursor.bind(1, position);
+        return cursor.run();
+    });
+}
+}  // namespace
+
+TEST(TriageSourceSpike, GraphOverflowPersistsGapAndContinuesSourcePaging) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    REQUIRE_MOCK();
+    Fixture f;
+    ASSERT_TRUE(f.connect());
+    auto& db = f.db.store->db();
+    ASSERT_TRUE(db.exec(
+        "CREATE TABLE graph_spike_source(id TEXT PRIMARY KEY, revision TEXT NOT NULL);"
+        "CREATE TABLE graph_spike_pending(id TEXT NOT NULL, revision TEXT NOT NULL, PRIMARY KEY(id,revision));"
+        "CREATE TABLE graph_spike_suggestion(id TEXT NOT NULL, revision TEXT NOT NULL, PRIMARY KEY(id,revision));"
+        "CREATE TABLE graph_spike_tombstone(id TEXT PRIMARY KEY);"
+        "CREATE TABLE graph_spike_state(scope TEXT PRIMARY KEY, cursor TEXT NOT NULL, gap INTEGER NOT NULL);"
+        "CREATE TABLE graph_spike_resync(active INTEGER NOT NULL);"
+        "INSERT INTO graph_spike_resync VALUES(0);"
+        "INSERT INTO graph_spike_state VALUES('inbox','',0);"
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<998) "
+        "INSERT INTO graph_spike_pending SELECT 'existing-'||x, 'r1' FROM n;"));
+    GraphCall call;
+    call.path = "/me/mailFolders/inbox/messages/delta";
+    call.page_size = 2;
+    auto first = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(first) << first.error().message;
+    ASSERT_EQ(first->items.size(), 2u);
+    ASSERT_FALSE(first->next_link.empty());
+    ASSERT_TRUE(db.exec("CREATE TRIGGER graph_spike_fail BEFORE UPDATE ON graph_spike_state "
+                        "BEGIN SELECT RAISE(ABORT,'injected cursor failure'); END;"));
+    EXPECT_FALSE(graph_spike_page(db, *first));
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_source"), 0);
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_pending"), 998);
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT gap FROM graph_spike_state WHERE scope='inbox'"), 0);
+    ASSERT_TRUE(db.exec("DROP TRIGGER graph_spike_fail"));
+    ASSERT_TRUE(graph_spike_page(db, *first));
+    ASSERT_TRUE(graph_spike_page(db, *first));  // replay at capacity must not create a false gap
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_source"), 2);
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_pending"), 1000);
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT gap FROM graph_spike_state WHERE scope='inbox'"), 0);
+    call.path = first->next_link;
+    auto second = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(second) << second.error().message;
+    ASSERT_EQ(second->items.size(), 2u);
+    ASSERT_FALSE(second->next_link.empty());
+    ASSERT_TRUE(graph_spike_page(db, *second, call.path));
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_source"), 4);
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_pending"), 1000);
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT gap FROM graph_spike_state WHERE scope='inbox'"), 1);
+    f.restart();
+    auto& reopened = f.db.store->db();
+    auto cursor = reopened.prepare("SELECT cursor FROM graph_spike_state WHERE scope='inbox'");
+    ASSERT_TRUE(cursor.step());
+    call.path = cursor.col_text(0);
+    EXPECT_EQ(call.path, second->next_link);
+    auto third = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(third) << third.error().message;
+    ASSERT_FALSE(third->items.empty());
+    ASSERT_TRUE(graph_spike_page(reopened, *third, call.path));
+    EXPECT_EQ(graph_spike_scalar(reopened, "SELECT COUNT(*) FROM graph_spike_source"), 4 + third->items.size());
+    EXPECT_EQ(graph_spike_scalar(reopened, "SELECT COUNT(*) FROM graph_spike_pending"), 1000);
+    EXPECT_EQ(graph_spike_scalar(reopened, "SELECT gap FROM graph_spike_state WHERE scope='inbox'"), 1);
+    auto next_cursor = reopened.prepare("SELECT cursor FROM graph_spike_state WHERE scope='inbox'");
+    ASSERT_TRUE(next_cursor.step());
+    EXPECT_EQ(next_cursor.col_text(0), third->next_link.empty() ? third->delta_link : third->next_link);
+}
+
+TEST(TriageSourceSpike, ReplayAndTombstoneCannotDuplicateOrRestoreSuggestion) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    REQUIRE_MOCK();
+    Fixture f;
+    ASSERT_TRUE(f.connect());
+    auto& db = f.db.store->db();
+    ASSERT_TRUE(db.exec(
+        "CREATE TABLE graph_spike_source(id TEXT PRIMARY KEY, revision TEXT NOT NULL);"
+        "CREATE TABLE graph_spike_pending(id TEXT NOT NULL, revision TEXT NOT NULL, PRIMARY KEY(id,revision));"
+        "CREATE TABLE graph_spike_suggestion(id TEXT NOT NULL, revision TEXT NOT NULL, PRIMARY KEY(id,revision));"
+        "CREATE TABLE graph_spike_tombstone(id TEXT PRIMARY KEY);"
+        "CREATE TABLE graph_spike_state(scope TEXT PRIMARY KEY, cursor TEXT NOT NULL, gap INTEGER NOT NULL);"
+        "CREATE TABLE graph_spike_resync(active INTEGER NOT NULL);"
+        "INSERT INTO graph_spike_resync VALUES(0);"
+        "INSERT INTO graph_spike_state VALUES('inbox','',0);"));
+    GraphCall call;
+    call.path = "/me/mailFolders/inbox/messages/delta";
+    call.page_size = 100;
+    auto initial = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(initial) << initial.error().message;
+    ASSERT_FALSE(initial->items.empty());
+    ASSERT_FALSE(initial->delta_link.empty());
+    const auto id = jstr(initial->items[0], "id");
+    const auto revision = jstr(initial->items[0], "changeKey");
+    GraphPage ambiguous = *initial;
+    auto conflicting = initial->items[0];
+    conflicting["changeKey"] = revision + "-conflict";
+    ambiguous.items.push_back(conflicting);
+    EXPECT_FALSE(graph_spike_page(db, ambiguous));
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_source"), 0);
+    ASSERT_TRUE(graph_spike_page(db, *initial));
+    ASSERT_TRUE(graph_spike_suggest(db, id, revision));
+    ASSERT_TRUE(graph_spike_suggest(db, id, revision));
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_suggestion"), 1);
+    ASSERT_TRUE(graph_spike_page(db, *initial));
+    ASSERT_TRUE(graph_spike_suggest(db, id, revision));
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_suggestion"), 1);
+    GraphCall edit;
+    edit.method = "PATCH";
+    edit.path = "/me/messages/" + id;
+    edit.body = json{{"isRead", !jbool(initial->items[0], "isRead", false)}};
+    ASSERT_TRUE(f.svc->connection()->graph->call(edit));
+    call.path = initial->delta_link;
+    auto changed = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(changed) << changed.error().message;
+    ASSERT_EQ(changed->items.size(), 1u);
+    const auto new_revision = jstr(changed->items[0], "changeKey");
+    ASSERT_FALSE(new_revision.empty());
+    ASSERT_NE(new_revision, revision);
+    ASSERT_TRUE(graph_spike_page(db, *changed, call.path));
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_suggestion"), 0);
+    ASSERT_TRUE(graph_spike_suggest(db, id, revision));  // stale result for the previous revision
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_suggestion"), 0);
+    ASSERT_TRUE(graph_spike_suggest(db, id, new_revision));
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_suggestion"), 1);
+    f.mock.ctl("DELETE", "/users/jan/messages/" + id);
+    call.path = changed->delta_link;
+    auto removed = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(removed) << removed.error().message;
+    ASSERT_EQ(removed->items.size(), 1u);
+    ASSERT_TRUE(removed->items[0].contains("@removed"));
+    ASSERT_TRUE(graph_spike_page(db, *removed, call.path));
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_suggestion"), 0);
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_tombstone"), 1);
+    EXPECT_FALSE(graph_spike_page(db, *initial));  // a stale page cannot resurrect the item
+    ASSERT_TRUE(graph_spike_suggest(db, id, new_revision));  // stale model result
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_suggestion"), 0);
+}
+
+TEST(TriageSourceSpike, ExpiredCursorResyncReconcilesOnlyAfterFinalPage) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    REQUIRE_MOCK();
+    Fixture f;
+    ASSERT_TRUE(f.connect());
+    auto& db = f.db.store->db();
+    ASSERT_TRUE(db.exec(
+        "CREATE TABLE graph_spike_source(id TEXT PRIMARY KEY, revision TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0);"
+        "CREATE TABLE graph_spike_pending(id TEXT NOT NULL, revision TEXT NOT NULL, PRIMARY KEY(id,revision));"
+        "CREATE TABLE graph_spike_suggestion(id TEXT NOT NULL, revision TEXT NOT NULL, PRIMARY KEY(id,revision));"
+        "CREATE TABLE graph_spike_tombstone(id TEXT PRIMARY KEY);"
+        "CREATE TABLE graph_spike_state(scope TEXT PRIMARY KEY, cursor TEXT NOT NULL, gap INTEGER NOT NULL);"
+        "CREATE TABLE graph_spike_resync(active INTEGER NOT NULL);"
+        "INSERT INTO graph_spike_resync VALUES(0);"
+        "INSERT INTO graph_spike_state VALUES('inbox','',0);"));
+    GraphCall call;
+    call.path = "/me/mailFolders/inbox/messages/delta";
+    call.page_size = 100;
+    auto initial = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(initial) << initial.error().message;
+    ASSERT_GE(initial->items.size(), 2u);
+    ASSERT_FALSE(initial->delta_link.empty());
+    const auto deleted_id = jstr(initial->items[0], "id");
+    const auto retained_id = jstr(initial->items[1], "id");
+    ASSERT_TRUE(graph_spike_page(db, *initial));
+    ASSERT_TRUE(graph_spike_suggest(db, deleted_id, jstr(initial->items[0], "changeKey")));
+    ASSERT_TRUE(graph_spike_suggest(db, retained_id, jstr(initial->items[1], "changeKey")));
+    f.mock.ctl("POST", "/delta/expire");
+    f.mock.ctl("DELETE", "/users/jan/messages/" + deleted_id);
+    const auto arrived = f.mock.ctl("POST", "/users/jan/messages", {{"subject", "during expired cursor"}, {"body", "test"}});
+    const auto arrived_id = jstr(arrived, "id");
+    ASSERT_FALSE(arrived_id.empty());
+    call.path = initial->delta_link;
+    auto expired = f.svc->connection()->graph->page(call);
+    ASSERT_FALSE(expired);
+    ASSERT_EQ(expired.error().code, "sync_state_not_found");
+    ASSERT_TRUE(graph_spike_resync_begin(db));
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT gap FROM graph_spike_state WHERE scope='inbox'"), 1);
+    call.path = "/me/mailFolders/inbox/messages/delta";
+    call.page_size = 2;
+    auto page = f.svc->connection()->graph->page(call);
+    ASSERT_TRUE(page) << page.error().message;
+    ASSERT_FALSE(page->next_link.empty());
+    EXPECT_FALSE(graph_spike_page(db, *page, ""));
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_source WHERE seen=1"), 0);
+    ASSERT_TRUE(graph_spike_resync_page(db, *page, ""));
+    EXPECT_EQ(graph_spike_scalar(db, "SELECT COUNT(*) FROM graph_spike_suggestion"), 2);  // no sweep on partial page
+    f.restart();
+    auto& reopened = f.db.store->db();
+    std::string cursor;
+    {
+        auto q = reopened.prepare("SELECT cursor FROM graph_spike_state WHERE scope='inbox'");
+        ASSERT_TRUE(q.step());
+        cursor = q.col_text(0);
+    }
+    ASSERT_EQ(cursor, page->next_link);
+    for (int pages = 0; pages < 100; ++pages) {
+        call.path = cursor;
+        page = f.svc->connection()->graph->page(call);
+        ASSERT_TRUE(page) << page.error().message;
+        EXPECT_FALSE(graph_spike_page(reopened, *page, cursor));
+        if (!page->delta_link.empty()) {
+            ASSERT_TRUE(reopened.exec("CREATE TRIGGER graph_spike_fail_resync BEFORE UPDATE ON graph_spike_state "
+                                      "BEGIN SELECT RAISE(ABORT,'injected final cursor failure'); END;"));
+            EXPECT_FALSE(graph_spike_resync_page(reopened, *page, cursor));
+            EXPECT_EQ(graph_spike_scalar(reopened, "SELECT COUNT(*) FROM graph_spike_suggestion"), 2);
+            EXPECT_EQ(graph_spike_scalar(reopened, "SELECT COUNT(*) FROM graph_spike_tombstone"), 0);
+            ASSERT_TRUE(reopened.exec("DROP TRIGGER graph_spike_fail_resync"));
+        }
+        ASSERT_TRUE(graph_spike_resync_page(reopened, *page, cursor));
+        if (!page->delta_link.empty()) break;
+        ASSERT_FALSE(page->next_link.empty());
+        cursor = page->next_link;
+    }
+    ASSERT_FALSE(page->delta_link.empty());
+    EXPECT_EQ(graph_spike_scalar(reopened, "SELECT COUNT(*) FROM graph_spike_suggestion"), 1);
+    EXPECT_EQ(graph_spike_scalar(reopened, "SELECT COUNT(*) FROM graph_spike_tombstone"), 1);
+    EXPECT_EQ(graph_spike_scalar(reopened, "SELECT gap FROM graph_spike_state WHERE scope='inbox'"), 1);
+    auto present = reopened.prepare("SELECT 1 FROM graph_spike_source WHERE id=?1");
+    present.bind(1, arrived_id);
+    EXPECT_TRUE(present.step());
+    auto pending = reopened.prepare("SELECT 1 FROM graph_spike_pending WHERE id=?1");
+    pending.bind(1, arrived_id);
+    EXPECT_FALSE(pending.step());
+    auto retained = reopened.prepare("SELECT 1 FROM graph_spike_suggestion WHERE id=?1");
+    retained.bind(1, retained_id);
+    EXPECT_TRUE(retained.step());
+    auto deleted = reopened.prepare("SELECT 1 FROM graph_spike_source WHERE id=?1");
+    deleted.bind(1, deleted_id);
+    EXPECT_FALSE(deleted.step());
 }

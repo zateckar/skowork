@@ -17,13 +17,13 @@
 
 namespace wb::shell {
 
-enum class RouteName { inbox, thread, new_thread, status, settings, telemetry, about, skill_editor, automation, automation_editor, knowledge, apps, chat };
+enum class RouteName { inbox, thread, new_thread, status, settings, telemetry, about, skill_editor, automation, automation_editor, knowledge, apps, chat, agenda };
 
 // The routes shown in the page pane rather than the Inbox.
 inline bool is_page(RouteName n) {
     return n == RouteName::status || n == RouteName::settings || n == RouteName::telemetry || n == RouteName::about ||
            n == RouteName::skill_editor || n == RouteName::automation || n == RouteName::automation_editor ||
-           n == RouteName::knowledge || n == RouteName::apps;
+           n == RouteName::knowledge || n == RouteName::apps || n == RouteName::agenda;
 }
 
 struct MessageRef {

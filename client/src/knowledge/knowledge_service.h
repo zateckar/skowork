@@ -40,6 +40,7 @@ struct KnowledgeConfig {
     long long max_file_mb = 25;                 // knowledge.max_file_mb
     long long embedding_daily_tokens = 10'000'000;
     long long extraction_daily_calls = 2000;
+    double min_salience = 0.35;  // knowledge.min_salience (add-knowledge-salience design D2): 0.0 to 0.9
     int max_threads = 2;
     std::vector<std::string> exclusions;  // knowledge.exclusions (globs)
     bool save_as_note = true;             // knowledge.save_as_note (add-save-as-note design D5)
@@ -123,6 +124,8 @@ struct Passage {
     // A team passage (source "team"): the owner, the Groups it is shared with, and its id in team knowledge.
     std::string owner, team_item;
     std::vector<std::string> groups;
+    // The most important fact extracted from the passage, as one sentence (add-knowledge-salience); may be empty.
+    std::string statement;
 };
 
 struct SearchResult {
@@ -235,7 +238,9 @@ public:
     Status dismiss_category_name(long long id);
     // Current knowledge in pages (Knowledge section): all facts, a category's, or Uncategorized ones (category 0),
     // newest first, each with its state and categories; `next` is the id to continue before.
-    json facts_page(std::optional<long long> category, long long before, int limit);
+    // `low_importance`: only facts the user marked unimportant or that were rated below policy.knowledge.min_salience,
+    // which current answers leave out (add-knowledge-salience Low importance filter, design D6, D7).
+    json facts_page(std::optional<long long> category, long long before, int limit, bool low_importance = false);
     // The user's decision on a review: keep_both, prefer_left or prefer_right (with a reason) or defer. It is tied to
     // the two excerpts shown and refused (stale) when knowledge changed since `generation` or the review needs a recheck.
     Status decide_review(long long review_id, const std::string& decision, const std::string& reason, long long generation);
@@ -327,6 +332,9 @@ public:
     // Curation (Knowledge Curation, design D5): kind relation (an extracted fact) or user (a user-stated fact).
     Status edit_fact(const std::string& kind, long long id, const std::string& text);
     Status delete_fact(const std::string& kind, long long id);
+    // The user's importance of a stored relation (add-knowledge-salience design D6): level high, normal or low. It is
+    // kept by the relation's names, survives re-extraction and does not delete the fact.
+    Status set_fact_importance(long long relation_id, const std::string& level);
     Status rename_entity(long long id, const std::string& name);
 
     // ---- Sharing (Sharing Knowledge Items, design D1, D3) ----
@@ -452,6 +460,12 @@ private:
     bool enrich_step();
     // Returns the passages one of whose findings took its date from the item.
     std::vector<long long> store_extraction(const std::vector<ChunkRow>& batch, const Extraction& x);
+    // The Source context of each passage of a batch (add-knowledge-salience design D1), from its item.
+    std::vector<SourceContext> passage_contexts(const std::vector<ChunkRow>& batch);
+    // Background rating of existing facts (design D7): one bounded batch, within the scoring share of the budget.
+    bool score_step();
+    // Retrieval weights (design D5) applied to ranked passages; `candidates` keep their order when no weight applies.
+    void apply_salience_weights(std::vector<Passage>& candidates);
     void notify();
     [[nodiscard]] bool deferred() const;
     void loop();

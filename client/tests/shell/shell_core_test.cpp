@@ -75,6 +75,8 @@ std::vector<std::string> summary(const std::vector<FeedItem>& items) {
             case ItemType::stopped: out.push_back(std::string("stopped:") + (i.by_user ? "true" : "false")); break;
             case ItemType::activity: out.push_back("activity"); break;
             case ItemType::working: out.push_back("working"); break;
+            case ItemType::speed: break;  // timing dependent; covered by the RunSpeed tests
+            default: break;
         }
     return out;
 }
@@ -379,6 +381,85 @@ TEST(ShellFeed, ActivityRailGroupsParallelSubagents) {
     LiveText live;
     EXPECT_EQ(apply_live_event(s2, live, {"run.state", "c1", T, 3, "", {{"state", "succeeded"}, {"reason", ""}}}), Apply::ok);
     EXPECT_EQ(s2.subagents[0].state, "succeeded");
+}
+
+TEST(ShellFeed, ChildProgressIsKeptInTheLiveSnapshot) {
+    FeedSnapshot snap = snapshot({run("parent", "running")});
+    RunInfo child = run("child", "running");
+    child.parent_run_id = "parent";
+    child.events.push_back({1, "", "state", {{"state", "running"}}});
+    snap.subagents.push_back(child);
+    LiveText live;
+    const LiveRunEvent event{"progress", "child", T, 2, "", {{"active_tools", 2}}};
+    EXPECT_EQ(apply_live_event(snap, live, event), Apply::ok);
+    ASSERT_EQ(snap.subagents[0].events.size(), 2u);
+    EXPECT_EQ(snap.subagents[0].events.back().kind, "progress");
+    EXPECT_EQ(jint(snap.subagents[0].events.back().payload, "active_tools"), 2);
+}
+
+TEST(ShellFeed, ChildProgressCoalescesGapsAndIgnoresOlderEvents) {
+    FeedSnapshot snap = snapshot({run("parent", "running")});
+    RunInfo child = run("child", "running");
+    child.parent_run_id = "parent";
+    child.events.push_back({1, "", "state", {{"state", "running"}}});
+    snap.subagents.push_back(child);
+    LiveText live;
+    EXPECT_EQ(apply_live_event(snap, live, {"progress", "child", T, 3, "", {{"active_tools", 1}}}), Apply::ok);
+    EXPECT_EQ(apply_live_event(snap, live, {"progress", "child", T, 2, "", {{"active_tools", 9}}}), Apply::ok);
+    ASSERT_EQ(snap.subagents[0].events.size(), 2u);
+    EXPECT_EQ(jint(snap.subagents[0].events.back().payload, "active_tools"), 1);
+}
+
+TEST(ShellFeed, WorkingIndicatorUsesTheLatestBoundedToolProgress) {
+    RunInfo running = run("parent", "running");
+    running.events = {{1, "", "progress", {{"active_tools", 2}}}};
+    FeedSnapshot snap = snapshot({running});
+    auto items = build_feed(snap);
+    ASSERT_FALSE(items.empty());
+    ASSERT_EQ(items.back().type, ItemType::working);
+    EXPECT_EQ(items.back().text, "feed.working_tools|2");
+    LiveText live;
+    EXPECT_EQ(apply_live_event(snap, live, {"progress", "parent", T, 2, "", {{"active_tools", 0}}}), Apply::ok);
+    items = build_feed(snap);
+    ASSERT_FALSE(items.empty());
+    ASSERT_EQ(items.back().type, ItemType::working);
+    EXPECT_TRUE(items.back().text.empty());
+}
+
+TEST(ShellFeed, WorkingIndicatorShowsOnlyRecognizedModelProgress) {
+    RunInfo running = run("parent", "running");
+    running.events = {{1, "", "progress", {{"active_tools", 0}, {"phase", "model"}}}};
+    FeedSnapshot snap = snapshot({running});
+    auto items = build_feed(snap);
+    ASSERT_FALSE(items.empty());
+    ASSERT_EQ(items.back().type, ItemType::working);
+    EXPECT_EQ(items.back().text, "feed.working_model");
+    LiveText live;
+    EXPECT_EQ(apply_live_event(snap, live, {"progress", "parent", T, 2, "", {{"active_tools", 0}, {"phase", "secret"}}}), Apply::ok);
+    items = build_feed(snap);
+    ASSERT_FALSE(items.empty());
+    EXPECT_TRUE(items.back().text.empty());
+}
+
+TEST(ShellFeed, RailShowsEachActiveChildsToolProgress) {
+    RunInfo parent = run("parent", "running");
+    parent.events = {{1, "", "subagent", {{"call_id", "a"}, {"child_run_id", "child"}, {"task", "Check"}}}};
+    RunInfo child = run("child", "running");
+    child.parent_run_id = "parent";
+    child.events = {{1, "", "progress", {{"active_tools", 2}}}};
+    FeedSnapshot snap = snapshot({parent});
+    snap.subagents = {child};
+    auto groups = build_rail(snap, 0);
+    ASSERT_EQ(groups.size(), 1u);
+    ASSERT_EQ(groups[0].entries.size(), 1u);
+    EXPECT_EQ(groups[0].entries[0].active_tools, 2);
+    snap.subagents[0].events.push_back({2, "", "progress", {{"active_tools", 0}, {"phase", "model"}}});
+    groups = build_rail(snap, 0);
+    EXPECT_TRUE(groups[0].entries[0].model_active);
+    snap.subagents[0].state = "failed";
+    groups = build_rail(snap, 0);
+    EXPECT_EQ(groups[0].entries[0].active_tools, 0);
+    EXPECT_FALSE(groups[0].entries[0].model_active);
 }
 
 TEST(ShellFeed, SnapshotFromJson) {
@@ -1031,4 +1112,142 @@ TEST(ShellFeed, SavedSkillEntryLinksToItsPublishDialogAndARefusalHasNoLink) {
     EXPECT_EQ(tools[0]->result->publish_route, "#/skills/edit/weekly-report");
     ASSERT_TRUE(tools[1]->result.has_value());
     EXPECT_TRUE(tools[1]->result->publish_route.empty());
+}
+
+// ---- Generation Speed Under Answers (show-generation-speed) ----
+
+namespace {
+
+StoredEvent model_call_event(long long seq, long long first_token_ms, long long duration_ms, long long output, bool exact = true) {
+    json p = {{"started_at", "2026-10-23T10:00:00.000Z"}, {"duration_ms", duration_ms}, {"output_tokens", output}, {"exact", exact}};
+    p["first_token_ms"] = first_token_ms < 0 ? json(nullptr) : json(first_token_ms);
+    return {seq, "2026-10-23T10:00:10.000Z", "model_call", p};
+}
+
+const long long kT0 = *iso_millis("2026-10-23T10:00:00.000Z");
+
+const FeedItem* speed_item(const std::vector<FeedItem>& items) {
+    for (const FeedItem& i : items)
+        if (i.type == ItemType::speed) return &i;
+    return nullptr;
+}
+
+}  // namespace
+
+TEST(RunSpeed, MeasuredSpeedExcludesWaitingAndToolTime) {
+    RunInfo r = run("run_1", "succeeded");
+    // Two calls: 600 tokens in 10 s after a 2 s wait, then 200 tokens in 5 s after a 1 s wait; Tool time lies between them.
+    r.events.push_back(model_call_event(3, 2000, 12000, 600));
+    r.events.push_back(model_call_event(9, 1000, 6000, 200));
+    const auto s = run_speed(r, {}, kT0 + 60000);
+    ASSERT_TRUE(s);
+    EXPECT_EQ(s->tokens_per_s, 53);  // 800 tokens / 15 s
+    EXPECT_FALSE(s->approximate);
+    EXPECT_EQ(s->waiting_ms, -1);
+}
+
+TEST(RunSpeed, CallsWithoutStreamedOutputDoNotCount) {
+    RunInfo r = run("run_1", "succeeded");
+    r.events.push_back(model_call_event(3, -1, 4000, 80));  // tool calls only
+    EXPECT_FALSE(run_speed(r, {}, kT0));
+    r.events.push_back(model_call_event(5, 0, 2000, 100, false));
+    const auto s = run_speed(r, {}, kT0);
+    ASSERT_TRUE(s);
+    EXPECT_EQ(s->tokens_per_s, 50);
+    EXPECT_TRUE(s->approximate);  // the provider reported no usage
+}
+
+TEST(RunSpeed, FailedRunWithoutOutputShowsNothing) {
+    RunInfo r = run("run_1", "failed");
+    r.events.push_back({1, "2026-10-23T10:00:00.000Z", "error", {{"code", "unavailable"}}});
+    auto snap = snapshot({r});
+    EXPECT_EQ(speed_item(build_feed(snap, {}, kT0 + 5000)), nullptr);
+}
+
+TEST(RunSpeed, WaitingForTheFirstTokenCountsFromTheModelPhase) {
+    RunInfo r = run("run_1", "running");
+    r.events.push_back({1, "2026-10-23T10:00:00.000Z", "progress", {{"phase", "model"}, {"active_tools", 0}}});
+    auto snap = snapshot({r});
+    const FeedItem* it = speed_item(build_feed(snap, {}, kT0 + 4200));
+    ASSERT_NE(it, nullptr);
+    ASSERT_TRUE(it->speed);
+    EXPECT_EQ(it->speed->waiting_ms, 4200);
+    EXPECT_EQ(it->speed->tokens_per_s, -1);
+}
+
+TEST(RunSpeed, StreamingEstimateWaitsForASecondOrTwentyTokensThenGivesWayToTheMeasuredCall) {
+    auto snap = snapshot({run("run_1", "running")});
+    snap.runs[0].events.push_back({1, "2026-10-23T10:00:00.000Z", "progress", {{"phase", "model"}, {"active_tools", 0}}});
+    LiveText live;
+    LiveRunEvent d;
+    d.kind = "text.delta";
+    d.run_id = "run_1";
+    d.thread_id = T;
+    d.at = "2026-10-23T10:00:01.000Z";
+    d.data = {{"text", "Hi"}};
+    ASSERT_EQ(apply_live_event(snap, live, d), Apply::ok);
+    // 300 ms after the first token, one short word: too early for a rate, and no longer waiting.
+    EXPECT_FALSE(run_speed(snap.runs[0], live, kT0 + 1300));
+
+    d.at = "2026-10-23T10:00:03.000Z";
+    d.data = {{"text", std::string(298, 'a')}};  // 300 ASCII characters = 100 estimated tokens
+    ASSERT_EQ(apply_live_event(snap, live, d), Apply::ok);
+    auto s = run_speed(snap.runs[0], live, kT0 + 3000);
+    ASSERT_TRUE(s);
+    EXPECT_TRUE(s->approximate);
+    EXPECT_EQ(s->tokens_per_s, 50);  // 100 tokens / 2 s since the first token
+    EXPECT_EQ(s->waiting_ms, -1);
+
+    // The call ends: its measured values replace the estimate, and the stored answer follows.
+    LiveRunEvent mc;
+    mc.kind = "model_call";
+    mc.run_id = "run_1";
+    mc.thread_id = T;
+    mc.seq = 2;
+    mc.at = "2026-10-23T10:00:03.100Z";
+    const StoredEvent stored = model_call_event(2, 1000, 3100, 120);
+    mc.data = stored.payload;
+    ASSERT_EQ(apply_live_event(snap, live, mc), Apply::ok);
+    s = run_speed(snap.runs[0], live, kT0 + 9000);
+    ASSERT_TRUE(s);
+    EXPECT_FALSE(s->approximate);
+    EXPECT_EQ(s->tokens_per_s, 57);  // 120 tokens / 2.1 s
+    EXPECT_TRUE(live.output_since.empty());
+}
+
+TEST(RunSpeed, DiscardRestartsTheEstimate) {
+    auto snap = snapshot({run("run_1", "running")});
+    LiveText live;
+    LiveRunEvent d;
+    d.kind = "text.delta";
+    d.run_id = "run_1";
+    d.thread_id = T;
+    d.at = "2026-10-23T10:00:01.000Z";
+    d.data = {{"text", "partial"}};
+    apply_live_event(snap, live, d);
+    ASSERT_TRUE(live.output_since.contains("run_1"));
+    LiveRunEvent x;
+    x.kind = "discard";
+    x.run_id = "run_1";
+    x.thread_id = T;
+    apply_live_event(snap, live, x);
+    EXPECT_FALSE(live.output_since.contains("run_1"));
+}
+
+TEST(RunSpeed, SpeedLineSitsAfterTheAnswerAndBeforeTheUsageLine) {
+    RunInfo r = run("run_1", "succeeded");
+    r.events.push_back({1, "2026-10-23T10:00:00.000Z", "message", {{"role", "user"}, {"content", "Hello"}}});
+    r.events.push_back(model_call_event(2, 500, 2500, 100));
+    r.events.push_back({3, "2026-10-23T10:00:03.000Z", "message", {{"role", "assistant"}, {"content", "Hi there"}}});
+    r.usage = {50, 100, 0, 1};
+    auto snap = snapshot({r});
+    const auto items = build_feed(snap, {}, kT0 + 10000);
+    ASSERT_EQ(items.size(), 4u);
+    EXPECT_EQ(items[1].type, ItemType::assistant);
+    EXPECT_EQ(items[2].type, ItemType::speed);
+    EXPECT_EQ(items[2].key, "run_1:speed");
+    ASSERT_TRUE(items[2].speed);
+    EXPECT_EQ(items[2].speed->tokens_per_s, 50);
+    EXPECT_EQ(items[3].type, ItemType::activity);
+    ASSERT_TRUE(items[3].usage);
 }

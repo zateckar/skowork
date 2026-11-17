@@ -107,6 +107,8 @@ struct QueuedMessage {
 //                                                                    empty for a standalone one)
 //   action.resolved  {id, resolution}
 //   usage            {prompt, completion, reasoning, requests}       totals of the Run so far
+//   model_call       {started_at, first_token_ms, duration_ms, output_tokens, exact}   one completed model call
+//                                                                    (first_token_ms is null without streamed text)
 //   activity         {text}                                          Activity log entry (retries, edits, compaction)
 //   compaction       {id, kind, messages_compacted, tokens_before, tokens_after}   the Thread was compacted
 //   subagent         {call_id, child_run_id, task}                   a subagent Run was started for a delegate call

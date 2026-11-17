@@ -428,6 +428,36 @@ TEST(Database, EncryptedAtRestAndKeyBound) {
     EXPECT_EQ(slurp(root->keys()).find(std::string(key->begin(), key->end())), std::string::npos);
 }
 
+TEST(Database, LegacyAppMigrationOpensAndWritesANewerSchemaByDefault) {
+    // Characterizes the legacy default; it is not evidence of a safe recovery migration.
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto key = keys.get_or_create("app.db");
+    ASSERT_TRUE(key);
+    const std::vector<Migration> old_migrations = {{1, "CREATE TABLE runs(id INTEGER PRIMARY KEY);"}};
+    const std::vector<Migration> new_migrations = {old_migrations[0], {2, "CREATE TABLE recovery_ledger(id INTEGER PRIMARY KEY);"}};
+    {
+        MigrationOutcome upgraded;
+        auto db = open_and_migrate(root->file("app.db"), *key, new_migrations, upgraded);
+        ASSERT_TRUE(db);
+        ASSERT_EQ((*db)->user_version(), 2);
+    }
+    // The historical app call omits refuse_newer. A schema version alone is not a downgrade barrier.
+    MigrationOutcome legacy;
+    auto db = open_and_migrate(root->file("app.db"), *key, old_migrations, legacy);
+    ASSERT_TRUE(db);
+    EXPECT_EQ(legacy.from_version, 2);
+    EXPECT_TRUE((*db)->exec("INSERT INTO runs(id) VALUES(1);"));
+    db->reset();
+    MigrationOutcome gated;
+    auto refused = open_and_migrate(root->file("app.db"), *key, old_migrations, gated, true);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "schema_too_new");
+}
+
 TEST(Database, FailedMigrationRestoresBackupAndOpensReadOnly) {
     TempRoot t;
     auto root = DataRoot::open(t.path);

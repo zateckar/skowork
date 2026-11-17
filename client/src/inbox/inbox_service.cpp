@@ -115,6 +115,8 @@ json to_json(const ThreadEntry& e) {
             {"running", e.running},
             {"open_actions", e.open_actions},
             {"last_run_state", e.last_run_state},
+            {"activity_phase", e.activity_phase},
+            {"active_tools", e.active_tools},
             {"kind", e.kind},
             {"unread_count", e.unread_count},
             {"chat_kind", e.chat_kind},
@@ -206,7 +208,7 @@ void InboxService::process(const json& e) {
     } else if (kind == "action.created") {
         notify("action", thread, data);
         changed(thread);
-    } else if (kind == "message" || kind == "action.resolved" || kind == "compaction" || kind == "subagent") {
+    } else if (kind == "message" || kind == "action.resolved" || kind == "compaction" || kind == "subagent" || kind == "progress") {
         changed(thread);
     }
 }
@@ -524,6 +526,14 @@ void InboxService::register_rpc(RpcRegistry& rpc, bool expose_on_pipe) {
             if (!r.parent_run_id.empty()) {
                 json c = run_json(r);
                 if (r.state == runtime::RunState::interrupted && waiting.contains(r.id)) c["events"] = events_json(rt.events(r.id));
+                else if (r.state == runtime::RunState::running) {
+                    if (auto progress = rt.store().latest_event(r.id, "progress")) {
+                        const auto phase = jstr(progress->payload, "phase");
+                        progress->payload = {{"active_tools", std::clamp(jint(progress->payload, "active_tools"), 0LL, 1024LL)},
+                                             {"phase", phase == "model" || phase == "tools" || phase == "idle" ? phase : ""}};
+                        c["events"] = events_json({*progress});
+                    }
+                }
                 children.push_back(std::move(c));
                 continue;
             }

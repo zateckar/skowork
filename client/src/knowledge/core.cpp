@@ -567,7 +567,10 @@ const json& extraction_schema() {
                 {"confidence", {{"type", "number"}}},
                 {"valid_from", {{"type", "string"}}},
                 {"valid_to", {{"type", "string"}}},
-                {"chunk", {{"type", "integer"}}}}},
+                {"chunk", {{"type", "integer"}}},
+                {"salience", {{"type", "number"}, {"minimum", 0}, {"maximum", 1}}},
+                {"durability", {{"type", "string"}, {"enum", json::array({"lasting", "temporary", "trivial"})}}},
+                {"statement", {{"type", "string"}, {"maxLength", kMaxStatementBytes}}}}},
               {"required", {"subject", "predicate", "object", "chunk"}}}}}}}},
         {"required", {"entities", "relations"}}};
     return s;
@@ -583,6 +586,26 @@ std::string iso_date(const json& j, const char* key) {
         if ((i == 4 || i == 7) ? v[i] != '-' : !digit) return {};
     }
     return v.substr(0, 10);
+}
+
+// A statement cut at a word boundary to at most kMaxStatementBytes bytes; whitespace is collapsed.
+std::string statement_of(std::string_view text) {
+    std::string collapsed;
+    bool space = false;
+    for (char c : text) {
+        if (is_space(c)) {
+            space = !collapsed.empty();
+            continue;
+        }
+        if (space) collapsed.push_back(' ');
+        space = false;
+        collapsed.push_back(c);
+    }
+    if (collapsed.size() <= kMaxStatementBytes) return collapsed;
+    std::string cut = utf8_truncate(collapsed, kMaxStatementBytes);
+    if (const size_t sp = cut.find_last_of(' '); sp != std::string::npos && sp > 0) cut.resize(sp);
+    while (!cut.empty() && (cut.back() == ' ' || cut.back() == ',' || cut.back() == ';')) cut.pop_back();
+    return cut;
 }
 
 std::string predicate_of(std::string_view p) {
@@ -656,10 +679,154 @@ std::optional<Extraction> parse_extraction(std::string_view text, int chunk_coun
             }
             x.valid_from = iso_date(r, "valid_from");
             x.valid_to = iso_date(r, "valid_to");
+            if (const auto it = r.find("salience"); it != r.end() && it->is_number()) {
+                const double v = it->get<double>();
+                x.salience = std::isfinite(v) ? std::clamp(v, 0.0, 1.0) : kDefaultSalience;
+            }
+            x.durability = normalize_durability(decode_text(jstr(r, "durability")));
+            x.statement = statement_of(decode_text(jstr(r, "statement")));
             out.relations.push_back(std::move(x));
         }
     }
     return out;
+}
+
+std::string addressing_breadth(const std::string& source, int recipients) {
+    if (source == "threads" || source == "notes") return "direct";
+    if (source != "mail" && source != "calendar" && source != "meetings") return {};
+    if (recipients <= 0) return {};
+    if (recipients == 1) return "direct";
+    return recipients <= 10 ? "group" : "broadcast";
+}
+
+json source_context_json(const SourceContext& c) {
+    return json{{"source", c.source},
+                {"title", c.title},
+                {"author", c.author},
+                {"author_is_user", c.author_is_user},
+                {"recipients", c.recipients},
+                {"breadth", c.breadth},
+                {"folder", c.folder},
+                {"organization_sender", c.organization_sender}};
+}
+
+std::optional<std::vector<RelationScore>> parse_relation_scores(std::string_view text, int count) {
+    std::string_view body = text;
+    if (const size_t fence = body.find("```"); fence != std::string_view::npos) {
+        body.remove_prefix(fence + 3);
+        if (const size_t nl = body.find('\n'); nl != std::string_view::npos && nl < 16) body.remove_prefix(nl + 1);
+        if (const size_t close = body.find("```"); close != std::string_view::npos) body = body.substr(0, close);
+    }
+    const size_t open = body.find('{'), close = body.rfind('}');
+    if (open == std::string_view::npos || close == std::string_view::npos || close < open) return std::nullopt;
+    auto j = parse_json(body.substr(open, close - open + 1));
+    if (!j || !j->is_object()) return std::nullopt;
+    std::vector<RelationScore> out;
+    const json* list = jobj(*j, "ratings");
+    if (!list || !list->is_array()) return out;
+    for (const auto& r : *list) {
+        if (!r.is_object()) continue;
+        const long long i = jint(r, "i", -1);
+        if (i < 0 || i >= count) continue;
+        RelationScore s;
+        s.index = static_cast<int>(i);
+        if (const auto it = r.find("salience"); it != r.end() && it->is_number()) {
+            const double v = it->get<double>();
+            s.salience = std::isfinite(v) ? std::clamp(v, 0.0, 1.0) : kDefaultSalience;
+        }
+        s.durability = normalize_durability(decode_text(jstr(r, "durability")));
+        out.push_back(s);
+    }
+    return out;
+}
+
+SourceContext source_context_from_json(const json& j) {
+    SourceContext c;
+    if (!j.is_object()) return c;
+    c.source = jstr(j, "source");
+    c.title = jstr(j, "title");
+    c.author = jstr(j, "author");
+    c.author_is_user = jbool(j, "author_is_user");
+    c.recipients = static_cast<int>(std::clamp<long long>(jint(j, "recipients"), 0, 1'000'000));
+    c.breadth = jstr(j, "breadth");
+    c.folder = jstr(j, "folder");
+    c.organization_sender = jbool(j, "organization_sender");
+    return c;
+}
+
+namespace {
+
+// An attribute value: one line, with the markup characters escaped.
+std::string attribute_text(std::string_view s) {
+    std::string out;
+    for (char c : s) {
+        switch (c) {
+            case '&': out += "&amp;"; break;
+            case '<': out += "&lt;"; break;
+            case '>': out += "&gt;"; break;
+            case '"': out += "&quot;"; break;
+            case '\n':
+            case '\r':
+            case '\t': out.push_back(' '); break;
+            default: out.push_back(c);
+        }
+    }
+    return bounded(out, 300);
+}
+
+// Passage text with `<passage` and `</passage` (any case) neutralised, so that it cannot open or close a passage.
+std::string neutralise_passage_tags(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '<') {
+            size_t j = i + 1;
+            if (j < text.size() && text[j] == '/') ++j;
+            if (to_lower(text.substr(j, 7)) == "passage") {
+                out += "&lt;";
+                continue;
+            }
+        }
+        out.push_back(text[i]);
+    }
+    return out;
+}
+
+}  // namespace
+
+std::string render_passage(int index, const std::string& date, const SourceContext& context, std::string_view text) {
+    std::string out = "<passage index=\"" + std::to_string(index) + "\"";
+    if (!date.empty()) out += " date=\"" + attribute_text(date) + "\"";
+    if (!context.source.empty()) out += " source=\"" + attribute_text(context.source) + "\"";
+    if (!context.author.empty()) out += " author=\"" + attribute_text(context.author) + "\"";
+    out += std::string(" author_is_user=\"") + (context.author_is_user ? "true" : "false") + "\"";
+    if (!context.breadth.empty()) out += " addressed=\"" + attribute_text(context.breadth) + "\"";
+    if (context.recipients > 0) out += " recipients=\"" + std::to_string(context.recipients) + "\"";
+    if (!context.title.empty()) out += " title=\"" + attribute_text(context.title) + "\"";
+    if (!context.folder.empty()) out += " folder=\"" + attribute_text(context.folder) + "\"";
+    out += ">\n" + neutralise_passage_tags(text) + "\n</passage>";
+    return out;
+}
+
+std::string normalize_durability(std::string_view durability) {
+    const std::string d = to_lower(trim(durability));
+    return d == "temporary" || d == "trivial" ? d : "lasting";
+}
+
+double salience_weight(double salience, const SourceContext& context, bool organization_sender) {
+    const double s = std::isfinite(salience) ? std::clamp(salience, 0.0, 1.0) : kDefaultSalience;
+    double factor = 1.0;
+    if (context.breadth == "broadcast" && organization_sender) factor = 1.15;
+    else if (context.source == "threads") factor = 0.9;  // a Chat
+    return (0.6 + 0.4 * s) * factor;
+}
+
+double weighted_score(double score, double weight) { return score >= 0 ? score * weight : score / weight; }
+
+std::string importance_level(double salience) {
+    if (!std::isfinite(salience)) return "normal";
+    if (salience >= 0.7) return "high";
+    return salience < 0.35 ? "low" : "normal";
 }
 
 }  // namespace wb::knowledge

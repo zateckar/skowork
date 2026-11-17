@@ -44,6 +44,8 @@
 #include "app/meeting_rpc.h"
 #include "app/knowledge_rpc.h"
 #include "app/messaging_rpc.h"
+#include "app/agenda_rpc.h"
+#include "agenda/service.h"
 #include "messaging/messaging.h"
 #include "mcp/manager.h"
 #include "model/model_client.h"
@@ -158,6 +160,8 @@ struct App {
     MachineConfig cfg;
     std::string config_error;
     std::unique_ptr<BrowserLauncher> launcher;
+    std::mutex dev_opened_mx;  // dev_open_urls "record" (development builds)
+    std::vector<std::string> dev_opened;
     std::unique_ptr<TokenManager> tokens;
     std::unique_ptr<ControlPlaneClient> cp;
     std::unique_ptr<ControlChannel> channel;
@@ -242,6 +246,15 @@ struct App {
     std::atomic<long long> messaging_unread{0};                         // for the tray and the status
     void start_messaging();
     void messaging_push(const PushEnvelope& e);
+    // The Agenda (client/agenda; add-agenda): its own intake from mail, calendar, meetings and Chats, the detection
+    // queue, reminders and read-only preparation.
+    std::unique_ptr<agenda::Service> agenda_svc;
+    std::atomic<agenda::Service*> agenda_live{nullptr};  // read by mail, meeting, channel and Run threads
+    std::atomic<bool> agenda_ticking{false};
+    void start_agenda();
+    agenda::Identity agenda_identity();
+    void agenda_mail_event(const mail::MailEvent& e);
+    void agenda_chat_message(const json& payload);
     // Local apps (client/local-apps): the manager is created before the policy handler (its app folders), the listener
     // and the apps.* tools with the agent. The MCP bridge calls the catalog's tool definitions kept here.
     std::unique_ptr<apps::AppManager> local_apps;
@@ -370,6 +383,10 @@ json App::status() {
         j["messaging"] = {{"available", chat != nullptr}, {"enabled", chat && chat->enabled()}, {"unread", messaging_unread.load()},
                           {"busy", chat && chat->busy()}};
     }
+    {
+        auto* a = agenda_live.load();
+        j["agenda"] = a ? json{{"available", a->available()}, {"enabled", a->active()}} : json{{"available", false}, {"enabled", false}};
+    }
     j["dictation"] = dictation_svc ? dictation_svc->status() : json{{"enabled", false}, {"available", false}, {"reason", ""}};
     j["telemetry"] = telemetry ? json{{"level", telemetry::to_string(telemetry->level())}, {"source", telemetry->level_source()},
                                        {"content_active", telemetry->content_active()}, {"pending", telemetry->pending()}}
@@ -472,6 +489,12 @@ void App::tick() {
         if (auto b = browser()) pool.post([b] { b->tick(); });
     // Local apps stop after 15 minutes without requests (client/local-apps App Lifecycle).
     if (local_apps && ticks % 30 == 25) pool.post([this] { if (local_apps) local_apps->tick(); });
+    // The Agenda: detection at most every 60 seconds, reminders and automatic preparation (client/agenda).
+    if (ticks % 5 == 2 && agenda_live.load() && !agenda_ticking.exchange(true))
+        pool.post([this] {
+            if (auto* a = agenda_live.load(); a && !gate.paused()) a->tick();
+            agenda_ticking = false;
+        });
     // Telemetry batches every 60 seconds or 500 records (design D3); a footprint sample every hour.
     if (telemetry && ticks % 5 == 3 && !telemetry_flushing && telemetry->flush_due()) {
         telemetry_flushing = true;
@@ -750,6 +773,10 @@ void App::register_rpc() {
     rpc.add("dev.authorize_url", RpcExposure::ui_and_pipe, [this](const json&) -> Result<json> {
         auto* rec = dynamic_cast<DevRecordLauncher*>(launcher.get());
         return json{{"url", rec ? rec->last_url() : std::string{}}};
+    });
+    rpc.add("dev.opened_urls", RpcExposure::ui_and_pipe, [this](const json&) -> Result<json> {
+        const std::lock_guard lock(dev_opened_mx);
+        return json{{"urls", dev_opened}};
     });
     // Calls a method that is exposed to the window only, as the window would (manual acceptance runs).
     rpc.add("dev.call", RpcExposure::ui_and_pipe, [this](const json& p) -> Result<json> {
@@ -1374,7 +1401,21 @@ void App::start_agent() {
     run_end->b = browser();
     run_end->c = computer();
     auto collector = std::make_shared<telemetry::RunCollector>([this] { return telemetry.get(); });
-    auto svc = AgentService::create(store->db(), *model, std::move(rc), enforcer, {run_end, collector});
+    // Agenda preparation is read-only (client/agenda Preparation Has No Effects): its Runs and their Child Runs may call
+    // read-risk tools only, whatever the policy allows.
+    struct AgendaReadOnly final : runtime::Hook {
+        std::atomic<agenda::Service*>* live = nullptr;
+        runtime::ToolDecision before_tool_call(const runtime::ToolCallInfo& call) override {
+            auto* a = live ? live->load() : nullptr;
+            if (!a || call.risk == runtime::Risk::read) return runtime::ToolDecision::allow();
+            if (a->is_preparation_run(call.run.run_id) || (!call.run.parent_run_id.empty() && a->is_preparation_run(call.run.parent_run_id)))
+                return runtime::ToolDecision::deny("Agenda preparation only reads; it does not send, write or change anything.");
+            return runtime::ToolDecision::allow();
+        }
+    };
+    auto agenda_hook = std::make_shared<AgendaReadOnly>();
+    agenda_hook->live = &agenda_live;
+    auto svc = AgentService::create(store->db(), *model, std::move(rc), enforcer, {run_end, collector, agenda_hook});
     if (!svc) {
         log::error(kLog, "agent runtime: " + svc.error().message);
         return;
@@ -1421,6 +1462,179 @@ void App::start_agent() {
     start_knowledge();
     start_meetings();
     start_messaging();
+    start_agenda();
+}
+
+namespace {
+// The local offset from UTC in minutes at a moment (daylight saving included).
+int local_offset_at(long long ms) {
+    ULARGE_INTEGER u{};
+    u.QuadPart = static_cast<unsigned long long>(ms + 11'644'473'600'000LL) * 10'000ULL;
+    const FILETIME ft{u.LowPart, u.HighPart};
+    SYSTEMTIME utc{}, local{};
+    FILETIME lf{};
+    if (!::FileTimeToSystemTime(&ft, &utc) || !::SystemTimeToTzSpecificLocalTime(nullptr, &utc, &local) ||
+        !::SystemTimeToFileTime(&local, &lf))
+        return 0;
+    ULARGE_INTEGER l{};
+    l.LowPart = lf.dwLowDateTime;
+    l.HighPart = lf.dwHighDateTime;
+    return static_cast<int>((static_cast<long long>(l.QuadPart) - static_cast<long long>(u.QuadPart)) / 600'000'000LL);
+}
+
+// A long meeting transcript keeps its start and its end, where follow-ups are usually agreed.
+std::string bounded_transcript(const std::string& text) {
+    if (text.size() <= agenda::kMaxItemText) return text;
+    const std::string head = utf8_truncate(text, agenda::kMaxItemText / 3);
+    size_t from = text.size() - (agenda::kMaxItemText - head.size() - 8);
+    while (from < text.size() && (static_cast<unsigned char>(text[from]) & 0xC0) == 0x80) ++from;
+    return head + "\n[...]\n" + text.substr(from);
+}
+}  // namespace
+
+agenda::Identity App::agenda_identity() {
+    agenda::Identity me;
+    const std::string account = mail_svc ? mail_svc->account() : std::string{};
+    const std::string upn = tokens ? tokens->user_principal() : std::string{};
+    for (const auto& a : {account, upn})
+        if (a.find('@') != std::string::npos && std::find(me.emails.begin(), me.emails.end(), to_lower(a)) == me.emails.end())
+            me.emails.push_back(to_lower(a));
+    // The display name from the address (jana.novakova@ -> "jana novakova"); names are compared without accents.
+    const std::string& src = !me.emails.empty() ? me.emails.front() : upn;
+    std::string local = src.substr(0, src.find('@'));
+    std::replace_if(local.begin(), local.end(), [](char c) { return c == '.' || c == '_' || c == '-'; }, ' ');
+    if (local.find(' ') != std::string::npos) me.name = local;
+    return me;
+}
+
+// Mail and calendar intake (client/agenda Agenda Item Sources): received mail and created or changed events, read from
+// the local copy; deletions and cancellations withdraw what they supported. The initial sync's backfill is skipped.
+void App::agenda_mail_event(const mail::MailEvent& e) {
+    auto* a = agenda_live.load();
+    if (!a || !mail_svc) return;
+    if (e.kind == "mail.deleted") return a->withdraw("mail", e.id);
+    if (e.kind == "event.cancelled") return a->withdraw("calendar", e.id);
+    if (jbool(e.detail, "backfill", false)) return;
+    const agenda::Identity me = agenda_identity();
+    const auto mine = [&me](const std::string& address) {
+        return std::find(me.emails.begin(), me.emails.end(), to_lower(address)) != me.emails.end();
+    };
+    agenda::SourceItem s;
+    if (e.kind == "mail.received") {
+        const auto m = mail_svc->store().message(e.id);
+        if (!m || m->withheld) return;
+        s.kind = "mail";
+        s.id = m->id;
+        s.conversation = m->conversation_id;
+        s.title = m->subject;
+        s.text = m->body.empty() ? m->preview : m->body;
+        s.author = m->from.name.empty() ? m->from.address : m->from.name;
+        s.author_is_user = mine(m->from.address);
+        // Addressed directly means To; Cc alone needs the user's name in the text (design D2).
+        for (const auto& p : m->to) {
+            ++s.recipients;
+            if (mine(p.address)) s.user_addressed = true;
+        }
+        s.recipients += static_cast<int>(m->cc.size());
+        s.at_ms = m->received_at;
+        s.link = m->web_link;
+    } else if (e.kind == "event.created" || e.kind == "event.updated") {
+        const auto ev = mail_svc->store().event(e.id);
+        if (!ev || ev->withheld || ev->masked || ev->cancelled) return;
+        s.kind = "calendar";
+        s.id = ev->id;
+        s.conversation = ev->ical_uid;
+        s.title = ev->subject;
+        s.text = "Event: " + ev->subject + "\nStarts: " + iso8601_utc(sys_clock::time_point(std::chrono::milliseconds(ev->start_at))) +
+                 (ev->location.empty() ? std::string{} : "\nLocation: " + ev->location) + "\n\n" + ev->body;
+        s.author = ev->organizer.name.empty() ? ev->organizer.address : ev->organizer.name;
+        s.author_is_user = ev->is_organizer;
+        s.recipients = ev->attendees.is_array() ? static_cast<int>(ev->attendees.size()) : 0;
+        s.user_addressed = true;  // the event is in the user's calendar
+        s.at_ms = system_clock().unix_millis();
+        s.link = ev->web_link;
+    } else {
+        return;
+    }
+    a->offer(s);
+}
+
+// Chat intake: a message pushed to the user (client/user-messaging). Direct Chats address the user; in a team Chat the
+// user must be named.
+void App::agenda_chat_message(const json& payload) {
+    auto* a = agenda_live.load();
+    auto* m = messaging_live.load();
+    const json* msg = jobj(payload, "message");
+    if (!a || !m || !msg) return;
+    agenda::SourceItem s;
+    s.kind = "chat";
+    s.id = jstr(*msg, "id");
+    s.conversation = jstr(payload, "chat", jstr(*msg, "chat"));
+    s.text = jstr(*msg, "text");
+    s.author = jstr(*msg, "sender_name", jstr(*msg, "sender"));
+    s.author_is_user = iequals(jstr(*msg, "sender"), m->me());
+    s.at_ms = parse_iso8601_ms(jstr(*msg, "at")).value_or(system_clock().unix_millis());
+    const json chat = m->chat(s.conversation);
+    const bool direct = chat.is_object() && jstr(chat, "kind") == "direct";
+    s.title = chat.is_object() ? jstr(chat, "name", direct ? s.author : std::string("Chat")) : std::string("Chat");
+    if (s.title.empty()) s.title = direct ? s.author : "Chat";
+    s.recipients = chat.is_object() ? static_cast<int>(chat.value("members", json::array()).size()) : 0;
+    s.user_addressed = direct;
+    s.link = "#/chats/" + s.conversation;
+    if (s.id.empty() || s.conversation.empty() || trim(s.text).empty()) return;
+    a->offer(s);
+}
+
+void App::start_agenda() {
+    if (!agent || !store || !model) return;
+    agenda::Env ae;
+    ae.policy = [this](const std::string& key) -> std::optional<json> {
+        const auto p = policy ? policy->current() : nullptr;
+        if (!p || !p->is_set(key)) return std::nullopt;
+        const json* v = p->find(key);
+        return v ? std::optional<json>(*v) : std::nullopt;
+    };
+    ae.model = model.get();
+    ae.now = [] { return system_clock().unix_millis(); };
+    ae.tz_offset_min = [](long long ms) { return local_offset_at(ms); };
+    ae.identity = [this] { return agenda_identity(); };
+    ae.start_preparation = [this](const agenda::Item& item, const std::string& thread_id, const std::string& message,
+                                  const std::string& preamble, bool unattended) -> Result<agenda::Preparation> {
+        if (!agent || !inbox) return make_error("unavailable", "The agent is not running.");
+        std::string thread = thread_id;
+        if (thread.empty()) {
+            auto t = agent->runtime().create_thread(item.title);
+            if (!t) return t.error();
+            thread = *t;
+            (void)inbox->store().set_origin(thread, "agenda", json{{"agenda_item", item.id}, {"title", item.title}, {"link", "#/agenda"}});
+        }
+        runtime::StartOptions o;
+        o.unattended = unattended;
+        // The item's text comes from mail, meetings and Chats: untrusted content with the Agenda item as its source.
+        o.untrusted = runtime::Provenance{"agenda", item.id, iso8601_utc_now(), false};
+        o.preamble = preamble;
+        auto run = agent->runtime().start_run(thread, message, o);
+        if (!run) return run.error();
+        return agenda::Preparation{thread, *run};
+    };
+    ae.notify = [this](const std::string& title, const std::string& body, const std::string& route) {
+        MainThread::post([this, title, body, route] {
+            if (toasts) toasts->show(ToastContent{title, body, route});
+        });
+    };
+    ae.hold_reminders = [this] { return gate.inputs().presentation; };
+    ae.changed = [this] {
+        MainThread::post([this] { if (ui && ui->is_open()) ui->emit("agenda.changed", json::object()); });
+    };
+    agenda_svc = std::make_unique<agenda::Service>(store->db(), std::move(ae));
+    if (mail_svc) mail_svc->on_event([this](const mail::MailEvent& e) { agenda_mail_event(e); });
+    forget.on_forget("source", "agenda", [this](const std::string& id) {
+        // Forgetting a Source removes what the Agenda took from it (client/agenda Agenda Data Deletion).
+        if (id == "agenda" && agenda_svc) return agenda_svc->delete_all();
+        return Status{};
+    });
+    register_agenda_rpc(rpc, [this] { return agenda_live.load(); });
+    agenda_live = agenda_svc.get();
 }
 
 // client/user-messaging (add-user-messaging design D4): the service on app.db, calling control-plane/user-messaging
@@ -1465,6 +1679,7 @@ void App::start_messaging() {
 void App::messaging_push(const PushEnvelope& e) {
     pool.post([this, type = e.type, payload = e.payload] {
         if (auto* m = messaging_live.load()) m->on_push(type, payload);
+        if (type == "chat-message") agenda_chat_message(payload);
     });
 }
 
@@ -1823,6 +2038,20 @@ void App::start_meetings() {
         return r->text;
     };
     env.knowledge = [this](const meeting::MeetingRecord& m, const json& turns) {
+        if (auto* a = agenda_live.load()) {
+            // Meeting intake (client/agenda): the transcript; tasks must name the user.
+            agenda::SourceItem s;
+            s.kind = "meeting";
+            s.id = m.id;
+            s.conversation = m.series_id.empty() ? m.event_id : m.series_id;
+            s.title = m.title;
+            for (const auto& x : turns) s.text += jstr(x, "speaker") + ": " + jstr(x, "text") + "\n";
+            s.text = bounded_transcript(s.text);
+            s.recipients = static_cast<int>(m.attendees.size());
+            s.at_ms = m.ended_at ? m.ended_at : m.started_at;
+            s.link = m.thread_id.empty() ? std::string{} : "#/threads/" + m.thread_id;
+            if (!trim(s.text).empty()) a->offer(s);
+        }
         auto* k = knowledge_live.load();
         if (!k) return;
         std::vector<knowledge::Turn> t;
@@ -1830,6 +2059,7 @@ void App::start_meetings() {
         k->meeting_transcript(m.id, m.title, m.started_at, t, m.thread_id.empty() ? std::string{} : "skowork://thread/" + m.thread_id);
     };
     env.knowledge_removed = [this](const std::string& id) {
+        if (auto* a = agenda_live.load()) a->withdraw("meeting", id);
         if (auto* k = knowledge_live.load()) k->meeting_removed(id);
     };
     env.publish = [this](const std::string& event, const json& m) {
@@ -2590,8 +2820,16 @@ void App::start_apps() {
     if (!local_apps || !agent) return;
     app_server = std::make_unique<apps::AppServer>(*local_apps);
     // Only the listener's own loopback URLs go to the browser.
-    const auto open_url = [](const std::string& url) {
+    const auto open_url = [this](const std::string& url) {
         if (!starts_with(url, "http://127.0.0.1:")) return;
+#ifdef SKOWORK_DEV_ENDPOINTS
+        if (cfg.dev_open_urls == "record") {
+            log::info(kLog, "dev: recorded app launch " + url.substr(0, url.find('?')));
+            const std::lock_guard lock(dev_opened_mx);
+            dev_opened.push_back(url);
+            return;
+        }
+#endif
         if (Status s = open_in_shell(url, L"open"); !s) log::warn(kLog, "apps: " + s.error().message);
     };
     apps::AppToolsEnv te;
@@ -2643,6 +2881,7 @@ void App::shutdown() {
     if (agent) agent->shutdown();
     knowledge_live = nullptr;
     messaging_live = nullptr;
+    agenda_live = nullptr;
     if (dictation_svc) (void)dictation_svc->cancel();  // the audio of a recording goes with it (Dictation Privacy)
     if (meeting_svc) meeting_svc->stop();
     if (knowledge_svc) knowledge_svc->stop();
@@ -2682,6 +2921,8 @@ void App::shutdown() {
     meeting_svc.reset();
     knowledge_svc.reset();
     messaging_svc.reset();
+    while (agenda_ticking.load()) std::this_thread::sleep_for(std::chrono::milliseconds(20));  // a tick on the pool ends first
+    agenda_svc.reset();
     agent.reset();
     mail_svc.reset();
     enforcer.reset();
@@ -2826,7 +3067,8 @@ int run_app(HINSTANCE inst, const std::vector<std::wstring>& args) {
     app.workers = std::make_unique<WorkerHost>(std::move(wopt));
     app.ui = std::make_unique<NativeAppWindow>(app.rpc, app.ui_pool, app.pool);
     app.toasts = std::make_unique<ToastNotifier>([&app](const std::string& thread_id) {
-        if (app.ui) app.ui->open("#/threads/" + thread_id);
+        // Agenda reminders carry a route (#/agenda, #/threads/<id>); every other toast carries a Thread.
+        if (app.ui) app.ui->open(starts_with(thread_id, "#/") ? thread_id : "#/threads/" + thread_id);
     });
     app.register_rpc();
     app.pipe->start([&app](const std::string& req) { return app.rpc.handle_pipe_request(req); });

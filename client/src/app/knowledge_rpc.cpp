@@ -101,7 +101,7 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
     add("knowledge.facts", [](Svc& s, const json& p) -> Result<json> {
         std::optional<long long> category;
         if (p.contains("category") && p["category"].is_number_integer()) category = p["category"].get<long long>();
-        return s.facts_page(category, jint(p, "before", 0), static_cast<int>(jint(p, "limit", 50)));
+        return s.facts_page(category, jint(p, "before", 0), static_cast<int>(jint(p, "limit", 50)), jstr(p, "importance") == "low");
     });
     add("knowledge.review.decide", [done](Svc& s, const json& p) {
         return done(s.decide_review(jint(p, "id"), jstr(p, "decision"), jstr(p, "reason"), jint(p, "generation")));
@@ -196,6 +196,8 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
         for (const auto& x : r.passages) {
             json j = {{"source", x.source}, {"title", x.title}, {"ref", x.ref}, {"text", x.text}, {"item_id", x.item_id}};
             if (x.date) j["date"] = iso8601_utc(sys_clock::time_point(std::chrono::milliseconds(x.date)));
+            // The statement sits beside the passage it was extracted from; the passage stays the evidence (design D3).
+            if (!x.statement.empty()) j["statement"] = x.statement;
             if (x.source == "team") {
                 j["owner"] = x.owner;
                 j["groups"] = x.groups;
@@ -208,6 +210,7 @@ void register_knowledge_rpc(RpcRegistry& rpc, std::function<knowledge::Knowledge
     });
     add("knowledge.fact.edit", [done](Svc& s, const json& p) { return done(s.edit_fact(jstr(p, "kind"), jint(p, "id"), jstr(p, "text"))); });
     add("knowledge.fact.delete", [done](Svc& s, const json& p) { return done(s.delete_fact(jstr(p, "kind"), jint(p, "id"))); });
+    add("knowledge.fact.importance", [done](Svc& s, const json& p) { return done(s.set_fact_importance(jint(p, "id"), jstr(p, "level"))); });
     add("knowledge.entity.rename", [done](Svc& s, const json& p) { return done(s.rename_entity(jint(p, "id"), jstr(p, "name"))); });
     const auto groups_of = [](const json& p) {
         std::vector<std::string> g;

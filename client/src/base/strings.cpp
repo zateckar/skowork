@@ -84,6 +84,14 @@ std::string utf8_truncate(std::string_view s, size_t max_bytes) {
     return std::string(s.substr(0, n));
 }
 
+size_t estimate_text_tokens(std::string_view text) {
+    size_t ascii = 0;
+    for (const unsigned char c : text)
+        if (c < 0x80) ++ascii;
+    const size_t non_ascii = text.size() - ascii;
+    return non_ascii + ascii / 3 + (ascii % 3 != 0);
+}
+
 bool constant_time_equals(std::string_view a, std::string_view b) {
     unsigned char diff = a.size() == b.size() ? 0 : 1;
     const size_t n = a.size() < b.size() ? a.size() : b.size();

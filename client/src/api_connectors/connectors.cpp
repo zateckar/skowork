@@ -164,7 +164,7 @@ runtime::ToolDef tool_for(const std::shared_ptr<const Request>& request, const C
         if (!*request) return runtime::ToolOutput::failure("The connectors are not available, so the call was not made.");
         auto r = (*request)("POST", path, json{{"arguments", a}}.dump());
         runtime::ToolOutput out = r ? call_output(r->status, r->body)
-                                    : runtime::ToolOutput::failure("The connector could not be reached, so the call was not made (" + r.error().message + ").");
+                                    : runtime::ToolOutput::failure("The connector could not be reached or its response was lost; the outcome is unknown (" + r.error().message + ").");
         out.provenance = runtime::Provenance{"api", connector + "/" + operation, iso8601_utc_now(), false};
         return out;
     };

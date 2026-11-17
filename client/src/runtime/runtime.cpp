@@ -138,7 +138,10 @@ ToolDef make_ask_user(bool surfaces_enabled) {
         "choices":{"type":"array","items":{"type":"string","minLength":1},"maxItems":8,"description":"Optional answers to suggest; the user may also answer in their own words"}},
         "required":["question"]})");
     if (surfaces_enabled)
-        t.parameters["properties"]["form"] = {{"type", "object"}, {"description", "Optional version 1 generated UI form with exactly one submit button."}};
+        t.parameters["properties"]["form"] = {{"type", "object"},
+                                              {"description", "Optional generated UI form (the skowork-ui block format, version 1) with controls "
+                                                              "preset to sensible defaults and exactly one button. The user's values come back "
+                                                              "as the answer. Prefer it to several questions in prose."}};
     t.risk = Risk::read;
     t.core = true;
     t.own_data = true;  // reads or asks within the client only (fail-closed reads)
@@ -310,6 +313,22 @@ private:
             for (const auto& [k, v] : extra.items()) payload[k] = v;
         auto seq = store_.append_event(id_, "activity", payload);
         emit("activity", payload, seq ? *seq : 0);
+    }
+
+    // Progress is a separate, bounded projection: Tool names, arguments and activity text are untrusted.
+    void tool_progress(int delta) {
+        const std::lock_guard lock(progress_mx_);
+        active_tools_ = std::max(0, active_tools_ + delta);
+        const json payload = {{"active_tools", std::min(active_tools_, 1024)}, {"phase", active_tools_ > 0 ? "tools" : "idle"}};
+        const auto seq = store_.append_event(id_, "progress", payload);
+        if (seq) emit("progress", payload, *seq);
+    }
+
+    void model_progress(bool active) {
+        const std::lock_guard lock(progress_mx_);
+        const json payload = {{"active_tools", std::min(active_tools_, 1024)}, {"phase", active ? "model" : "idle"}};
+        const auto seq = store_.append_event(id_, "progress", payload);
+        if (seq) emit("progress", payload, *seq);
     }
 
     // A subagent Run's starting message carries its own time line, like a top-level Run's (Run Context).
@@ -638,6 +657,14 @@ private:
                 pending_images_.clear();
             }
         }
+        if (!continuation_note_.empty()) {
+            // Output Limit Continuation: request-only, never stored or resent (handle-output-limit D1).
+            model::ChatMessage note;
+            note.role = "user";
+            note.content = std::move(continuation_note_);
+            continuation_note_.clear();
+            req.messages.push_back(std::move(note));
+        }
         req.run_id = id_;
         req.thread_id = rec_.thread_id;
         req.feature = "agent";
@@ -671,8 +698,16 @@ private:
         std::string incomplete_text;
         bool incomplete_truncated = false;
         constexpr size_t kIncompleteLimit = 1024 * 1024;
+        // Model Call Timing (show-generation-speed design D1): the first answer or reasoning text of the attempt that
+        // produced the response; a retry starts the measurement again.
+        auto call_started = rt_.clock_.now();
+        std::optional<decltype(call_started)> first_output;
+        const auto mark_output = [&](std::string_view t) {
+            if (!t.empty() && !first_output) first_output = rt_.clock_.now();
+        };
         model::ChatSink sink;
         sink.on_text = [&](std::string_view t) {
+            mark_output(t);
             emit("text.delta", {{"text", std::string(t)}});
             if (!rt_.cfg_.generated_surfaces || incomplete_truncated) return;
             size_t take = std::min(kIncompleteLimit - incomplete_text.size(), t.size());
@@ -682,8 +717,13 @@ private:
             if (take) incomplete_text.append(t.data(), take);
             incomplete_truncated = take < t.size();
         };
-        sink.on_reasoning = [&](std::string_view t) { emit("reasoning.delta", {{"text", std::string(t)}}); };
+        sink.on_reasoning = [&](std::string_view t) {
+            mark_output(t);
+            emit("reasoning.delta", {{"text", std::string(t)}});
+        };
         sink.on_retry = [&](int attempt, const model::ModelFailure& f, std::chrono::milliseconds delay) {
+            call_started = rt_.clock_.now() + delay;
+            first_output.reset();
             incomplete_text.clear();
             incomplete_truncated = false;
             emit("discard", json::object());
@@ -692,7 +732,9 @@ private:
                      {{"retry", attempt}, {"code", f.code}});
         };
         const size_t sent_estimate = estimate_request_tokens(req.messages, req.tools);
+        model_progress(true);
         auto result = rt_.model_.chat(req, sink);
+        model_progress(false);
 
         auto keep_incomplete = [&] {
             if (incomplete_text.empty()) return;
@@ -725,6 +767,7 @@ private:
         context_retry_ = false;
         rt_.observe_usage(req.role, sent_estimate, resp.usage.prompt);
         record_usage(resp.usage);
+        record_model_call(resp, call_started, first_output);
         if (!resp.reasoning.empty()) {  // kept, never resent; sent live with its stored sequence number (Run Event Stream)
             const json reasoning = {{"text", resp.reasoning}};
             const auto seq = store_.append_event(id_, "reasoning", reasoning);
@@ -756,12 +799,45 @@ private:
         ModelCallInfo after{info_, nullptr, &resp};
         rt_.hooks_.after_model_call(after);
 
+        const bool cut = resp.finish_reason == "length";
+        if (!cut) length_stops_ = 0;
         if (resp.tool_calls.empty()) {
+            if (cut) return continue_after_output_limit(req.max_tokens.value_or(0), resp);
             end(RunState::succeeded, "");
             finished_ = true;
             return false;
         }
         return true;  // the loop finds the open batch
+    }
+
+    // Output Limit Continuation (handle-output-limit D1, D2): a reply cut at the output limit is not an answer.
+    bool continue_after_output_limit(int limit, const model::ChatResponse& resp) {
+        const std::string tokens = limit > 0 ? std::to_string(limit) + " tokens" : "tokens";
+        if (++length_stops_ > 2) {
+            const std::string why = "The model reached its output limit (" + tokens + ") before it finished.";
+            const json error = {{"code", "output_limit"}, {"message", why}, {"reason", why}, {"partial_output", !resp.text.empty()}};
+            auto seq = store_.append_event(id_, "error", error);
+            emit("error", error, seq ? *seq : 0);
+            end(RunState::failed, why, {{"error", error}});
+            return false;
+        }
+        continuation_note_ = "[The previous reply stopped at the output limit of " + tokens +
+                             " before it was complete. Continue from where it stopped. Keep reasoning short; split long "
+                             "content over several tool calls, for example several smaller files.";
+        if (length_stops_ > 1)
+            continuation_note_ += " Act now with what you have drafted: call a tool or write the answer; do not plan everything again.";
+        // The cut-off draft, so the model continues instead of starting over (handle-output-limit D1).
+        std::string draft = resp.reasoning + (resp.reasoning.empty() || resp.text.empty() ? "" : "\n") + resp.text;
+        constexpr size_t kDraftLimit = 8000;
+        if (draft.size() > kDraftLimit) {
+            size_t from = draft.size() - kDraftLimit;
+            while (from < draft.size() && (static_cast<unsigned char>(draft[from]) & 0xc0) == 0x80) ++from;
+            draft = draft.substr(from);
+        }
+        if (!draft.empty()) continuation_note_ += " The end of your unfinished draft:\n" + draft;
+        continuation_note_ += "]";
+        activity("The reply reached the model's output limit (" + tokens + "); the model continues", {{"output_limit", length_stops_}});
+        return true;
     }
 
     // ---- compaction (design D4) ----
@@ -810,6 +886,29 @@ private:
     static std::string random_suffix() {
         static std::atomic<unsigned> n{0};
         return std::to_string(++n) + "_";
+    }
+
+    // Model Call Timing: stored before the answer it produced, so the feed counts the call once. A response without
+    // streamed text or reasoning (tool calls only) has no first-token time and does not count towards the speed.
+    template <class TimePoint>
+    void record_model_call(const model::ChatResponse& resp, TimePoint started, const std::optional<TimePoint>& first) {
+        using std::chrono::duration_cast;
+        using std::chrono::milliseconds;
+        const auto ended = rt_.clock_.now();
+        const bool exact = resp.usage.completion > 0;
+        long long output = resp.usage.completion;
+        if (!exact) {
+            std::string produced = resp.text + resp.reasoning;
+            for (const auto& c : resp.tool_calls) produced += c.tool + c.raw_arguments;
+            output = static_cast<long long>(estimate_context_tokens(produced));
+        }
+        json payload = {{"started_at", iso8601_utc(started)},
+                        {"duration_ms", std::max<long long>(0, duration_cast<milliseconds>(ended - started).count())},
+                        {"output_tokens", output},
+                        {"exact", exact}};
+        payload["first_token_ms"] =
+            first ? json(std::max<long long>(0, duration_cast<milliseconds>(*first - started).count())) : json(nullptr);
+        if (auto seq = store_.append_event(id_, "model_call", payload)) emit("model_call", payload, *seq);
     }
 
     void record_usage(model::Usage u) {
@@ -1357,6 +1456,7 @@ private:
             ctx.skill_folder = skill_->folder;
             ctx.skill_no_network = skill_->manifest.network == "none";
         }
+        tool_progress(1);
         try {
             if (w.def->id == kFindTools) w.out = run_find_tools(w.info.args);
             else if (w.def->id == kReadAttachment) w.out = run_read_attachment(w.info.args);
@@ -1370,6 +1470,7 @@ private:
         } catch (...) {
             w.out = ToolOutput::failure("The tool failed.");
         }
+        tool_progress(-1);
     }
 
     // ---- find_tools ----
@@ -1660,8 +1761,12 @@ private:
         model::ImagePart image;
     };
     std::vector<PendingImage> pending_images_;  // held in memory until the next model request (never stored)
+    std::string continuation_note_;  // Output Limit Continuation: the next request only
+    int length_stops_ = 0;           // consecutive replies cut at the output limit
     std::mutex images_mx_;
     std::mutex tool_activity_mx_;  // tools running in parallel report to the Activity log one at a time
+    std::mutex progress_mx_;
+    int active_tools_ = 0;
     std::set<std::string> loaded_;
     std::vector<std::string> loaded_order_;  // loaded_ in the order the tools were first loaded in the Thread
     std::mutex loaded_mx_;

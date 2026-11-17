@@ -11,6 +11,15 @@ import { ask, Dialog, Field, notify, Records, time, useDialog, useLoad } from '.
 const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 /** The fallback wait of a model without a stored one. */
 const FALLBACK_AFTER_DEFAULT_S = 60;
+/** The sampling defaults of control-plane/llm-gateway Sampling Defaults Setting, with the ranges the gateway accepts. */
+const SAMPLING = [
+  { key: 'temperature', label: 'Temperature', min: 0, max: 2, help: '0 to 2' },
+  { key: 'top_p', label: 'Top p', min: 0, max: 1, help: 'Above 0 to 1' },
+  { key: 'top_k', label: 'Top k', min: -1, max: 1000, help: '-1 (off) or 1 to 1000' },
+  { key: 'min_p', label: 'Min p', min: 0, max: 1, help: '0 to 1' },
+  { key: 'presence_penalty', label: 'Presence penalty', min: -2, max: 2, help: '-2 to 2' },
+  { key: 'repetition_penalty', label: 'Repetition penalty', min: 0, max: 2, help: 'Above 0 to 2' },
+] as const;
 
 interface Model {
   id: string;
@@ -26,6 +35,8 @@ interface Model {
   reasoning_effort: string | null;
   fallback_model: string | null;
   fallback_after_s: number | null;
+  /** Sampling defaults the gateway adds when a request lacks the field (Sampling Defaults Setting). */
+  sampling: Partial<Record<(typeof SAMPLING)[number]['key'], number>> | null;
   /** The models whose fallback this model is, as `connection/id`. */
   fallback_of: string[];
 }
@@ -232,6 +243,11 @@ export function Connections() {
                   // Not sent while the picker is blocked: the gateway keeps the stored value, which is empty for such a model.
                   ...(f.fallback_model === undefined ? {} : { fallback_model: f.fallback_model || null }),
                   fallback_after_s: f.fallback_after_s ? Number(f.fallback_after_s) : null,
+                  // An empty field stores no value; no values at all clears the defaults.
+                  sampling: (() => {
+                    const s = Object.fromEntries(SAMPLING.filter((p) => f[`sampling_${p.key}`]).map((p) => [p.key, Number(f[`sampling_${p.key}`])]));
+                    return Object.keys(s).length ? s : null;
+                  })(),
                 });
               } catch (err) {
                 if (err instanceof ApiError && typeof err.details.field === 'string') {
@@ -279,6 +295,18 @@ export function Connections() {
                 <input name="fallback_after_s" type="number" min={5} max={600} placeholder={String(FALLBACK_AFTER_DEFAULT_S)} defaultValue={m.fallback_after_s ?? ''} />
               </Field>
             </div>
+            {m.kind === 'chat' && (
+              <>
+                <p key={`sampling-${refusal?.nonce ?? 0}`}>Sampling defaults: added to requests that do not set the value. Empty sends nothing. {refused('sampling')}</p>
+                <div className="two">
+                  {SAMPLING.map((p) => (
+                    <Field key={`${p.key}-${refusal?.nonce ?? 0}`} label={p.label} help={p.help}>
+                      <input name={`sampling_${p.key}`} type="number" step="any" min={p.min} max={p.max} defaultValue={m.sampling?.[p.key] ?? ''} data-testid={`sampling-${p.key}`} />
+                    </Field>
+                  ))}
+                </div>
+              </>
+            )}
           </Dialog>
         );
       })()}

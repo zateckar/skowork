@@ -4,7 +4,7 @@
 // 600-699 telemetry, 700-799 computer-use, 800-899 skills, 900-999 scheduler, 1000-1099 mail-calendar,
 // 1100-1199 knowledge (app.db side), 1200-1299 meeting-capture, 1300-1399 skills additions made after them, 1400-1499 user-messaging,
 // 1500-1599 fix-long-thread-model-calls, 1600-1699 agent-created-skills, 1700-1799 improve-meeting-capture-quality,
-// 1800-1899 improve-skowork-and-knowledge-control.
+// 1800-1899 improve-skowork-and-knowledge-control, 1900-1999 agenda.
 #include "storage/app_store.h"
 
 namespace wb {
@@ -531,6 +531,51 @@ CREATE TABLE meeting_terms(
 CREATE TABLE compaction_hooks(
   key TEXT PRIMARY KEY,
   at INTEGER NOT NULL);
+)sql"},
+        // client/agenda (add-agenda): Agenda items with their sources, the detection queue, and settings and counters.
+        {1900, R"sql(
+CREATE TABLE agenda_items(
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  action TEXT NOT NULL,
+  due_at INTEGER NOT NULL,
+  has_time INTEGER NOT NULL DEFAULT 0,
+  inferred INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL CHECK(state IN ('open','done','dismissed')),
+  draft_kind TEXT NOT NULL DEFAULT 'none',
+  user_edited INTEGER NOT NULL DEFAULT 0,
+  prep_thread_id TEXT NOT NULL DEFAULT '',
+  prep_run_id TEXT NOT NULL DEFAULT '',
+  prepared_at INTEGER NOT NULL DEFAULT 0,
+  refreshed INTEGER NOT NULL DEFAULT 0,
+  reminders TEXT NOT NULL DEFAULT '[]',
+  notice TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  state_at INTEGER NOT NULL);
+CREATE INDEX agenda_items_due ON agenda_items(state, due_at);
+CREATE TABLE agenda_sources(
+  item_id TEXT NOT NULL REFERENCES agenda_items(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  conversation TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '',
+  quote TEXT NOT NULL DEFAULT '',
+  link TEXT NOT NULL DEFAULT '',
+  at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(item_id, kind, source_id));
+CREATE INDEX agenda_sources_source ON agenda_sources(kind, source_id);
+CREATE TABLE agenda_pending(
+  kind TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  item TEXT NOT NULL,
+  queued_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(kind, source_id));
+CREATE TABLE agenda_state(
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL);
 )sql"},
     };
     return migrations;

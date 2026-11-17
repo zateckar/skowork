@@ -17,11 +17,10 @@
 
 using namespace wb::computer;
 
-TEST(ComputerBranding, BothExecutableNamesAreProtected) {
+TEST(ComputerBranding, OwnExecutablesAreProtected) {
     const ComputerEnv env;
     EXPECT_TRUE(app_refusal("Skowork.exe", {}, {}, env.own_executables));
-    EXPECT_TRUE(app_refusal("Skowork.exe", {}, {}, env.own_executables));
-    EXPECT_TRUE(app_refusal("skowork.exe", {"skowork.exe"}, {}, env.own_executables));
+    EXPECT_TRUE(app_refusal("skowork-worker.exe", {}, {}, env.own_executables));    EXPECT_TRUE(app_refusal("skowork.exe", {"skowork.exe"}, {}, env.own_executables));
 }
 
 namespace {

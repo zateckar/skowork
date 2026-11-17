@@ -24,6 +24,14 @@ std::u16string view_name(Shell& s, const ViewId& view) {
     return s.t("views." + view);
 }
 
+std::u16string running_label(Shell& s, const ThreadEntry& e) {
+    auto label = s.t("list.running");
+    if (e.activity_phase == "model") label += u" · " + s.t("feed.working_model");
+    else if (e.activity_phase == "tools" && e.active_tools > 0)
+        label += u" · " + s.t("feed.working_tools", {{"count", ui::to_utf16(std::to_string(e.active_tools))}});
+    return label;
+}
+
 // The content of a row: draws a group header or a Thread entry and handles the pointer for the row.
 class RowContent : public Node {
 public:
@@ -134,7 +142,7 @@ public:
             pill(shell_.t(origin_badge_key(entry_)), Paint::accent_surface, ink);
         }
         if (entry_.has_action) pill(shell_.t("list.needs_action"), Paint::warning_background, Paint::text);
-        if (entry_.running) pill(shell_.t("list.running"), Paint::info_background, Paint::text);
+        if (entry_.running) pill(running_label(shell_, entry_), Paint::info_background, Paint::text);
         else if (entry_.last_run_state == "failed") pill(shell_.t("list.failed"), Paint::error_background, Paint::text);
         if (!entry_.preview.empty() && right > x + 8)
             c.text(u.layout(ui::to_utf16(entry_.preview), TextStyle::caption, right - x, false), x, y2 + 1, dim);
@@ -239,7 +247,7 @@ void ThreadListPane::build_row(size_t i, ui::ListRow& row) {
             if (e.origin_kind != "user") n += u", " + shell_.t(origin_badge_key(e));
             if (e.unread) n += u", " + shell_.t("list.unread");
             if (e.has_action) n += u", " + shell_.t("list.needs_action");
-            if (e.running) n += u", " + shell_.t("list.running");
+            if (e.running) n += u", " + running_label(shell_, e);
             else if (e.last_run_state == "failed") n += u", " + shell_.t("list.failed");
         }
         row.name = n;
