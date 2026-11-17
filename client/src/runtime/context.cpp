@@ -4,6 +4,7 @@
 #include "runtime/tools.h"
 
 #include <algorithm>
+#include <cmath>
 #include <set>
 
 namespace wb::runtime {
@@ -76,6 +77,25 @@ size_t estimate_request_tokens(const std::vector<model::ChatMessage>& messages, 
         n += m.images.size() * kImageTokenAllowance;
     }
     return n;
+}
+
+void UsageCalibration::observe(size_t estimate, long long prompt_tokens) {
+    if (estimate < kMinEstimate || prompt_tokens <= 0) return;
+    const double ratio = std::clamp(static_cast<double>(prompt_tokens) / static_cast<double>(estimate), 1.0, kMaxFactor);
+    if (ratios_.size() >= kSamples) ratios_.erase(ratios_.begin());
+    ratios_.push_back(ratio);
+}
+
+double UsageCalibration::factor() const {
+    double f = 1.0;
+    for (const double r : ratios_) f = std::max(f, r);
+    return f;
+}
+
+size_t UsageCalibration::apply(size_t estimate) const {
+    const double f = factor();
+    if (f <= 1.0) return estimate;
+    return std::max(estimate, static_cast<size_t>(std::ceil(static_cast<double>(estimate) * f)));
 }
 
 std::optional<WorkingContextBudget> working_context_budget(long long window, long long output_reserve) {

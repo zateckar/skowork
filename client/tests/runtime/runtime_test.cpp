@@ -3035,6 +3035,101 @@ TEST(RuntimeCompaction, SummarizerRequestLeavesRoomForReasoningAndCarriesThePrev
     EXPECT_EQ(record["content"], "SUMMARY 1: codename HELIOTROPE");
 }
 
+// improve-skowork-and-knowledge-control 6.1: estimates are reconciled with provider prompt usage (design D4 calibration).
+TEST(RuntimeCompaction, UsageCalibrationTakesTheRecentMaximumRatioWithinBounds) {
+    UsageCalibration c;
+    EXPECT_EQ(c.factor(), 1.0);
+    EXPECT_EQ(c.apply(10'000), 10'000u);
+    c.observe(500, 5'000);  // too small: template overhead dominates
+    c.observe(10'000, 0);   // no provider count
+    EXPECT_EQ(c.factor(), 1.0);
+    c.observe(10'000, 8'000);  // the provider counted fewer: never scale below the estimate
+    EXPECT_EQ(c.factor(), 1.0);
+    c.observe(10'000, 14'000);
+    EXPECT_DOUBLE_EQ(c.factor(), 1.4);
+    EXPECT_EQ(c.apply(10'001), 14'002u);
+    c.observe(10'000, 50'000);  // bounded at twice the estimate
+    EXPECT_DOUBLE_EQ(c.factor(), 2.0);
+    for (size_t i = 0; i < UsageCalibration::kSamples - 1; ++i) c.observe(10'000, 12'000);
+    EXPECT_DOUBLE_EQ(c.factor(), 2.0);  // the high sample is still among the last eight
+    c.observe(10'000, 12'000);
+    EXPECT_DOUBLE_EQ(c.factor(), 1.2);  // and has now aged out
+}
+
+TEST(RuntimeCompaction, ProviderUsageAboveTheEstimateTriggersCompactionAndRefusalEarlier) {
+    for (const double ratio : {1.5, 0.8}) {
+        SCOPED_TRACE(ratio);
+        RuntimeConfig cfg;
+        cfg.compaction_keep_messages = 2;
+        Env env(cfg);
+        for (const auto role : {model::Role::main, model::Role::small}) {
+            model::RoleInfo info;
+            info.role = role;
+            info.context_window = 262'144;
+            info.max_output_tokens = 8'192;
+            env.model.set_role_info(info);
+        }
+        const auto budget = working_context_budget(262'144, 8'192);
+        ASSERT_TRUE(budget);
+        env.model.set_responder([](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+            if (req.feature != "compaction") return std::nullopt;
+            return summary_response("SUMMARY: the large block was read");
+        });
+        // The provider reports `ratio` times the client's estimate of what was sent.
+        const auto answer = [&env, ratio](const std::string& text, double reported = 0) {
+            env.model.push([text, factor = reported > 0 ? reported : ratio](const model::ChatRequest& req, const model::ChatSink&) {
+                auto r = text_response(text);
+                r.usage.prompt = std::llround(static_cast<double>(estimate_request_tokens(req.messages, req.tools)) * factor);
+                return model::ModelResult<model::ChatResponse>(r);
+            });
+        };
+        env.start();
+        const auto thread = env.thread();
+        answer("ready", 1.0);  // the provider agrees with the small first request
+        const auto seed = env.run(thread, "read the large block");
+        ASSERT_TRUE(env.wait(seed, RunState::succeeded));
+        model::ChatMessage block;
+        block.role = "user";
+        block.content = "block:" + std::string(130'000 * 3, 'x');  // about 130,000 estimated tokens: below 180,000
+        ASSERT_TRUE(env.rt->store().append_event(seed, "message", message_to_event(block)));
+
+        // The first large request is sent uncalibrated and teaches the runtime the provider's count.
+        answer("measured");
+        ASSERT_TRUE(env.wait(env.run(thread, "measure"), RunState::succeeded));
+        EXPECT_TRUE(env.rt->store().compactions(thread).empty());
+        const auto usage = env.rt->context_usage(thread);
+        EXPECT_NEAR(usage.calibration, ratio > 1 ? ratio : 1.0, 1e-4);  // the provider count is a rounded integer
+
+        answer("continued");
+        const auto next = env.run(thread, "continue");
+        ASSERT_TRUE(env.wait(next, RunState::succeeded));
+        const auto sent = env.model.requests().back();
+        const auto raw = static_cast<long long>(estimate_request_tokens(sent.messages, sent.tools));
+        if (ratio > 1) {
+            // 1.5 x 130,000 reaches the 180,000 trigger: compaction ran and the calibrated request is at most the target.
+            EXPECT_EQ(env.rt->store().compactions(thread).size(), 1u);
+            EXPECT_LE(static_cast<long long>(std::ceil(static_cast<double>(raw) * ratio)), budget->target);
+        } else {
+            EXPECT_TRUE(env.rt->store().compactions(thread).empty());
+            EXPECT_GT(raw, 130'000);
+        }
+
+        // A new Thread whose only message is below B uncalibrated but at or above it calibrated is not sent.
+        const auto fresh = env.thread();
+        const auto before = env.model.request_count();
+        answer("sent");
+        const auto big = env.run(fresh, std::string(140'000 * 3, 'y'));
+        if (ratio > 1) {
+            ASSERT_TRUE(env.wait(big, RunState::failed));
+            EXPECT_EQ(env.model.request_count(), before);
+            ASSERT_EQ(env.rt->conversation(fresh).size(), 1u);
+        } else {
+            ASSERT_TRUE(env.wait(big, RunState::succeeded));
+            EXPECT_EQ(env.model.request_count(), before + 1);
+        }
+    }
+}
+
 // improve-skowork-and-knowledge-control 6.4: an empty summary and a storage failure leave no checkpoint and the full history.
 TEST(RuntimeCompaction, EmptySummaryLeavesNoCheckpointAndTheCompleteHistory) {
     Env env;

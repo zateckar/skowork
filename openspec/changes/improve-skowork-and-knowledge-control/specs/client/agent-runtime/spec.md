@@ -60,6 +60,14 @@ Budget checks SHALL include instructions, summaries, conversation messages, tool
 - **WHEN** the displayed context estimate uses the most recently attempted request's tool definitions
 - **THEN** its explanation identifies them as the last selection and does not imply that the next request has the same tools
 
+#### Scenario: Provider counts more tokens than estimated
+- **WHEN** the provider's prompt usage for a sufficiently large request of a Model role exceeds the client's estimate of that request
+- **THEN** later budget checks, compaction triggers and targets, summarizer passes and the context indicator for that role and model scale the estimate up by the recently observed ratio, bounded at twice the estimate, and never scale it below the uncalibrated estimate
+
+#### Scenario: Calibrated request would reach the budget
+- **WHEN** a request's uncalibrated estimate is below B but its calibrated estimate is at or above B and compaction cannot reduce it
+- **THEN** the runtime does not send it and fails the Run with the context error, leaving history intact
+
 #### Scenario: Tool-call repair exceeds the budget
 - **WHEN** a corrective model request would exceed the current input budget after adding the invalid call and its validation errors
 - **THEN** the client does not send that corrective request and retains the original validation errors for the Run

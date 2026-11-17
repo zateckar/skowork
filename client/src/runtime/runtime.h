@@ -10,6 +10,7 @@
 
 #include "base/time.h"
 #include "model/types.h"
+#include "runtime/context.h"
 #include "runtime/hooks.h"
 #include "runtime/run_store.h"
 #include "runtime/tools.h"
@@ -163,6 +164,8 @@ public:
         long long tool_tokens = 0;
         bool includes_tools = false;
         double compaction_threshold = 0;
+        // The factor `tokens` includes from provider prompt usage (1 when none was observed); still an estimate.
+        double calibration = 1.0;
     };
     [[nodiscard]] ContextUsage context_usage(const std::string& thread_id);
 
@@ -241,6 +244,11 @@ private:
                               size_t b, const std::shared_ptr<CancelToken>& cancel);
     [[nodiscard]] long long context_window(model::Role role);
     [[nodiscard]] int output_limit(model::Role role);
+    // Estimates reconciled with provider prompt usage, per role and resolved model (design D4 calibration).
+    [[nodiscard]] size_t calibrated(model::Role role, size_t estimate);
+    [[nodiscard]] double calibration_factor(model::Role role);
+    void observe_usage(model::Role role, size_t estimate, long long prompt_tokens);
+    [[nodiscard]] std::string calibration_key(model::Role role);
     [[nodiscard]] RunLimits limits_for(bool unattended) const { return cfg_.run_limits(unattended); }
     Result<std::string> start_run_locked(const std::string& thread_id, const std::string& text, const StartOptions& options);
 
@@ -271,6 +279,8 @@ private:
     // Idempotency keys of the BeforeCompaction calls made by this process (a retry for the same revision does not repeat them).
     std::mutex hook_mx_;
     std::set<std::string> hooked_compactions_;
+    std::mutex calibration_mx_;
+    std::map<std::string, UsageCalibration> calibration_;
     EventListener listener_;
     std::mutex standalone_mx_;
     std::function<void(const ActionItem&, const std::string&)> standalone_handler_;

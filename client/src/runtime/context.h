@@ -41,6 +41,25 @@ inline constexpr int kSummaryOutputTokens = 8'192;
 // The estimated room kept in each summarizer request for the previous summary, unless that summary is larger.
 inline constexpr long long kSummaryRoomTokens = 2'048;
 
+// Reconciles estimates with provider prompt usage (Complete Request Accounting; design D4): the factor is the largest
+// ratio of provider prompt tokens to the client's estimate among the last kSamples requests of at least kMinEstimate
+// estimated tokens, at least 1 and at most kMaxFactor. Not thread-safe; the runtime guards it.
+class UsageCalibration {
+public:
+    static constexpr size_t kSamples = 8;
+    static constexpr size_t kMinEstimate = 1'024;
+    static constexpr double kMaxFactor = 2.0;
+
+    // Records one successful request: its estimate as sent and the provider's prompt tokens (ignored when unknown).
+    void observe(size_t estimate, long long prompt_tokens);
+    [[nodiscard]] double factor() const;
+    // The estimate scaled by factor(), rounded up; never below `estimate`.
+    [[nodiscard]] size_t apply(size_t estimate) const;
+
+private:
+    std::vector<double> ratios_;  // oldest first, at most kSamples
+};
+
 struct WorkingContextBudget {
     long long input = 0;
     long long trigger = 0;

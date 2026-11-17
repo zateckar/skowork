@@ -34,6 +34,8 @@ function estimateText(s) {
   for (const c of b) if (c < 0x80) ascii++;
   return b.length - ascii + Math.floor(ascii / 3) + (ascii % 3 !== 0 ? 1 : 0);
 }
+// UsageCalibration: the largest of the last eight provider/estimate ratios of requests of 1,024+ estimated tokens, in [1, 2].
+const calibration = { ratios: [], observe(estimate, prompt) { if (estimate < 1024 || !(prompt > 0)) return; this.ratios.push(Math.min(2, Math.max(1, prompt / estimate))); if (this.ratios.length > 8) this.ratios.shift(); }, factor() { return Math.max(1, ...this.ratios); } };
 const estimateRequest = (messages) => messages.reduce((n, m) => n + 4 + estimateText(m.content ?? '') + estimateText(m.tool_call_id ?? ''), 0);
 function budget(window, output) {
   if (window <= 0 || output < 0) return null;
@@ -176,19 +178,21 @@ async function main() {
     const summarise = async (previous, messages, label) => {
       const sys = { role: 'system', content: SUMMARIZER };
       const summaryRoom = Math.max(estimateText(previous), 2048);
-      const room = smallBudget.input - estimateRequest([sys]) - summaryRoom - 512;
+      const factor = calibration.factor();  // fixed for this compaction's passes, as in the client
+      const room = Math.floor(smallBudget.input / factor) - estimateRequest([sys]) - summaryRoom - 512;
       const maxChars = Math.max(4000, Math.floor(small.context_window / 2) * 4);
       const partTokens = Math.min(room, Math.floor(maxChars / 3));
       const us = units(messages, partTokens);
-      const fits = (text) => estimateRequest([sys, { role: 'user', content: text }]) < smallBudget.input && utf8(text).length <= maxChars;
+      const fits = (text) => estimateRequest([sys, { role: 'user', content: text }]) * factor < smallBudget.input && utf8(text).length <= maxChars;
       let summary = previous, begin = 0;
       while (begin < us.length) {
         let low = begin + 1, high = us.length, end = begin;
         while (low <= high) { const mid = (low + high) >> 1; if (fits(render(summary, messages, us, begin, mid))) { end = mid; low = mid + 1; } else high = mid - 1; }
         if (end === begin) throw new Error(`${label}: a unit and the prior summary do not fit the summarizer input`);
         const r = await chat('small', [sys, { role: 'user', content: render(summary, messages, us, begin, end) }], smallOutput, label, effort ? { reasoning_effort: effort } : {});
+        calibration.observe(r.estimate, r.prompt_tokens);
         if (!r.text) throw new Error(`${label}: empty summary (finish ${r.finish}, prompt ${r.prompt_tokens}, completion ${r.completion_tokens}, reasoning ${r.reasoning_chars} chars, ${r.elapsed_ms} ms)`);
-        record.passes.push({ compaction: label, units: end - begin, parts: us.slice(begin, end).filter((u) => u.parts > 1).length, ...r, text: undefined, summary_words: r.text.split(/\s+/).length });
+        record.passes.push({ compaction: label, calibration: Math.round(factor * 1000) / 1000, within_budget: r.prompt_tokens === null ? null : r.prompt_tokens < smallBudget.input, units: end - begin, parts: us.slice(begin, end).filter((u) => u.parts > 1).length, ...r, text: undefined, summary_words: r.text.split(/\s+/).length });
         console.log(JSON.stringify(record.passes.at(-1)));
         summary = r.text;
         begin = end;
