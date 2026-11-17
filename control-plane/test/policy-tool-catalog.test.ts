@@ -34,6 +34,108 @@ test('literal client policy lookups have a registered key or map owner', async (
   assert.deepEqual(unregisteredPolicyLookups('policy_string("example.missing", "");', known), ['example.missing']);
 });
 
+// ---- Key-to-consumer direction (control-plane/policy-service Policy Coverage Verification; design D2) ----------------
+
+type Sources = Record<string, string>;  // path relative to its source root -> text without comments
+
+const withoutComments = (text: string) => text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
+
+async function sources(root: URL, pattern: RegExp, skip: (file: string) => boolean = () => false): Promise<Sources> {
+  const out: Sources = {};
+  for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile() || !pattern.test(entry.name)) continue;
+    const file = join(entry.parentPath, entry.name);
+    const relative = file.slice(root.pathname.replace(/^\/([A-Za-z]:)/, '$1').replace(/\//g, '\\').length).replace(/\\/g, '/');
+    if (!skip(relative)) out[relative] = withoutComments(await readFile(file, 'utf8'));
+  }
+  return out;
+}
+
+// The client's defaults table declares keys ({"key", default}); a declaration is not a consumer.
+function withoutDeclarations(file: string, text: string): string {
+  if (file !== 'policy/core.cpp') return text;
+  return text.replace(/(client_policy_defaults\(\)\s*\{[\s\S]*?static const json d = \{)[\s\S]*?(\n\s*\};)/, '$1$2');
+}
+
+// Paths the client builds at run time, each recognised from the code that builds it.
+function dynamicClientLookups(client: Sources): string[] {
+  const out: string[] = [];
+  // sandbox::limits_for(policy, group) reads "tools." + group + ".limits." + name for each limit_value name.
+  const sandbox = client['sandbox/sandbox.cpp'] ?? '';
+  if (/"tools\."\s*\+\s*group\s*\+\s*"\.limits\."\s*\+\s*name/.test(sandbox)) {
+    const names = [...sandbox.matchAll(/limit_value\(p,\s*group,\s*"([a-z_]+)"/g)].map((m) => m[1]!);
+    const groups = Object.values(client).flatMap((text) => [...text.matchAll(/limits_for\([^,()]*(?:\(\))?,\s*"([a-z]+)"\)/g)].map((m) => m[1]!));
+    for (const group of new Set(groups)) for (const name of names) out.push(`tools.${group}.limits.${name}`);
+  }
+  // RuntimeConfig::run_limits reads policy_limit(prefix + name) under each mode's prefix.
+  const types = client['runtime/types.h'] ?? '';
+  const prefixes = [...types.matchAll(/"(llm\.run_limits\.[a-z]+\.)"/g)].map((m) => m[1]!);
+  const limits = [...types.matchAll(/policy_limit\(prefix \+ "([a-z_]+)"/g)].map((m) => m[1]!);
+  for (const prefix of prefixes) for (const name of limits) out.push(prefix + name);
+  // The Work Inbox reads "notifications." + kind for each of kNotificationKinds.
+  const inbox = (client['inbox/inbox_service.cpp'] ?? '') + (client['inbox/inbox_service.h'] ?? '');
+  const kinds = /kNotificationKinds\[\]\s*=\s*\{([^}]*)\}/.exec(inbox);
+  if (kinds && /"notifications\."\s*\+\s*kind/.test(inbox))
+    for (const [, kind] of kinds[1]!.matchAll(/"([a-z_]+)"/g)) out.push(`notifications.${kind}`);
+  // Knowledge reads "knowledge.sources." + k for each of source_kinds().
+  const sourceKinds = /source_kinds\(\)\s*\{\s*static const std::vector<std::string> k = \{([^}]*)\}/.exec(client['knowledge/kg_store.cpp'] ?? '');
+  if (sourceKinds && /"knowledge\.sources\."\s*\+\s*k\b/.test(client['knowledge/knowledge_service.cpp'] ?? ''))
+    for (const [, kind] of sourceKinds[1]!.matchAll(/"([a-z_]+)"/g)) out.push(`knowledge.sources.${kind}`);
+  // Meeting capture reads "meeting_capture." + key for each flag("key", default).
+  const meeting = client['meeting/core.cpp'] ?? '';
+  if (/p\("meeting_capture\."\s*\+\s*key\)/.test(meeting))
+    for (const [, key] of meeting.matchAll(/\bflag\("([a-z_]+)"/g)) out.push(`meeting_capture.${key}`);
+  return out;
+}
+
+// Built at run time but intentionally unregistered: an MCP server runs through Sandbox::start, which applies neither
+// the wall-clock nor the output limit (client/mcp-client: the wall-clock limit does not apply to a server process).
+const UNREGISTERED_DYNAMIC = ['tools.mcp.limits.output_kb', 'tools.mcp.limits.wall_minutes'];
+
+function keysWithoutConsumers(keys: readonly { path: string; owner: string }[], client: Sources, server: Sources): string[] {
+  const clientText = Object.entries(client).map(([file, text]) => withoutDeclarations(file, text)).join('\n');
+  const serverText = Object.values(server).join('\n');
+  const dynamic = new Set(dynamicClientLookups(client));
+  const quoted = (text: string, path: string) => text.includes(`"${path}"`) || text.includes(`'${path}'`) || text.includes(`\`${path}\``);
+  return keys.filter((key) => key.owner.startsWith('client/')
+    ? !quoted(clientText, key.path) && !dynamic.has(key.path)
+    : !quoted(serverText, key.path)).map((key) => `${key.path} (${key.owner})`);
+}
+
+async function codeSources() {
+  const client = await sources(new URL('../../client/src/', import.meta.url), /\.(cpp|h)$/);
+  // The registry declares keys; the server's consumers are everywhere else.
+  const server = await sources(new URL('../src/', import.meta.url), /\.ts$/, (file) => file === 'policy/keys.ts');
+  return { client, server };
+}
+
+test('every registered policy key has a consumer on its owning side', async () => {
+  const { client, server } = await codeSources();
+  assert.deepEqual(keysWithoutConsumers(KEYS, client, server), [], 'registered keys without a consumer');
+  const known = new Set(KEYS.map((key) => key.path));
+  const unregistered = dynamicClientLookups(client).filter((path) => !known.has(path)).sort();
+  assert.deepEqual(unregistered, UNREGISTERED_DYNAMIC, 'run-time policy paths without a registered key');
+});
+
+test('key-to-consumer inventory rejects declarations, wrong-side references and unknown dynamic members', () => {
+  const client: Sources = {
+    'policy/core.cpp': 'const json& client_policy_defaults() {\n    static const json d = {\n        {"example.declared", 1},\n    };\n    return d;\n}',
+    'example/reader.cpp': 'p->integer("example.read", 0);',
+    'sandbox/sandbox.cpp': 'return p->integer("tools." + group + ".limits." + name, fallback); limit_value(p, group, "memory_mb", 1);',
+    'example/start.cpp': 'spec.limits = sandbox::limits_for(p.get(), "worker");',
+  };
+  const server: Sources = { 'gateway/gateway.ts': "policy.get('example.server');" };
+  const keys = [
+    { path: 'example.declared', owner: 'client/example' },        // only in the defaults table
+    { path: 'example.read', owner: 'client/example' },
+    { path: 'example.server', owner: 'client/example' },          // a client key read only by the server
+    { path: 'tools.worker.limits.memory_mb', owner: 'client/example' },
+    { path: 'example.server_side', owner: 'control-plane/example' },
+  ];
+  assert.deepEqual(keysWithoutConsumers(keys, client, server),
+    ['example.declared (client/example)', 'example.server (client/example)', 'example.server_side (control-plane/example)']);
+});
+
 test('desktop runtime, image, storage and battery limits have policy bindings', async () => {
   const code = async (file: string) => (await readFile(new URL(`../../client/src/${file}`, import.meta.url), 'utf8'))
     .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');

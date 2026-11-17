@@ -412,7 +412,14 @@ private:
                 for (const auto& id : allowed) mark_loaded(id);
                 allowed_ = std::move(allowed);
                 child_instructions_ = jstr(e.payload, "instructions");
-                if (const json* s = jobj(e.payload, "skill"); s && s->is_object()) skill_ = skill_from(*s);
+                if (const json* s = jobj(e.payload, "skill"); s && s->is_object()) {
+                    skill_ = skill_from(*s);
+                    // The data root can move (client/local-storage): the same Skill version is found where it is now.
+                    if (rt_.cfg_.resolve_skill)
+                        if (auto now = rt_.cfg_.resolve_skill(rec_.thread_id, skill_->manifest.name);
+                            now && now->manifest.version == skill_->manifest.version && !now->folder.empty())
+                            skill_->folder = now->folder;
+                }
             }
         }
         rebuild_conversation();

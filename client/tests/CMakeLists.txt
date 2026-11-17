@@ -141,6 +141,7 @@ if(WIN32)
     platform/http_stream_test.cpp
     storage/storage_test.cpp
     storage/generated_surface_state_test.cpp
+    storage/data_root_test.cpp
     host/host_test.cpp
     app/run_event_relay_test.cpp
     app/periodic_pass_test.cpp

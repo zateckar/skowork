@@ -821,6 +821,7 @@ bool App::start_storage() {
     pending_remote_removals = static_cast<int>(pending->entries.size());
     log::init(log::Options{root->logs()});
     log::info(kLog, std::string("Skowork ") + kVersion + " (" + kChannel + ", " + kCommit + ") starting");
+    if (!root->transition_note().empty()) log::warn(kLog, "data root transition: " + root->transition_note());
     KeyStore keys(root->keys());
     if (Status s = keys.load(); !s) {
         storage_error = "key store: " + s.error().message;
@@ -998,6 +999,20 @@ void App::start_identity_and_channel() {
         }
         quota.set_max_bytes(quota_bytes);
         check_storage_quota();
+        // policy.storage.root (client/local-storage Data Location In User Profile): recorded now, the profile moves at
+        // the next start. A --data-root override (tests, diagnostics) never touches the managed root.
+        if (p && !la.data_root) {
+            std::wstring wanted = widen(p->string("storage.root", ""));
+            if (!wanted.empty()) {
+                std::wstring expanded(32'768, L'\0');
+                const DWORD n = ::ExpandEnvironmentStringsW(wanted.c_str(), expanded.data(), static_cast<DWORD>(expanded.size()));
+                wanted = n > 0 && n <= expanded.size() ? expanded.substr(0, n - 1) : std::wstring{};
+            }
+            const bool requested = !trim(p->string("storage.root", "")).empty();
+            if (requested && wanted.empty()) log::warn(kLog, "policy.storage.root cannot be expanded; the data root stays");
+            else if (Status s = DataRoot::set_policy_root(requested ? std::optional<std::filesystem::path>(wanted) : std::nullopt); !s)
+                log::warn(kLog, "policy.storage.root is not used: " + s.error().message);
+        }
         // The MCP catalog arrives in the bundle (Catalog Updates Applied Live).
         if (auto m = mcp()) pool.post([m] { m->apply(); });
         if (auto cm = connectors_mgr()) pool.post([cm] { cm->apply(); });

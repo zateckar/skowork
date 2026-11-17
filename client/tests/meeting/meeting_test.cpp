@@ -1705,6 +1705,31 @@ TEST(MeetingService, RetentionKeepsAudioOnlyWhenAllowedAndSweepsPendingAudio) {
     EXPECT_TRUE(std::filesystem::exists(path_from_utf8(f.svc->store().get(kept)->audio_dir)));
 }
 
+// The data root can move (client/local-storage): a stored audio folder from the old root is not used; the meeting's
+// audio is found and deleted under the current capture folder.
+TEST(MeetingService, AudioIsFoundUnderTheCurrentCaptureFolderAfterTheRootMoves) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+    f.make();
+    json tracks;
+    f.transcribe_override = [&](const json& p) -> Result<json> {
+        tracks = p.value("tracks", json::array());
+        return make_error("model_missing", "no models");
+    };
+    const std::string id = f.capture_one();
+    auto m = f.svc->store().get(id);
+    ASSERT_TRUE(m);
+    const auto dir = f.env.tmp.path / L"capture" / widen(id);
+    ASSERT_TRUE(std::filesystem::exists(dir));
+    m->audio_dir = path_to_utf8(f.env.tmp.path / L"old-root" / L"capture" / widen(id));
+    ASSERT_TRUE(f.svc->store().put(*m));
+    f.svc->run_transcriptions();
+    ASSERT_FALSE(tracks.empty());
+    for (const auto& t : tracks) EXPECT_EQ(path_from_utf8(t.get<std::string>()).parent_path(), dir);
+    ASSERT_TRUE(f.svc->forget(id));
+    EXPECT_FALSE(std::filesystem::exists(dir));
+}
+
 // Unsupported Language, no models, and Transcribe Now (user-initiated, not deferred).
 TEST(MeetingService, UnsupportedLanguageMissingModelsAndTranscribeNow) {
     WB_REQUIRES_DEV_ENDPOINTS();

@@ -47,6 +47,13 @@ long long last_written(const std::filesystem::path& dir, long long fallback) {
     return last > 0 ? std::min(last, fallback) : fallback;
 }
 
+// A meeting's audio folder, derived from the current capture folder: the stored value only records that audio was
+// captured, since the data root can move (client/local-storage Data Location In User Profile).
+std::filesystem::path audio_dir_of(const std::filesystem::path& capture_dir, const MeetingRecord& m) {
+    if (m.audio_dir.empty() || m.id.empty()) return {};
+    return capture_dir / m.id;
+}
+
 // Part files of a continued capture: "<kind>.skau", then "<kind>.2.skau" and so on (design D4).
 int parts_in(const std::filesystem::path& dir) {
     int n = 0;
@@ -107,7 +114,7 @@ void MeetingService::start() {
             (void)store_->put(m);
         }
         for (auto m : store_->in_states({"capturing", "interrupted"})) {
-            if (m.state == "capturing") m.ended_at = last_written(path_from_utf8(m.audio_dir), now());
+            if (m.state == "capturing") m.ended_at = last_written(audio_dir_of(env_.capture_dir, m), now());
             m.state = "interrupted";
             m.action_id.clear();
             (void)store_->put(m);
@@ -490,7 +497,7 @@ void MeetingService::on_answer(const std::string& action_id, const std::string& 
         if (answer == kContinue && !capture_) {
             // The same meeting, in new part files; the participant notice is not repeated.
             (void)begin_capture(*m, source_of(*m), starts_with(m->source, "app:") && !m->user_started,
-                                parts_in(path_from_utf8(m->audio_dir)) + 1);
+                                parts_in(audio_dir_of(env_.capture_dir, *m)) + 1);
             return;
         }
         m->state = "pending";
@@ -538,7 +545,7 @@ void MeetingService::live_step() {
     if (!m || !env_.transcribe) return;
     json tracks = json::array();
     std::error_code ec;
-    for (const auto& e : std::filesystem::directory_iterator(path_from_utf8(m->audio_dir), ec))
+    for (const auto& e : std::filesystem::directory_iterator(audio_dir_of(env_.capture_dir, *m), ec))
         if (e.path().extension() == ".skau") tracks.push_back(path_to_utf8(e.path()));
     std::vector<std::string> vocabulary;
     {
@@ -564,7 +571,7 @@ void MeetingService::transcribe_one(MeetingRecord m) {
     json tracks = json::array();
     std::error_code ec;
     if (!m.audio_deleted)
-        for (const auto& e : std::filesystem::directory_iterator(path_from_utf8(m.audio_dir), ec))
+        for (const auto& e : std::filesystem::directory_iterator(audio_dir_of(env_.capture_dir, m), ec))
             if (e.path().extension() == ".skau") tracks.push_back(path_to_utf8(e.path()));
     std::vector<std::string> vocabulary;
     {
@@ -670,9 +677,9 @@ void MeetingService::complete(MeetingRecord& m) {
 
 void MeetingService::delete_audio(MeetingRecord& m) {
     if (!m.audio_dir.empty()) {
-        const auto dir = path_from_utf8(m.audio_dir);
+        const auto dir = audio_dir_of(env_.capture_dir, m);
         // Only inside the capture directory.
-        if (dir.parent_path() == env_.capture_dir) {
+        if (!dir.empty() && dir.parent_path() == env_.capture_dir) {
             std::error_code ec;
             std::filesystem::remove_all(dir, ec);
         }
