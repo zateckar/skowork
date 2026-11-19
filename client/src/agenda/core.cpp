@@ -268,13 +268,18 @@ std::optional<Due> resolve_due(const Candidate& c, long long source_ms, int tz_o
     const long long ahead = due_day - src_day;
     const bool has_digits = std::any_of(phrase.begin(), phrase.end(), [](char ch) { return ch >= '0' && ch <= '9'; });
     if (!has_digits) {
-        if (contains_any(phrase, {"tomorrow", "zitra", "morgen"})) {
-            if (ahead != 1) return std::nullopt;
+        const int wd = weekday_in(phrase);
+        // German "Morgen" is also "morning" ("Montagmorgen", "heute Morgen"): it means tomorrow only on its own.
+        const bool german_tomorrow = wd < 0 && phrase.find("morgen") != std::string::npos;
+        if (contains_any(phrase, {"day after tomorrow", "ubermorgen", "pozitri"})) {
+            if (ahead != 2) return std::nullopt;
         } else if (contains_any(phrase, {"today", "dnes", "heute"})) {
             if (ahead != 0) return std::nullopt;
+        } else if (contains_any(phrase, {"tomorrow", "zitra"}) || german_tomorrow) {
+            if (ahead != 1) return std::nullopt;
         } else if (contains_any(phrase, {"next week", "pristi tyden", "naechste woche", "nachste woche"})) {
             if (ahead < 1 || ahead > 13) return std::nullopt;
-        } else if (const int wd = weekday_in(phrase); wd >= 0) {
+        } else if (wd >= 0) {
             const int due_wd = static_cast<int>(((due_day + 3) % 7 + 7) % 7);  // 1970-01-01 was a Thursday (index 3)
             if (due_wd != wd || ahead < 0 || ahead > 13) return std::nullopt;
         }

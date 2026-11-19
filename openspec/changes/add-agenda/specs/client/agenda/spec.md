@@ -68,6 +68,10 @@ The client SHALL resolve relative due dates against the source's timestamp and t
 - **WHEN** a mail asks for something "by last Monday"
 - **THEN** no Agenda item is created
 
+#### Scenario: Due time after a clock change
+- **WHEN** a mail sent on Friday 26 March 2027 in Prague asks for a call "on Monday at 10:00", after summer time has started
+- **THEN** the Agenda item is due at 10:00 local summer time on Monday 29 March
+
 ### Requirement: Agenda Item Merging
 The client SHALL merge a candidate into an open Agenda item when both describe the same commitment, adding the new source link and quote, and SHALL keep the earlier due date. A later source revision that changes the due date SHALL update an item the user has not edited and SHALL be shown to the user.
 

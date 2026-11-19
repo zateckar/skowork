@@ -281,6 +281,7 @@ void Service::detect(const std::vector<Pending>& batch) {
             (void)store_.add_counter(std::string("dropped.") + to_string(drop), 1);
             continue;
         }
+        if (const auto d = local_due(c, it->at_ms, tz)) due = *d;
         accept(c, *it, due);
     }
     (void)store_.dequeue(items);
@@ -439,7 +440,7 @@ Result<json> Service::edit(const std::string& id, const json& patch) {
         c.due = d->get<std::string>();
         c.due_kind = "explicit";
         const long long now = env_.now();
-        const auto due = resolve_due(c, now, env_.tz_offset_min ? env_.tz_offset_min(now) : 0);
+        const auto due = local_due(c, now, env_.tz_offset_min ? env_.tz_offset_min(now) : 0);
         if (!due) return make_error("invalid", "The date is not valid.");
         it->due_at = due->at_ms;
         it->has_time = due->has_time;
@@ -488,6 +489,16 @@ Result<json> Service::start_preparation(Item it, bool unattended) {
     return to_json(it);
 }
 
+// Resolved with the local offset at the due moment, so a date after a daylight-saving change keeps its local time.
+std::optional<Due> Service::local_due(const Candidate& c, long long source_ms, int tz_now) {
+    auto due = resolve_due(c, source_ms, tz_now);
+    if (!due || !env_.tz_offset_min) return due;
+    const int tz_due = env_.tz_offset_min(due->at_ms);
+    if (tz_due == tz_now) return due;
+    if (auto d = resolve_due(c, source_ms, tz_due)) return d;
+    return due;
+}
+
 bool Service::is_preparation_run(const std::string& run_id) {
     const std::lock_guard lock(mx_);
     return prep_runs_.contains(run_id);
@@ -525,6 +536,10 @@ void Service::reminders(long long now) {
 
 void Service::auto_prepare(long long now) {
     if (!settings().auto_prepare || !policy_bool("agenda.auto_prepare", false)) return;
+    // Preparation reads; an Unattended run that may not even read would only fail (design D5).
+    if (const auto risks = env_.policy ? env_.policy("unattended.allowed_risk") : std::nullopt;
+        risks && (!risks->is_array() || std::find(risks->begin(), risks->end(), json("read")) == risks->end()))
+        return;
     const long long cap = policy_int("agenda.daily_preparations", 10, 0, 100);
     const std::string key = "prepared." + day_key(now);
     if (store_.counter(key) >= cap) return;

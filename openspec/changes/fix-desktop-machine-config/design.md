@@ -33,3 +33,13 @@ A dedicated Windows test executable links the real channel loader, path resoluti
 ## Validation
 
 Record reproduction and final release-build/test results here after execution.
+
+2026-11-19, development workstation (GCC/MinGW, unsigned):
+- `cmake --preset release` and `cmake --build --preset release` succeed.
+- Release CTest: `machine_config_tests`, `ui_strings_check_bundles` and `ui_strings_check_missing_key` pass.
+- Debug suite (`ctest --preset debug -LE "e2e|desktop"`): `machine_config_tests` and every other suite pass except `win_tests`, where intermittent `ShellKnowledge` UI tests unrelated to machine configuration still fail at times (see rename-to-skowork, Verification record).
+- `tools/check-manifests.ps1` passes for `Skowork.exe` and `skowork-worker.exe`; `tools/check-footprint.ps1 -InstallOnly` reports 28.89 MB against the 30 MB budget.
+- `openspec validate --all --strict` passes.
+- Not run: launching the release client against a real machine configuration, and signing.
+
+Archive waits for add-client-foundation, which creates the control-plane/fleet-registry spec this change modifies.

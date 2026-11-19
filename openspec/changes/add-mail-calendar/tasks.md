@@ -22,7 +22,7 @@
 - [ ] 3.1 Implement the OAuth token provider: policy.mail.oauth configuration, silent WAM acquisition, the interactive sign-in in the system browser with a loopback redirect, encrypted refresh-token storage, Disconnect mailbox, scope selection by policy, and the "Connect mailbox" standalone Action item in a system-origin Thread. Verify against the mock: full sign-in, refresh after restart, interaction_required raises the Question, the loopback listener exists only while a sign-in is pending and closes after the redirect or 5 minutes (socket check in the test)
 - [x] 3.1a Implement policy.mail.auth = oauth|mock, with mock mode compiled out of release builds. Verify that the release build rejects mock auth and that a missing policy.mail.oauth disables mail features
 - [x] 3.2 Implement the Graph HTTP layer: base URL from policy, validated against the compiled-in Graph host set in release builds; that host set registered as a platform connection exempt from egress rules; paging; Retry-After; backoff. Verify against the mock with injected faults, that a release build rejects a non-Graph host, and that sync works with an empty egress allowlist
-- [ ] 3.3 Fuzz the Graph JSON response parsers. Verify the fuzz target runs in CI without crashes
+- [x] 3.3 Fuzz the Graph JSON response parsers. Verify the fuzz target runs locally without crashes (client/build-pipeline Remaining Pipeline Checks keeps parser fuzzing local; it does not gate CI). Status: done 2026-11-19; fuzz_graph_parse_smoke, 200,000 mutated runs from the seed corpus and dictionary, no crash
 
 ## 4. Mail and calendar tools
 

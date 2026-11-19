@@ -108,4 +108,16 @@ New encrypted tables in `app.db`, created disabled. No historical scan: enabling
 - Merging by title uses word overlap (Jaccard over words of three letters or more, stop-words removed): the same source at 0.3, the same conversation at 0.4 within ±7 days; otherwise the small-role merge decision for up to 10 nearby items. A dismissed item suppresses candidates from the same source or conversation at overlap 0.4.
 - Read-only preparation is enforced by a BeforeToolCall hook that denies any non-read Risk class for a preparation Run and its Child Runs, after the policy hook. The Thread's origin is `agenda`.
 - Reminders are toasts whose activation opens `#/agenda` or the preparation Thread; they are held while presentation mode is on and shown at the next tick after it ends. The whole tick pauses while background work is paused.
-- Not yet verified: the real-gateway spikes (1.1, 1.3), the e2e preparation (4.3) and the read-only hook in a running app (unit tests cover the service; the hook has no isolated test).
+- Not yet verified: the real-gateway spikes (1.1, 1.3), the e2e preparation (4.3) and the read-only hook in a running app. Since 2026-11-19 the hook's rule, the meeting and Chat adapters live in `client/src/app/agenda_intake.cpp` with tests of their own.
+- Automatic preparation starts nothing while policy.unattended.allowed_risk leaves out read: such a Run could not read its sources.
+
+## Date Resolution Check (task 1.2, 2026-11-19)
+
+`AgendaDueDates.RelativePhrasesAgainstAFixedTable` resolves 30 rows against three fixed source moments: Tuesday 17 November 2026 09:00 CET; Saturday 21 November 00:30 CET (still Friday in UTC); and Friday 26 March 2027 18:00 CET, two days before summer time. Phrases: "by Friday", "next week", "today", "tomorrow morning", "the day after tomorrow", "do pátku", "v pondělí", "příští týden", "zítra ráno", "pozítří", "bis Freitag", "nächste Woche", "morgen früh", "Montagmorgen", "heute Morgen", "übermorgen" and "Monday". Each phrase was tested with a date that agrees and, for most, with one that does not. A disagreeing date is dropped, never moved to a guessed date.
+
+Failures found and fixed:
+- German "Morgen" is also "morning". "Montagmorgen" and "heute Morgen" were checked as "tomorrow", and their correct dates were dropped. Now "morgen" means tomorrow only in a phrase without a weekday or "heute".
+- "the day after tomorrow", "übermorgen" and "pozítří" contain a "tomorrow" word. A correct date two days ahead was dropped. They are now checked as two days ahead.
+- Every due date used the UTC offset at the moment of detection. A due time after a daylight-saving change was an hour off, and so was the end of a due day. Detection and user edits now resolve with the offset at the due moment (`AgendaService.ADueTimeAfterTheSwitchToSummerTimeKeepsItsLocalTime`, scenario "Due time after a clock change").
+
+Remaining limits, by design: a weekday is accepted up to 13 days ahead, so "by Friday" also allows the Friday of next week. Phrases without a recognised word ("kommende Woche", "do konce měsíce") are not checked against the date; the quote check, the future-date rule and the inferred mark still apply.

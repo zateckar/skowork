@@ -44,6 +44,7 @@
 #include "app/meeting_rpc.h"
 #include "app/knowledge_rpc.h"
 #include "app/messaging_rpc.h"
+#include "app/agenda_intake.h"
 #include "app/agenda_rpc.h"
 #include "agenda/service.h"
 #include "messaging/messaging.h"
@@ -1407,10 +1408,8 @@ void App::start_agent() {
         std::atomic<agenda::Service*>* live = nullptr;
         runtime::ToolDecision before_tool_call(const runtime::ToolCallInfo& call) override {
             auto* a = live ? live->load() : nullptr;
-            if (!a || call.risk == runtime::Risk::read) return runtime::ToolDecision::allow();
-            if (a->is_preparation_run(call.run.run_id) || (!call.run.parent_run_id.empty() && a->is_preparation_run(call.run.parent_run_id)))
-                return runtime::ToolDecision::deny("Agenda preparation only reads; it does not send, write or change anything.");
-            return runtime::ToolDecision::allow();
+            if (!a) return runtime::ToolDecision::allow();
+            return agenda_preparation_decision(call, [a](const std::string& run) { return a->is_preparation_run(run); });
         }
     };
     auto agenda_hook = std::make_shared<AgendaReadOnly>();
@@ -1480,15 +1479,6 @@ int local_offset_at(long long ms) {
     l.LowPart = lf.dwLowDateTime;
     l.HighPart = lf.dwHighDateTime;
     return static_cast<int>((static_cast<long long>(l.QuadPart) - static_cast<long long>(u.QuadPart)) / 600'000'000LL);
-}
-
-// A long meeting transcript keeps its start and its end, where follow-ups are usually agreed.
-std::string bounded_transcript(const std::string& text) {
-    if (text.size() <= agenda::kMaxItemText) return text;
-    const std::string head = utf8_truncate(text, agenda::kMaxItemText / 3);
-    size_t from = text.size() - (agenda::kMaxItemText - head.size() - 8);
-    while (from < text.size() && (static_cast<unsigned char>(text[from]) & 0xC0) == 0x80) ++from;
-    return head + "\n[...]\n" + text.substr(from);
 }
 }  // namespace
 
@@ -1566,23 +1556,8 @@ void App::agenda_chat_message(const json& payload) {
     auto* m = messaging_live.load();
     const json* msg = jobj(payload, "message");
     if (!a || !m || !msg) return;
-    agenda::SourceItem s;
-    s.kind = "chat";
-    s.id = jstr(*msg, "id");
-    s.conversation = jstr(payload, "chat", jstr(*msg, "chat"));
-    s.text = jstr(*msg, "text");
-    s.author = jstr(*msg, "sender_name", jstr(*msg, "sender"));
-    s.author_is_user = iequals(jstr(*msg, "sender"), m->me());
-    s.at_ms = parse_iso8601_ms(jstr(*msg, "at")).value_or(system_clock().unix_millis());
-    const json chat = m->chat(s.conversation);
-    const bool direct = chat.is_object() && jstr(chat, "kind") == "direct";
-    s.title = chat.is_object() ? jstr(chat, "name", direct ? s.author : std::string("Chat")) : std::string("Chat");
-    if (s.title.empty()) s.title = direct ? s.author : "Chat";
-    s.recipients = chat.is_object() ? static_cast<int>(chat.value("members", json::array()).size()) : 0;
-    s.user_addressed = direct;
-    s.link = "#/chats/" + s.conversation;
-    if (s.id.empty() || s.conversation.empty() || trim(s.text).empty()) return;
-    a->offer(s);
+    const json chat = m->chat(jstr(payload, "chat", jstr(*msg, "chat")));
+    if (auto s = agenda_chat_item(payload, chat, m->me(), system_clock().unix_millis())) a->offer(*s);
 }
 
 void App::start_agenda() {
@@ -2038,20 +2013,8 @@ void App::start_meetings() {
         return r->text;
     };
     env.knowledge = [this](const meeting::MeetingRecord& m, const json& turns) {
-        if (auto* a = agenda_live.load()) {
-            // Meeting intake (client/agenda): the transcript; tasks must name the user.
-            agenda::SourceItem s;
-            s.kind = "meeting";
-            s.id = m.id;
-            s.conversation = m.series_id.empty() ? m.event_id : m.series_id;
-            s.title = m.title;
-            for (const auto& x : turns) s.text += jstr(x, "speaker") + ": " + jstr(x, "text") + "\n";
-            s.text = bounded_transcript(s.text);
-            s.recipients = static_cast<int>(m.attendees.size());
-            s.at_ms = m.ended_at ? m.ended_at : m.started_at;
-            s.link = m.thread_id.empty() ? std::string{} : "#/threads/" + m.thread_id;
-            if (!trim(s.text).empty()) a->offer(s);
-        }
+        if (auto* a = agenda_live.load())
+            if (auto s = agenda_meeting_item(m, turns)) a->offer(*s);
         auto* k = knowledge_live.load();
         if (!k) return;
         std::vector<knowledge::Turn> t;

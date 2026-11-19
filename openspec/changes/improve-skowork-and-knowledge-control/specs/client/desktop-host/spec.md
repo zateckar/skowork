@@ -20,3 +20,11 @@ Every published desktop version, including a development version, SHALL have a c
 #### Scenario: Missing speech artifact
 - **WHEN** a release lacks a verified compatible speech package or its acquisition metadata
 - **THEN** release validation fails instead of publishing a desktop version with an unusable setup action
+
+
+### Requirement: Executable Manifest Settings
+`Skowork.exe` and `skowork-worker.exe` SHALL each embed exactly one application manifest that selects the UTF-8 active code page and long-path awareness; `Skowork.exe` SHALL also declare Per-Monitor V2 DPI awareness. client/build-pipeline checks this before publishing, together with the core install-size budget.
+
+#### Scenario: A build loses a manifest setting
+- **WHEN** a release build of `skowork-worker.exe` has no long-path setting in its manifest, or `Skowork.exe` lacks Per-Monitor V2 DPI awareness
+- **THEN** the pipeline's manifest check fails and the desktop package is not published

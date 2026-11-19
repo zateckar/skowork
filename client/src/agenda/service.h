@@ -98,6 +98,7 @@ private:
 
     void detect(const std::vector<Pending>& batch);
     void accept(const Candidate& c, const SourceItem& item, const Due& due);
+    std::optional<Due> local_due(const Candidate& c, long long source_ms, int tz_now);
     std::optional<std::string> model_merge(const Candidate& c, const std::vector<Item>& nearby);
     void reminders(long long now);
     void auto_prepare(long long now);

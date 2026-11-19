@@ -269,6 +269,11 @@ Targets below are acceptance budgets, not measurements from this planning pass. 
 
 Alternatives: accept unit tests alone (misses packaging, native UI and model behavior); require million-token live inputs for every unit test (slow and expensive without improving boundary coverage); infer baseline performance from a fast workstation (misstates the hardware requirement).
 
+Owners of work done without its own task (task 2.4, 2026-11-19):
+- Shared-item recheck with a server content digest (`server_content_hash` in `control-plane/src/knowledge/team.ts`, tested in `control-plane/test/team-knowledge.test.ts`): control-plane/team-knowledge Shared Item Content Verification in this change.
+- Install-size gate (`client/tools/check-footprint.ps1`, 30 MB): the core-package budget of client/desktop-host Footprint Budgets (add-client-foundation, raised to 30 MB there), run by client/build-pipeline Remaining Pipeline Checks.
+- Manifest gate (`client/tools/check-manifests.ps1`): no requirement named its settings, so this change adds client/desktop-host Executable Manifest Settings; client/build-pipeline Remaining Pipeline Checks runs it.
+
 ## New Policy And Configuration Inventory
 
 | Entry | Owner | Values/default | Merge and guardrail |

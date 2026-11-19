@@ -19,7 +19,7 @@
 - [x] 3.5 Lazy Tool Loading per Thread: load order kept, bound drops the earliest loaded, tools that policy denies are dropped. Verify with unit tests for each scenario
 - [x] 3.6 Run Retry (D6): `threads.retry` resumes the failed latest Run; failed model output is excluded from later requests. Verify with unit tests: one user message after retry, completed tool calls not re-executed, retry refused for an older Run
 
-- [ ] 3.7 Read streams as data arrives (D8): `WinHttpQueryDataAvailable` before each `WinHttpReadData` in `HttpClient::send`. Verify with a test against a loopback server that sends small chunks with gaps: each chunk reaches `on_chunk` before the next is sent, and a gap shorter than the idle timeout never fails
+- [x] 3.7 Read streams as data arrives (D8): `WinHttpQueryDataAvailable` before each `WinHttpReadData` in `HttpClient::send`. Verify with a test against a loopback server that sends small chunks with gaps: each chunk reaches `on_chunk` before the next is sent, and a gap shorter than the idle timeout never fails. Status: done 2026-11-19; HttpStream.SmallChunksReachTheCallerAsTheyArrive passes in the debug suite (four chunks 400 ms apart, each delivered within 300 ms, 3 s idle limit)
 
 ## 4. Acceptance
 

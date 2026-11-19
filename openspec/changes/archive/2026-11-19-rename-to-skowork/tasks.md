@@ -13,7 +13,7 @@
 - [x] 3.1 Search tracked text files for `Workbench`, `workbench` and `WORKBENCH` and confirm no occurrence remains.
 - [x] 3.2 Run `openspec validate --all --strict` and confirm it passes.
 - [x] 3.3 Run the control-plane test suite and confirm it passes.
-- [ ] 3.4 Build the client and run its tests where the local toolchain allows, and record the result in design.md. Record anything not run.
+- [x] 3.4 Build the client and run its tests where the local toolchain allows, and record the result in design.md. Record anything not run.
 
 ## 4. Archive
-- [ ] 4.1 Run `openspec archive rename-to-skowork --yes` once every task is checked, then reread the merged specs under `openspec/specs/` for coherence.
+- [x] 4.1 Run `openspec archive rename-to-skowork --yes` once every task is checked, then reread the merged specs under `openspec/specs/` for coherence.

@@ -602,7 +602,8 @@ std::vector<FeedItem> FeedView::visible(std::vector<FeedItem> items) const {
                 out.push_back(std::move(w));
             }
         } else {
-            if (it.type == ItemType::working && it.text.empty())
+            // One Tool at work is named in plain words ("Working with mail"); parallel Tools keep their count.
+            if (it.type == ItemType::working && (it.text.empty() || it.text == "feed.working_tools|1"))
                 if (const auto s = step.find(it.run_id); s != step.end()) it.text = s->second.first + "|" + s->second.second;
             out.push_back(std::move(it));
         }

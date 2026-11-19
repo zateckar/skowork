@@ -358,7 +358,13 @@ Result<bool> remove_speech_version(const fs::path& data_root, const std::string&
     const fs::path removing = speech_root(data_root) / L"removing";
     fs::create_directories(removing, ec);
     const fs::path moved = removing / widen(version + "-" + random_urlsafe(6));
-    if (!::MoveFileExW(dir.c_str(), moved.c_str(), 0)) return defer();
+    // A scanner or the search indexer opens new files for a moment; a worker keeps its handle. Retry briefly, then defer.
+    for (int attempt = 0;; ++attempt) {
+        if (::MoveFileExW(dir.c_str(), moved.c_str(), 0)) break;
+        const DWORD e = ::GetLastError();
+        if (attempt == 9 || (e != ERROR_ACCESS_DENIED && e != ERROR_SHARING_VIOLATION)) return defer();
+        ::Sleep(50);
+    }
     fs::remove_all(moved, ec);  // anything left is deleted at the next start
     return true;
 }

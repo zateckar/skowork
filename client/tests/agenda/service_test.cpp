@@ -2,6 +2,7 @@
 // through a fake small model, admission counters, merging, dismissal, withdrawal, user edits, preparation, reminders
 // and deletion, on a real encrypted app.db.
 #include "agenda/service.h"
+#include "app/agenda_intake.h"
 #include "base/time.h"
 #include "platform/crypto.h"
 #include "platform/win.h"
@@ -31,6 +32,8 @@ public:
     int requests = 0;
     std::string text;
     std::string merge_answer = R"({"same":null})";
+    bool no_candidates = false;          // answer every detected item with no candidates
+    std::vector<size_t> batch_sizes;     // items per detection request
     model::ChatRequest last;
     std::optional<model::RoleInfo> role_info(model::Role role) override {
         if (role != model::Role::small) return std::nullopt;
@@ -46,6 +49,15 @@ public:
         model::ChatResponse resp;
         resp.finish_reason = "stop";
         resp.text = r.feature == "agenda.merge" ? merge_answer : text;
+        if (r.feature == "agenda.detect") {
+            const json data = json::parse(r.messages.back().content);
+            batch_sizes.push_back(data["items"].size());
+            if (no_candidates) {
+                json items = json::array();
+                for (const auto& it : data["items"]) items.push_back({{"id", it["id"]}, {"candidates", json::array()}});
+                resp.text = json{{"items", items}}.dump();
+            }
+        }
         return resp;
     }
 };
@@ -57,6 +69,7 @@ struct Rig {
     long long now = kNow;
     std::map<std::string, json> policy;
     bool presentation = false;
+    std::function<int(long long)> tz = [](long long) { return kCet; };
     std::vector<std::tuple<std::string, std::string, std::string>> notes;  // title, body, route
     std::vector<std::string> prepared;                                        // messages of started preparations
     std::string preamble;
@@ -90,7 +103,7 @@ struct Rig {
         };
         e.model = &model;
         e.now = [this] { return now; };
-        e.tz_offset_min = [](long long) { return kCet; };
+        e.tz_offset_min = [this](long long t) { return tz(t); };
         e.identity = [] { return agenda::Identity{"jana novakova", {"jana.novakova@example.cz"}}; };
         e.start_preparation = [this](const agenda::Item&, const std::string& thread, const std::string& message, const std::string& pre,
                                      bool un) -> Result<agenda::Preparation> {
@@ -411,4 +424,132 @@ TEST(AgendaService, TheQueueKeepsTheNewestFiveHundredAndCountsTheRest) {
     const json st = r.svc->status();
     EXPECT_EQ(jint(st, "pending"), 500);
     EXPECT_EQ(jint(st, "overflow"), 3);
+}
+
+TEST(AgendaService, MeetingTasksAreAdmittedOnlyWhenTheyNameTheUserAndLeaveWithTheMeeting) {
+    Rig r;
+    r.enable();
+    auto rec = [](const std::string& id, const std::string& who) {
+        meeting::MeetingRecord m;
+        m.id = id;
+        m.thread_id = "th-" + id;
+        m.title = "Budget review";
+        m.event_id = "ev-" + id;
+        m.attendees = {"a", "b", "c", "d"};
+        m.started_at = ms("2026-11-17T09:10:00Z");
+        m.ended_at = ms("2026-11-17T09:40:00Z");
+        const json turns = json::array({{{"speaker", "Petr Svoboda"}, {"text", who + ", please send the cost estimate by 24 November."}},
+                                        {{"speaker", "Petr Svoboda"}, {"text", "Thanks, see you next week."}}});
+        return *agenda_meeting_item(m, turns);
+    };
+    const std::string task = candidate("please send the cost estimate by 24 November", "2026-11-24", "Send the cost estimate");
+    r.svc->offer(rec("mt-other", "Martin"));
+    r.model.text = answer("mt-other", task);
+    r.svc->detect_now();
+    EXPECT_TRUE(r.svc->list()["items"].empty());
+    EXPECT_EQ(jint(r.svc->status()["dropped"], "responsibility"), 1);
+
+    r.svc->offer(rec("mt-1", "Jana Novakova"));
+    r.model.text = answer("mt-1", task);
+    r.svc->detect_now();
+    const json items = r.svc->list()["items"];
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_EQ(jstr(items[0]["sources"][0], "link"), "#/threads/th-mt-1");
+    r.svc->withdraw("meeting", "mt-1");  // the meeting was deleted
+    EXPECT_TRUE(r.svc->list()["items"].empty());
+}
+
+TEST(AgendaService, ChatMessagesAreBatchedAtMostOncePerIntervalFromEnablementOn) {
+    Rig r;
+    const json chat = {{"kind", "direct"}, {"members", json::array({"petr", "jana"})}};
+    auto push = [&](int i, const char* at) {
+        const json payload = {{"chat", "c-1"},
+                              {"message", {{"id", "msg-" + std::to_string(i)}, {"text", "Message " + std::to_string(i)}, {"sender", "petr"}, {"at", at}}}};
+        r.svc->offer(*agenda_chat_item(payload, chat, "jana", r.now));
+    };
+    r.enable();
+    push(0, "2026-11-17T08:59:00Z");  // history before enablement
+    for (int i = 1; i <= 12; ++i) push(i, "2026-11-17T09:30:00Z");
+    EXPECT_EQ(jint(r.svc->status(), "pending"), 12);
+    r.model.no_candidates = true;
+    r.svc->tick();
+    r.svc->tick();  // within the interval: no second request
+    ASSERT_EQ(r.model.batch_sizes, std::vector<size_t>{10});
+    EXPECT_EQ(jint(r.svc->status(), "pending"), 2);
+    r.now += agenda::kRequestIntervalMs;
+    r.svc->tick();
+    EXPECT_EQ(r.model.batch_sizes, (std::vector<size_t>{10, 2}));
+    EXPECT_EQ(jint(r.svc->status(), "pending"), 0);
+}
+
+TEST(AgendaService, AutomaticPreparationIsRefreshedOnceTheWorkingDayBeforeAfterASourceChanged) {
+    Rig r;
+    r.policy["agenda.auto_prepare"] = true;
+    r.enable();
+    ASSERT_TRUE(r.svc->set({{"auto_prepare", true}}));
+    r.svc->offer(mail("m1", "Please send me the Q4 slides by Monday 23 November."));
+    r.model.text = answer("m1", candidate("send me the Q4 slides by Monday", "2026-11-23", "Send the Q4 slides"));
+    r.svc->detect_now();
+    r.svc->tick();
+    ASSERT_EQ(r.runs, 1);
+    // Thursday: a newer revision of the source, but it is not yet the working day before Monday.
+    r.now = ms("2026-11-19T10:00:00Z");
+    auto rev = mail("m1", "Please send me the Q4 slides by Monday 23 November, with the risks slide.");
+    rev.at_ms = r.now;
+    r.svc->offer(rev);
+    r.model.text = answer("m1", candidate("send me the Q4 slides by Monday", "2026-11-23", "Send the Q4 slides"));
+    r.svc->detect_now();
+    r.svc->tick();
+    EXPECT_EQ(r.runs, 1);
+    r.now = ms("2026-11-20T08:00:00Z");  // Friday
+    r.svc->tick();
+    ASSERT_EQ(r.runs, 2);
+    EXPECT_TRUE(r.unattended);
+    r.svc->tick();
+    EXPECT_EQ(r.runs, 2);
+    // Another change after the refresh: no second refresh.
+    rev.at_ms = r.now + 60'000;
+    r.now += 120'000;
+    r.svc->offer(rev);
+    r.svc->detect_now();
+    r.svc->tick();
+    EXPECT_EQ(r.runs, 2);
+}
+
+TEST(AgendaService, AutomaticPreparationNeedsUnattendedRunsThatMayRead) {
+    Rig r;
+    r.policy["agenda.auto_prepare"] = true;
+    r.policy["unattended.allowed_risk"] = json::array();
+    r.enable();
+    ASSERT_TRUE(r.svc->set({{"auto_prepare", true}}));
+    r.svc->offer(mail("m1", kAsk));
+    r.model.text = answer("m1", candidate("send me the Q4 slides"));
+    r.svc->detect_now();
+    r.svc->tick();
+    EXPECT_EQ(r.runs, 0);
+    r.policy["unattended.allowed_risk"] = json::array({"read"});
+    r.svc->tick();
+    EXPECT_EQ(r.runs, 1);
+}
+
+TEST(AgendaService, ADueTimeAfterTheSwitchToSummerTimeKeepsItsLocalTime) {
+    Rig r;
+    const long long summer = ms("2027-03-28T01:00:00Z");
+    r.tz = [summer](long long t) { return t < summer ? 60 : 120; };
+    r.enable();
+    r.now = ms("2027-03-26T09:00:00Z");  // Friday 10:00 CET
+    auto m = mail("m1", "Please call me on Monday at 10:00 about the Q4 slides.");
+    m.at_ms = ms("2027-03-26T08:30:00Z");
+    r.svc->offer(m);
+    r.model.text = answer("m1", json{{"title", "Call Petr"}, {"action", "Call Petr about the Q4 slides"}, {"due", "2027-03-29T10:00"},
+                                     {"due_phrase", "on Monday at 10:00"}, {"due_kind", "explicit"}, {"responsibility", "requested"},
+                                     {"quote", "call me on Monday at 10:00"}, {"confidence", 0.9}, {"draft_kind", "none"}}
+                                    .dump());
+    r.svc->detect_now();
+    const json items = r.svc->list()["items"];
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_EQ(jint(items[0], "due_at"), ms("2027-03-29T08:00:00Z"));  // 10:00 CEST
+    auto edited = r.svc->edit(jstr(items[0], "id"), {{"due", "2027-03-30T14:00"}});
+    ASSERT_TRUE(edited) << edited.error().message;
+    EXPECT_EQ(jint(*edited, "due_at"), ms("2027-03-30T12:00:00Z"));
 }

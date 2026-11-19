@@ -167,12 +167,17 @@ public:
     // Invokes a control on the window thread, as its Invoke pattern does. Not through UI Automation from this
     // process: invoking raises events (Invoked, focus, the rich edit's own), and a client in the window's process
     // stalls when the window thread raises one (see uia_test.cpp, which covers the Invoke pattern itself).
+    // Views rebuild their nodes when they reload, so an element can be missing for a moment: retry briefly.
     bool invoke(const std::string& id) {
-        return with(id, [](ui::Node& n) {
-            if (!n.can_invoke()) return false;
-            n.invoke();
-            return true;
-        });
+        for (int waited = 0;; waited += 20) {
+            const bool done = with(id, [](ui::Node& n) {
+                if (!n.can_invoke()) return false;
+                n.invoke();
+                return true;
+            });
+            if (done || waited >= 1000) return done;
+            std::this_thread::sleep_for(20ms);
+        }
     }
     // Expands or collapses an element (ExpandCollapse), on the window thread for the same reason.
     bool expand(const std::string& id, bool on = true) {
@@ -1552,7 +1557,17 @@ std::vector<std::string> work_items(ShellThread& w) {
 }  // namespace
 
 TEST(ShellFeed, WorkDetailsAreHiddenByDefaultWithAStatusLineAndShowDetailsPerRun) {
-    Fixture f([](Inbox& in) { in.env.add_tool(mail_tool(in.env)); });
+    Gate gate;  // outlives the fixture, whose Run may still wait on it after a failed assertion
+    // The mail call waits, so the Run's current step stays "mail" until the gate opens; once the tool returns, the
+    // step is the model call ("Contacting the model").
+    Fixture f([&gate](Inbox& in) {
+        ToolDef mail = mail_tool(in.env);
+        mail.run = [&gate, inner = mail.run](ToolContext& c, const json& args) {
+            gate.wait();
+            return inner(c, args);
+        };
+        in.env.add_tool(std::move(mail));
+    });
     const auto t = f.in.env.thread();
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
     f.attach(w);
@@ -1561,9 +1576,7 @@ TEST(ShellFeed, WorkDetailsAreHiddenByDefaultWithAStatusLineAndShowDetailsPerRun
 
     f.in.env.model.push_calls({{"c1", "find_tools", {{"query", "mail send"}}}});
     f.in.env.model.push_calls({{"c2", "mail.send", {{"to", "a@b.cz"}, {"body", "Hello"}}}});
-    Gate gate;
-    f.in.env.model.push([&gate](const model::ChatRequest&, const model::ChatSink&) {
-        gate.wait();
+    f.in.env.model.push([](const model::ChatRequest&, const model::ChatSink&) {
         model::ChatResponse r = text_response("I sent the mail.");
         r.reasoning = "Checking what was sent.";
         return model::ModelResult<model::ChatResponse>(r);
@@ -6697,7 +6710,7 @@ TEST(ShellKnowledge, PublishCategoriesPreviewsExactlyWhatIsUploaded) {
             std::error_code ec;
             std::filesystem::remove_all(path, ec);
         }
-        std::filesystem::path path = std::filesystem::temp_directory_path() / L"workbench-test" / wb::widen(wb::random_urlsafe(6));
+        std::filesystem::path path = std::filesystem::temp_directory_path() / L"skowork-test" / wb::widen(wb::random_urlsafe(6));
     } dir;
     const auto docs = dir.path / L"docs";
     std::filesystem::create_directories(docs);
@@ -6886,7 +6899,7 @@ TEST(ShellKnowledge, SharingShowsPendingRemovalsAndReviewsTheNextVersion) {
             std::error_code ec;
             std::filesystem::remove_all(path, ec);
         }
-        std::filesystem::path path = std::filesystem::temp_directory_path() / L"workbench-test" / wb::widen(wb::random_urlsafe(6));
+        std::filesystem::path path = std::filesystem::temp_directory_path() / L"skowork-test" / wb::widen(wb::random_urlsafe(6));
     } dir;
     const auto docs = dir.path / L"docs";
     std::filesystem::create_directories(docs);
@@ -7654,8 +7667,8 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
         ASSERT_TRUE(w.invoke("knowledge-fact-category-choose-" + risks_id));
         ASSERT_TRUE(w.until([&] { return decision(june_fact, *risks) == "manual"; }));
         const std::string august_suggestion = "knowledge-suggestion-" + std::to_string(august_fact) + "-" + planning_id;
-        ASSERT_TRUE(w.until([&] { return w.exists(august_suggestion); }));
-        ASSERT_TRUE(w.invoke(august_suggestion));
+        // The list reloads after the Risks assignment; the row can be gone for a moment between a check and an invoke.
+        ASSERT_TRUE(w.until([&] { return w.invoke(august_suggestion); }));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-fact-category-reject-" + planning_id); }));
         ASSERT_TRUE(w.invoke("knowledge-fact-category-reject-" + planning_id));
         ASSERT_TRUE(w.until([&] { return decision(august_fact, *planning) == "rejected"; }));

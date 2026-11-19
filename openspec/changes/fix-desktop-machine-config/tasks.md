@@ -9,6 +9,6 @@
 - [x] 2.2 Read the Skowork registry key and `skowork.machine.json` only (D4 as superseded by rename-to-skowork D2). Verify (2026-11-12, before the supersession): `machine_config_tests` covered the legacy registry key and file; the legacy-name tests are removed by rename-to-skowork task 2.3.
 
 ## 3. Validation
-- [ ] 3.1 Build the release desktop client, run configuration regressions and relevant existing tests, and record results in design.md; run OpenSpec strict validation.
+- [x] 3.1 Build the release desktop client, run configuration regressions and relevant existing tests, and record results in design.md; run OpenSpec strict validation. Status: done 2026-11-19 (design.md Validation).
 
 Once all tasks are complete, archive this change and reread the merged spec as AGENTS.md requires.

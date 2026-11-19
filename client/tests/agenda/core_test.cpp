@@ -183,3 +183,54 @@ TEST(AgendaDetection, DataCarriesLocalDatesAndWeekdays) {
     EXPECT_EQ(d["items"][0]["id"], "m1");
     EXPECT_NE(detection_instructions().find("untrusted"), std::string::npos);
 }
+
+// Task 1.2: relative dates and time zones against a fixed table of source timestamps. A phrase that does not agree with
+// the date drops the candidate; nothing is guessed.
+TEST(AgendaDueDates, RelativePhrasesAgainstAFixedTable) {
+    struct Row {
+        const char* source;  // UTC
+        int tz;
+        const char* due;
+        const char* phrase;
+        bool ok;
+    };
+    const Row rows[] = {
+        // Tuesday 17 November 2026, 09:00 CET.
+        {"2026-11-17T08:00:00Z", 60, "2026-11-20", "by Friday", true},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-27", "by Friday", true},  // the Friday of next week
+        {"2026-11-17T08:00:00Z", 60, "2026-11-19", "by Friday", false},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-24", "next week", true},
+        {"2026-11-17T08:00:00Z", 60, "2026-12-08", "next week", false},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-17", "today", true},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-18T09:00", "tomorrow morning", true},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-19T09:00", "tomorrow morning", false},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-19", "the day after tomorrow", true},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-18", "the day after tomorrow", false},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-20", "do pátku", true},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-23", "v pondělí", true},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-25", "příští týden", true},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-18T08:00", "zítra ráno", true},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-19", "pozítří", true},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-18", "pozítří", false},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-20", "bis Freitag", true},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-24", "nächste Woche", true},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-18T08:00", "morgen früh", true},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-19", "morgen", false},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-23T09:00", "Montagmorgen", true},  // Monday morning, not tomorrow
+        {"2026-11-17T08:00:00Z", 60, "2026-11-18T09:00", "Montagmorgen", false},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-17T11:00", "heute Morgen", true},  // this morning
+        {"2026-11-17T08:00:00Z", 60, "2026-11-19", "übermorgen", true},
+        {"2026-11-17T08:00:00Z", 60, "2026-11-18", "übermorgen", false},
+        // Saturday 21 November, 00:30 CET: still Friday in UTC; "tomorrow" is Sunday.
+        {"2026-11-20T23:30:00Z", 60, "2026-11-22", "tomorrow", true},
+        {"2026-11-20T23:30:00Z", 60, "2026-11-21", "tomorrow", false},
+        {"2026-11-20T23:30:00Z", 60, "2026-11-23", "Monday", true},
+        // Friday 26 March 2027, 18:00 CET; summer time starts on Sunday 28 March.
+        {"2027-03-26T17:00:00Z", 60, "2027-03-29", "on Monday", true},
+        {"2027-03-26T17:00:00Z", 60, "2027-03-27", "tomorrow", true},
+    };
+    for (const auto& r : rows) {
+        Candidate c = cand("q", r.due, r.phrase);
+        EXPECT_EQ(resolve_due(c, ms(r.source), r.tz).has_value(), r.ok) << r.source << " " << r.due << " \"" << r.phrase << "\"";
+    }
+}

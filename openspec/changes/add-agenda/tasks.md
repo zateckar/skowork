@@ -1,19 +1,20 @@
 ## 1. Validation Spikes
 
 - [ ] 1.1 Build a labelled corpus of at least 150 mail, calendar, meeting follow-up and Chat samples in en, cs and de (dev/graph-mock fixtures, no real mailbox), including newsletters, FYI mail, lunch chatter, broadcasts, past and vague dates. Run the extended classifier prompt against the real gateway; verify precision of admitted Agenda items is at least 0.9 and recall at least 0.7, and record the figures in design.md.
-- [ ] 1.2 Verify local resolution of relative dates and time zones ("by Friday", "next week", "tomorrow morning", cs and de phrasing) against a fixed table of source timestamps; record failures as dropped, not guessed.
+- [x] 1.2 Verify local resolution of relative dates and time zones ("by Friday", "next week", "tomorrow morning", cs and de phrasing) against a fixed table of source timestamps; record failures as dropped, not guessed.
+  Status: done 2026-11-19; 30-row table in AgendaDueDates.RelativePhrasesAgainstAFixedTable. Three failures were fixed: German "Morgen" as morning, day-after-tomorrow phrases, and the offset at the due moment across a daylight-saving change. Details are in design.md, Date Resolution Check.
 - [ ] 1.3 Measure detection request size and latency per batch of 10 items against the real gateway; verify the 60-second interval keeps a busy day within the background model budget.
 
 ## 2. Detection And Admission
 
 - [x] 2.1 Implement the Agenda's mail and calendar intake and the bounded detection request and candidate parser (design D1); verify with parser unit tests, intake unit tests (baseline, sent items, excluded folders, queue cap, backoff) and a fuzz target for the candidate schema.
-  Status: done 2026-11-17; AgendaParse.* (agenda_tests), AgendaService.IsOffByDefaultAndScansNothingBeforeEnablement, AFailedOrMalformedDetectionKeepsTheItemsForLater, TheQueueKeepsTheNewestFiveHundredAndCountsTheRest. The app's mail and calendar adapters (sent folders are never received, backfill skipped) have no isolated test; fuzz_agenda_detection is registered but was not run.
+  Status: done 2026-11-17; AgendaParse.* (agenda_tests), AgendaService.IsOffByDefaultAndScansNothingBeforeEnablement, AFailedOrMalformedDetectionKeepsTheItemsForLater, TheQueueKeepsTheNewestFiveHundredAndCountsTheRest. The app's mail and calendar adapters (sent folders are never received, backfill skipped) have no isolated test. fuzz_agenda_detection_smoke (50,000 mutated runs) passed on 2026-11-19.
 - [x] 2.2 Implement the admission rules (design D2): quote check, responsibility, action, future date, confidence; verify each rule with unit tests, including a 40-recipient broadcast without the user's name and a past date.
   Status: done 2026-11-17; AgendaAdmit.* (agenda_tests) and AgendaService.NoiseLowConfidenceAndPastDatesAreDropped.
-- [ ] 2.3 Queue meeting transcripts when they are indexed, admitted only when a task names the user (design D1, changed 2026-11-17 from structured follow-ups); verify with meeting-service tests.
-  Status: partial 2026-11-17; implemented in the app's meeting knowledge callback with withdrawal on meeting deletion. No meeting-service test yet.
-- [ ] 2.4 Add Chat intake for direct Chats and mentions (design D1); verify batching, interval and that history before enablement is not scanned.
-  Status: partial 2026-11-17; chat-message pushes share the mail queue and interval, and the enablement baseline is tested for all kinds (IsOffByDefaultAndScansNothingBeforeEnablement). The push adapter has no isolated test.
+- [x] 2.3 Queue meeting transcripts when they are indexed, admitted only when a task names the user (design D1, changed 2026-11-17 from structured follow-ups); verify with meeting-service tests.
+  Status: done 2026-11-19; the adapter moved to `client/src/app/agenda_intake.cpp`. AgendaIntake.AMeetingBecomesASpeakerLabelledItemLinkedToItsThread, AMeetingWithoutTranscriptTextIsNotOffered, ALongTranscriptKeepsItsStartAndEndOnCharacterBoundaries and AgendaService.MeetingTasksAreAdmittedOnlyWhenTheyNameTheUserAndLeaveWithTheMeeting.
+- [x] 2.4 Add Chat intake for direct Chats and mentions (design D1); verify batching, interval and that history before enablement is not scanned.
+  Status: done 2026-11-19; AgendaIntake.ADirectChatAddressesTheUserAndATeamChatDoesNot, TheUsersOwnAndEmptyChatMessagesAreHandled and AgendaService.ChatMessagesAreBatchedAtMostOncePerIntervalFromEnablementOn (10 then 2 items, one request per 60 seconds, a message from before enablement not queued).
 
 ## 3. Merging And Lifecycle
 
@@ -24,10 +25,10 @@
 
 ## 4. Preparation
 
-- [ ] 4.1 Implement Prepare as a top-level Run limited to read-risk Tools with brief and draft instructions (design D5); verify that a write or external Tool is unavailable and that source content is tagged untrusted.
-  Status: partial 2026-11-17; PreparationStartsOnceWithAReadOnlyPreambleAndUntrustedData covers the service; the read-only BeforeToolCall hook in the app has no test of its own yet.
-- [ ] 4.2 Implement automatic preparation with its opt-in, daily cap, 7-day window and single refresh; verify with scheduler-style unit tests and with an unattended policy that denies read Tools.
-  Status: partial 2026-11-17; AutomaticPreparationNeedsPolicyAndTheUsersChoice covers opt-in, policy and one per tick; the refresh and the unattended-policy case are not tested.
+- [x] 4.1 Implement Prepare as a top-level Run limited to read-risk Tools with brief and draft instructions (design D5); verify that a write or external Tool is unavailable and that source content is tagged untrusted.
+  Status: done 2026-11-19; PreparationStartsOnceWithAReadOnlyPreambleAndUntrustedData covers the service, and AgendaIntake.PreparationRunsAndTheirChildRunsMayOnlyRead the hook's rule (`agenda_preparation_decision`): write-local, external and destructive calls are denied in a preparation Run and its Child Runs, other Runs are unaffected.
+- [x] 4.2 Implement automatic preparation with its opt-in, daily cap, 7-day window and single refresh; verify with scheduler-style unit tests and with an unattended policy that denies read Tools.
+  Status: done 2026-11-19; AutomaticPreparationNeedsPolicyAndTheUsersChoice, AutomaticPreparationIsRefreshedOnceTheWorkingDayBeforeAfterASourceChanged and AutomaticPreparationNeedsUnattendedRunsThatMayRead. The service now starts no automatic preparation when policy.unattended.allowed_risk leaves out read (design D5).
 - [ ] 4.3 Run one local e2e preparation against the real gateway with Graph-mock data; verify the brief has Citations and the draft is labelled.
 
 ## 5. Inbox View And Reminders

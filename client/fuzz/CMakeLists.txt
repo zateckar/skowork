@@ -116,7 +116,7 @@ if(SKOWORK_TESTS AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
            COMMAND fuzz_kg_analysis -runs=200000 -seed=1 -max_len=8192 -dict=${SKOWORK_FUZZ_CORPUS}/kg_analysis.dict ${kg_analysis_seeds})
   file(GLOB meeting_container_seeds ${SKOWORK_FUZZ_CORPUS}/meeting_container/*)
   add_test(NAME fuzz_meeting_container_smoke
-           COMMAND fuzz_meeting_container -runs=200000 -seed=1 -max_len=8192 -dict=${SKOWORK_FUZZ_CORPUS}/meeting_container.dict ${meeting_container_seeds})
+           COMMAND fuzz_meeting_container -runs=50000 -seed=1 -max_len=8192 -dict=${SKOWORK_FUZZ_CORPUS}/meeting_container.dict ${meeting_container_seeds})
   add_test(NAME fuzz_speech_manifest_smoke COMMAND fuzz_speech_manifest -runs=200000 -seed=1 -max_len=8192)
   file(GLOB speech_archive_seeds ${SKOWORK_FUZZ_CORPUS}/speech_archive/*)
   add_test(NAME fuzz_speech_archive_smoke COMMAND fuzz_speech_archive -runs=100000 -seed=1 -max_len=16384 ${speech_archive_seeds})

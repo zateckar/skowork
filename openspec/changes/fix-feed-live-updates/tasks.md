@@ -28,4 +28,4 @@
 
 - [ ] 5.1 Measure on the baseline laptop (i5, 16 GB, iGPU, CPU-only ML) through the real organization LLM API: a 30-minute Thread with a long streamed Run and background load, before and after the change. Verify: the D6 limits hold, and the numbers are recorded in design.md Acceptance. Needs the user's OK: it drives the desktop window.
 - [ ] 5.2 Manual check of the feed: reproduce the repeated answer, copy part of an answer with Ctrl+C while live updates arrive, and check that the composer still takes typed text. Verify: one answer, the clipboard holds exactly the selected words, and the composer is unchanged. Needs the user's OK: it uses desktop input.
-- [ ] 5.3 Run `openspec validate --all --strict`. Verify: it passes with no warnings.
+- [x] 5.3 Run `openspec validate --all --strict`. Verify: it passes with no warnings. Status: done 2026-11-19; 61 of 61 items pass, no warnings (only archive-order notes).

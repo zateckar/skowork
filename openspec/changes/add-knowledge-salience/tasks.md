@@ -1,7 +1,7 @@
 ## 1. Validation Spikes
 
 - [ ] 1.1 Build a labelled corpus of at least 120 passages in en, cs and de (Graph-mock mail, calendar, meeting transcripts, Chats, files; no real mailbox) with facts labelled important, temporary or trivial, including a company-wide memo, project mail and lunch or thank-you chatter. Run the extended extraction instruction against the real gateway; verify recall of important facts is at least 0.9, at least 70% of trivial facts are dropped, and record the relation-count reduction in design.md.
-  Status: not started 2026-11-17; needs the real gateway, and unsigned builds on this workstation cannot open outbound connections (use dev-proxy with WORKBENCH_DEV_PROXY, unsandboxed).
+  Status: not started 2026-11-17; needs the real gateway, and unsigned builds on this workstation cannot open outbound connections (use dev-proxy with SKOWORK_DEV_PROXY, unsandboxed).
 - [ ] 1.2 Tune the retrieval weights (design D5) on 30 labelled queries over the corpus; verify the memo outranks small talk for related queries without lowering recall@10 versus the current ranking.
   Status: not started 2026-11-17; depends on the corpus in 1.1 and the real gateway. Weights are in place as design constants (see RetrievalWeightsRankImportantSourcesHigher).
 - [ ] 1.3 Measure the added output tokens and latency per extraction call against the real gateway; verify the daily budget still covers a typical day of new items.
