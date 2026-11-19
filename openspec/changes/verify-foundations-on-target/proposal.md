@@ -2,7 +2,7 @@
 
 ## Why
 
-The four foundation changes (add-client-foundation, add-work-inbox, add-knowledge-graph, add-agent-runtime) are implemented and their behaviour is covered by local tests. Each one still has open checks that cannot run on the development workstation. They need an organization laptop, the baseline laptop, the organization Keycloak or Entra tenant, the real LLM gateway, the corporate proxy and VPN, a second Windows account, desktop input, a signing certificate, or a push to `main`. Because those checks stay open, the foundations cannot be archived. Nine finished changes that modify the foundations' requirements cannot be archived either.
+The four foundation changes (add-client-foundation, add-work-inbox, add-knowledge-graph, add-agent-runtime) and later add-native-ui and add-skills are implemented and their behaviour is covered by local tests. Each one still has open checks that cannot run on the development workstation. They need an organization laptop, the baseline laptop, the organization Keycloak or Entra tenant, the real LLM gateway, the corporate proxy and VPN, a second Windows account, desktop input, a signing certificate, or a push to `main`. Because those checks stay open, the foundations cannot be archived. Nine finished changes that modify the foundations' requirements cannot be archived either.
 
 ## What Changes
 
@@ -17,7 +17,7 @@ This change has no spec deltas (`skip_specs: true`). It verifies requirements al
 ## Out of scope
 
 - New behaviour or changed requirements.
-- Checks already owned by another in-flight change, such as the native UI measurements and screen-reader pass in add-native-ui.
+- Checks owned by a change that stays open for other reasons.
 
 ## Impact
 

@@ -80,6 +80,7 @@ endif()
 # Portable Skills tests (client/skills): SKILL.md, the frontmatter subset, tiers, tool scope.
 add_executable(skills_tests skills/skills_core_test.cpp skills/skills_catalog_test.cpp skills/skills_authoring_test.cpp)
 target_link_libraries(skills_tests PRIVATE wb_skills_core GTest::gtest_main)
+target_compile_definitions(skills_tests PRIVATE SKOWORK_SKILL_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/skills/public")
 if(WIN32)
   target_link_options(skills_tests PRIVATE -Wl,--subsystem,console)
   set_target_properties(skills_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -251,7 +252,9 @@ if(WIN32)
     e2e/browser_e2e_test.cpp)
   target_link_libraries(e2e_tests PRIVATE wb_app wb_model wb_runtime wb_tools wb_apps GTest::gtest_main ws2_32 iphlpapi)
   target_compile_definitions(e2e_tests PRIVATE SKOWORK_MCP_TEST_SERVER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../dev/mcp-test-server"
-    SKOWORK_DEV_STACK_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../dev/.stack")
+    SKOWORK_DEV_STACK_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../dev/.stack"
+    SKOWORK_AGENDA_CORPUS="${CMAKE_CURRENT_SOURCE_DIR}/../../dev/graph-mock/fixtures/agenda-corpus.json"
+    SKOWORK_GRAPH_MOCK_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../dev/graph-mock")
   set_target_properties(e2e_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
   add_dependencies(e2e_tests Skowork skowork-worker)
   add_test(NAME e2e_tests COMMAND e2e_tests)

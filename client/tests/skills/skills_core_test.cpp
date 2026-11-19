@@ -5,6 +5,11 @@
 
 #include <gtest/gtest.h>
 
+#include <cctype>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+
 using namespace wb;
 using namespace wb::skills;
 
@@ -261,4 +266,55 @@ TEST(SkillScope, ResolutionsIntersect) {
     EXPECT_EQ(allowed_resolutions(contradictory, "x"), std::vector<std::string>{"reject"});
     EXPECT_TRUE(tool_matches("mcp:jira/*", "mcp:jira/search"));
     EXPECT_FALSE(tool_matches("mail.*", "files.read"));
+}
+
+// add-skills task 1.1: 20 public Agent Skills (fixtures/skills/public, see NOTICE.md) parse unchanged, their name is
+// their folder's name, and frontmatter the client does not know (license) is kept in `frontmatter`.
+TEST(SkillMd, PublicAgentSkillsParseAndKeepUnknownFrontmatter) {
+    namespace fs = std::filesystem;
+    int count = 0;
+    for (const auto& entry : fs::recursive_directory_iterator(SKOWORK_SKILL_FIXTURES)) {
+        if (entry.path().filename() != "SKILL.md") continue;
+        ++count;
+        const std::string folder = entry.path().parent_path().filename().string();
+        SCOPED_TRACE(folder);
+        std::ifstream in(entry.path(), std::ios::binary);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        const std::string text = ss.str();
+        const Parsed p = ok(text);
+        EXPECT_EQ(p.manifest.name, folder);
+        EXPECT_FALSE(p.manifest.description.empty());
+        EXPECT_FALSE(p.body.empty());
+        // Every top-level key of the frontmatter is kept, known or not.
+        std::istringstream lines(text.substr(text.find('\n') + 1));
+        for (std::string line; std::getline(lines, line);) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line == "---") break;
+            const auto colon = line.find(':');
+            if (line.empty() || !std::isalpha(static_cast<unsigned char>(line[0])) || colon == std::string::npos) continue;
+            EXPECT_TRUE(p.manifest.frontmatter.contains(line.substr(0, colon))) << line.substr(0, colon);
+        }
+        if (text.find("\nlicense:") != std::string::npos)
+            EXPECT_TRUE(p.manifest.frontmatter.at("license").is_string());
+    }
+    EXPECT_EQ(count, 20);
+}
+
+// A description is counted in characters (UTF-8 code points), at most 1024. Authoring refuses a longer one; loading
+// keeps a published package usable and shortens the description the agent sees (Agent Skills Compatibility).
+TEST(SkillMd, DescriptionLengthInCharacters) {
+    std::string czech;
+    for (int i = 0; i < 1000; ++i) czech += "\xC5\xBE";  // "ž": 2 bytes, 1 character
+    EXPECT_EQ(ok("---\nname: cz\ndescription: " + czech + "\n---\nx\n", false).manifest.description, czech);
+    auto r = parse_skill_md("---\nname: cz\ndescription: " + czech + "\n---\nx\n", false, true);
+    EXPECT_TRUE(std::holds_alternative<Parsed>(r));
+    const std::string longer = std::string(1100, 'a');
+    const std::string md = "---\nname: long\ndescription: " + longer + "\n---\nx\n";
+    auto strict = parse_skill_md(md, false, true);
+    ASSERT_TRUE(std::holds_alternative<ParseError>(strict));
+    EXPECT_EQ(std::get<ParseError>(strict).field, "description");
+    const Parsed loaded = ok(md);
+    EXPECT_EQ(loaded.manifest.description, std::string(1023, 'a') + "\xE2\x80\xA6");
+    EXPECT_EQ(loaded.manifest.frontmatter.at("description").get<std::string>(), longer);
 }

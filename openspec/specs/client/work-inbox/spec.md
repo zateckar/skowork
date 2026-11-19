@@ -479,3 +479,29 @@ A dialog SHALL dim the window behind it by darkening it, and no dialog or row of
 #### Scenario: Dimming in the dark theme
 - **WHEN** a dialog opens in the dark theme
 - **THEN** the window behind it is darker than before, not lighter
+
+### Requirement: Markdown Rendering
+The Thread feed SHALL render model output as Markdown (CommonMark with tables, strikethrough and task lists), also while it streams. Code blocks use a monospace font and offer Copy. Model output is untrusted: raw HTML in it is shown as text, images in it are never fetched and are shown as their alternative text with the link, and a link opens in the default browser only when the user clicks it, after the target URL is shown.
+
+#### Scenario: Formatted answer
+- **WHEN** the model answers with a heading, a bulleted list, a table and a code block
+- **THEN** the feed shows them formatted, and the Markdown markup itself is not visible
+
+#### Scenario: Remote image in output
+- **WHEN** model output contains a Markdown image with a remote URL
+- **THEN** no request is made to that URL, and the feed shows the alternative text and the link
+
+#### Scenario: Raw HTML in output
+- **WHEN** model output contains an HTML tag such as a script element
+- **THEN** the feed shows it as literal text
+
+### Requirement: Agenda View
+When the Agenda is enabled (client/agenda), the Inbox views SHALL include an Agenda view listing open Agenda items grouped as Overdue, Today, Tomorrow, This week and Later, sorted by due time. Each row SHALL show the title, the due date with an inferred marking where applicable, the kinds of its sources and whether a preparation exists, and SHALL offer Prepare or Open preparation, Open source, Mark done, Dismiss and Edit date. Every row and action SHALL have a UI Automation name.
+
+#### Scenario: Open the Agenda
+- **WHEN** the user has two open items due today and one due next week
+- **THEN** the Agenda view shows them under Today and Later, and each row offers Prepare
+
+#### Scenario: Agenda disabled
+- **WHEN** the Agenda is disabled
+- **THEN** the Agenda view is not listed among the Inbox views

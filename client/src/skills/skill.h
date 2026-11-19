@@ -50,8 +50,11 @@ struct Parsed {
 };
 
 // Parses SKILL.md. `require_version`: the registry's rule (shared, group, org); private and built-in Skills may omit
-// it and get 0.0.0 (Agent Skills Compatibility).
-std::variant<Parsed, ParseError> parse_skill_md(std::string_view text, bool require_version = false);
+// it and get 0.0.0 (Agent Skills Compatibility). The description may have at most kMaxDescriptionChars characters.
+// `authoring` (the editor, Save as skill) refuses a longer one; loading accepts it and shortens manifest.description,
+// keeping the full text in frontmatter (Agent Skills Compatibility).
+inline constexpr std::size_t kMaxDescriptionChars = 1024;
+std::variant<Parsed, ParseError> parse_skill_md(std::string_view text, bool require_version = false, bool authoring = false);
 
 [[nodiscard]] bool valid_name(std::string_view name);
 [[nodiscard]] bool valid_version(std::string_view version);

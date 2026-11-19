@@ -477,8 +477,42 @@ TEST(AgendaService, ChatMessagesAreBatchedAtMostOncePerIntervalFromEnablementOn)
     ASSERT_EQ(r.model.batch_sizes, std::vector<size_t>{10});
     EXPECT_EQ(jint(r.svc->status(), "pending"), 2);
     r.now += agenda::kRequestIntervalMs;
+    r.svc->tick();  // two items do not fill a batch: they wait up to 15 minutes for more
+    EXPECT_EQ(r.model.batch_sizes, std::vector<size_t>{10});
+    r.now += agenda::kFillWaitMs;
     r.svc->tick();
     EXPECT_EQ(r.model.batch_sizes, (std::vector<size_t>{10, 2}));
+    EXPECT_EQ(jint(r.svc->status(), "pending"), 0);
+}
+
+// add-agenda task 1.3: a batch of 10 costs about 3,400 tokens on the real gateway, so detection sends at most 100
+// requests a local day (about a third of the default chat budget); later items wait for the next day.
+TEST(AgendaService, DetectionStopsForTheDayAfterTheDailyLimit) {
+    Rig r;
+    r.enable();
+    r.model.no_candidates = true;
+    for (long long n = 0; n <= agenda::kMaxDetectionsPerDay; ++n) {
+        for (int i = 0; i < 10; ++i) {
+            agenda::SourceItem s;
+            s.kind = "mail";
+            s.id = "m-" + std::to_string(n) + "-" + std::to_string(i);
+            s.title = "Mail";
+            s.text = "Text";
+            s.user_addressed = true;
+            s.recipients = 1;
+            s.at_ms = r.now;
+            r.svc->offer(s);
+        }
+        r.svc->tick();
+        r.now += agenda::kRequestIntervalMs;
+    }
+    EXPECT_EQ(static_cast<long long>(r.model.batch_sizes.size()), agenda::kMaxDetectionsPerDay);
+    const json st = r.svc->status();
+    EXPECT_TRUE(jbool(st, "daily_limit_reached", false));
+    EXPECT_EQ(jint(st, "pending"), 10);
+    r.now += 24LL * 3'600'000;  // the next local day
+    r.svc->tick();
+    EXPECT_EQ(static_cast<long long>(r.model.batch_sizes.size()), agenda::kMaxDetectionsPerDay + 1);
     EXPECT_EQ(jint(r.svc->status(), "pending"), 0);
 }
 

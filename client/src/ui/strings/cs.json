@@ -1687,6 +1687,7 @@
   "settings.agenda.remind_hour_before": "Hodinu předem u položek s časem",
   "settings.agenda.auto_prepare": "Automaticky připravit položky s termínem do 7 dnů (jen čtení)",
   "settings.agenda.diagnostics": "Čeká na kontrolu: {pending}. Kandidáti vynechaní jako šum: {dropped}.",
+  "settings.agenda.daily_limit": "Dnešní limit kontrol je vyčerpán. Nové položky počkají a zkontrolují se zítra.",
   "settings.agenda.last_error": "Poslední kontrola selhala ({reason}); zkusí se znovu později.",
   "settings.agenda.delete_all": "Smazat data Agendy",
   "settings.agenda.delete_title": "Smazat data Agendy?",

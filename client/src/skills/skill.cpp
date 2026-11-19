@@ -112,7 +112,7 @@ bool tool_matches(std::string_view pattern, std::string_view tool) {
     return p == pattern.size();
 }
 
-std::variant<Parsed, ParseError> parse_skill_md(std::string_view text, bool require_version) {
+std::variant<Parsed, ParseError> parse_skill_md(std::string_view text, bool require_version, bool authoring) {
     if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF && static_cast<unsigned char>(text[1]) == 0xBB &&
         static_cast<unsigned char>(text[2]) == 0xBF)
         text.remove_prefix(3);
@@ -158,8 +158,19 @@ std::variant<Parsed, ParseError> parse_skill_md(std::string_view text, bool requ
     m.name = *name;
     const auto desc = scalar("description");
     if (!desc || desc->empty()) return err("description", "SKILL.md needs a description.");
-    if (desc->size() > 1024) return err("description", "The description is longer than 1024 characters.");
-    m.description = *desc;
+    // Characters are code points: a UTF-8 continuation byte does not start one.
+    std::size_t chars = 0, cut = desc->size();
+    for (std::size_t i = 0; i < desc->size(); ++i) {
+        if ((static_cast<unsigned char>((*desc)[i]) & 0xC0) == 0x80) continue;
+        if (chars == kMaxDescriptionChars - 1 && cut == desc->size()) cut = i;
+        ++chars;
+    }
+    if (chars > kMaxDescriptionChars) {
+        if (authoring) return err("description", "The description is longer than 1024 characters.");
+        m.description = desc->substr(0, cut) + "\xE2\x80\xA6";  // the first 1023 characters and an ellipsis
+    } else {
+        m.description = *desc;
+    }
     auto version = scalar("version");
     if (!version) return err("version", "The version must be a single value.");
     // agentskills.io packages declare it as metadata.version.

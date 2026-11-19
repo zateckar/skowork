@@ -234,3 +234,40 @@ TEST(AgendaDueDates, RelativePhrasesAgainstAFixedTable) {
         EXPECT_EQ(resolve_due(c, ms(r.source), r.tz).has_value(), r.ok) << r.source << " " << r.due << " \"" << r.phrase << "\"";
     }
 }
+
+// The real gateway's small model wraps its JSON in one Markdown code fence (add-agenda task 1.1, 2026-11-19). Exactly
+// one fenced block, labelled json or not and closed or not, is accepted; a fence with other text, or two blocks, rejects
+// the batch.
+TEST(AgendaParse, AcceptsOneFencedJsonBlockAndNothingElse) {
+    const std::vector<SourceItem> items = {mail("x")};
+    const std::string body = response(kGood);
+    EXPECT_TRUE(parse_detection("\n\n```json\n" + body + "\n```\n", items));
+    EXPECT_TRUE(parse_detection("```\n" + body + "\n```", items));
+    EXPECT_FALSE(parse_detection("Here you go:\n```json\n" + body + "\n```", items));
+    EXPECT_FALSE(parse_detection("```json\n" + body + "\n```\nDone.", items));
+    EXPECT_FALSE(parse_detection("```json\n" + body + "\n```\n```json\n" + body + "\n```", items));
+    EXPECT_FALSE(parse_detection("```python\n" + body + "\n```", items));
+    EXPECT_TRUE(parse_detection("\n\n```json\n" + body, items));  // the real model sometimes omits the closing fence
+    EXPECT_FALSE(parse_detection("```json\n" + body + "\nDone.", items));
+}
+
+// A self-commitment in a meeting belongs to the user only when the user speaks the quoted words (add-agenda task 1.1,
+// 2026-11-19: the real model labels "Jana Nováková: I'll do it" as self_committed).
+TEST(AgendaAdmission, SelfCommitmentInAMeetingNeedsTheUserAsSpeaker) {
+    SourceItem m;
+    m.kind = "meeting";
+    m.id = "t1";
+    m.text = "Tom\xC3\xA1\xC5\xA1 Kr\xC3\xA1l: We need numbers.\nJana Nov\xC3\xA1kov\xC3\xA1: I will prepare the cost comparison by Friday.\n"
+             "Petr Dvo\xC5\x99\xC3\xA1k: I will update the FMEA by Friday.\n";
+    m.at_ms = kNow - 3'600'000;
+    Candidate c = cand("I will prepare the cost comparison by Friday.");
+    c.source_id = "t1";
+    c.responsibility = "self_committed";
+    EXPECT_EQ(admit(c, m, me(), kNow, kCet, 0.7, nullptr), Drop::none);
+    c.quote = "I will update the FMEA by Friday.";
+    EXPECT_EQ(admit(c, m, me(), kNow, kCet, 0.7, nullptr), Drop::responsibility);
+    SourceItem mail_item = mail("I will prepare the cost comparison by Friday.");  // in mail the author must be the user
+    c.quote = "I will prepare the cost comparison by Friday.";
+    c.source_id = mail_item.id;
+    EXPECT_EQ(admit(c, mail_item, me(), kNow, kCet, 0.7, nullptr), Drop::responsibility);
+}

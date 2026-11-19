@@ -116,6 +116,9 @@ json Service::status() {
     j["available"] = available();
     j["auto_prepare_allowed"] = policy_bool("agenda.auto_prepare", false);
     j["pending"] = store_.pending_count();
+    const bool today = store_.state("detect.day").value_or("") == day_key(env_.now());
+    j["detections_today"] = today ? store_.counter("detect.count") : 0;
+    j["daily_limit_reached"] = today && store_.counter("detect.count") >= kMaxDetectionsPerDay;
     j["open"] = static_cast<long long>(store_.list("open").size());
     json dropped = json::object();
     long long total = 0;
@@ -207,7 +210,15 @@ void Service::tick() {
     }
     if (due) {
         auto batch = store_.due_pending(now, kMaxItemsPerBatch);
-        if (!batch.empty()) {
+        const auto oldest = std::min_element(batch.begin(), batch.end(), [](const Pending& a, const Pending& b) { return a.queued_at < b.queued_at; });
+        const bool ready = batch.size() >= kMaxItemsPerBatch || (!batch.empty() && now - oldest->queued_at >= kFillWaitMs);
+        const std::string today = day_key(now);
+        if (store_.state("detect.day").value_or("") != today) {
+            (void)store_.set_state("detect.day", today);
+            (void)store_.set_state("detect.count", "0");
+        }
+        if (ready && store_.counter("detect.count") < kMaxDetectionsPerDay) {
+            (void)store_.add_counter("detect.count", 1);
             {
                 const std::lock_guard lock(mx_);
                 next_request_at_ = now + kRequestIntervalMs;

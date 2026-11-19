@@ -240,6 +240,8 @@ void PagePane::build_agenda_settings(Node& c) {
         text(c, shell_.t("settings.agenda.diagnostics", {{"pending", u16(std::to_string(jint(s, "pending")))},
                                                          {"dropped", u16(std::to_string(jint(s, "dropped_total")))}}),
              Paint::text_secondary, "agenda-diagnostics");
+        if (jbool(s, "daily_limit_reached"))
+            text(c, shell_.t("settings.agenda.daily_limit"), Paint::text_secondary, "agenda-daily-limit");
         if (const std::string err = jstr(s, "last_error"); !err.empty())
             text(c, shell_.t("settings.agenda.last_error", {{"reason", u16(err)}}), Paint::warning, "agenda-last-error");
     }

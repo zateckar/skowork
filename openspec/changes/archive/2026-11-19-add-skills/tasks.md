@@ -1,0 +1,50 @@
+# Tasks
+
+## 1. Validation spikes
+
+- [x] 1.1 Verified 2026-11-19 with the production parser rather than a prototype: `SkillMd.PublicAgentSkillsParseAndKeepUnknownFrontmatter` parses 20 public skills (18 from anthropics/skills, 2 from obra/superpowers; `client/tests/fixtures/skills/public/NOTICE.md`) and keeps the unknown `license` field. claude-api has a 1,080-character description. The spec now counts characters and loads such a package with a shortened description (design.md D11).
+- [x] 1.2 Superseded by design.md D6 "Storage in SQLite": the registry keeps packages in SQLite, not GitLab. Clients use only the registry API with their Skowork token (control-plane tests in `control-plane/test/skill*.test.ts`, 39 pass on 2026-11-19).
+
+## 2. Client skill loading (client/skills)
+
+- [x] 2.1 Implement the SKILL.md parser and validation (required fields, kebab-case name, semantic version, optional folders). Verify with unit tests and a fuzz target for the frontmatter parser
+- [x] 2.2 Implement the five load tiers, precedence, shadowing display and locked org skills. Verify with tests for each conflict case
+- [x] 2.3 Implement the tool-scope intersection, the default Skill tool set, and the skill-declared decision floor (interrupt_on, risk) with client/policy-enforcement. Verify that a skill cannot gain a tool or remove an approval, and that a call above the declared risk is approved
+- [x] 2.4 Implement the network field (no-network sandbox mode for scripts) and suggested triggers (offer only, created after user confirmation). Verify that a network-none script's requests through the proxy are refused and that no Trigger exists without confirmation
+
+## 3. Running skills
+
+- [x] 3.1 Expose skill names and descriptions to the main agent, and run selected skills as subagents. Verify that the Activity log shows the delegation in an end-to-end test
+- [x] 3.2 Implement `/name` invocation with completion in the composer. Verify with a UI test that the explicitly invoked skill is used
+- [x] 3.3 Implement script execution via shell.run with the policy.skills.script_runtimes check. Verify that a PowerShell script runs sandboxed and that a disallowed runtime is refused
+
+## 4. Authoring
+
+- [x] 4.1 Implement the skill editor (frontmatter, body, files, validation). Verify with UI tests that a valid private skill is created and saved
+- [x] 4.2 Implement "Save as skill" drafting with personal-data parameterisation. Verify on sample Threads that names, email addresses and paths become parameters
+- [x] 4.3 Implement skill test runs in labelled test Threads. Verify that the test uses the draft's tool scope
+- [x] 4.4 Implement publishing from the client (shared with named users, group, org under policy.skills.publish) and the user's published versions with their review state. Verify that an org publish shows In review and that a registry refusal is shown with its message
+
+## 5. Skill registry (control-plane/skill-registry)
+
+- [x] 5.1 Implement storage, immutable versioning, scopes and publish authorization against policy.skills.publish. Verify with tests for republish and scope rejection
+- [x] 5.2 Implement the scanner (secrets, PowerShell AST commands and URLs, declared tools and MCP servers, injection patterns). Verify against a labelled test corpus, including a hard reject for secrets
+- [x] 5.3 Implement the org review state machine, self-review block, ES256 signing and public import with source and licence, and fill the admin console's skill review queue view (scan results, diff against the previous version, approve or reject with a comment, public import for platform-admins; control-plane/admin-console Skill Review Queue). Verify with end-to-end tests through the admin-console review queue
+- [x] 5.4 Implement the distribution API, skills-changed and skill-revoked pushes, revocations in sync responses, and aggregate usage counts. Verify that a revocation removes the skill from a connected client on push, and from an offline client at its next sync
+
+- [x] 5.5 Public import from a URL or from an uploaded package (one of them), licence from SKILL.md, and `metadata.version` in the registry and client parsers (D6, revised 2026-11-05). Verify with registry tests (download, both sources refused, redirect to HTTP refused, size limit, licence fallback), a client parser test, and the admin end-to-end import test
+- [x] 5.6 Sole-reviewer self-approval with a required comment, `self_approved` on the version and in the audit, and the matching hint in the admin console's review queue (D6 Sole reviewer, added 2026-11-05). Verify with registry tests: blocked with a second reviewer, refused without a comment, allowed and recorded as sole reviewer
+
+## 6. Client installation and lifecycle
+
+- [x] 6.1 Implement sync (start, reconnect, push, every 24 h), install by digest, signature verification, pinning, auto-update by policy and rollback. Verify with tests for signature mismatch and rollback
+- [x] 6.2 Implement requires_mcp gating and revocation handling during a running subagent. Verify with tests for a missing server and mid-Run revocation
+
+## 7. Integration
+
+- [x] 7.1 Moved to verify-foundations-on-target 9.1 (two signed-in test clients and a reviewer).
+- [x] 7.2 Run `openspec validate --all --strict` and fix any findings
+
+## Workflow follow-up
+
+- Archive with `openspec archive add-skills --yes` after review.

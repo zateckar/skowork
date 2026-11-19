@@ -42,3 +42,13 @@ These runs need desktop input or an identity-provider sign-in. Ask the user befo
 - [ ] 7.2 (add-work-inbox 8.1) End-to-end: a user-started Run in a background Thread raises an Approval while the window is closed. Verify a toast appears, the Approval card opens with provenance, and the Run completes with the Thread unread.
 - [ ] 7.3 (add-client-foundation 6.1) End-to-end on an organization laptop against the organization Keycloak. Verify logon, tray, sign-in, registration, online in the fleet registry, refresh over an hour, and that revocation locks the client.
 - [ ] 7.4 (add-knowledge-graph 6.2) End-to-end on the baseline laptop with the mock mailbox and a document set. Ask about a project and verify a cited answer drawn from mail, documents and earlier Threads.
+
+## 8. Native window on target (from add-native-ui, add-work-inbox)
+
+- [ ] 8.1 (add-native-ui 1.1, 4.1; add-work-inbox 1.1) On the baseline laptop, with software rendering and also on a 4K monitor: 10,000 synthetic Threads and a 200-message feed. Verify first content ≤ 300 ms, 60 fps scrolling, and the four client/desktop-host Window Footprint budgets. Record the numbers next to the development-workstation results in the archived add-native-ui design.md.
+- [ ] 8.2 (add-native-ui 1.2, 4.4; add-work-inbox 7.2) Manual pass with NVDA and Narrator and a high-contrast check. Verify names, roles and notification events are announced, every function works by keyboard alone, and Action items are announced.
+- [ ] 8.3 (add-native-ui 1.3) Type in the composer with a Japanese IME. Verify composition, conversion and commit work in the rich-edit control inside the Direct2D window.
+
+## 9. Skills across clients (from add-skills)
+
+- [ ] 9.1 (add-skills 7.1) End-to-end on two signed-in test clients: user A saves a Thread as a skill, shares it with user B, publishes it to org, a reviewer approves it, and the skill is revoked. Verify each step on both clients.

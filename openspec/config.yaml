@@ -116,10 +116,13 @@ context: |
   - Citation: a numbered source listed under an answer, for a Passage the answer refers to.
   - Inbox: the implicit folder that holds every Inbox entry not in a user folder.
   - Inbox entry: a Thread or a Chat as listed in the Inbox views (client/work-inbox Chat Entries).
-  - Inbox views: Unread, Action, Running, All, Archive and Folders (see client/work-inbox).
+  - Inbox views: Unread, Action, Running, All, Archive, Folders and, when the Agenda is enabled, Agenda (see client/work-inbox).
   - Action item: something waiting for the user. It is either a pending Approval or a pending Question.
     A Question comes from ask_user, or the client raises it with fixed choices (for example
     Continue/Stop, Accept/Decline, Connect mailbox). An Action item always belongs to a Thread.
+  - Agenda: the user's opt-in list of open Agenda items, shown in the Agenda view of the Inbox views (client/agenda).
+  - Agenda item: a commitment the user made or was asked to keep, with an action and a due date, taken from mail,
+    calendar, meetings or Chats and linked to its sources (client/agenda).
   - Automations: the UI label for the section where users manage Triggers. It is not a separate concept.
   - Tool: a callable capability exposed to the model. Tool ids look like: files.read, files.write,
     shell.run, web.fetch, browser.*, computer.*, image.generate, mail.*, calendar.*, knowledge.*, tasks.*,
@@ -134,7 +137,7 @@ context: |
   - Policy bundle: a signed, versioned and expiring document issued by the control plane. It holds
     the effective policy for one user. Its top-level keys are:
     llm, identity, tools, filesystem, network, mcp, skills, knowledge, meeting_capture, scheduler,
-    unattended, telemetry, storage, mail, ui, messaging, apps, dictation, notifications, speech.
+    unattended, telemetry, storage, mail, ui, messaging, apps, dictation, notifications, speech, agenda.
   - Policy key layout: decisions are written policy.tools.rules[<tool-id pattern>] = allow|approve|deny,
     with policy.tools.risk.<risk class> defaults. Unattended runs add policy.unattended.allowed_risk and
     policy.unattended.rules. Tool settings are written policy.tools.<group>.<setting> and are never decisions.

@@ -40,6 +40,10 @@ struct Env {
 
 constexpr size_t kPendingCap = 500;
 constexpr long long kRequestIntervalMs = 60'000;
+// A batch goes out when it is full or its oldest item has waited this long (Bounded Agenda Detection, task 1.3).
+constexpr long long kFillWaitMs = 15LL * 60'000;
+// Detection requests per local day; further items wait in the queue for the next day.
+constexpr long long kMaxDetectionsPerDay = 100;
 constexpr long long kMergeWindowMs = 7LL * 86'400'000;
 constexpr long long kRetentionMs = 90LL * 86'400'000;
 constexpr long long kAutoPrepareWindowMs = 7LL * 86'400'000;

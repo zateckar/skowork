@@ -112,6 +112,19 @@ bool names_user(const std::string& text, const Identity& me) {
     return false;
 }
 
+// A meeting transcript has one "Speaker: words" line per turn. True when the quote lies on one line whose speaker is
+// the user, so the user said it.
+bool spoken_by_user(const std::string& text, const std::string& quote, const Identity& me) {
+    const std::string q = fold_space(quote);
+    if (q.empty()) return false;
+    for (const auto& line : split(text, '\n')) {
+        const auto colon = line.find(':');
+        if (colon == std::string::npos || fold_space(line).find(q) == std::string::npos) continue;
+        if (names_user(line.substr(0, colon), me)) return true;
+    }
+    return false;
+}
+
 std::set<std::string> title_words(const std::string& s) {
     static const std::set<std::string> stop = {"the", "and", "for", "with", "from", "about", "pro", "pod", "nad", "der",
                                                "die", "das", "und", "mit", "fur", "von", "den", "dem"};
@@ -131,7 +144,27 @@ std::set<std::string> title_words(const std::string& s) {
 
 }  // namespace
 
-std::optional<json> strict_json(const std::string& text) {
+// Models often wrap JSON in one Markdown code fence (```json ... ```), and sometimes stop before the closing fence.
+// Returns the inner text when the whole response is one such block, closed or not, the text itself when it has no
+// fence, and nothing when a fence comes with other text. The inner text must then parse as JSON on its own.
+std::optional<std::string> unfence(const std::string& text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos || text.compare(first, 3, "```") != 0) return text;
+    const auto line_end = text.find('\n', first);
+    if (line_end == std::string::npos) return std::nullopt;
+    const std::string info = text.substr(first + 3, line_end - first - 3);
+    if (info.find_first_not_of(" \t\r") != std::string::npos && fold_space(info) != "json") return std::nullopt;
+    std::string inner = text.substr(line_end + 1);
+    const auto last = inner.find_last_not_of(" \t\r\n");
+    if (last != std::string::npos && last >= 2 && inner.compare(last - 2, 3, "```") == 0) inner.resize(last - 2);
+    if (inner.find("```") != std::string::npos) return std::nullopt;
+    return inner;
+}
+
+std::optional<json> strict_json(const std::string& raw) {
+    const auto unfenced = unfence(raw);
+    if (!unfenced) return std::nullopt;
+    const std::string& text = *unfenced;
     if (text.size() > 65536 || !shallow_json(text)) return std::nullopt;
     bool duplicate = false;
     std::map<int, std::set<std::string>> keys;
@@ -293,7 +326,8 @@ Drop admit(const Candidate& c, const SourceItem& item, const Identity& me, long 
     if (c.title.empty() || c.action.empty()) return Drop::action;
     const bool named = names_user(item.text, me) || names_user(c.action, me);
     if (c.responsibility == "self_committed") {
-        if (!item.author_is_user) return Drop::responsibility;
+        // The user wrote it, or said it in a meeting (client/agenda Agenda Item Admission).
+        if (!item.author_is_user && !(item.kind == "meeting" && spoken_by_user(item.text, c.quote, me))) return Drop::responsibility;
     } else {
         const bool broadcast = item.distribution_list || item.recipients > kBroadcastRecipients;
         if (broadcast && !named) return Drop::broadcast;

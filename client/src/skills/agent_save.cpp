@@ -312,7 +312,7 @@ Result<PreparedSave> prepare_agent_save(const AgentSkillEnv& env, const AgentSki
     if (p.args.version.empty()) p.args.version = kDefaultVersion;
     p.text = skill_text(p.args);
     if (p.text.size() > kMaxSkillMdBytes) return make_error("too_large", "SKILL.md is larger than 256 KB.");
-    auto parsed = parse_skill_md(p.text, false);
+    auto parsed = parse_skill_md(p.text, false, true);
     if (const auto* e = std::get_if<ParseError>(&parsed)) return make_error("invalid", e->field + ": " + e->message);
     total += p.text.size();
     if (total > limits.max_unpacked) return make_error("too_large", "The Skill would be larger than the package limit.");

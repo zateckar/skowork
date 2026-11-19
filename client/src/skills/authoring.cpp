@@ -120,7 +120,7 @@ std::string join_skill_md(const SkillSource& s) {
 Result<std::string> save_private(const fs::path& private_dir, const std::string& original, const SkillSource& s) {
     const std::string text = join_skill_md(s);
     if (text.size() > kMaxSkillMdBytes) return make_error("too_large", "SKILL.md is larger than 256 KB.");
-    auto parsed = parse_skill_md(text, false);
+    auto parsed = parse_skill_md(text, false, true);
     if (const auto* e = std::get_if<ParseError>(&parsed)) return make_error("invalid", e->field + ": " + e->message);
     const std::string name = std::get<Parsed>(parsed).manifest.name;
     if (!original.empty() && !valid_name(original)) return make_error("invalid_params", "the original name is not valid");

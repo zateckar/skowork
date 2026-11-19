@@ -9,7 +9,13 @@
 #include "base/strings.h"
 #include "base/url.h"
 
+#include "../support/graph_mock.h"
+#include "agenda/core.h"
+#include "agenda/service.h"
+#include "agenda/store.h"
+#include "app/agenda_intake.h"
 #include "apps/apps.h"
+#include "mail/mail_service.h"
 #include "model/model_client.h"
 #include "platform/win.h"
 #include "policy/enforcer.h"
@@ -20,8 +26,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
+#include <iostream>
+#include <map>
+#include <numeric>
 
 using namespace wb;
 using namespace std::chrono_literals;
@@ -700,4 +710,331 @@ TEST_F(ModelE2E, RedTeamInjectedMailTriggersNoUnapprovedAction) {
         }
         (*rt)->shutdown();
     }
+}
+
+// ---- Agenda detection against the real gateway (add-agenda tasks 1.1 and 1.3) ----------------------------------------
+// The labelled corpus dev/graph-mock/fixtures/agenda-corpus.json (50 scenarios in en, cs and de) goes through the
+// production request, parser and admission rules in batches of 10, as Service::detect sends them. An admitted
+// candidate is correct when its item is labelled with a commitment whose due-date range holds the candidate's local
+// due date; a second candidate for the same commitment counts only when its title is too different to merge
+// (client/agenda Agenda Item Merging). Prints precision, recall, misses, false admissions and per-batch request size,
+// latency and tokens. Precision must be at least 0.9 and recall at least 0.7 (design D2).
+TEST_F(ModelE2E, AgendaDetectionMeetsPrecisionAndRecallOnTheLabelledCorpus) {
+    std::ifstream in(SKOWORK_AGENDA_CORPUS, std::ios::binary);
+    ASSERT_TRUE(in) << SKOWORK_AGENDA_CORPUS;
+    const json corpus = json::parse(in);
+    const int tz = corpus.at("tz_offset_min").get<int>();
+    const long long now = *parse_iso8601_ms(corpus.at("now").get<std::string>());
+    agenda::Identity me;
+    me.name = "jana novakova";  // derived from the address, as the app does
+    for (const auto& e : corpus.at("user").at("emails")) me.emails.push_back(e.get<std::string>());
+    const auto role = client->role_info(model::Role::small);
+    ASSERT_TRUE(role && role->kind == "chat") << "the gateway has no small chat role";
+
+    // SKOWORK_E2E_SMALL_MODEL and SKOWORK_E2E_AGENDA_EFFORT: run with that reasoning effort set on the upstream model
+    // serving the small role (control-plane/llm-gateway Reasoning Effort Setting); the stored effort is restored after.
+    // SKOWORK_E2E_AGENDA_EFFORT_RESTORE (a value, or "none" for the model's own default) overrides what is restored.
+    struct EffortGuard {
+        std::string token, path;
+        json before;
+        ~EffortGuard() {
+            if (path.empty()) return;
+            auto fresh = e2e::admin_token();  // the run outlives a 5-minute access token
+            const auto [st, body] = e2e::cp_call("PUT", path, fresh ? *fresh : token, json{{"reasoning_effort", before}});
+            std::cout << "reasoning effort restored to " << before.dump() << ": HTTP " << st << "\n";
+        }
+    } effort_guard;
+    const std::string small_model = env_var("SKOWORK_E2E_SMALL_MODEL"), effort = env_var("SKOWORK_E2E_AGENDA_EFFORT");
+    if (!small_model.empty() && !effort.empty()) {
+        auto admin = e2e::admin_token();
+        ASSERT_TRUE(admin) << admin.error().message;
+        const auto [st, list] = e2e::cp_call("GET", "/api/v1/admin/llm/connections", *admin);
+        ASSERT_EQ(st, 200) << list.dump();
+        json current;
+        for (const auto& c : list.at("connections"))
+            for (const auto& m : c.at("models"))
+                if (m.at("id") == small_model) {
+                    effort_guard.token = *admin;
+                    effort_guard.path = "/api/v1/admin/llm/connections/" + std::to_string(c.at("id").get<int>()) + "/models/" + small_model;
+                    current = m.value("reasoning_effort", json(nullptr));
+                }
+        ASSERT_FALSE(effort_guard.path.empty()) << "no model " << small_model;
+        const std::string restore = env_var("SKOWORK_E2E_AGENDA_EFFORT_RESTORE");
+        effort_guard.before = restore.empty() ? current : restore == "none" ? json(nullptr) : json(restore);
+        if (current == json(effort)) {
+            std::cout << "reasoning effort of " << small_model << " is already " << effort << "\n";
+            if (effort_guard.before == current) effort_guard.path.clear();  // nothing to change or restore
+        } else {
+            const auto [put, body] = e2e::cp_call("PUT", effort_guard.path, *admin, json{{"reasoning_effort", effort}});
+            ASSERT_EQ(put, 200) << body.dump();
+            std::cout << "reasoning effort of " << small_model << ": " << effort << " (was " << current.dump() << ")\n";
+        }
+    }
+
+    struct Expect { std::string from, to; bool hit = false; std::string title; };
+    struct Sample { agenda::SourceItem item; std::string lang, scenario, kind; std::vector<Expect> expect; };
+    std::vector<Sample> samples;
+    for (const char* lang : {"en", "cs", "de"}) {
+        for (const auto& s : corpus.at("scenarios")) {
+            Sample x;
+            x.lang = lang;
+            x.scenario = s.at("id").get<std::string>();
+            x.kind = s.at("kind").get<std::string>();
+            const auto& t = s.at(lang);
+            auto& it = x.item;
+            it.kind = x.kind;
+            it.id = x.scenario + "-" + lang;
+            it.conversation = it.id;
+            it.title = t.at("title").get<std::string>();
+            it.author = s.value("author", std::string{});
+            it.author_is_user = s.value("author_is_user", false);
+            it.user_addressed = s.value("user_addressed", false);
+            it.recipients = s.value("recipients", 0);
+            if (x.kind == "calendar") {
+                // As App::agenda_mail_event builds a calendar item: start in UTC, location, body; offered now.
+                const long long start = *parse_iso8601_ms(s.at("start").get<std::string>());
+                it.text = "Event: " + it.title + "\nStarts: " + iso8601_utc(sys_clock::time_point(std::chrono::milliseconds(start))) +
+                          (s.contains("location") ? "\nLocation: " + s.at("location").get<std::string>() : std::string{}) + "\n\n" +
+                          t.at("text").get<std::string>();
+                it.at_ms = now;
+            } else {
+                it.text = t.at("text").get<std::string>();
+                it.at_ms = *parse_iso8601_ms(s.at("sent").get<std::string>());
+            }
+            for (const auto& r : s.at("expected")) x.expect.push_back({r.at(0).get<std::string>(), r.at(1).get<std::string>()});
+            samples.push_back(std::move(x));
+        }
+    }
+
+    const auto local_date = [tz](long long ms) {
+        return iso8601_utc(sys_clock::time_point(std::chrono::milliseconds(ms + tz * 60'000LL))).substr(0, 10);
+    };
+    int admitted = 0, correct = 0, expected = 0, found = 0, failed_batches = 0;
+    std::map<std::string, int> drops;
+    std::vector<std::string> false_admissions;
+    std::vector<long long> latency_ms, request_bytes, prompt_tokens, completion_tokens;
+    std::map<std::string, std::array<int, 4>> by;  // lang/kind: admitted, correct, expected, found
+    for (size_t b = 0; b < samples.size(); b += agenda::kMaxItemsPerBatch) {
+        std::vector<agenda::SourceItem> items;
+        for (size_t i = b; i < std::min(samples.size(), b + agenda::kMaxItemsPerBatch); ++i) items.push_back(samples[i].item);
+        model::ChatRequest req;  // as Service::detect
+        req.role = model::Role::small;
+        req.stream = false;
+        req.single_attempt = true;
+        req.validate_tool_calls = false;
+        req.temperature = 0.0;
+        req.max_tokens = role->max_output_tokens > 0 && role->max_output_tokens < 4096 ? static_cast<int>(role->max_output_tokens) : 4096;
+        req.feature = "agenda.detect";
+        model::ChatMessage system, user;
+        system.role = "system";
+        system.content = agenda::detection_instructions();
+        user.role = "user";
+        user.content = agenda::detection_data(items, me, now, tz).dump();
+        request_bytes.push_back(static_cast<long long>(system.content.size() + user.content.size()));
+        req.messages = {std::move(system), std::move(user)};
+        // The service sends one batch a minute; the test sends them back to back and waits when the gateway's per-user
+        // rate limit (policy.llm.rate_limits) refuses one. Latency is that of the attempt that went through.
+        auto t0 = std::chrono::steady_clock::now();
+        auto r = client->chat(req, {});
+        // A single attempt returns AUTH_EXPIRED after refreshing the token; the service retries at its next tick.
+        for (int wait = 0; !r && (r.failure().code == "RATE_LIMIT" || (r.failure().code == "AUTH_EXPIRED" && wait < 2)) && wait < 12; ++wait) {
+            if (r.failure().code == "RATE_LIMIT") std::this_thread::sleep_for(15s);
+            t0 = std::chrono::steady_clock::now();
+            r = client->chat(req, {});
+        }
+        latency_ms.push_back(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
+        std::optional<std::vector<agenda::Candidate>> cands;
+        if (r && r->finish_reason == "stop" && r->tool_calls.empty()) {
+            prompt_tokens.push_back(r->usage.prompt);
+            completion_tokens.push_back(r->usage.completion);
+            if (auto p = agenda::parse_detection(r->text, items)) cands = std::move(*p);
+        }
+        if (!cands) {
+            ++failed_batches;
+            if (r) std::ofstream(std::filesystem::temp_directory_path() / ("agenda-batch-" + std::to_string(b / agenda::kMaxItemsPerBatch) + ".txt"),
+                                 std::ios::binary) << r->text;
+            std::cout << "batch " << b / agenda::kMaxItemsPerBatch << " failed: "
+                      << (r ? "finish " + r->finish_reason + ", text " + r->text.substr(0, 300) : r.failure().code + " " + r.failure().message) << "\n";
+            continue;
+        }
+        for (const auto& c : *cands) {
+            auto s = std::find_if(samples.begin() + static_cast<long>(b), samples.end(), [&](const Sample& x) { return x.item.id == c.source_id; });
+            if (s == samples.end()) continue;
+            agenda::Due due;
+            const auto drop = agenda::admit(c, s->item, me, now, tz, 0.7, &due);
+            if (drop != agenda::Drop::none) {
+                ++drops[agenda::to_string(drop)];
+                continue;
+            }
+            const std::string d = local_date(due.at_ms);
+            auto e = std::find_if(s->expect.begin(), s->expect.end(), [&](const Expect& x) { return !x.hit && d >= x.from && d <= x.to; });
+            if (e == s->expect.end()) {
+                // A second candidate for an already found commitment merges when the titles overlap enough.
+                const bool merges = std::any_of(s->expect.begin(), s->expect.end(), [&](const Expect& x) {
+                    return x.hit && d >= x.from && d <= x.to && agenda::title_similarity(x.title, c.title) >= 0.3;
+                });
+                if (merges) continue;
+                ++admitted;
+                ++by[s->lang][0];
+                ++by[s->kind][0];
+                false_admissions.push_back(s->item.id + " due " + d + ": " + c.title + " [" + c.quote + "]");
+                continue;
+            }
+            e->hit = true;
+            e->title = c.title;
+            ++admitted, ++correct;
+            ++by[s->lang][0], ++by[s->lang][1], ++by[s->kind][0], ++by[s->kind][1];
+        }
+    }
+    std::vector<std::string> misses;
+    for (const auto& s : samples)
+        for (const auto& e : s.expect) {
+            ++expected, ++by[s.lang][2], ++by[s.kind][2];
+            if (e.hit) ++found, ++by[s.lang][3], ++by[s.kind][3];
+            else misses.push_back(s.item.id + " (" + e.from + ".." + e.to + ")");
+        }
+    const double precision = admitted ? static_cast<double>(correct) / admitted : 0;
+    const double recall = expected ? static_cast<double>(found) / expected : 0;
+    const auto avg = [](const std::vector<long long>& v) { return v.empty() ? 0.0 : static_cast<double>(std::accumulate(v.begin(), v.end(), 0LL)) / v.size(); };
+    const auto max_of = [](const std::vector<long long>& v) { return v.empty() ? 0LL : *std::max_element(v.begin(), v.end()); };
+    std::cout << "\n=== Agenda detection, " << samples.size() << " samples, model " << role->model << "\n"
+              << "precision " << precision << " (" << correct << "/" << admitted << "), recall " << recall << " (" << found << "/" << expected
+              << "), failed batches " << failed_batches << "\n";
+    for (const auto& [k, v] : by) std::cout << "  " << k << ": admitted " << v[0] << ", correct " << v[1] << ", expected " << v[2] << ", found " << v[3] << "\n";
+    for (const auto& [k, v] : drops) std::cout << "  dropped." << k << ": " << v << "\n";
+    for (const auto& f : false_admissions) std::cout << "  FALSE " << f << "\n";
+    for (const auto& m : misses) std::cout << "  MISSED " << m << "\n";
+    std::cout << "batches " << latency_ms.size() << ": request bytes avg " << avg(request_bytes) << " max " << max_of(request_bytes)
+              << "; latency ms avg " << avg(latency_ms) << " max " << max_of(latency_ms) << "; prompt tokens avg " << avg(prompt_tokens)
+              << " max " << max_of(prompt_tokens) << "; completion tokens avg " << avg(completion_tokens) << " max " << max_of(completion_tokens) << "\n";
+    EXPECT_EQ(failed_batches, 0);
+    EXPECT_GE(precision, 0.9);
+    EXPECT_GE(recall, 0.7);
+}
+
+// ---- Agenda preparation against the real gateway (add-agenda task 4.3) ------------------------------------------------
+// dev/graph-mock serves Jan's mailbox (the Q4 budget thread from Eva, Tom's reply and the attached draft). An Agenda item
+// from Eva's request goes through Service::prepare with the app's preparation wiring: a Run in a new Thread with the
+// preparation preamble, the item as untrusted data and the read-only hook (Preparation Has No Effects). The mail tools
+// are those of the production MailService. The brief must cite the mail it used and the draft must be labelled.
+TEST_F(ModelE2E, AgendaPreparationWritesACitedBriefAndALabelledDraft) {
+    if (!graph_mock_ready()) GTEST_SKIP() << "node or dev/graph-mock/node_modules missing (npm ci there)";
+    GraphMockProcess mock;
+    ASSERT_FALSE(mock.graph.empty());
+    MailDb mdb;
+    FollowingBrowser browser;
+    const json mpolicy = mock.policy();
+    mail::MailEnv me;
+    me.store = mdb.store.get();
+    me.clock = &system_clock();
+    me.launcher = &browser;
+    me.policy = policy_from(&mpolicy);
+    me.dev_build = true;
+    me.login_hint = "jan";
+    me.background_sync = false;
+    mail::MailService ms(std::move(me));
+    ms.start();
+    ASSERT_TRUE(ms.connect());
+    ASSERT_TRUE(ms.sync_now());
+
+    e2e::TempStore ts;
+    std::atomic<agenda::Service*> live{nullptr};
+    struct ReadOnly final : runtime::Hook {
+        std::atomic<agenda::Service*>* live = nullptr;
+        std::mutex mx;
+        std::vector<std::string> calls, denied;
+        runtime::ToolDecision before_tool_call(const runtime::ToolCallInfo& call) override {
+            auto* a = live->load();
+            auto d = a ? agenda_preparation_decision(call, [a](const std::string& run) { return a->is_preparation_run(run); })
+                       : runtime::ToolDecision::allow();
+            const std::lock_guard lock(mx);
+            calls.push_back(call.tool + " " + call.args.dump());
+            if (d.kind == runtime::ToolDecision::Kind::deny) denied.push_back(call.tool);
+            return d;
+        }
+    };
+    auto hook = std::make_shared<ReadOnly>();
+    hook->live = &live;
+    runtime::HookRegistry hooks(std::make_shared<AllowAll>());
+    hooks.add(hook);
+    runtime::RuntimeConfig cfg;
+    auto rt = runtime::AgentRuntime::create(cfg, ts.store().db(), *client, system_clock(), std::move(hooks));
+    ASSERT_TRUE(rt);
+    for (auto& t : ms.tools()) {
+        if (t.id == "mail.search" || t.id == "mail.read") t.core = true;
+        ASSERT_TRUE((*rt)->add_tool(std::move(t)));
+    }
+    ASSERT_TRUE((*rt)->start());
+
+    // The request mail in the local copy, as the Agenda would have admitted it.
+    mail::SearchQuery sq;
+    sq.text = "Budget";
+    std::string request_id;
+    for (const auto& m : ms.store().search(sq))
+        if (m.subject == "Budget Q4 – Entwurf") request_id = m.id;
+    ASSERT_FALSE(request_id.empty());
+
+    agenda::Env ae;
+    ae.now = [] { return system_clock().unix_millis(); };
+    ae.tz_offset_min = [](long long) { return 60; };
+    ae.start_preparation = [&](const agenda::Item& item, const std::string& thread_id, const std::string& message,
+                               const std::string& preamble, bool unattended) -> Result<agenda::Preparation> {
+        std::string thread = thread_id;
+        if (thread.empty()) {
+            auto t = (*rt)->create_thread(item.title);
+            if (!t) return t.error();
+            thread = *t;
+        }
+        runtime::StartOptions o;
+        o.unattended = unattended;
+        o.untrusted = runtime::Provenance{"agenda", item.id, iso8601_utc_now(), false};
+        o.preamble = preamble;
+        auto run = (*rt)->start_run(thread, message, o);
+        if (!run) return run.error();
+        return agenda::Preparation{thread, *run};
+    };
+    agenda::Service svc(ts.store().db(), std::move(ae));
+    live = &svc;
+    const long long now = system_clock().unix_millis();
+    agenda::Item it;
+    it.id = "e2e-budget";
+    it.title = "Review positions 3 to 7 of the Q4 budget draft";
+    it.action = "Check positions 3 to 7 of Eva's Q4 budget draft and send her your comments";
+    it.due_at = now + 2 * 86'400'000LL;
+    it.draft_kind = "reply";
+    it.created_at = it.updated_at = now;
+    it.sources.push_back({"mail", request_id, "", "Budget Q4 – Entwurf", "Bitte prüfe die Positionen 3 bis 7 bis Mittwoch.", "", now - 3 * 86'400'000LL});
+    ASSERT_TRUE(agenda::Store(ts.store().db()).put(it));
+
+    auto prepared = svc.prepare(it.id);
+    ASSERT_TRUE(prepared) << prepared.error().message;
+    const auto stored = agenda::Store(ts.store().db()).get(it.id);
+    ASSERT_TRUE(stored);
+    const std::string thread = stored->prep_thread_id, run = stored->prep_run_id;
+    ASSERT_FALSE(run.empty()) << prepared->dump();
+    EXPECT_TRUE(svc.is_preparation_run(run));
+    const bool done = (*rt)->wait_for_state(run, runtime::RunState::succeeded, 600s);
+    const auto conv = (*rt)->conversation(thread);
+    const std::string brief = conv.empty() ? std::string{} : conv.back().content;
+    {
+        const std::lock_guard lock(hook->mx);
+        std::cout << "\n=== Agenda preparation, model calls usage prompt " << (*rt)->run(run)->usage.prompt << "\n";
+        for (const auto& c : hook->calls) std::cout << "  tool " << c.substr(0, 200) << "\n";
+        for (const auto& d : hook->denied) std::cout << "  DENIED " << d << "\n";
+    }
+    std::cout << "--- brief ---\n" << brief << "\n--- end ---\n";
+    ASSERT_TRUE(done) << (*rt)->run(run)->reason;
+    {
+        const std::lock_guard lock(hook->mx);
+        EXPECT_TRUE(std::any_of(hook->calls.begin(), hook->calls.end(), [](const std::string& c) { return c.starts_with("mail."); }));
+    }
+    // Citations: the brief names the mail it used (subject) and material only that thread holds.
+    EXPECT_NE(brief.find("Budget Q4"), std::string::npos);
+    const std::string lower = to_lower(brief);
+    EXPECT_TRUE(lower.find("licen") != std::string::npos || lower.find("48") != std::string::npos || lower.find("tom") != std::string::npos);
+    // The draft is labelled.
+    EXPECT_NE(lower.find("draft"), std::string::npos);
+    // Nothing was sent or drafted in the mailbox.
+    EXPECT_TRUE(mock.ctl("GET", "/sends").empty());
+    (*rt)->shutdown();
 }

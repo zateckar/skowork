@@ -1672,6 +1672,7 @@
   "settings.agenda.remind_hour_before": "Eine Stunde vorher bei Einträgen mit Uhrzeit",
   "settings.agenda.auto_prepare": "Einträge mit Termin in 7 Tagen automatisch vorbereiten (nur lesend)",
   "settings.agenda.diagnostics": "Warten auf Prüfung: {pending}. Als Rauschen ausgelassene Kandidaten: {dropped}.",
+  "settings.agenda.daily_limit": "Das heutige Prüflimit ist erreicht. Neue Einträge warten und werden morgen geprüft.",
   "settings.agenda.last_error": "Die letzte Prüfung ist fehlgeschlagen ({reason}); sie wird später wiederholt.",
   "settings.agenda.delete_all": "Agenda-Daten löschen",
   "settings.agenda.delete_title": "Agenda-Daten löschen?",

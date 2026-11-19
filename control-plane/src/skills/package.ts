@@ -143,7 +143,7 @@ export function manifestOf(frontmatter: Record<string, FrontValue>): Manifest {
   if (!NAME.test(name) || name.length > 64) throw invalid('name', `The name "${name}" must be lower-case kebab-case, at most 64 characters.`);
   const description = scalar(frontmatter, 'description') ?? '';
   if (!description) throw invalid('description', 'SKILL.md needs a description.');
-  if (description.length > 1024) throw invalid('description', 'The description is longer than 1024 characters.');
+  if ([...description].length > 1024) throw invalid('description', 'The description is longer than 1024 characters.');
   const version = scalar(frontmatter, 'version') || metadataVersion(frontmatter);
   if (!version) throw invalid('version', 'SKILL.md needs a version (semantic, for example 1.0.0).');
   if (!SEMVER.test(version) || !parseVersion(version)) throw invalid('version', `The version "${version}" is not a semantic version.`);
