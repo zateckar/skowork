@@ -120,6 +120,12 @@ public:
     // with "not_failed" when that Run did not fail, "thread_busy", "blocked"/"offline"/"revoked" (as start_run), or
     // "not_found". Returns the Run id; the Run is queued until a slot is free.
     Result<std::string> retry_run(const std::string& thread_id);
+    // Effect-Aware Continuation (improve-proactive-durable-work design D3): starts a new Run linked to a top-level Run
+    // that failed with "interrupted by shutdown", once every call of its subtree with an unknown outcome is answered
+    // Continue. Fails with "not_continuable" (the message says why) or the start_run gates. Returns the new Run id.
+    Result<std::string> continue_run(const std::string& failed_run_id);
+    // What recovery shows for a failed Run: {continuable, pending, blocker, continuation, stopped, unknown: [...]}.
+    json recovery_status(const std::string& run_id);
     // Starts a Run with the oldest queued message of every Thread that has queued messages and no active Run, oldest
     // first (called when the client connects again). Returns how many Runs started.
     int resume_waiting();
@@ -225,6 +231,13 @@ private:
     void maybe_ready(const std::string& run_id);
     void resolve_open_actions(const std::string& run_id, const std::string& why);
     Status end_in_place(const RunRecord& run, RunState to, const std::string& reason);
+    Result<std::string> continue_run_locked(const std::string& failed_run_id);
+    // Raises a standalone recovery Question for every unanswered unknown call in the subtree of a shutdown-failed Run.
+    void raise_recovery_questions(const std::string& root_run_id);
+    // Settles reconcilable unknown calls of a shutdown-failed Run with their Tool's read-only check (task 3.5).
+    void reconcile_unknown(const std::string& root_run_id);
+    // The answer to a recovery Question (improve-proactive-durable-work design D3, Shutdown Questions).
+    void apply_recovery_answer(const ActionItem& action, const std::string& answer);
     // Subagents: the Run and all its descendants, the root of a Run, open Action items anywhere in a subtree.
     std::vector<RunRecord> subtree(const std::string& run_id);
     std::string root_of(const std::string& run_id);

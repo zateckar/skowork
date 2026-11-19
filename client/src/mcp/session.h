@@ -18,7 +18,8 @@
 
 namespace wb::mcp {
 
-// Error codes of requests: "closed" (the connection or process ended), "timeout", "cancelled", "rpc" (a JSON-RPC
+// Error codes of requests: "closed" (the connection or process is not there, so nothing was sent), "ended" (the process
+// ended after the request was sent), "timeout", "cancelled", "rpc" (a JSON-RPC
 // error from the server), "protocol" (an unusable reply), "session_expired" (HTTP 404 for the session),
 // "unauthorized", "policy_denied", and the HttpClient codes.
 class Transport {

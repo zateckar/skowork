@@ -34,6 +34,32 @@ constexpr const char* kSkillSaveSentence = "A Skill needs no file path. To creat
                                            "the tool stores the Skill for the user. Never ask the user where to save a Skill or which folder to use.";
 constexpr const char* kChildLimitReason = "subagent time limit reached";
 
+// Effect-aware recovery (improve-proactive-durable-work design D3).
+constexpr const char* kRecoveryRaiser = "runtime.recovery";
+constexpr const char* kContinueChoice = "Continue without knowing";
+constexpr const char* kStopChoice = "Stop";
+constexpr const char* kLiveUnknownText =
+    "The outcome of this call is unknown: the request may have taken effect, but no result came back. Do not assume it "
+    "succeeded or failed, and do not make it again unless the user asks for it.";
+constexpr const char* kGuardReason =
+    "An earlier call in this Thread has an unknown outcome, so every further call needs your explicit authorization.";
+constexpr size_t kMaxRecordedResultBytes = 1024 * 1024;
+
+// The runtime's own discovery, attachment reads and Questions have no effect outside the Run.
+Recovery recovery_of(const ToolDef& d) {
+    if (d.id == kFindTools || d.id == kReadAttachment || d.id == kAskUser) return Recovery::replay_safe;
+    return d.recovery;
+}
+
+std::string unknown_prompt(const std::string& tool, bool after_shutdown) {
+    return after_shutdown
+               ? "Skowork stopped while the call " + tool + " was running, so its outcome is unknown: it may or may not have taken "
+                 "effect. Continue lets the work go on without knowing; every further call in this Thread then needs your "
+                 "approval. Stop ends it here."
+               : "The call " + tool + " may have taken effect, but no result came back, so its outcome is unknown. Continue lets "
+                 "the Run go on without knowing; every further call in this Thread then needs your approval. Stop ends the Run.";
+}
+
 bool reserved_id(const std::string& id) {
     return id == kFindTools || id == kAskUser || id == kReadAttachment || id == kDelegate || id == kUseSkill;
 }
@@ -253,6 +279,7 @@ private:
         ToolOutput out;
         std::string child_run;  // delegate: the subagent Run to resume
         bool waiting = false;   // delegate: the subagent is interrupted, so the call has no result yet
+        std::string op_id;      // the call's row in the operation ledger
     };
 
     // ---- small helpers ----
@@ -422,6 +449,18 @@ private:
                 }
             } else if (e.kind == "nonce") {
                 nonce_ = jstr(e.payload, "nonce");
+            } else if (e.kind == "continuation") {
+                // A continuation sees the untrusted content of the Runs it continues (improve-proactive-durable-work D3).
+                for (std::string c = jstr(e.payload, "continues_run_id"); !c.empty();) {
+                    for (const auto& pe : store_.events(c))
+                        if (pe.kind == "tool_result" || pe.kind == "message")
+                            if (const json* p = jobj(pe.payload, "provenance")) {
+                                Provenance prov = provenance_from(*p);
+                                if (!prov.trusted) untrusted_.push_back(std::move(prov));
+                            }
+                    const auto prev = store_.run(c);
+                    c = prev ? prev->continues_run_id : std::string{};
+                }
             } else if (e.kind == "subagent_spec") {
                 // A subagent's tool set is fixed when it starts (design D5).
                 std::set<std::string> allowed;
@@ -1039,7 +1078,7 @@ private:
             }
             const Scan state = scan();
             std::vector<Work> work;
-            for (size_t i = 0; i < batch.calls.size(); ++i) {
+            for (size_t i = 0; i < batch.calls.size() && !stop_after_batch_; ++i) {
                 const json& call = batch.calls[i];
                 const std::string cid = jstr(call, "id");
                 const auto it = state.calls.find(cid);
@@ -1066,6 +1105,12 @@ private:
             }
             execute(work);
             if (stopped()) return BatchOutcome::ended;
+            if (stop_after_batch_) {
+                // The user chose Stop for a call whose outcome is unknown (Uncertain Tool Outcomes).
+                close_batch_unexecuted(batch, "the user stopped the Run");
+                end(RunState::cancelled, "stopped by user: a call's outcome was unknown");
+                return BatchOutcome::ended;
+            }
             if (control_->cancelled()) {
                 end_cancelled();
                 return BatchOutcome::ended;
@@ -1226,7 +1271,15 @@ private:
             for (const auto& r : skill_->manifest.interrupt_on) sd.interrupt_on.push_back(r.tool);
             w.info.skill = std::move(sd);
         }
-        const ToolDecision d = rt_.hooks_.decide(w.info);  // fail closed inside
+        ToolDecision d = rt_.hooks_.decide(w.info);  // fail closed inside
+        // Unknown Effect Guard: while the Thread holds a call with an unknown outcome, a call that policy allows still
+        // needs the user's explicit authorization; an Approval the policy asks for satisfies both.
+        bool guarded = false;
+        if ((d.kind == ToolDecision::Kind::allow || d.kind == ToolDecision::Kind::rewrite) && recovery_of(*def) != Recovery::replay_safe &&
+            def->id != kDelegate && def->id != kUseSkill && store_.thread_has_unknown(rec_.thread_id)) {
+            d = ToolDecision::approval(kGuardReason);
+            guarded = true;
+        }
 
         const char* kind = "allow";
         switch (d.kind) {
@@ -1238,7 +1291,12 @@ private:
         json decided = {{"call_id", cid}, {"tool", tool}, {"args", w.info.args}, {"rationale", rationale},
                         {"risk", to_string(w.info.risk)}, {"decision", kind}, {"reason", d.reason}};
         auto seq = store_.append_event(id_, "tool_call", decided);
-        emit("tool_call", decided, seq ? *seq : 0);
+        if (!seq) {
+            // The decision is the call's intent in the ledger: unrecorded, the call is not made (design D3).
+            add_result(cid, tool, false, "The call was not executed: its decision could not be recorded.");
+            return true;
+        }
+        emit("tool_call", decided, *seq);
 
         switch (d.kind) {
         case ToolDecision::Kind::deny:
@@ -1249,6 +1307,7 @@ private:
             for (const auto& p : w.info.untrusted_context) provenance.push_back(provenance_json(p));
             json payload = {{"tool", tool}, {"args", w.info.args}, {"risk", to_string(w.info.risk)}, {"rationale", rationale},
                             {"reason", d.reason}, {"untrusted_context", provenance}};
+            if (guarded) payload["unknown_effect_guard"] = true;
             if (skill_) {
                 // The Skill may restrict how the user resolves it; AgentRuntime::resolve_approval refuses the others.
                 const auto allowed = skills::allowed_resolutions(skill_->manifest, tool);
@@ -1271,14 +1330,16 @@ private:
         return true;
     }
 
-    void raise(const std::string& call_id, const std::string& kind, const json& payload) {
+    std::string raise(const std::string& call_id, const std::string& kind, const json& payload) {
         auto action = store_.create_action(id_, kind, call_id, payload);
         if (!action) {
-            add_result(call_id, jstr(payload, "tool"), false, "The call could not be offered to the user.");
-            return;
+            add_result(call_id, jstr(payload, "tool"), false,
+                       jbool(payload, "unknown_outcome") ? kLiveUnknownText : "The call could not be offered to the user.");
+            return {};
         }
         auto seq = store_.append_event(id_, "interrupt", {{"action_id", action->id}, {"kind", kind}, {"call_id", call_id}});
         emit("action.created", {{"id", action->id}, {"kind", kind}, {"call_id", call_id}, {"payload", payload}}, seq ? *seq : 0);
+        return action->id;
     }
 
     // A resolved Action item: turns the user's resolution into a result or into work to run.
@@ -1329,6 +1390,15 @@ private:
         }
         // A Question: the answer goes back to the asking tool, or is the tool result.
         const std::string answer = jstr(action.resolution, "answer");
+        if (jbool(action.payload, "unknown_outcome")) {
+            // The user's choice about a call whose outcome is unknown; it asserts nothing about the effect (design D3).
+            const bool stop = answer != kContinueChoice;
+            if (const std::string op = jstr(action.payload, "op_id"); !op.empty()) (void)store_.resolve_operation(op, stop ? "stop" : "continue");
+            add_result(cid, tool, false,
+                       std::string(kLiveUnknownText) + (stop ? " The user stopped the Run." : " The user chose to continue without knowing."), user);
+            if (stop) stop_after_batch_ = true;
+            return;
+        }
         if (def && def->resume) {
             Work w;
             w.index = index;
@@ -1366,6 +1436,15 @@ private:
 
         for (auto& w : work) {
             if (w.waiting) continue;  // the subagent waits for the user; the call gets its result when it resumes
+            if (w.out.outcome_unknown) {
+                // The Run stops for the user before its next model call (Uncertain Tool Outcomes); the call stays open.
+                const json payload = {{"prompt", unknown_prompt(w.info.tool, false)}, {"choices", {kContinueChoice, kStopChoice}},
+                                      {"free_text", false}, {"tool", w.info.tool}, {"args", w.info.args},
+                                      {"unknown_outcome", true}, {"op_id", w.op_id}, {"detail", w.out.content}};
+                const std::string action = raise(w.call_id, "question", payload);
+                if (!action.empty() && !w.op_id.empty()) (void)store_.set_operation_action(w.op_id, action);
+                continue;
+            }
             if (w.out.question) {
                 const QuestionRequest& q = *w.out.question;
                 json payload = {{"prompt", q.prompt}, {"choices", q.choices}, {"free_text", q.free_text}, {"tool", w.info.tool},
@@ -1456,6 +1535,17 @@ private:
             ctx.skill_folder = skill_->folder;
             ctx.skill_no_network = skill_->manifest.network == "none";
         }
+        const Recovery recovery = recovery_of(*w.def);
+        if (w.def->id != kDelegate && w.def->id != kUseSkill) {
+            // The ledger row comes first: a call that cannot be recorded is not made (design D3).
+            auto op = store_.begin_operation(id_, rec_.thread_id, w.call_id, w.info.tool, w.info.args, to_string(recovery));
+            if (!op) {
+                w.out = ToolOutput::failure("The call was not executed: it could not be recorded before it was made.");
+                return;
+            }
+            w.op_id = *op;
+            ctx.operation_id = *op;
+        }
         tool_progress(1);
         try {
             if (w.def->id == kFindTools) w.out = run_find_tools(w.info.args);
@@ -1467,8 +1557,19 @@ private:
             else w.out = ToolOutput::failure("The tool has no implementation.");
         } catch (const std::exception& e) {
             w.out = ToolOutput::failure(std::string("The tool failed: ") + e.what());
+            // It failed after it started: what it did before is not known (design D3).
+            w.out.outcome_unknown = recovery != Recovery::replay_safe && !w.op_id.empty();
         } catch (...) {
             w.out = ToolOutput::failure("The tool failed.");
+            w.out.outcome_unknown = recovery != Recovery::replay_safe && !w.op_id.empty();
+        }
+        if (!w.op_id.empty()) {
+            // Recorded as soon as the Tool returns, before the batch waits for its other calls (design D3).
+            Provenance prov = w.out.provenance.value_or(w.def->provenance);
+            if (prov.source_kind.empty()) prov.source_kind = "tool";
+            prov.at = now();
+            const std::string recorded = w.out.question ? std::string{} : std::string(utf8_prefix(w.out.content, kMaxRecordedResultBytes));
+            (void)store_.finish_operation(w.op_id, w.out.ok, recorded, provenance_json(prov), w.out.outcome_unknown);
         }
         tool_progress(-1);
     }
@@ -1805,6 +1906,7 @@ private:
     sys_clock::time_point active_since_;
     long long base_active_ms_ = 0;
     bool finished_ = false;
+    bool stop_after_batch_ = false;  // the user chose Stop for a call whose outcome is unknown
 };
 
 // =====================================================================================================================
@@ -1897,8 +1999,122 @@ Result<RecoveryReport> AgentRuntime::start() {
         if (!r.parent_run_id.empty()) continue;  // subagents resume through their root Run
         if (!subtree_has_open_actions(r.id)) resume_ready_.push_back(r.id);
     }
+    // Calls whose outcome became unknown at the shutdown: a reconcilable Tool checks read-only whether the effect
+    // happened; every call still unknown gets one Question before any continuation (design D3).
+    // Runs failed at an earlier start are revisited: a reconciliation whose commit was lost runs again.
+    std::vector<std::string> roots = report->unknown_roots;
+    for (const auto& op : store_.unanswered_unknown_operations()) {
+        const std::string root = root_of(op.run_id);
+        const auto r = store_.run(root);
+        if (r && r->state == RunState::failed && r->reason == "interrupted by shutdown" &&
+            std::find(roots.begin(), roots.end(), root) == roots.end())
+            roots.push_back(root);
+    }
+    for (const auto& root : roots) {
+        reconcile_unknown(root);
+        raise_recovery_questions(root);
+    }
     pump_locked();
     return report;
+}
+
+void AgentRuntime::reconcile_unknown(const std::string& root_run_id) {
+    for (const auto& r : subtree(root_run_id))
+        for (const auto& op : store_.operations_of_run(r.id)) {
+            if (op.state != "unknown" || op.recovery != to_string(Recovery::reconcilable) || !op.resolution.empty()) continue;
+            std::function<Reconciliation(const std::string&, const json&)> reconcile;
+            {
+                const std::lock_guard lock(tools_mx_);
+                if (const ToolDef* d = tools_.find(op.tool)) reconcile = d->reconcile;
+            }
+            if (!reconcile) continue;
+            Reconciliation rec;
+            try {
+                rec = reconcile(op.id, op.args);
+            } catch (const std::exception& e) {
+                log::warn("runtime", "reconciliation of " + op.tool + " failed: " + e.what());
+                continue;
+            } catch (...) {
+                continue;
+            }
+            if (rec.kind == Reconciliation::Kind::unknown) continue;  // ambiguous or timed out: the user decides
+            const bool ok = rec.kind == Reconciliation::Kind::succeeded;
+            (void)store_.reconcile_operation(op.id, ok, ok ? rec.content : std::string{});
+        }
+}
+
+void AgentRuntime::raise_recovery_questions(const std::string& root_run_id) {
+    if (const auto root = store_.run(root_run_id); root && root->recovery == "stopped") return;  // never continued
+    for (const auto& r : subtree(root_run_id))
+        for (const auto& op : store_.operations_of_run(r.id)) {
+            const auto asked = op.action_id.empty() ? std::nullopt : store_.action(op.action_id);
+            if (op.state != "unknown" || !op.resolution.empty()) {
+                // Settled by reconciliation since it was asked: the Question is stale.
+                if (asked && asked->open() && asked->run_id.empty()) (void)withdraw_standalone(asked->id, "the outcome was settled");
+                continue;
+            }
+            if (asked && asked->open()) continue;  // already asked
+            const json payload = {{"prompt", unknown_prompt(op.tool, true)}, {"choices", {kContinueChoice, kStopChoice}},
+                                  {"free_text", false}, {"raised_by", kRecoveryRaiser}, {"unknown_outcome", true},
+                                  {"op_id", op.id}, {"run_id", root_run_id}, {"tool", op.tool}, {"args", op.args}};
+            auto a = store_.create_standalone_action(op.thread_id, kRecoveryRaiser, payload);
+            if (!a) {
+                log::error("runtime", "could not ask about an unknown outcome: " + a.error().message);
+                continue;
+            }
+            (void)store_.set_operation_action(op.id, a->id);
+            emit("action.created", "", op.thread_id, {{"id", a->id}, {"kind", a->kind}, {"call_id", ""}, {"payload", a->payload}});
+        }
+}
+
+void AgentRuntime::apply_recovery_answer(const ActionItem& action, const std::string& answer) {
+    const std::string op_id = jstr(action.payload, "op_id");
+    const std::string root = jstr(action.payload, "run_id");
+    const bool stop = answer != kContinueChoice;
+    (void)store_.resolve_operation(op_id, stop ? "stop" : "continue");
+    if (stop) {
+        // One Stop ends the failed Run for good: its other recovery Questions are withdrawn.
+        (void)store_.set_run_recovery(root, "stopped");
+        for (const auto& r : subtree(root))
+            for (const auto& op : store_.operations_of_run(r.id))
+                if (!op.action_id.empty() && op.action_id != action.id)
+                    if (const auto a = store_.action(op.action_id); a && a->open()) (void)withdraw_standalone(a->id, "you stopped the Run");
+    }
+    emit("run.recovery", root, action.thread_id, recovery_status(root));
+}
+
+json AgentRuntime::recovery_status(const std::string& run_id) {
+    bool pending = false;
+    const std::string blocker = store_.continuation_blocker(run_id, &pending);
+    json unknown = json::array();
+    for (const auto& r : subtree(run_id))
+        for (const auto& op : store_.operations_of_run(r.id))
+            if (op.state == "unknown")
+                unknown.push_back({{"op_id", op.id}, {"run_id", op.run_id}, {"tool", op.tool}, {"resolution", op.resolution},
+                                   {"action_id", op.action_id}});
+    const auto rec = store_.run(run_id);
+    const auto cont = store_.continuation_of(run_id);
+    return {{"run_id", run_id}, {"continuable", blocker.empty()}, {"pending", pending}, {"blocker", blocker},
+            {"continuation", cont ? cont->id : std::string{}}, {"stopped", rec && rec->recovery == "stopped"},
+            {"unknown", std::move(unknown)}};
+}
+
+Result<std::string> AgentRuntime::continue_run(const std::string& failed_run_id) {
+    const std::lock_guard lock(mx_);
+    return continue_run_locked(failed_run_id);
+}
+
+Result<std::string> AgentRuntime::continue_run_locked(const std::string& failed_run_id) {
+    if (!started_) return make_error("not_started", "the runtime is not started");
+    if (stopping_) return make_error("stopping", "the runtime is shutting down");
+    if (revoked_) return make_error("revoked", "access was revoked");
+    if (cfg_.start_gate)
+        if (const auto why = cfg_.start_gate()) return make_error(cfg_.offline && cfg_.offline() ? "offline" : "blocked", *why);
+    auto run = store_.create_continuation(failed_run_id, std::string(model::role_name(cfg_.role)));
+    if (!run) return run.error();
+    emit("run.state", run->id, run->thread_id, {{"state", "queued"}, {"reason", "continuation"}, {"continues_run_id", failed_run_id}});
+    pump_locked();
+    return run->id;
 }
 
 void AgentRuntime::shutdown() {
@@ -2276,6 +2492,8 @@ Result<std::string> AgentRuntime::retry_run(const std::string& thread_id) {
         if (r.parent_run_id.empty()) latest = r;
     if (!latest) return make_error("not_found", "the Thread has no Run");
     if (latest->state != RunState::failed) return make_error("not_failed", "the latest Run did not fail");
+    // A Run that failed at a shutdown is continued by a new linked Run, never reopened (Effect-Aware Continuation).
+    if (latest->reason == "interrupted by shutdown") return continue_run_locked(latest->id);
 
     // Calls of the open batch that started (decided or interrupted) but have no result may have partly run.
     std::vector<std::pair<std::string, std::string>> unfinished;
@@ -2702,6 +2920,10 @@ Status AgentRuntime::answer_question(const std::string& action_id, const std::st
     if (action->run_id.empty()) {
         // Standalone: no Run to resume; the answer goes back to the capability that raised it (add-work-inbox D9).
         emit("action.resolved", "", action->thread_id, {{"id", action_id}, {"resolution", resolution}});
+        if (jstr(action->payload, "raised_by") == kRecoveryRaiser) {
+            apply_recovery_answer(*action, answer);
+            return {};
+        }
         std::function<void(const ActionItem&, const std::string&)> handler;
         {
             const std::lock_guard lock(standalone_mx_);

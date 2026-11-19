@@ -494,6 +494,7 @@ Status InboxStore::delete_thread(const std::string& thread_id) {
         const char* statements[] = {
             "DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE thread_id=?1)",
             "DELETE FROM action_items WHERE thread_id=?1",
+            "DELETE FROM tool_operations WHERE thread_id=?1",  // the operation ledger, with its captured results
             "DELETE FROM queued_messages WHERE thread_id=?1",
             "DELETE FROM thread_compactions WHERE thread_id=?1",
             "DELETE FROM thread_attachments WHERE thread_id=?1",

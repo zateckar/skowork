@@ -84,7 +84,17 @@ struct Sched {
         e.run_state = [this](const std::string& id) -> std::optional<RunView> {
             const auto r = env.rt->run(id);
             if (!r) return std::nullopt;
-            return RunView{r->state, r->reason};
+            RunView v;
+            v.state = r->state;
+            v.reason = r->reason;
+            if (r->state == RunState::failed && r->reason == "interrupted by shutdown") {  // as the app wires it
+                const json rec = env.rt->recovery_status(id);
+                v.stopped = jbool(rec, "stopped");
+                v.continuation = jstr(rec, "continuation");
+                const json* unknown = jobj(rec, "unknown");
+                v.unknown_effect = !v.stopped && v.continuation.empty() && unknown && unknown->is_array() && !unknown->empty();
+            }
+            return v;
         };
         e.cancel_run = [this](const std::string& id, const std::string& why) { return env.rt->cancel(id, why); };
         e.notify = [this](const std::string& title, const std::string& body, const std::string&) {
@@ -407,7 +417,7 @@ TEST(Scheduler, UserStopCancelsTheOccurrence) {
     EXPECT_EQ(t.s->occurrence(occ)->attempts, 1);
 }
 
-TEST(Scheduler, RestartWithAnExpiredLeaseRetriesTheOccurrence) {
+TEST(Scheduler, RestartRetriesAnOccurrenceWhoseRunRecoveryFailed) {
     Sched t;
     const std::string id = t.create(daily("Digest"));
     Gate gate;
@@ -415,19 +425,19 @@ TEST(Scheduler, RestartWithAnExpiredLeaseRetriesTheOccurrence) {
     const std::string occ = jstr(*t.s->run_now(id), "occurrence_id");
     const std::string first_run = t.s->occurrence(occ)->run_id;
     ASSERT_TRUE(t.env.wait_for([&] { return t.env.model.request_count() == 1; }));  // the Run is inside its model call
-    // The process ends; the new one starts after the lease ran out.
+    // The process ends; at the next start the runtime's recovery runs first, then the scheduler.
     t.s.reset();
     t.env.rt->shutdown();
     t.env.make_runtime();
     t.advance(kLeaseMs + 1000);
     t.make();
+    t.env.start();
     t.s->start();
     auto o = t.s->occurrence(occ);
-    EXPECT_EQ(o->state, "pending");
+    EXPECT_EQ(o->state, "pending");  // nothing was dispatched, so the Occurrence is retried
     EXPECT_EQ(o->attempts, 1);
     const json h = t.history(id);
     EXPECT_EQ(jstr(h[0]["attempts"][0], "outcome"), "failed");
-    t.env.start();
     t.env.model.push_text("second attempt");
     t.advance(kMin + 1000);
     ASSERT_TRUE(t.settle(occ, "succeeded")) << t.dump();
@@ -464,6 +474,98 @@ TEST(Scheduler, InterruptedRunKeepsItsOccurrenceAcrossRestart) {
     ASSERT_TRUE(t.env.rt->resolve_approval(actions[0].id, ApprovalResolution::approve()));
     ASSERT_TRUE(t.settle(occ, "succeeded"));
     EXPECT_EQ(t.env.calls.count("mail.send"), 1);
+}
+
+// ---- held Occurrences (improve-proactive-durable-work 3.4) ----------------------------------------------------------
+
+namespace {
+// Starts an Occurrence whose Run stops inside a model call, ends the process, leaves a dispatched mail.send in the Run's
+// ledger as if the process had died during the call, and starts again: runtime recovery first, then the scheduler.
+struct HeldOccurrence {
+    std::string trigger, occ, run, thread;
+};
+HeldOccurrence crash_with_unknown_send(Sched& t, bool notify = false) {
+    HeldOccurrence h;
+    json def = daily("Digest");
+    if (notify) def["notify"] = true;
+    h.trigger = t.create(def);
+    Gate gate;
+    t.env.model.push_blocking(gate);
+    h.occ = jstr(*t.s->run_now(h.trigger), "occurrence_id");
+    h.run = t.s->occurrence(h.occ)->run_id;
+    EXPECT_TRUE(t.env.wait_for([&] { return t.env.model.request_count() == 1; }));
+    t.s.reset();
+    t.env.rt->shutdown();
+    gate.release();
+    t.env.make_runtime();
+    h.thread = t.env.rec(h.run).thread_id;
+    auto& store = t.env.rt->store();
+    EXPECT_EQ(t.env.rec(h.run).state, RunState::running);  // still running when the process died
+    EXPECT_TRUE(store.begin_operation(h.run, h.thread, "c1", "mail.send", {{"to", "boss@example.com"}}, "unknown"));
+    t.advance(kLeaseMs * 3);
+    t.make();
+    t.env.start();
+    t.s->start();
+    return h;
+}
+ActionItem only_recovery_question(Sched& t, const std::string& thread) {
+    for (auto& a : t.env.rt->pending_actions(thread))
+        if (jstr(a.payload, "raised_by") == "runtime.recovery") return a;
+    ADD_FAILURE() << "no recovery Question";
+    return {};
+}
+}  // namespace
+
+TEST(SchedulerRecovery, AnUnknownEffectHoldsTheOccurrenceUntilTheContinuationSettlesIt) {
+    Sched t;
+    t.env.add_tool(core_mail(t.env));
+    const auto h = crash_with_unknown_send(t, true);
+    auto o = t.s->occurrence(h.occ);
+    EXPECT_EQ(o->state, "running");
+    EXPECT_EQ(o->attempts, 1);
+    EXPECT_EQ(t.count("SELECT held FROM occurrences WHERE id='" + h.occ + "'"), 1);
+    t.advance(kHourMs);
+    t.s->tick();
+    EXPECT_EQ(t.s->occurrence(h.occ)->state, "running");  // no retry while the user decides
+    EXPECT_EQ(t.s->occurrence(h.occ)->run_id, h.run);
+    EXPECT_EQ(t.count("SELECT COUNT(*) FROM runs WHERE origin_ref='" + h.occ + "'"), 1);
+    ASSERT_TRUE(t.env.rt->answer_question(only_recovery_question(t, h.thread).id, "Continue without knowing"));
+    t.env.model.push_text("I could not confirm the digest was sent.");
+    auto cont = t.env.rt->continue_run(h.run);
+    ASSERT_TRUE(cont) << cont.error().message;
+    ASSERT_TRUE(t.settle(h.occ, "succeeded")) << t.dump();
+    EXPECT_EQ(t.s->occurrence(h.occ)->attempts, 1);
+    EXPECT_EQ(t.count("SELECT held FROM occurrences WHERE id='" + h.occ + "'"), 0);
+    EXPECT_EQ(t.env.calls.count("mail.send"), 0);
+    t.s->tick();
+    EXPECT_EQ(t.notes.size(), 1u);  // one final notification
+}
+
+TEST(SchedulerRecovery, AStopAnswerCancelsTheHeldOccurrence) {
+    Sched t;
+    t.env.add_tool(core_mail(t.env));
+    const auto h = crash_with_unknown_send(t);
+    ASSERT_TRUE(t.env.rt->answer_question(only_recovery_question(t, h.thread).id, "Stop"));
+    ASSERT_TRUE(t.settle(h.occ, "cancelled"));
+    EXPECT_EQ(t.s->occurrence(h.occ)->outcome, "stopped by user");
+    t.advance(kHourMs);
+    t.s->tick();
+    EXPECT_EQ(t.s->occurrence(h.occ)->attempts, 1);
+}
+
+TEST(SchedulerRecovery, AFailedContinuationEndsTheOccurrenceWithoutAnotherAttempt) {
+    Sched t;
+    t.env.add_tool(core_mail(t.env));
+    const auto h = crash_with_unknown_send(t, true);
+    ASSERT_TRUE(t.env.rt->answer_question(only_recovery_question(t, h.thread).id, "Continue without knowing"));
+    t.env.model.push_failure(failure(model::code::invalid_request));
+    ASSERT_TRUE(t.env.rt->continue_run(h.run));
+    ASSERT_TRUE(t.settle(h.occ, "dead")) << t.dump();
+    EXPECT_EQ(t.s->occurrence(h.occ)->attempts, 1);
+    t.advance(kHourMs);
+    t.s->tick();
+    EXPECT_EQ(t.count("SELECT COUNT(*) FROM runs WHERE origin_ref='" + h.occ + "'"), 2);  // the Run and its continuation
+    EXPECT_EQ(t.notes.size(), 1u);
 }
 
 // ---- slots, limits, thread modes (3.1-3.3) --------------------------------------------------------------------------

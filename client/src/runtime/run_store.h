@@ -56,6 +56,22 @@ struct RecoveryReport {
     std::vector<std::string> failed_running;  // Runs that were running at shutdown, now failed
     int queued = 0;                           // Runs still queued, in their original order
     int interrupted = 0;                      // Runs still waiting for the user
+    // Top-level failed Runs whose subtree holds a call with an unknown outcome (improve-proactive-durable-work D3).
+    std::vector<std::string> unknown_roots;
+};
+
+// One dispatched Tool call in the operation ledger (improve-proactive-durable-work design D3).
+struct OperationRecord {
+    std::string id, run_id, thread_id, call_id, tool;
+    json args = json::object();
+    std::string recovery = "unknown";   // unknown | replay_safe | reconcilable
+    std::string state;                   // dispatched | completed | unknown | abandoned
+    bool ok = false;
+    std::string content;                 // the captured result (completed)
+    json provenance = json::object();
+    std::string resolution;              // '' | continue | stop: the user's answer about an unknown outcome
+    std::string action_id;               // the Question that asks about it
+    std::string created_at, updated_at;
 };
 
 struct ThreadSummary {
@@ -96,6 +112,37 @@ public:
     // Startup recovery: Runs left running become failed ("interrupted by shutdown"), and so do queued subagent Runs (their
     // parent was running); other queued Runs and interrupted Runs stay.
     Result<RecoveryReport> recover();
+
+    // ---- Operation ledger (improve-proactive-durable-work design D3) ----
+    // Records a call as dispatched; written before the Tool runs. A failure means the call must not run.
+    Result<std::string> begin_operation(const std::string& run_id, const std::string& thread_id, const std::string& call_id,
+                                        const std::string& tool, const json& args, const std::string& recovery);
+    // The Tool returned: completed with its result, or unknown when it cannot tell whether it took effect.
+    Status finish_operation(const std::string& id, bool ok, const std::string& content, const json& provenance, bool unknown);
+    Status resolve_operation(const std::string& id, const std::string& resolution);
+    Status set_operation_action(const std::string& id, const std::string& action_id);
+    // A read-only reconciliation settled an unknown call: completed with what is known of the effect, or abandoned when
+    // the effect provably did not happen. Fails with "not_unknown" when the call is no longer unknown or was answered.
+    Status reconcile_operation(const std::string& id, bool succeeded, const std::string& content);
+    [[nodiscard]] std::optional<OperationRecord> operation(const std::string& id);
+    [[nodiscard]] std::optional<OperationRecord> operation_by_action(const std::string& action_id);
+    [[nodiscard]] std::vector<OperationRecord> operations_of_run(const std::string& run_id);
+    // The Thread holds a call whose outcome is unknown: the Unknown Effect Guard applies to its Runs.
+    [[nodiscard]] bool thread_has_unknown(const std::string& thread_id);
+    [[nodiscard]] std::vector<OperationRecord> unknown_operations(const std::string& thread_id);
+    // Every unknown call not yet answered, in all Threads (recovery at startup revisits them).
+    [[nodiscard]] std::vector<OperationRecord> unanswered_unknown_operations();
+    // The recovery choice of a failed Run ("stopped" after a Stop answer).
+    Status set_run_recovery(const std::string& run_id, const std::string& recovery);
+    // Claims the continuation of a shutdown-failed top-level Run in one transaction (Atomic Continuation Claim); fails
+    // with "not_continuable" and the reason of continuation_blocker otherwise. The new queued Run keeps the origin,
+    // Unattended flag and counters of the failed Run.
+    Result<RunRecord> create_continuation(const std::string& failed_run_id, const std::string& role);
+    [[nodiscard]] std::optional<RunRecord> continuation_of(const std::string& run_id);
+    // Why a failed Run cannot be continued now (empty when it can): it did not fail with "interrupted by shutdown", is not
+    // the latest top-level Run, its Thread has an active Run, it was stopped or continued, or an unknown call of its
+    // subtree is not answered Continue (then pending is set).
+    [[nodiscard]] std::string continuation_blocker(const std::string& failed_run_id, bool* pending = nullptr);
 
     // ---- Event log ----
     Result<long long> append_event(const std::string& run_id, const std::string& kind, const json& payload);
@@ -164,6 +211,9 @@ public:
 
 private:
     std::vector<ContextMessage> thread_messages(const std::string& thread_id, const std::string& except_run);
+    std::vector<RunRecord> subtree_locked(const std::string& run_id);
+    Status classify_unfinished(const RunRecord& run);
+    std::optional<OperationRecord> read_operation(Statement& st);
     std::optional<RunRecord> read_run(Statement& st);
     Result<long long> append_event_locked(const std::string& run_id, const std::string& kind, const json& payload);
     std::string now() const { return iso8601_utc(clock_.now()); }
@@ -171,6 +221,9 @@ private:
     Database& db_;
     const Clock& clock_;
 };
+
+// What the model is told about a call that was made but has no recorded result (improve-proactive-durable-work D3).
+extern const char* const kUnknownOutcomeText;
 
 // ChatMessage <-> the payload of a "message" event.
 json message_to_event(const model::ChatMessage& m, const json& extra = nullptr);

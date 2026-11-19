@@ -692,6 +692,11 @@ TEST(RuntimeRecovery, CrashAfterExternalEffectLeavesOutcomeUnconfirmed) {
     ASSERT_EQ(recovered->failed_running, std::vector<std::string>{run_id});
     ASSERT_EQ(store.run(run_id)->state, RunState::failed);
     EXPECT_EQ(store.run(run_id)->reason, "interrupted by shutdown");
+    const auto ops = store.operations_of_run(run_id);
+    ASSERT_EQ(ops.size(), 1u);
+    EXPECT_EQ(ops[0].call_id, "crash-call");
+    EXPECT_EQ(ops[0].state, "unknown");
+    EXPECT_EQ(recovered->unknown_roots, std::vector<std::string>{run_id});
     EXPECT_TRUE(std::filesystem::exists(coordinator.path / "effect.txt"));
 }
 
@@ -770,6 +775,12 @@ TEST(RuntimeRecovery, CrashAfterChildEffectLeavesBothHistoriesUnconfirmed) {
     EXPECT_EQ(store.run(parent->id)->state, RunState::failed);
     EXPECT_EQ(store.run(child_id)->reason, "interrupted by shutdown");
     EXPECT_EQ(store.run(parent->id)->reason, "interrupted by shutdown");
+    // The Child Run's call is unknown; the delegate call has no row of its own; the parent is the recovery root.
+    const auto child_ops = store.operations_of_run(child_id);
+    ASSERT_EQ(child_ops.size(), 1u);
+    EXPECT_EQ(child_ops[0].state, "unknown");
+    EXPECT_TRUE(store.operations_of_run(parent->id).empty());
+    EXPECT_EQ(recovered->unknown_roots, std::vector<std::string>{parent->id});
     EXPECT_TRUE(std::filesystem::exists(coordinator.path / "effect.txt"));
 }
 
@@ -832,14 +843,24 @@ TEST(RuntimeRecovery, CrashDuringParallelBatchLeavesFinishedEffectUnconfirmed) {
     EXPECT_TRUE(decisions.count("slow-call"));
     EXPECT_FALSE(results.count("fast-call"));
     EXPECT_FALSE(results.count("slow-call"));
-    ASSERT_TRUE(store.recover());
+    // The finished call's result is in the ledger although the batch never returned (design D3).
+    std::map<std::string, OperationRecord> ops;
+    for (auto& o : store.operations_of_run(run_id)) ops[o.call_id] = o;
+    ASSERT_TRUE(ops.count("fast-call") && ops.count("slow-call"));
+    EXPECT_EQ(ops["fast-call"].state, "completed");
+    EXPECT_EQ(ops["fast-call"].content, "fast call finished");
+    EXPECT_EQ(ops["slow-call"].state, "dispatched");
+    const auto recovered = store.recover();
+    ASSERT_TRUE(recovered);
     EXPECT_EQ(store.run(run_id)->state, RunState::failed);
     EXPECT_EQ(store.run(run_id)->reason, "interrupted by shutdown");
+    EXPECT_EQ(store.operation(ops["slow-call"].id)->state, "unknown");
+    EXPECT_EQ(store.operation(ops["fast-call"].id)->state, "completed");
+    EXPECT_EQ(recovered->unknown_roots, std::vector<std::string>{run_id});
     EXPECT_TRUE(std::filesystem::exists(coordinator.path / "effect.txt"));
 }
 
-TEST(RuntimeRecovery, DecisionWriteFailureCurrentlyDoesNotPreventDispatch) {
-    // Characterization: task 3.1 must replace this with fail-closed behavior.
+TEST(RuntimeRecovery, DecisionWriteFailurePreventsDispatch) {
     Env env;
     ToolDef tool = make_tool(env, "spike.effect", Risk::external);
     tool.core = true;
@@ -851,7 +872,8 @@ TEST(RuntimeRecovery, DecisionWriteFailureCurrentlyDoesNotPreventDispatch) {
     env.start();
     const auto run = env.run(env.thread(), "do the test effect");
     ASSERT_TRUE(env.wait(run, RunState::succeeded));
-    EXPECT_EQ(env.calls.count("spike.effect"), 1);
+    EXPECT_EQ(env.calls.count("spike.effect"), 0);
+    EXPECT_NE(env.tool_content(run, "lost-decision").find("not executed"), std::string::npos);
     bool decision = false, result = false;
     for (const auto& event : env.rt->events(run)) {
         if (jstr(event.payload, "call_id") != "lost-decision") continue;
@@ -862,8 +884,7 @@ TEST(RuntimeRecovery, DecisionWriteFailureCurrentlyDoesNotPreventDispatch) {
     EXPECT_TRUE(result);
 }
 
-TEST(RuntimeRecovery, CompletedParallelCallIsNotRecordedUntilTheEntireBatchReturns) {
-    // Characterizes the current batch window; task 3.1 must account for every call independently.
+TEST(RuntimeRecovery, CompletedParallelCallIsInTheLedgerBeforeTheBatchReturns) {
     RuntimeConfig cfg;
     cfg.max_parallel_tools = 2;
     Env env(cfg);
@@ -890,13 +911,17 @@ TEST(RuntimeRecovery, CompletedParallelCallIsNotRecordedUntilTheEntireBatchRetur
     const auto run = env.run(env.thread(), "parallel effects");
     const bool both_started = env.wait_for([&] { return completed.load() && waiting.load(); });
     if (both_started) std::this_thread::sleep_for(30ms);
-    bool result_recorded = false;
-    if (both_started)
+    bool result_recorded = false, in_ledger = false;
+    if (both_started) {
         for (const auto& event : env.rt->events(run))
             if (event.kind == "tool_result" && jstr(event.payload, "call_id") == "fast-call") result_recorded = true;
+        for (const auto& o : env.rt->store().operations_of_run(run))
+            if (o.call_id == "fast-call" && o.state == "completed" && o.content == "external effect completed") in_ledger = true;
+    }
     gate.release();
     ASSERT_TRUE(both_started);
-    EXPECT_FALSE(result_recorded);
+    EXPECT_FALSE(result_recorded);  // the batch is recorded together...
+    EXPECT_TRUE(in_ledger);         // ...but the ledger has the result at once
     ASSERT_TRUE(env.wait(run, RunState::succeeded));
     EXPECT_NE(env.tool_content(run, "fast-call").find("external effect completed"), std::string::npos);
 }
@@ -5099,15 +5124,15 @@ TEST(RunRetry, AStartedCallWithoutAResultIsNotExecutedAgain) {
     assistant.tool_calls.push_back({"c9", "notes.write", "{}"});
     ASSERT_TRUE(env.rt->store().append_event(id, "message", message_to_event(assistant)));
     ASSERT_TRUE(env.rt->store().append_event(id, "tool_call", {{"call_id", "c9"}, {"tool", "notes.write"}, {"decision", "allow"}}));
+    ASSERT_TRUE(env.rt->store().begin_operation(id, thread, "c9", "notes.write", json::object(), "unknown"));  // dispatched
     env.model.push_text("noted");
     ASSERT_TRUE(env.rt->retry_run(thread));
     ASSERT_TRUE(env.wait(id, RunState::succeeded));
     EXPECT_EQ(env.calls.count("notes.write"), 0);
-    EXPECT_NE(env.tool_content(id, "c9").find("did not complete"), std::string::npos);
+    EXPECT_NE(env.tool_content(id, "c9").find("outcome of this call is unknown"), std::string::npos);
 }
 
-TEST(RunRetry, ModelCanIssueANewCallAfterAnUnfinishedCall) {
-    // Characterizes the current unsafe retry path; replace with the unknown-effect guard test during task 3.3.
+TEST(RunRetry, ADecidedCallThatWasNeverDispatchedIsNotExecuted) {
     Env env;
     ToolDef t = make_tool(env, "notes.write", Risk::read);
     t.core = true;
@@ -5122,12 +5147,43 @@ TEST(RunRetry, ModelCanIssueANewCallAfterAnUnfinishedCall) {
     assistant.tool_calls.push_back({"c9", "notes.write", "{}"});
     ASSERT_TRUE(env.rt->store().append_event(id, "message", message_to_event(assistant)));
     ASSERT_TRUE(env.rt->store().append_event(id, "tool_call", {{"call_id", "c9"}, {"tool", "notes.write"}, {"decision", "allow"}}));
+    env.model.push_text("noted");
+    ASSERT_TRUE(env.rt->retry_run(thread));
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    EXPECT_EQ(env.calls.count("notes.write"), 0);
+    EXPECT_NE(env.tool_content(id, "c9").find("not executed"), std::string::npos);
+}
+
+TEST(RunRetry, ANewCallAfterAnUnknownOutcomeNeedsTheUser) {
+    Env env;
+    ToolDef t = make_tool(env, "notes.write", Risk::read);
+    t.core = true;
+    env.add_tool(t);
+    env.start();
+    env.model.push_failure(failure(model::code::timeout));
+    const auto thread = env.thread();
+    const auto id = env.run(thread, "write it");
+    ASSERT_TRUE(env.wait(id, RunState::failed));
+    model::ChatMessage assistant;
+    assistant.role = "assistant";
+    assistant.tool_calls.push_back({"c9", "notes.write", "{}"});
+    ASSERT_TRUE(env.rt->store().append_event(id, "message", message_to_event(assistant)));
+    ASSERT_TRUE(env.rt->store().append_event(id, "tool_call", {{"call_id", "c9"}, {"tool", "notes.write"}, {"decision", "allow"}}));
+    auto op = env.rt->store().begin_operation(id, thread, "c9", "notes.write", json::object(), "unknown");
+    ASSERT_TRUE(op);
+    ASSERT_TRUE(env.rt->store().finish_operation(*op, false, "", json::object(), true));  // outcome unknown
     env.model.push_calls({{"c10", "notes.write", json::object()}});
     env.model.push_text("done");
     ASSERT_TRUE(env.rt->retry_run(thread));
+    ASSERT_TRUE(env.wait(id, RunState::interrupted));  // Run Retry does not bypass the Unknown Effect Guard
+    EXPECT_EQ(env.calls.count("notes.write"), 0);
+    const auto pending = env.rt->pending_actions(thread);
+    ASSERT_EQ(pending.size(), 1u);
+    EXPECT_EQ(pending[0].kind, "approval");
+    EXPECT_TRUE(jbool(pending[0].payload, "unknown_effect_guard"));
+    ASSERT_TRUE(env.rt->resolve_approval(pending[0].id, ApprovalResolution::approve()));
     ASSERT_TRUE(env.wait(id, RunState::succeeded));
     EXPECT_EQ(env.calls.count("notes.write"), 1);
-    EXPECT_TRUE(env.rt->pending_actions(thread).empty());
 }
 
 TEST(RunContext, CollectsRealFolders) {

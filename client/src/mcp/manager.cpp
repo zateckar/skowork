@@ -431,7 +431,17 @@ ToolOutput McpManager::call(const ServerPtr& s, const std::string& tool, ToolCon
         s->last_used = env_.now();
     }
     if (!r) {
-        if (r.error().code == "closed") {
+        const std::string code = r.error().code;
+        // A request that may have reached the server without an answer has an unknown outcome unless the tool only reads
+        // (improve-proactive-durable-work design D3). A refusal before sending, or an answer from the server, is a failure.
+        const bool effect = runtime::parse_risk(jstr(s->entry.risk, tool.c_str())).value_or(runtime::Risk::external) != runtime::Risk::read;
+        const bool sent = code != "closed" && code != "policy_denied" && code != "unauthorized" && code != "session_expired" &&
+                          code != "rpc" && code != "http";
+        const auto finish = [&](std::string text) {
+            return effect && sent ? ToolOutput::unknown(text + " The request may have reached the server, so the outcome is unknown.")
+                                  : ToolOutput::failure(std::move(text));
+        };
+        if (code == "closed" || code == "ended") {
             if (auto* stdio = dynamic_cast<StdioTransport*>(&session->transport()); stdio && stdio->crashed()) {
                 const std::string diag = stdio->diagnostics();
                 bool counted = false;
@@ -444,11 +454,11 @@ ToolOutput McpManager::call(const ServerPtr& s, const std::string& tool, ToolCon
                 }
                 stdio->close();
                 if (counted) crashed(s, diag);
-                return ToolOutput::failure("The MCP server " + s->entry.id + " stopped during the call (" + diag + ").");
+                return finish("The MCP server " + s->entry.id + " stopped during the call (" + diag + ").");
             }
         }
-        if (r.error().code == "cancelled") return ToolOutput::failure("The call was cancelled.");
-        return ToolOutput::failure("The MCP call failed: " + r.error().message);
+        if (code == "cancelled") return finish("The call was cancelled.");
+        return finish("The MCP call failed: " + r.error().message);
     }
     const CallText ct = call_result_text(*r);
     ToolOutput out;

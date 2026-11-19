@@ -89,6 +89,15 @@ bool risk_is_declared(const ToolDef& tool) {
     return tool.risk.has_value() || static_cast<bool>(tool.risk_of) || static_cast<bool>(tool.risk_in_run);
 }
 
+const char* to_string(Recovery r) {
+    switch (r) {
+    case Recovery::replay_safe: return "replay_safe";
+    case Recovery::reconcilable: return "reconcilable";
+    case Recovery::unknown: break;
+    }
+    return "unknown";
+}
+
 Risk declared_risk(const ToolDef& tool) {
     // A tool whose risk depends on its arguments is treated as the worst case until a call exists; one that computes
     // it from the Run declares its highest class in `risk`.

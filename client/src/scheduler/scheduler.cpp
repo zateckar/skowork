@@ -836,20 +836,26 @@ void Scheduler::poll_running(long long t_now, bool at_start) {
         auto s = env_.db->prepare("SELECT id, run_id, lease_until FROM occurrences WHERE state='running'");
         while (s.step()) rows.push_back({s.col_text(0), s.col_text(1), s.col_int(2)});
     }
+    // The runtime's recovery runs before the scheduler starts and decides what a Run left running became; the
+    // scheduler does not fail a Run from its lease (improve-proactive-durable-work design D3).
+    (void)at_start;
     for (const auto& r : rows) {
-        const auto st = r.run.empty() || !env_.run_state ? std::nullopt : env_.run_state(r.run);
+        auto st = r.run.empty() || !env_.run_state ? std::nullopt : env_.run_state(r.run);
         if (!st) {
             attempt_failed(r.id, "the Run is missing", t_now, false);
             continue;
         }
+        // A failed Run that was continued: the Occurrence follows its continuation, which is never retried.
+        bool continued = false;
+        for (int depth = 0; depth < 16 && st->state == runtime::RunState::failed && !st->continuation.empty(); ++depth) {
+            auto next = env_.run_state ? env_.run_state(st->continuation) : std::nullopt;
+            if (!next) break;
+            st = next;
+            continued = true;
+        }
+        set_held(r.id, false);
         switch (st->state) {
             case runtime::RunState::running:
-                // After a restart, an expired lease on a Run still marked running means its process ended with it.
-                if (at_start && r.lease_until < t_now) {
-                    attempt_failed(r.id, "interrupted by shutdown", t_now, true);
-                    break;
-                }
-                [[fallthrough]];
             case runtime::RunState::queued:
             case runtime::RunState::interrupted: {
                 // Still ours: the lease is renewed (an interrupted Run keeps its Occurrence).
@@ -862,9 +868,51 @@ void Scheduler::poll_running(long long t_now, bool at_start) {
             case runtime::RunState::cancelled:
                 finish(r.id, "cancelled", st->reason.empty() || st->reason == "cancelled by user" ? "stopped by user" : st->reason, t_now);
                 break;
-            case runtime::RunState::failed: attempt_failed(r.id, st->reason.empty() ? "the Run failed" : st->reason, t_now, false); break;
+            case runtime::RunState::failed:
+                if (st->stopped) {
+                    finish(r.id, "cancelled", "stopped by user", t_now);
+                } else if (st->unknown_effect) {
+                    // A call's outcome is unknown: no retry and no slot until the user continues or stops it.
+                    set_held(r.id, true);
+                } else if (continued) {
+                    end_dead(r.id, st->reason.empty() ? "the continuation failed" : st->reason, t_now);
+                } else {
+                    attempt_failed(r.id, st->reason.empty() ? "the Run failed" : st->reason, t_now, false);
+                }
+                break;
         }
     }
+}
+
+void Scheduler::set_held(const std::string& occurrence_id, bool held) {
+    auto s = env_.db->prepare("UPDATE occurrences SET held=? WHERE id=? AND held<>?");
+    s.bind(1, held ? 1 : 0).bind(2, occurrence_id).bind(3, held ? 1 : 0);
+    if (s.run() && env_.db->changes() > 0) {
+        emit(occurrence_id);
+        if (env_.changed) env_.changed();
+    }
+}
+
+void Scheduler::end_dead(const std::string& occurrence_id, const std::string& why, long long t_now) {
+    int attempts = 0;
+    std::string trigger_id, thread;
+    {
+        auto s = env_.db->prepare("SELECT attempts, trigger_id, thread_id FROM occurrences WHERE id=?");
+        s.bind(1, occurrence_id);
+        if (!s.step()) return;
+        attempts = static_cast<int>(s.col_int(0));
+        trigger_id = s.col_text(1);
+        thread = s.col_text(2);
+    }
+    auto a = env_.db->prepare("UPDATE occurrence_attempts SET ended_at=?, outcome='failed', error=? WHERE occurrence_id=? AND n=? AND ended_at=0");
+    a.bind(1, t_now).bind(2, why).bind(3, occurrence_id).bind(4, attempts);
+    (void)a.run();
+    auto s = env_.db->prepare("UPDATE occurrences SET state='dead', outcome=?, ended_at=?, lease_owner='', lease_until=0 WHERE id=?");
+    s.bind(1, why).bind(2, t_now).bind(3, occurrence_id);
+    (void)s.run();
+    if (const auto t = trigger_id.empty() ? std::nullopt : trigger(trigger_id); t && t->notify && env_.notify) env_.notify("failed", why, thread);
+    emit(occurrence_id);
+    if (env_.changed) env_.changed();
 }
 
 void Scheduler::prune(long long t_now) {

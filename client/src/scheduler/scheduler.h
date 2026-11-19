@@ -32,6 +32,11 @@ inline constexpr int kMaxSkippedRecorded = 20;
 struct RunView {
     runtime::RunState state = runtime::RunState::queued;
     std::string reason;
+    // A Run that failed at a shutdown (improve-proactive-durable-work design D3): a call of it has an unknown outcome and
+    // waits for the user, the user stopped it, or it was continued by this Run.
+    bool unknown_effect = false;
+    bool stopped = false;
+    std::string continuation;
 };
 
 struct FileStat {
@@ -153,6 +158,10 @@ private:
     void start_ready(long long now);
     bool begin_attempt(const std::string& occurrence_id, long long now);
     void attempt_failed(const std::string& occurrence_id, const std::string& error, long long now, bool lease_expired);
+    // An Occurrence held while a call of its Run has an unknown outcome (improve-proactive-durable-work design D3).
+    void set_held(const std::string& occurrence_id, bool held);
+    // Ends an Occurrence as dead without a further attempt (a failed continuation), with its one notification.
+    void end_dead(const std::string& occurrence_id, const std::string& why, long long now);
     void finish(const std::string& occurrence_id, const std::string& state, const std::string& outcome, long long now);
     void emit(const std::string& occurrence_id);
     std::string run_text(const TriggerRow& t, const json& detail);

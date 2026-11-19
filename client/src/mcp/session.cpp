@@ -131,7 +131,7 @@ Result<json> StdioTransport::request(const std::string& method, const json& para
             if (m.error) return rpc_error(*m.error);
             return std::move(m.result);
         }
-        if (eof_) return make_error("closed", "the MCP server ended");
+        if (eof_) return make_error("ended", "the MCP server ended");  // after the request was sent
         const bool is_cancelled = cancelled && cancelled();
         if (is_cancelled || std::chrono::steady_clock::now() >= deadline) {
             lock.unlock();

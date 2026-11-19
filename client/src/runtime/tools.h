@@ -56,6 +56,9 @@ private:
 
 struct ToolContext {
     std::string run_id, thread_id, call_id;
+    // The stable id of this dispatch in the operation ledger; a provider that supports it sends it along so that
+    // ToolDef::reconcile can find the operation later (improve-proactive-durable-work design D3).
+    std::string operation_id;
     bool unattended = false;
     // Set when the call comes from a Skill's subagent (client/skills): its name and folder, and whether it declares
     // network none. shell.run applies policy.skills.script_runtimes and the no-network mode from these.
@@ -103,10 +106,33 @@ struct ToolOutput {
     // Files for the user: stored as Thread attachments with the tool's provenance and listed in the tool result for the
     // UI. The model is told only their attachment ids, sizes and dimensions; the bytes never go to it.
     std::vector<ToolFile> files;
+    // The call may have taken effect but the tool cannot tell (a request sent whose response was lost): the runtime
+    // records the outcome as unknown and asks the user before the Run continues (client/agent-runtime Uncertain Tool
+    // Outcomes). `content` says what is known and must not claim the call was not made.
+    bool outcome_unknown = false;
 
     static ToolOutput success(std::string content) { return {true, std::move(content), std::nullopt, std::nullopt, {}, {}}; }
     static ToolOutput failure(std::string content) { return {false, std::move(content), std::nullopt, std::nullopt, {}, {}}; }
     static ToolOutput ask(QuestionRequest q) { return {true, {}, std::nullopt, std::move(q), {}, {}}; }
+    static ToolOutput unknown(std::string content) {
+        ToolOutput o = failure(std::move(content));
+        o.outcome_unknown = true;
+        return o;
+    }
+};
+
+// What recovery may do with a call that has no recorded result (improve-proactive-durable-work design D3). unknown is
+// the default: nothing about the effect is known. replay_safe: the call has no effect outside the Run and may simply be
+// made again. reconcilable: ToolDef::reconcile can tell, read-only, whether the effect happened.
+enum class Recovery { unknown, replay_safe, reconcilable };
+const char* to_string(Recovery r);
+
+// The answer of a read-only reconciliation: the effect happened (content: what is known of it), it provably did not
+// happen, or it cannot be told. A timeout or an inconclusive search is unknown.
+struct Reconciliation {
+    enum class Kind { succeeded, absent, unknown };
+    Kind kind = Kind::unknown;
+    std::string content;
 };
 
 using ToolFn = std::function<ToolOutput(ToolContext&, const json& args)>;
@@ -149,6 +175,11 @@ struct ToolDef {
     // The files and URLs a call uses, for the policy's argument checks (paths are taken as given; the policy
     // canonicalises them).
     std::function<std::vector<ToolResource>(const json& args)> resources_of;
+    // Recovery capability of a call without a recorded result; see Recovery. Never inferred from the id or the Risk class.
+    Recovery recovery = Recovery::unknown;
+    // For Recovery::reconcilable: checks, without repeating the call, whether the operation with this stable id and these
+    // arguments took effect. ToolContext::operation_id carried the same id when the call was made.
+    std::function<Reconciliation(const std::string& operation_id, const json& args)> reconcile;
 };
 
 // The Risk class of a call: computed from the Run and arguments or from the arguments, else declared, else destructive.

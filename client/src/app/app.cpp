@@ -2211,7 +2211,17 @@ void App::start_scheduler() {
     se.run_state = [this](const std::string& id) -> std::optional<scheduler::RunView> {
         const auto r = agent->runtime().run(id);
         if (!r) return std::nullopt;
-        return scheduler::RunView{r->state, r->reason};
+        scheduler::RunView v;
+            v.state = r->state;
+            v.reason = r->reason;
+        if (r->state == runtime::RunState::failed && r->reason == "interrupted by shutdown") {
+            const json rec = agent->runtime().recovery_status(id);
+            v.stopped = jbool(rec, "stopped");
+            v.continuation = jstr(rec, "continuation");
+            const json* unknown = jobj(rec, "unknown");
+            v.unknown_effect = !v.stopped && v.continuation.empty() && unknown && unknown->is_array() && !unknown->empty();
+        }
+        return v;
     };
     se.cancel_run = [this](const std::string& id, const std::string& why) { return agent->runtime().cancel(id, why); };
     se.notify = [this](const std::string& kind, const std::string& reason, const std::string& thread) {

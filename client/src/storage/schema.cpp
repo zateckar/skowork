@@ -577,6 +577,34 @@ CREATE TABLE agenda_state(
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL);
 )sql"},
+        // client/agent-runtime effect-aware recovery (improve-proactive-durable-work design D3): one row per dispatched
+        // Tool call, the continuation link of a Run, whether a Run keeps a ledger (0: written before this migration), and
+        // the recovery choice of a shutdown-failed Run; the held flag of an Occurrence waiting for that choice.
+        {2000, R"sql(
+CREATE TABLE tool_operations(
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(id),
+  thread_id TEXT NOT NULL,
+  call_id TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  args TEXT NOT NULL DEFAULT '{}',
+  recovery TEXT NOT NULL DEFAULT 'unknown' CHECK(recovery IN ('unknown','replay_safe','reconcilable')),
+  state TEXT NOT NULL CHECK(state IN ('dispatched','completed','unknown','abandoned')),
+  ok INTEGER NOT NULL DEFAULT 0,
+  content TEXT NOT NULL DEFAULT '',
+  provenance TEXT NOT NULL DEFAULT '{}',
+  resolution TEXT NOT NULL DEFAULT '' CHECK(resolution IN ('','continue','stop')),
+  action_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL);
+CREATE INDEX tool_operations_run ON tool_operations(run_id, call_id);
+CREATE INDEX tool_operations_thread ON tool_operations(thread_id, state);
+ALTER TABLE runs ADD COLUMN continues_run_id TEXT;
+ALTER TABLE runs ADD COLUMN ledger INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE runs ADD COLUMN recovery TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX runs_continues ON runs(continues_run_id) WHERE continues_run_id IS NOT NULL;
+ALTER TABLE occurrences ADD COLUMN held INTEGER NOT NULL DEFAULT 0;
+)sql"},
     };
     return migrations;
 }

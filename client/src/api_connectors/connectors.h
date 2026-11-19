@@ -49,7 +49,7 @@ std::optional<std::string> argument_problem(const json& schema, const json& args
 
 // A control-plane answer to a call as a tool result: the 2xx body, or the error envelope's code, message and upstream
 // text. Failures are returned as they are; no call is retried.
-runtime::ToolOutput call_output(int status, const std::string& body);
+runtime::ToolOutput call_output(int status, const std::string& body, bool effect = false);
 
 // The connector listing of the caller (GET api/v1/connectors) and the personal access token (PUT and DELETE
 // api/v1/connectors/<id>/token). The answers never carry a token; errors carry the control plane's code and message.

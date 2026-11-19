@@ -77,7 +77,7 @@ The runtime SHALL build each model request of a Thread so that it starts with th
 - **THEN** both Turns' requests carry the summary wrapped with the same boundary token, the one stored with that compaction
 
 ### Requirement: Run Retry
-The runtime SHALL let the user retry the latest top-level Run of a Thread when it failed. Retry continues that Run with its starting message and its completed tool results, without adding a user message. A tool call that had started without a result is not executed again; the model receives that it did not complete. Output of a failed model call SHALL NOT become part of any later request. A failed Run that is not retried keeps its starting message in the Thread context.
+The runtime SHALL let the user retry the latest top-level Run of a Thread when it failed. Retry continues that Run with its starting message and completed tool results, without adding a user message. A started call without a result is not executed again; the model receives that its outcome is unknown. Output of a failed model call SHALL NOT enter later requests. A failed Run not retried keeps its starting message. A shutdown-failed Run is continued as Effect-Aware Continuation defines.
 
 #### Scenario: Retry after a timeout
 - **WHEN** a Run fails with TIMEOUT after two tool calls, and the user chooses Retry
@@ -85,7 +85,7 @@ The runtime SHALL let the user retry the latest top-level Run of a Thread when i
 
 #### Scenario: Retry after a shutdown during a tool call
 - **WHEN** a Run failed with "interrupted by shutdown" while a tool call was executing, and the user chooses Retry
-- **THEN** that call is not executed again, the model receives a result saying it did not complete, and the Run continues
+- **THEN** a continuation linked to the failed Run starts, that call is not executed again, and the model receives that its outcome is unknown
 
 #### Scenario: Retry is offered only for the latest Run
 - **WHEN** a failed Run is followed by a newer Run in the same Thread

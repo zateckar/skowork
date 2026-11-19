@@ -175,6 +175,7 @@ if(WIN32)
     model/model_client_test.cpp
     model/recorded_test.cpp
     runtime/runtime_test.cpp
+    runtime/durable_work_test.cpp
     skills/skills_sync_test.cpp
     policy/policy_win_test.cpp
     sandbox/sandbox_test.cpp

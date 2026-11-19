@@ -1,6 +1,7 @@
 #include "runtime/run_store.h"
 
 #include "platform/crypto.h"
+#include "runtime/context.h"
 
 #include <chrono>
 #include <map>
@@ -82,7 +83,28 @@ std::string new_id(const char* prefix) { return std::string(prefix) + random_url
 
 constexpr const char* kRunColumns =
     "id,thread_id,parent_run_id,state,reason,origin_kind,origin_ref,unattended,queue_seq,role,active_ms,model_calls,tool_calls,"
-    "prompt_tokens,completion_tokens,reasoning_tokens,created_at,started_at,ended_at";
+    "prompt_tokens,completion_tokens,reasoning_tokens,created_at,started_at,ended_at,COALESCE(continues_run_id,''),recovery,ledger";
+
+constexpr const char* kOperationColumns =
+    "id,run_id,thread_id,call_id,tool,args,recovery,state,ok,content,provenance,resolution,action_id,created_at,updated_at";
+
+// The runtime's own tools: discovery, attachment reads and Questions have no effect outside the Run; delegate and
+// use_skill start Child Runs, whose own calls are in the ledger (improve-proactive-durable-work design D3).
+bool replay_safe_tool(const std::string& tool) { return tool == "find_tools" || tool == "read_attachment" || tool == "ask_user"; }
+bool child_tool(const std::string& tool) { return tool == "delegate" || tool == "use_skill"; }
+
+}  // namespace
+
+const char* const kUnknownOutcomeText =
+    "The outcome of this call is unknown: it was made, but its result was not recorded before the Run stopped. It may or may "
+    "not have taken effect. Do not assume either, and do not make it again unless the user asks for it.";
+
+namespace {
+
+constexpr const char* kAbandonedText = "The call did not finish before the client stopped. It has no effect outside this conversation and can be made again.";
+constexpr const char* kNotDispatchedText = "The call was not executed: the Run ended before it was made.";
+constexpr const char* kChildUnfinishedText =
+    "The subagent did not finish before the Run ended. Calls it made may have taken effect; their outcome is not known.";
 
 ActionItem read_action(Statement& st) {
     ActionItem a;
@@ -174,6 +196,9 @@ std::optional<RunRecord> RunStore::read_run(Statement& st) {
     r.created_at = st.col_text(16);
     r.started_at = st.col_text(17);
     r.ended_at = st.col_text(18);
+    r.continues_run_id = st.col_text(19);
+    r.recovery = st.col_text(20);
+    r.ledger = st.col_int(21) != 0;
     return r;
 }
 
@@ -189,8 +214,8 @@ Result<RunRecord> RunStore::create_run(const std::string& thread_id, const Origi
             if (q.step()) seq = q.col_int(0);
         }
         auto st = db_.prepare(
-            "INSERT INTO runs(id,thread_id,parent_run_id,state,origin_kind,origin_ref,unattended,queue_seq,role,created_at) "
-            "VALUES(?1,?2,?3,'queued',?4,?5,?6,?7,?8,?9)");
+            "INSERT INTO runs(id,thread_id,parent_run_id,state,origin_kind,origin_ref,unattended,queue_seq,role,created_at,ledger) "
+            "VALUES(?1,?2,?3,'queued',?4,?5,?6,?7,?8,?9,1)");
         st.bind(1, id).bind(2, thread_id);
         if (parent_run_id.empty()) st.bind_null(3);
         else st.bind(3, parent_run_id);
@@ -284,12 +309,26 @@ Result<long long> RunStore::reopen_failed(const std::string& run_id, const std::
         auto cur = run(run_id);
         if (!cur) return make_error("not_found", "no such Run");
         if (cur->state != RunState::failed) return make_error("not_failed", "only a failed Run can be retried");
-        // A call that may have partly run gets a result instead of a second execution (Run Retry).
+        // A call that may have partly run gets a result instead of a second execution (Run Retry): the recorded result
+        // of a completed call, else what is known about it (improve-proactive-durable-work design D3).
+        std::map<std::string, OperationRecord> ops;
+        for (auto& o : operations_of_run(run_id)) ops[o.call_id] = std::move(o);
         for (const auto& [call_id, tool] : unfinished) {
-            auto r = append_event_locked(run_id, "tool_result",
-                                         {{"call_id", call_id}, {"tool", tool}, {"ok", false},
-                                          {"content", "The call did not complete before the Run failed; it was not executed again."},
-                                          {"provenance", {{"source_kind", "runtime"}, {"trusted", true}, {"at", now()}}}});
+            const auto it = ops.find(call_id);
+            json result = {{"call_id", call_id}, {"tool", tool}, {"ok", false},
+                           {"provenance", {{"source_kind", "runtime"}, {"trusted", true}, {"at", now()}}}};
+            if (it != ops.end() && it->second.state == "completed") {
+                result["ok"] = it->second.ok;
+                result["content"] = it->second.content;
+                if (it->second.provenance.is_object() && !it->second.provenance.empty()) result["provenance"] = it->second.provenance;
+            } else if (it != ops.end() && it->second.state == "abandoned") {
+                result["content"] = kAbandonedText;
+            } else if (it == ops.end() && cur->ledger && !child_tool(tool)) {
+                result["content"] = kNotDispatchedText;
+            } else {
+                result["content"] = child_tool(tool) ? std::string(kChildUnfinishedText) : std::string(kUnknownOutcomeText);
+            }
+            auto r = append_event_locked(run_id, "tool_result", result);
             if (!r) return r.error();
         }
         const std::string at = now();
@@ -325,9 +364,286 @@ Result<RecoveryReport> RunStore::recover() {
         if (auto t = transition(r.id, RunState::failed, "interrupted by shutdown"); !t) return t.error();
         report.failed_running.push_back(r.id);
     }
+    // Calls dispatched without a recorded result: their outcome is unknown (improve-proactive-durable-work design D3).
+    std::vector<std::string> roots;
+    for (const auto& id : report.failed_running) {
+        const auto r = run(id);
+        if (!r) continue;
+        if (auto s = classify_unfinished(*r); !s) return s.error();
+        if (r->parent_run_id.empty()) roots.push_back(id);
+    }
+    // Shutdown-failed Runs written before the ledger existed, still the latest top-level Run of their Thread: their
+    // potentially dispatched calls are unknown too (design D3, legacy histories). Done once (ledger becomes 2).
+    {
+        std::vector<RunRecord> legacy;
+        auto st = db_.prepare(std::string("SELECT ") + kRunColumns +
+                              " FROM runs r WHERE state='failed' AND reason='interrupted by shutdown' AND ledger=0 AND parent_run_id IS NULL "
+                              "AND NOT EXISTS (SELECT 1 FROM runs n WHERE n.thread_id=r.thread_id AND n.parent_run_id IS NULL "
+                              "AND n.queue_seq>r.queue_seq)");
+        while (st.step()) legacy.push_back(*read_run(st));
+        for (const auto& r : legacy) {
+            for (const auto& x : subtree_locked(r.id))
+                if (auto s = classify_unfinished(x); !s) return s.error();
+            roots.push_back(r.id);
+        }
+    }
+    for (const auto& id : roots) {
+        bool unknown = false;
+        for (const auto& x : subtree_locked(id))
+            for (const auto& o : operations_of_run(x.id))
+                if (o.state == "unknown") unknown = true;
+        if (unknown) report.unknown_roots.push_back(id);
+    }
     report.queued = static_cast<int>(runs_in_state(RunState::queued).size());
     report.interrupted = static_cast<int>(runs_in_state(RunState::interrupted).size());
     return report;
+}
+
+std::vector<RunRecord> RunStore::subtree_locked(const std::string& run_id) {
+    std::vector<RunRecord> out;
+    const auto root = run(run_id);
+    if (!root) return out;
+    out.push_back(*root);
+    for (size_t i = 0; i < out.size(); ++i) {
+        auto st = db_.prepare(std::string("SELECT ") + kRunColumns + " FROM runs WHERE parent_run_id=?1 ORDER BY queue_seq");
+        st.bind(1, out[i].id);
+        while (st.step()) out.push_back(*read_run(st));
+    }
+    return out;
+}
+
+// A failed Run's dispatched calls become unknown (replay-safe ones abandoned). A Run without a ledger gets a row for
+// every call that may have been dispatched: allowed or approved, without a result.
+Status RunStore::classify_unfinished(const RunRecord& r) {
+    return db_.transaction([&]() -> Status {
+        const std::string at = now();
+        auto st = db_.prepare(
+            "UPDATE tool_operations SET state=CASE WHEN recovery='replay_safe' THEN 'abandoned' ELSE 'unknown' END, updated_at=?2 "
+            "WHERE run_id=?1 AND state='dispatched'");
+        st.bind(1, r.id).bind(2, at);
+        if (auto s = st.run(); !s) return s;
+        if (r.ledger) return {};
+        std::map<std::string, std::pair<std::string, json>> started;  // call id -> tool, args
+        std::set<std::string> answered;
+        for (const auto& e : events(r.id)) {
+            const std::string cid = jstr(e.payload, "call_id");
+            if (e.kind == "tool_call") {
+                const std::string d = jstr(e.payload, "decision");
+                if (d == "allow" || d == "rewrite") started[cid] = {jstr(e.payload, "tool"), e.payload.value("args", json::object())};
+            } else if (e.kind == "interrupt") {
+                const auto a = action(jstr(e.payload, "action_id"));
+                const std::string k = a ? jstr(a->resolution, "kind") : std::string{};
+                if (a && a->kind == "approval" && (k == "approve" || k == "approve_edited"))
+                    started[cid] = {jstr(a->payload, "tool"), k == "approve_edited" ? a->resolution.value("args", json::object())
+                                                                                    : a->payload.value("args", json::object())};
+            } else if (e.kind == "tool_result") {
+                answered.insert(cid);
+            }
+        }
+        for (const auto& [cid, call] : started) {
+            if (answered.count(cid) || child_tool(call.first)) continue;
+            auto ins = db_.prepare(std::string("INSERT INTO tool_operations(") + kOperationColumns +
+                                   ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0,'','{}','','',?9,?9)");
+            const bool safe = replay_safe_tool(call.first);
+            ins.bind(1, new_id("op_")).bind(2, r.id).bind(3, r.thread_id).bind(4, cid).bind(5, call.first).bind(6, call.second.dump())
+                .bind(7, safe ? "replay_safe" : "unknown").bind(8, safe ? "abandoned" : "unknown").bind(9, at);
+            if (auto s = ins.run(); !s) return s;
+        }
+        auto mark = db_.prepare("UPDATE runs SET ledger=2 WHERE id=?1");
+        mark.bind(1, r.id);
+        return mark.run();
+    });
+}
+
+// ---- Operation ledger -----------------------------------------------------------------------------------------------
+
+std::optional<OperationRecord> RunStore::read_operation(Statement& st) {
+    OperationRecord o;
+    o.id = st.col_text(0);
+    o.run_id = st.col_text(1);
+    o.thread_id = st.col_text(2);
+    o.call_id = st.col_text(3);
+    o.tool = st.col_text(4);
+    o.args = json::parse(st.col_text(5), nullptr, false);
+    if (o.args.is_discarded()) o.args = json::object();
+    o.recovery = st.col_text(6);
+    o.state = st.col_text(7);
+    o.ok = st.col_int(8) != 0;
+    o.content = st.col_text(9);
+    o.provenance = json::parse(st.col_text(10), nullptr, false);
+    if (o.provenance.is_discarded()) o.provenance = json::object();
+    o.resolution = st.col_text(11);
+    o.action_id = st.col_text(12);
+    o.created_at = st.col_text(13);
+    o.updated_at = st.col_text(14);
+    return o;
+}
+
+Result<std::string> RunStore::begin_operation(const std::string& run_id, const std::string& thread_id, const std::string& call_id,
+                                              const std::string& tool, const json& args, const std::string& recovery) {
+    const std::lock_guard lock(db_.mutex());
+    const std::string id = new_id("op_");
+    auto st = db_.prepare(std::string("INSERT INTO tool_operations(") + kOperationColumns +
+                          ") VALUES(?1,?2,?3,?4,?5,?6,?7,'dispatched',0,'','{}','','',?8,?8)");
+    st.bind(1, id).bind(2, run_id).bind(3, thread_id).bind(4, call_id).bind(5, tool).bind(6, args.dump()).bind(7, recovery).bind(8, now());
+    if (auto s = st.run(); !s) return s.error();
+    return id;
+}
+
+Status RunStore::finish_operation(const std::string& id, bool ok, const std::string& content, const json& provenance, bool unknown) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare("UPDATE tool_operations SET state=?2, ok=?3, content=?4, provenance=?5, updated_at=?6 WHERE id=?1 AND state='dispatched'");
+    st.bind(1, id).bind(2, unknown ? "unknown" : "completed").bind(3, ok ? 1 : 0).bind(4, content).bind(5, provenance.dump()).bind(6, now());
+    return st.run();
+}
+
+Status RunStore::resolve_operation(const std::string& id, const std::string& resolution) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare("UPDATE tool_operations SET resolution=?2, updated_at=?3 WHERE id=?1 AND resolution=''");
+    st.bind(1, id).bind(2, resolution).bind(3, now());
+    if (auto s = st.run(); !s) return s;
+    if (db_.changes() == 0) return make_error("already_resolved", "the outcome was already answered");
+    return {};
+}
+
+Status RunStore::set_operation_action(const std::string& id, const std::string& action_id) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare("UPDATE tool_operations SET action_id=?2, updated_at=?3 WHERE id=?1");
+    st.bind(1, id).bind(2, action_id).bind(3, now());
+    return st.run();
+}
+
+Status RunStore::reconcile_operation(const std::string& id, bool succeeded, const std::string& content) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare("UPDATE tool_operations SET state=?2, ok=?3, content=?4, updated_at=?5 "
+                          "WHERE id=?1 AND state='unknown' AND resolution=''");
+    st.bind(1, id).bind(2, succeeded ? "completed" : "abandoned").bind(3, succeeded ? 1 : 0).bind(4, content).bind(5, now());
+    if (auto s = st.run(); !s) return s;
+    if (db_.changes() == 0) return make_error("not_unknown", "the call is no longer unknown");
+    return {};
+}
+
+std::optional<OperationRecord> RunStore::operation(const std::string& id) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare(std::string("SELECT ") + kOperationColumns + " FROM tool_operations WHERE id=?1");
+    st.bind(1, id);
+    if (!st.step()) return std::nullopt;
+    return read_operation(st);
+}
+
+std::optional<OperationRecord> RunStore::operation_by_action(const std::string& action_id) {
+    const std::lock_guard lock(db_.mutex());
+    if (action_id.empty()) return std::nullopt;
+    auto st = db_.prepare(std::string("SELECT ") + kOperationColumns + " FROM tool_operations WHERE action_id=?1");
+    st.bind(1, action_id);
+    if (!st.step()) return std::nullopt;
+    return read_operation(st);
+}
+
+std::vector<OperationRecord> RunStore::operations_of_run(const std::string& run_id) {
+    const std::lock_guard lock(db_.mutex());
+    std::vector<OperationRecord> out;
+    auto st = db_.prepare(std::string("SELECT ") + kOperationColumns + " FROM tool_operations WHERE run_id=?1 ORDER BY created_at, rowid");
+    st.bind(1, run_id);
+    while (st.step()) out.push_back(*read_operation(st));
+    return out;
+}
+
+bool RunStore::thread_has_unknown(const std::string& thread_id) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare("SELECT 1 FROM tool_operations WHERE thread_id=?1 AND state='unknown' LIMIT 1");
+    st.bind(1, thread_id);
+    return st.step();
+}
+
+std::vector<OperationRecord> RunStore::unknown_operations(const std::string& thread_id) {
+    const std::lock_guard lock(db_.mutex());
+    std::vector<OperationRecord> out;
+    auto st = db_.prepare(std::string("SELECT ") + kOperationColumns +
+                          " FROM tool_operations WHERE thread_id=?1 AND state='unknown' ORDER BY created_at, rowid");
+    st.bind(1, thread_id);
+    while (st.step()) out.push_back(*read_operation(st));
+    return out;
+}
+
+std::vector<OperationRecord> RunStore::unanswered_unknown_operations() {
+    const std::lock_guard lock(db_.mutex());
+    std::vector<OperationRecord> out;
+    auto st = db_.prepare(std::string("SELECT ") + kOperationColumns +
+                          " FROM tool_operations WHERE state='unknown' AND resolution='' ORDER BY created_at, rowid");
+    while (st.step()) out.push_back(*read_operation(st));
+    return out;
+}
+
+Status RunStore::set_run_recovery(const std::string& run_id, const std::string& recovery) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare("UPDATE runs SET recovery=?2 WHERE id=?1");
+    st.bind(1, run_id).bind(2, recovery);
+    return st.run();
+}
+
+std::optional<RunRecord> RunStore::continuation_of(const std::string& run_id) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare(std::string("SELECT ") + kRunColumns + " FROM runs WHERE continues_run_id=?1");
+    st.bind(1, run_id);
+    if (!st.step()) return std::nullopt;
+    return read_run(st);
+}
+
+std::string RunStore::continuation_blocker(const std::string& failed_run_id, bool* pending) {
+    const std::lock_guard lock(db_.mutex());
+    if (pending) *pending = false;
+    const auto r = run(failed_run_id);
+    if (!r) return "the Run does not exist";
+    if (!r->parent_run_id.empty()) return "a subagent is continued with the Run that started it";
+    if (r->state != RunState::failed || r->reason != "interrupted by shutdown") return "the Run did not fail at a shutdown";
+    if (r->recovery == "stopped") return "you stopped this Run";
+    if (continuation_of(failed_run_id)) return "the Run was already continued";
+    {
+        auto st = db_.prepare("SELECT 1 FROM runs WHERE thread_id=?1 AND parent_run_id IS NULL AND queue_seq>?2 LIMIT 1");
+        st.bind(1, r->thread_id).bind(2, r->queue_seq);
+        if (st.step()) return "a newer Run followed it in the Thread";
+    }
+    if (active_run(r->thread_id)) return "the Thread has an active Run";
+    for (const auto& x : subtree_locked(failed_run_id))
+        for (const auto& o : operations_of_run(x.id)) {
+            if (o.state != "unknown" || o.resolution == "continue") continue;
+            if (o.resolution == "stop") return "you stopped this Run";
+            if (pending) *pending = true;
+            return "a call's outcome is unknown and waits for your answer";
+        }
+    return {};
+}
+
+Result<RunRecord> RunStore::create_continuation(const std::string& failed_run_id, const std::string& role) {
+    const std::lock_guard lock(db_.mutex());
+    std::string id;
+    const auto status = db_.transaction([&]() -> Status {
+        if (const std::string why = continuation_blocker(failed_run_id); !why.empty()) return make_error("not_continuable", why);
+        const auto f = run(failed_run_id);
+        id = new_id("run_");
+        long long seq = 1;
+        {
+            auto q = db_.prepare("SELECT COALESCE(MAX(queue_seq),0)+1 FROM runs");
+            if (q.step()) seq = q.col_int(0);
+        }
+        // The continuation keeps the origin, the Unattended flag and what the failed Run consumed (Run Limits).
+        auto st = db_.prepare(
+            "INSERT INTO runs(id,thread_id,parent_run_id,state,origin_kind,origin_ref,unattended,queue_seq,role,created_at,ledger,"
+            "continues_run_id,active_ms,model_calls,tool_calls,prompt_tokens,completion_tokens,reasoning_tokens) "
+            "VALUES(?1,?2,NULL,'queued',?3,?4,?5,?6,?7,?8,1,?9,?10,?11,?12,?13,?14,?15)");
+        st.bind(1, id).bind(2, f->thread_id).bind(3, to_string(f->origin.kind)).bind(4, f->origin.ref).bind(5, f->unattended ? 1 : 0)
+            .bind(6, seq).bind(7, role).bind(8, now()).bind(9, failed_run_id).bind(10, f->active_ms).bind(11, f->model_calls)
+            .bind(12, f->tool_calls).bind(13, f->usage.prompt).bind(14, f->usage.completion).bind(15, f->usage.reasoning);
+        if (auto s = st.run(); !s) return s;
+        if (auto e = append_event_locked(id, "state", {{"state", "queued"}, {"reason", "continuation"}}); !e) return e.error();
+        if (auto e = append_event_locked(id, "continuation", {{"continues_run_id", failed_run_id}}); !e) return e.error();
+        auto up = db_.prepare("UPDATE threads SET updated_at=?2 WHERE id=?1");
+        up.bind(1, f->thread_id).bind(2, now());
+        return up.run();
+    });
+    if (!status) return status.error();
+    return *run(id);
 }
 
 // ---- Event log ----------------------------------------------------------------------------------------------------
@@ -566,10 +882,29 @@ std::vector<ContextMessage> RunStore::thread_messages(const std::string& thread_
     for (const auto& r : runs_in_thread(thread_id)) {
         if (!r.parent_run_id.empty()) continue;  // a subagent's messages belong to the child Run
         std::vector<ContextMessage> msgs;
-        for (const auto& e : events(r.id))
+        std::string nonce;
+        for (const auto& e : events(r.id)) {
             if (e.kind == "message") msgs.push_back({message_from_event(e.payload), r.id, e.seq, false});
+            else if (e.kind == "nonce") nonce = jstr(e.payload, "nonce");
+        }
         if (r.id != except_run) {
-            // Close tool calls without a result.
+            // Close tool calls without a result with what the ledger knows (improve-proactive-durable-work design D3):
+            // the recorded result of a completed call, the unknown outcome of a dispatched one, "not executed" only for a
+            // call that provably was not made.
+            std::map<std::string, OperationRecord> ops;
+            for (auto& o : operations_of_run(r.id)) ops[o.call_id] = std::move(o);
+            const auto closing = [&](const model::ToolCallMessage& c) -> std::string {
+                const auto it = ops.find(c.id);
+                if (it != ops.end() && it->second.state == "completed") {
+                    const json& p = it->second.provenance;
+                    if (p.empty() || jbool(p, "trusted", true)) return it->second.content;
+                    return wrap_untrusted(it->second.content, nonce.empty() ? new_nonce() : nonce, jstr(p, "source_kind"), jstr(p, "source_id"));
+                }
+                if (it != ops.end() && it->second.state == "abandoned") return kAbandonedText;
+                if (child_tool(c.tool)) return kChildUnfinishedText;
+                if (it == ops.end() && r.ledger) return kNotDispatchedText;
+                return kUnknownOutcomeText;
+            };
             std::vector<ContextMessage> fixed;
             for (size_t i = 0; i < msgs.size(); ++i) {
                 fixed.push_back(msgs[i]);
@@ -585,7 +920,7 @@ std::vector<ContextMessage> RunStore::thread_messages(const std::string& thread_
                     ContextMessage m;
                     m.msg.role = "tool";
                     m.msg.tool_call_id = c.id;
-                    m.msg.content = "The call was not executed: the Run ended before it finished.";
+                    m.msg.content = closing(c);
                     m.run_id = r.id;
                     m.seq = msgs[i].seq;
                     fixed.push_back(std::move(m));

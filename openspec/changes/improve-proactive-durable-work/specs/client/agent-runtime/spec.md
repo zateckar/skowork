@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: Effect-Aware Continuation
-For a shutdown-failed Run whose recorded boundary is sufficient, the runtime SHALL offer explicit continuation without re-executing completed Tool calls. The failed Run and its history SHALL remain visible and the continuation SHALL be linked to it. Otherwise it SHALL explain that continuation is unavailable.
+For a shutdown-failed top-level Run whose recorded boundary is sufficient, the runtime SHALL offer explicit continuation as a new Run linked to it, without re-executing completed Tool calls; Run Retry of such a Run starts this continuation. The failed Run and its history SHALL remain unchanged and visible. Otherwise the runtime SHALL explain that continuation is unavailable.
 
 #### Scenario: Completed call before shutdown
 - **WHEN** a Run fails at shutdown after a Tool result was recorded and the user chooses continuation
@@ -25,7 +25,7 @@ The runtime SHALL treat a Tool call with an unconfirmed effect as outcome unknow
 - **THEN** the result and user-visible explanation state that the outcome is unknown and do not claim the call was not made.
 
 ### Requirement: Unknown Effect Guard
-While an effect remains unknown, the runtime MUST block each new potentially effectful Tool call in the continuation until the user explicitly authorizes that call. The call SHALL also receive its normal current policy decision and any required Approval.
+While a Thread holds a Tool call whose effect is unknown, the runtime MUST block each new Tool call of its Runs and Child Runs, except a call registered as replay-safe, until the user explicitly authorizes that call. The call SHALL also receive its normal current policy decision; an Approval of the exact call satisfies both, a policy allow alone does not.
 
 #### Scenario: Model reissues uncertain send
 - **WHEN** a continuation requests the same send after the user chose to continue with its outcome unknown

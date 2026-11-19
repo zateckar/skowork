@@ -99,7 +99,9 @@ std::optional<std::string> argument_problem(const json& schema, const json& args
     return "the arguments do not match the operation: " + errors.front();
 }
 
-runtime::ToolOutput call_output(int status, const std::string& body) {
+// `effect`: the operation can change something (its Risk class is not read). A call whose request may have reached the
+// API without an answer then has an unknown outcome (improve-proactive-durable-work design D3).
+runtime::ToolOutput call_output(int status, const std::string& body, bool effect) {
     const auto j = parse_json(body);
     if (status >= 200 && status < 300) {
         if (!j || !j->is_object() || !j->contains("status") || !j->contains("body"))
@@ -117,6 +119,9 @@ runtime::ToolOutput call_output(int status, const std::string& body) {
             upstream_text = jstr(*e, "text");
             upstream_status = jint(*e, "status");
         }
+    if (effect && (code == "TIMEOUT" || code == "UPSTREAM_ERROR") && !upstream_status)
+        return runtime::ToolOutput::unknown("The API did not answer (" + code + "): " + message +
+                                            " The request may have reached it, so the outcome is unknown.");
     std::string text = "The connector call failed (" + code + "): " + message;
     if (upstream_status) text += " The API answered " + std::to_string(upstream_status) + ".";
     if (!upstream_text.empty()) text += "\nThe API said: " + upstream_text;
@@ -156,15 +161,18 @@ runtime::ToolDef tool_for(const std::shared_ptr<const Request>& request, const C
     d.provenance = runtime::Provenance{"api", c.id + "/" + op.name, "", false};
     const std::string connector = c.id, operation = op.name;
     const json schema = op.input_schema;
-    d.run = [request, connector, operation, schema](runtime::ToolContext&, const json& args) -> runtime::ToolOutput {
+    const bool effect = op.risk != runtime::Risk::read;
+    d.run = [request, connector, operation, schema, effect](runtime::ToolContext&, const json& args) -> runtime::ToolOutput {
         json a = args.is_object() ? args : json::object();
         a.erase("rationale");  // the approval rationale is not an argument of the operation
         if (auto problem = argument_problem(schema, a)) return runtime::ToolOutput::failure("The call was not made: " + *problem);
         const std::string path = "api/v1/connectors/" + connector + "/operations/" + operation + "/call";
         if (!*request) return runtime::ToolOutput::failure("The connectors are not available, so the call was not made.");
         auto r = (*request)("POST", path, json{{"arguments", a}}.dump());
-        runtime::ToolOutput out = r ? call_output(r->status, r->body)
-                                    : runtime::ToolOutput::failure("The connector could not be reached or its response was lost; the outcome is unknown (" + r.error().message + ").");
+        const std::string lost = "The connector could not be reached or its response was lost (" + (r ? std::string{} : r.error().message) +
+                                 "), so the outcome is unknown.";
+        runtime::ToolOutput out = r ? call_output(r->status, r->body, effect)
+                                    : (effect ? runtime::ToolOutput::unknown(lost) : runtime::ToolOutput::failure(lost));
         out.provenance = runtime::Provenance{"api", connector + "/" + operation, iso8601_utc_now(), false};
         return out;
     };

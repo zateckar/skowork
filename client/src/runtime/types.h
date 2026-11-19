@@ -63,6 +63,12 @@ struct RunRecord {
     int tool_calls = 0;
     model::Usage usage;
     std::string created_at, started_at, ended_at;
+    // Effect-aware recovery (improve-proactive-durable-work design D3): the shutdown-failed Run this Run continues, the
+    // recovery choice of a failed Run ("" or "stopped"), and whether the Run keeps a ledger of its dispatched calls
+    // (false for Runs written before the ledger existed).
+    std::string continues_run_id;
+    std::string recovery;
+    bool ledger = false;
 };
 
 struct StoredEvent {
