@@ -856,7 +856,9 @@ bool App::start_storage() {
         log::error(kLog, storage_error);
         return true;  // the tray still runs; storage-dependent features stay off
     }
-    auto key = keys.get_or_create("app.db");
+    // Downgrade gate (improve-proactive-durable-work design, Downgrade gate): the key lives under kAppDbKey, so a
+    // client from before the operation ledger cannot open app.db and retry work whose effect is unknown.
+    auto key = keys.get_adopting(kAppDbKey, "app.db");
     if (!key) {
         storage_error = "key: " + key.error().message;
         log::error(kLog, storage_error);

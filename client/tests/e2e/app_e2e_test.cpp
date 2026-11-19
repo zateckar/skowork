@@ -29,6 +29,7 @@
 #include <udpmib.h>
 
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <regex>
 #include <set>
@@ -156,34 +157,67 @@ json stack_config() {
 
 }  // namespace
 
-TEST(AppE2E, ExistingClientOpensProfileWithNewerAdditiveSchema) {
+// improve-proactive-durable-work 1.4, the downgrade gate: a profile the current client opened cannot be opened by the
+// prior client, so it cannot retry work whose effect is unknown. SKOWORK_E2E_PRIOR_CLIENT names the prior client's
+// executable, built from its release tag as a development build so that --data-root, --pipe-name, --no-register and
+// --config keep it on this test's disposable profile. The current client opens the profile again afterwards.
+TEST(AppE2E, PriorClientCannotOpenAGatedProfile) {
     WB_REQUIRES_DEV_ENDPOINTS();
-    // Characterizes the current local binary. Replace with the actual previous-release barrier test when available.
+    wchar_t prior[MAX_PATH]{};
+    if (::GetEnvironmentVariableW(L"SKOWORK_E2E_PRIOR_CLIENT", prior, MAX_PATH) == 0) GTEST_SKIP() << "SKOWORK_E2E_PRIOR_CLIENT is not set";
     Instance a;
     a.write_config(json{{"control_plane_url", ""}});
-    {
-        auto root = DataRoot::open(a.dir / L"data");
-        ASSERT_TRUE(root);
-        KeyStore keys(root->keys());
-        ASSERT_TRUE(keys.load());
-        auto key = keys.get_or_create("app.db");
-        ASSERT_TRUE(key);
-        auto migrations = app_migrations();
-        ASSERT_FALSE(migrations.empty());
-        migrations.push_back({migrations.back().version + 1, "CREATE TABLE prototype_recovery_ledger(id INTEGER PRIMARY KEY);"});
-        MigrationOutcome outcome;
-        auto db = open_and_migrate(root->file("app.db"), *key, migrations, outcome);
-        ASSERT_TRUE(db);
-        ASSERT_FALSE(outcome.degraded);
-    }
     ASSERT_TRUE(a.start());
     auto status = a.call("app.status");
     ASSERT_TRUE(status);
-    ASSERT_TRUE(status->contains("storage"));
-    EXPECT_FALSE(jbool((*status)["storage"], "read_only", true));
-    EXPECT_TRUE(jstr((*status)["storage"], "error").empty());
-}
+    EXPECT_TRUE(jstr((*status)["storage"], "error").empty()) << status->dump();
+    (void)a.call("app.quit");
+    ASSERT_TRUE(exited_within(a.main, 10000));
+    a.main = {};
+    const auto keys_have = [&](const char* name) {
+        auto root = DataRoot::open(a.dir / L"data");
+        EXPECT_TRUE(root);
+        if (!root) return false;
+        KeyStore keys(root->keys());
+        EXPECT_TRUE(keys.load());
+        return keys.contains(name);
+    };
+    EXPECT_TRUE(keys_have(kAppDbKey));
+    EXPECT_FALSE(keys_have("app.db"));
 
+    // The prior client on the same profile: the tray runs, app.db does not open, nothing that needs storage starts.
+    const std::filesystem::path exe(prior);
+    std::wstring cmd = L"\"" + exe.wstring() + L"\" " + a.common_args() + L" --background";
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    ASSERT_TRUE(::CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, exe.parent_path().c_str(), &si, &pi));
+    ::CloseHandle(pi.hThread);
+    a.main = {unique_handle(pi.hProcess), pi.dwProcessId};
+    Result<json> old = make_error("pending", "");
+    for (int i = 0; i < 100 && !old; ++i) {
+        old = a.call("app.status");
+        if (!old) std::this_thread::sleep_for(100ms);
+    }
+    ASSERT_TRUE(old) << old.error().message;
+    std::cout << "prior client status: " << old->dump() << "\n";
+    const std::string error = jstr((*old)["storage"], "error");
+    EXPECT_NE(error.find("app.db"), std::string::npos) << old->dump();
+    (void)a.call("app.quit");
+    if (!exited_within(a.main, 10000)) ::TerminateProcess(a.main.process.get(), 1);
+    a.main = {};
+    EXPECT_TRUE(keys_have("app.db"));  // the prior client made itself a key (wrapped its own way) that opens nothing
+
+    // The current client again: it drops the prior client's key and opens the profile.
+    ASSERT_TRUE(a.start());
+    status = a.call("app.status");
+    ASSERT_TRUE(status);
+    EXPECT_TRUE(jstr((*status)["storage"], "error").empty()) << status->dump();
+    (void)a.call("app.quit");
+    ASSERT_TRUE(exited_within(a.main, 10000));
+    a.main = {};
+    EXPECT_FALSE(keys_have("app.db"));
+}
 TEST(AppE2E, SecondLaunchHandsOverAndExits) {
     Instance a;
     a.write_config(json{{"control_plane_url", ""}});

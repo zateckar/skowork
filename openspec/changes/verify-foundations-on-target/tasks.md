@@ -52,3 +52,7 @@ These runs need desktop input or an identity-provider sign-in. Ask the user befo
 ## 9. Skills across clients (from add-skills)
 
 - [ ] 9.1 (add-skills 7.1) End-to-end on two signed-in test clients: user A saves a Thread as a skill, shares it with user B, publishes it to org, a reviewer approves it, and the skill is revoked. Verify each step on both clients.
+
+## 10. Durable work on target (from improve-proactive-durable-work)
+
+- [ ] 10.1 (improve-proactive-durable-work 1.4) In a separate Windows user or VM with its own registry, data root and controlled network: install the signed v0.1.0 release, let the current client upgrade its profile, then start the v0.1.0 release binary on it. Verify it reports a storage error, starts no agent runtime or scheduler and dispatches nothing, and that the current client opens the profile again afterwards.

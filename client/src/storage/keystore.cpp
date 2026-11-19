@@ -103,4 +103,17 @@ Status KeyStore::remove(const std::string& name) {
     return save();
 }
 
+Result<db_key> KeyStore::get_adopting(const std::string& name, const std::string& legacy) {
+    const auto old = blobs_.find(legacy);
+    if (old == blobs_.end()) return get_or_create(name);
+    const auto before = blobs_;
+    if (!blobs_.count(name)) blobs_[name] = old->second;  // a stray legacy key next to the adopted one is dropped
+    blobs_.erase(legacy);
+    if (auto s = save(); !s) {
+        blobs_ = before;
+        return s.error();
+    }
+    return get(name);
+}
+
 }  // namespace wb

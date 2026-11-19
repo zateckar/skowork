@@ -428,6 +428,68 @@ TEST(Database, EncryptedAtRestAndKeyBound) {
     EXPECT_EQ(slurp(root->keys()).find(std::string(key->begin(), key->end())), std::string::npos);
 }
 
+// Downgrade gate (improve-proactive-durable-work 1.4): the key moves to kAppDbKey in one keys.bin write; a reader of
+// the legacy name gets a new key that cannot open the database, and the next adoption drops that stray key.
+TEST(KeyStoreGate, AdoptingMovesTheKeySoTheLegacyNameNoLongerOpensTheDatabase) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    db_key original{};
+    {
+        KeyStore keys(root->keys());
+        ASSERT_TRUE(keys.load());
+        auto k = keys.get_or_create("app.db");
+        ASSERT_TRUE(k);
+        original = *k;
+        auto db = Database::open(root->file("app.db"), original);
+        ASSERT_TRUE(db);
+        ASSERT_TRUE((*db)->exec("CREATE TABLE runs(id INTEGER PRIMARY KEY); INSERT INTO runs VALUES (7);"));
+    }
+    {
+        KeyStore keys(root->keys());
+        ASSERT_TRUE(keys.load());
+        auto k = keys.get_adopting(kAppDbKey, "app.db");
+        ASSERT_TRUE(k);
+        EXPECT_EQ(*k, original);
+    }
+    {
+        // A prior client: get_or_create("app.db") makes a new key, and the database refuses it.
+        KeyStore keys(root->keys());
+        ASSERT_TRUE(keys.load());
+        auto stray = keys.get_or_create("app.db");
+        ASSERT_TRUE(stray);
+        EXPECT_NE(*stray, original);
+        auto db = Database::open(root->file("app.db"), *stray);
+        ASSERT_FALSE(db);
+        EXPECT_EQ(db.error().code, "not_a_database");
+    }
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    auto k = keys.get_adopting(kAppDbKey, "app.db");
+    ASSERT_TRUE(k);
+    EXPECT_EQ(*k, original);
+    KeyStore reread(root->keys());
+    ASSERT_TRUE(reread.load());
+    EXPECT_FALSE(reread.get("app.db"));
+    auto db = Database::open(root->file("app.db"), *k);
+    ASSERT_TRUE(db);
+    auto q = (*db)->prepare("SELECT id FROM runs");
+    ASSERT_TRUE(q.step());
+    EXPECT_EQ(q.col_int(0), 7);
+}
+
+TEST(KeyStoreGate, AFreshProfileGetsOnlyTheGatedKey) {
+    TempRoot t;
+    auto root = DataRoot::open(t.path);
+    ASSERT_TRUE(root);
+    KeyStore keys(root->keys());
+    ASSERT_TRUE(keys.load());
+    ASSERT_TRUE(keys.get_adopting(kAppDbKey, "app.db"));
+    KeyStore reread(root->keys());
+    ASSERT_TRUE(reread.load());
+    EXPECT_TRUE(reread.get(kAppDbKey));
+    EXPECT_FALSE(reread.get("app.db"));
+}
 TEST(Database, LegacyAppMigrationOpensAndWritesANewerSchemaByDefault) {
     // Characterizes the legacy default; it is not evidence of a safe recovery migration.
     TempRoot t;
