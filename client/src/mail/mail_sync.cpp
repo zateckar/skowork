@@ -5,6 +5,7 @@
 #include "mail/graph_parse.h"
 #include "platform/log.h"
 
+#include <map>
 #include <set>
 
 namespace wb::mail {
@@ -42,6 +43,16 @@ void MailSync::on_event(std::function<void(const MailEvent&)> fn) {
     listeners_.push_back(std::move(fn));
 }
 
+void MailSync::set_page_sink(PageSink sink) {
+    const std::lock_guard lock(cfg_mx_);
+    sink_ = std::move(sink);
+}
+
+void MailSync::on_cycle(std::function<void()> fn) {
+    const std::lock_guard lock(cfg_mx_);
+    cycle_listeners_.push_back(std::move(fn));
+}
+
 void MailSync::publish(const MailEvent& e, SyncReport& r) {
     std::vector<std::function<void(const MailEvent&)>> listeners;
     {
@@ -56,6 +67,38 @@ void MailSync::publish(const MailEvent& e, SyncReport& r) {
             log::warn(kLog, std::string("mail event listener: ") + ex.what());
         }
     }
+}
+
+std::string conflicting_item(const std::vector<json>& items) {
+    std::map<std::string, std::string> seen;  // id -> "removed" or the change key
+    for (const auto& item : items) {
+        const std::string id = jstr(item, "id");
+        if (id.empty()) continue;
+        const std::string what = item.contains("@removed") ? std::string("\x01removed") : jstr(item, "changeKey");
+        const auto [it, inserted] = seen.emplace(id, what);
+        if (!inserted && it->second != what) return id;
+    }
+    return {};
+}
+
+Status MailSync::commit_page(const std::function<Status(std::vector<MailEvent>&, std::vector<PageChange>&)>& write,
+                             const std::function<Status()>& cursor, SyncReport& r) {
+    PageSink sink;
+    {
+        const std::lock_guard lock(cfg_mx_);
+        sink = sink_;
+    }
+    std::vector<MailEvent> events;
+    std::vector<PageChange> changes;
+    const Status page = store_.db().transaction([&]() -> Status {
+        if (Status s = write(events, changes); !s) return s;
+        if (sink && !changes.empty())
+            if (Status s = sink(changes); !s) return s;
+        return cursor ? cursor() : Status{};
+    });
+    if (!page) return page;  // nothing of the page stays, the cursor did not move
+    for (const auto& e : events) publish(e, r);
+    return {};
 }
 
 Result<SyncReport> MailSync::sync_once(GraphClient& graph, const std::shared_ptr<CancelToken>& cancel) {
@@ -78,13 +121,23 @@ Result<SyncReport> MailSync::sync_once(GraphClient& graph, const std::shared_ptr
             StoredFolder sf{jstr(f, "id"), jstr(f, "displayName"), jstr(f, "wellKnownName")};
             if (!sf.id.empty()) folders.push_back(std::move(sf));
         }
-        store_.set_folders(folders);
+        if (Status s = store_.set_folders(folders); !s) return s.error();
         const Rules rl = rules();
         for (const auto& f : folders) {
             if (folder_excluded(rl, {f.well_known, f.name})) {
-                // An excluded folder is not synced; what was synced before is dropped without events.
-                for (const auto& id : store_.message_ids(f.id)) store_.remove_message(id);
-                store_.drop_sync_state("folder:" + f.id);
+                // An excluded folder is not synced; what was synced before is dropped without events (triage sees it go).
+                const Status dropped = commit_page(
+                    [&](std::vector<MailEvent>&, std::vector<PageChange>& changes) -> Status {
+                        for (const auto& id : store_.message_ids(f.id)) {
+                            Status st;
+                            store_.remove_message(id, &st);
+                            if (!st) return st;
+                            changes.push_back({"mail", id, true, false, f.id, f.well_known.empty() ? f.name : f.well_known});
+                        }
+                        return store_.drop_sync_state("folder:" + f.id);
+                    },
+                    {}, r);
+                if (!dropped) return dropped.error();
                 continue;
             }
             ++r.folders;
@@ -95,6 +148,18 @@ Result<SyncReport> MailSync::sync_once(GraphClient& graph, const std::shared_ptr
         if (Status s = sync_calendar(r, cancel); !s) return s.error();
     const long long now = clock_.unix_millis();
     store_.prune(now - cfg.window.mail_days * kDay, now - cfg.window.calendar_past_days * kDay, now + cfg.window.calendar_future_days * kDay);
+    std::vector<std::function<void()>> after;
+    {
+        const std::lock_guard lock(cfg_mx_);
+        after = cycle_listeners_;
+    }
+    for (const auto& fn : after) {
+        try {
+            fn();
+        } catch (const std::exception& ex) {
+            log::warn(kLog, std::string("mail cycle listener: ") + ex.what());
+        }
+    }
     return r;
 }
 
@@ -108,6 +173,7 @@ Status MailSync::sync_folder(const StoredFolder& f, SyncReport& r, const std::sh
     const Rules rl = rules();
     const long long cutoff = clock_.unix_millis() - cfg.window.mail_days * kDay;
     const bool own = own_mail_folder(f);
+    const std::string folder_name = f.well_known.empty() ? f.name : f.well_known;
     for (int round = 0; round < 2; ++round) {
         std::string link = store_.delta_link(key);
         const bool full = link.empty();
@@ -128,54 +194,77 @@ Status MailSync::sync_folder(const StoredFolder& f, SyncReport& r, const std::sh
             if (!p) {
                 if (p.error().code == "sync_state_not_found" && round == 0) {
                     log::info(kLog, "delta token expired for a folder; full resync");
-                    store_.set_delta_link(key, "", store_.last_sync(), "synced");
+                    if (Status s = store_.set_delta_link(key, "", store_.last_sync(), "synced"); !s) return s;
                     ++r.resyncs;
                     expired = true;
                     break;
                 }
                 return p.error();
             }
-            for (const auto& item : p->items) {
-                const std::string id = jstr(item, "id");
-                if (id.empty()) continue;
-                if (item.contains("@removed")) {
-                    if (auto old = store_.remove_message(id); old && !old->withheld)
-                        publish({"mail.deleted", id, {{"id", id}, {"folder", f.well_known.empty() ? f.name : f.well_known}}}, r);
-                    continue;
-                }
-                Disposition d = Disposition::include;
-                auto m = parse_message(item, rl, {f.well_known, f.name}, &d);
-                if (!m) continue;
-                if (m->folder_id.empty()) m->folder_id = f.id;
-                seen.insert(id);
-                if (d == Disposition::excluded || (m->received_at && m->received_at < cutoff)) {
-                    store_.remove_message(id);
-                    continue;
-                }
-                ++r.messages;
-                const auto change = store_.upsert_message(*m);
-                if (change == MailStore::Change::none || m->withheld) continue;
-                json detail = message_json(*m, false);
-                detail["folder"] = f.well_known.empty() ? f.name : f.well_known;
-                if (change == MailStore::Change::created && !own && !m->is_draft) {
-                    MailEvent e{"mail.received", id, std::move(detail)};
-                    if (backfill) e.detail["backfill"] = true;
-                    publish(e, r);
-                } else if (change == MailStore::Change::updated) {
-                    publish({"mail.updated", id, std::move(detail)}, r);
-                }
-            }
-            if (!p->delta_link.empty()) {
-                if (full) {
-                    // A full sync is complete: what the store has and Graph did not list is gone.
-                    for (const auto& id : store_.message_ids(f.id))
-                        if (!seen.count(id))
-                            if (auto old = store_.remove_message(id); old && !old->withheld && !backfill)
-                                publish({"mail.deleted", id, {{"id", id}, {"folder", f.well_known.empty() ? f.name : f.well_known}}}, r);
-                }
-                store_.set_delta_link(key, p->delta_link, clock_.unix_millis(), "synced");
-                return {};
-            }
+            if (const std::string id = conflicting_item(p->items); !id.empty())
+                return make_error("ambiguous_page", "a mail delta page lists one item with conflicting changes");
+            const Status page = commit_page(
+                [&](std::vector<MailEvent>& events, std::vector<PageChange>& changes) -> Status {
+                    for (const auto& item : p->items) {
+                        const std::string id = jstr(item, "id");
+                        if (id.empty()) continue;
+                        Status st;
+                        if (item.contains("@removed")) {
+                            auto old = store_.remove_message(id, &st);
+                            if (!st) return st;
+                            if (old) {
+                                changes.push_back({"mail", id, true, false, f.id, folder_name});
+                                if (!old->withheld) events.push_back({"mail.deleted", id, {{"id", id}, {"folder", folder_name}}});
+                            }
+                            continue;
+                        }
+                        Disposition d = Disposition::include;
+                        auto m = parse_message(item, rl, {f.well_known, f.name}, &d);
+                        if (!m) continue;
+                        if (m->folder_id.empty()) m->folder_id = f.id;
+                        seen.insert(id);
+                        if (d == Disposition::excluded || (m->received_at && m->received_at < cutoff)) {
+                            if (store_.remove_message(id, &st)) changes.push_back({"mail", id, true, false, f.id, folder_name});
+                            if (!st) return st;
+                            continue;
+                        }
+                        ++r.messages;
+                        const auto change = store_.upsert_message(*m, &st);
+                        if (!st) return st;
+                        if (change == MailStore::Change::none) continue;
+                        changes.push_back({"mail", id, false, !own && !m->is_draft && !m->withheld && !backfill, f.id, folder_name});
+                        if (m->withheld) continue;
+                        json detail = message_json(*m, false);
+                        detail["folder"] = folder_name;
+                        if (change == MailStore::Change::created && !own && !m->is_draft) {
+                            MailEvent e{"mail.received", id, std::move(detail)};
+                            if (backfill) e.detail["backfill"] = true;
+                            events.push_back(std::move(e));
+                        } else if (change == MailStore::Change::updated) {
+                            events.push_back({"mail.updated", id, std::move(detail)});
+                        }
+                    }
+                    if (!p->delta_link.empty() && full) {
+                        // A full sync is complete: what the store has and Graph did not list is gone.
+                        for (const auto& id : store_.message_ids(f.id)) {
+                            if (seen.count(id)) continue;
+                            Status st;
+                            auto old = store_.remove_message(id, &st);
+                            if (!st) return st;
+                            if (!old) continue;
+                            changes.push_back({"mail", id, true, false, f.id, folder_name});
+                            if (!old->withheld && !backfill) events.push_back({"mail.deleted", id, {{"id", id}, {"folder", folder_name}}});
+                        }
+                    }
+                    return {};
+                },
+                [&]() -> Status {
+                    if (p->delta_link.empty()) return {};
+                    return store_.set_delta_link(key, p->delta_link, clock_.unix_millis(), "synced");
+                },
+                r);
+            if (!page) return page;
+            if (!p->delta_link.empty()) return {};
             link = p->next_link;
         }
         if (!expired) return {};
@@ -218,54 +307,76 @@ Status MailSync::sync_calendar(SyncReport& r, const std::shared_ptr<CancelToken>
             if (!p) {
                 if (p.error().code == "sync_state_not_found" && round == 0) {
                     log::info(kLog, "calendar delta token expired; full resync");
-                    store_.set_delta_link(key, "", store_.last_sync(), "expired");
+                    if (Status s = store_.set_delta_link(key, "", store_.last_sync(), "expired"); !s) return s;
                     ++r.resyncs;
                     expired = true;
                     break;
                 }
                 return p.error();
             }
-            for (const auto& item : p->items) {
-                const std::string id = jstr(item, "id");
-                if (id.empty()) continue;
-                if (item.contains("@removed")) {
-                    if (auto old = store_.remove_event(id); old && !old->withheld && !old->masked && !old->cancelled)
-                        publish({"event.cancelled", id, event_json(*old, false), old->start_at, old->end_at}, r);
-                    continue;
-                }
-                Disposition d = Disposition::include;
-                auto e = parse_event(item, rl, &d);
-                if (!e) continue;
-                seen.insert(id);
-                if (d == Disposition::excluded) {
-                    store_.remove_event(id);
-                    continue;
-                }
-                const auto before = store_.event(id);
-                ++r.events;
-                const auto change = store_.upsert_event(*e);
-                if (change == MailStore::Change::none || e->withheld || e->masked) continue;
-                MailEvent ev{"event.updated", id, event_json(*e, false), e->start_at, e->end_at};
-                if (e->cancelled && !(before && before->cancelled)) ev.kind = "event.cancelled";
-                else if (change == MailStore::Change::created) ev.kind = "event.created";
-                if (backfill && change == MailStore::Change::created) ev.detail["backfill"] = true;
-                publish(ev, r);
-            }
-            if (!p->delta_link.empty()) {
-                if (full)
-                    for (const auto& id : store_.event_ids())
-                        if (!seen.count(id))
-                            if (auto old = store_.remove_event(id); old && !old->withheld && !old->masked && !old->cancelled && !backfill &&
-                                                                    old->start_at < to && old->end_at > from)
-                                publish({"event.cancelled", id, event_json(*old, false), old->start_at, old->end_at}, r);
-                store_.set_delta_link(key, p->delta_link, clock_.unix_millis(), window);
-                return {};
-            }
+            if (const std::string id = conflicting_item(p->items); !id.empty())
+                return make_error("ambiguous_page", "a calendar delta page lists one item with conflicting changes");
+            const Status page = commit_page(
+                [&](std::vector<MailEvent>& events, std::vector<PageChange>& changes) -> Status {
+                    for (const auto& item : p->items) {
+                        const std::string id = jstr(item, "id");
+                        if (id.empty()) continue;
+                        Status st;
+                        if (item.contains("@removed")) {
+                            auto old = store_.remove_event(id, &st);
+                            if (!st) return st;
+                            if (!old) continue;
+                            changes.push_back({"calendar", id, true, false, {}, {}});
+                            if (!old->withheld && !old->masked && !old->cancelled)
+                                events.push_back({"event.cancelled", id, event_json(*old, false), old->start_at, old->end_at});
+                            continue;
+                        }
+                        Disposition d = Disposition::include;
+                        auto e = parse_event(item, rl, &d);
+                        if (!e) continue;
+                        seen.insert(id);
+                        if (d == Disposition::excluded) {
+                            if (store_.remove_event(id, &st)) changes.push_back({"calendar", id, true, false, {}, {}});
+                            if (!st) return st;
+                            continue;
+                        }
+                        const auto before = store_.event(id);
+                        ++r.events;
+                        const auto change = store_.upsert_event(*e, &st);
+                        if (!st) return st;
+                        if (change == MailStore::Change::none) continue;
+                        changes.push_back({"calendar", id, false, !e->withheld && !e->masked && !backfill, {}, {}});
+                        if (e->withheld || e->masked) continue;
+                        MailEvent ev{"event.updated", id, event_json(*e, false), e->start_at, e->end_at};
+                        if (e->cancelled && !(before && before->cancelled)) ev.kind = "event.cancelled";
+                        else if (change == MailStore::Change::created) ev.kind = "event.created";
+                        if (backfill && change == MailStore::Change::created) ev.detail["backfill"] = true;
+                        events.push_back(std::move(ev));
+                    }
+                    if (!p->delta_link.empty() && full)
+                        for (const auto& id : store_.event_ids()) {
+                            if (seen.count(id)) continue;
+                            Status st;
+                            auto old = store_.remove_event(id, &st);
+                            if (!st) return st;
+                            if (!old) continue;
+                            changes.push_back({"calendar", id, true, false, {}, {}});
+                            if (!old->withheld && !old->masked && !old->cancelled && !backfill && old->start_at < to && old->end_at > from)
+                                events.push_back({"event.cancelled", id, event_json(*old, false), old->start_at, old->end_at});
+                        }
+                    return {};
+                },
+                [&]() -> Status {
+                    if (p->delta_link.empty()) return {};
+                    return store_.set_delta_link(key, p->delta_link, clock_.unix_millis(), window);
+                },
+                r);
+            if (!page) return page;
+            if (!p->delta_link.empty()) return {};
             link = p->next_link;
         }
         if (!expired) return {};
     }
     return make_error("sync_state_not_found", "the calendar could not be resynchronised");
 }
-
 }  // namespace wb::mail

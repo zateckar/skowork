@@ -191,6 +191,19 @@ void ThreadPane::rebuild() {
         }
     }
 
+    // A triage suggestion (client/event-triage): its card, loaded once per Thread and again on triage.changed.
+    suggestion_ = emplace<Node>("thread-suggestion");
+    if (e && e->origin_kind == "system" && jstr(e->origin_ref, "kind") == "triage") {
+        if (suggestion_thread_ != id) {
+            suggestion_thread_ = id;
+            suggestion_data_ = nullptr;
+            load_suggestion();
+        }
+        rebuild_suggestion();
+    } else {
+        suggestion_thread_.clear();
+        suggestion_data_ = nullptr;
+    }
     banner_ = emplace<Node>("thread-banner");
     rebuild_banner();
 

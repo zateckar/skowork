@@ -84,6 +84,9 @@ public:
     Status remove_exclusion(const std::string& kind, const std::string& value);
 
     void on_event(std::function<void(const MailEvent&)> fn);
+    // Event triage (improve-proactive-durable-work D1): set before start().
+    void set_page_sink(PageSink sink) { sync_.set_page_sink(std::move(sink)); }
+    void on_cycle(std::function<void()> fn) { sync_.on_cycle(std::move(fn)); }
     // mail.* and calendar.* tools (client/mail-calendar Mail Tools And Risk Classes, Calendar Tools And Risk Classes).
     std::vector<runtime::ToolDef> tools();
 

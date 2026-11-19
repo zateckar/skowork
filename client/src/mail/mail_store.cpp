@@ -114,7 +114,7 @@ StoredEvent read_event(const Statement& s) {
 
 }  // namespace
 
-MailStore::Change MailStore::upsert_message(const StoredMessage& m) {
+MailStore::Change MailStore::upsert_message(const StoredMessage& m, Status* status) {
     const std::lock_guard lock(db_.mutex());
     Change change = Change::created;
     {
@@ -125,7 +125,7 @@ MailStore::Change MailStore::upsert_message(const StoredMessage& m) {
             change = Change::updated;
         }
     }
-    (void)db_.transaction([&]() -> Status {
+    const Status written = db_.transaction([&]() -> Status {
         auto s = db_.prepare(std::string("INSERT OR REPLACE INTO mail_messages(") + kMessageColumns +
                              ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)");
         s.bind(1, m.id).bind(2, m.folder_id).bind(3, m.conversation_id).bind(4, m.change_key).bind(5, m.received_at);
@@ -144,14 +144,18 @@ MailStore::Change MailStore::upsert_message(const StoredMessage& m) {
         i.bind(1, m.subject).bind(2, m.body).bind(3, people).bind(4, m.id);
         return i.run();
     });
+    if (!written) {
+        if (status) *status = written;
+        return Change::none;
+    }
     return change;
 }
 
-std::optional<StoredMessage> MailStore::remove_message(const std::string& id) {
+std::optional<StoredMessage> MailStore::remove_message(const std::string& id, Status* status) {
     const std::lock_guard lock(db_.mutex());
     auto m = message(id);
     if (!m) return std::nullopt;
-    (void)db_.transaction([&]() -> Status {
+    const Status removed = db_.transaction([&]() -> Status {
         auto s = db_.prepare("DELETE FROM mail_messages WHERE id=?1");
         s.bind(1, id);
         if (Status st = s.run(); !st) return st;
@@ -159,6 +163,10 @@ std::optional<StoredMessage> MailStore::remove_message(const std::string& id) {
         d.bind(1, id);
         return d.run();
     });
+    if (!removed) {
+        if (status) *status = removed;
+        return std::nullopt;
+    }
     return m;
 }
 
@@ -207,7 +215,7 @@ std::vector<std::string> MailStore::message_ids(const std::string& folder_id) {
     return out;
 }
 
-MailStore::Change MailStore::upsert_event(const StoredEvent& e) {
+MailStore::Change MailStore::upsert_event(const StoredEvent& e, Status* status) {
     const std::lock_guard lock(db_.mutex());
     Change change = Change::created;
     {
@@ -227,17 +235,23 @@ MailStore::Change MailStore::upsert_event(const StoredEvent& e) {
     s.bind(11, json{{"name", e.organizer.name}, {"address", e.organizer.address}}.dump()).bind(12, e.attendees.dump());
     s.bind(13, e.is_organizer ? 1 : 0).bind(14, e.cancelled ? 1 : 0).bind(15, e.response).bind(16, e.show_as).bind(17, e.sensitivity);
     s.bind(18, e.masked ? 1 : 0).bind(19, strings_json(e.categories).dump()).bind(20, e.label).bind(21, e.withheld ? 1 : 0).bind(22, e.web_link).bind(23, e.online_url);
-    (void)s.run();
+    if (Status st = s.run(); !st) {
+        if (status) *status = st;
+        return Change::none;
+    }
     return change;
 }
 
-std::optional<StoredEvent> MailStore::remove_event(const std::string& id) {
+std::optional<StoredEvent> MailStore::remove_event(const std::string& id, Status* status) {
     const std::lock_guard lock(db_.mutex());
     auto e = event(id);
     if (!e) return std::nullopt;
     auto s = db_.prepare("DELETE FROM cal_events WHERE id=?1");
     s.bind(1, id);
-    (void)s.run();
+    if (Status st = s.run(); !st) {
+        if (status) *status = st;
+        return std::nullopt;
+    }
     return e;
 }
 
@@ -274,9 +288,9 @@ std::vector<std::string> MailStore::event_ids() {
     return out;
 }
 
-void MailStore::set_folders(const std::vector<StoredFolder>& folders) {
+Status MailStore::set_folders(const std::vector<StoredFolder>& folders) {
     const std::lock_guard lock(db_.mutex());
-    (void)db_.transaction([&]() -> Status {
+    return db_.transaction([&]() -> Status {
         if (Status st = db_.exec("DELETE FROM mail_folders"); !st) return st;
         for (const auto& f : folders) {
             auto s = db_.prepare("INSERT OR REPLACE INTO mail_folders(id, name, well_known) VALUES(?1,?2,?3)");
@@ -317,18 +331,18 @@ std::string MailStore::sync_extra(const std::string& key) {
     return s.step() ? s.col_text(0) : std::string{};
 }
 
-void MailStore::set_delta_link(const std::string& key, const std::string& link, long long synced_at, const std::string& extra) {
+Status MailStore::set_delta_link(const std::string& key, const std::string& link, long long synced_at, const std::string& extra) {
     const std::lock_guard lock(db_.mutex());
     auto s = db_.prepare("INSERT OR REPLACE INTO mail_sync_state(key, delta_link, extra, synced_at) VALUES(?1,?2,?3,?4)");
     s.bind(1, key).bind(2, link).bind(3, extra).bind(4, synced_at);
-    (void)s.run();
+    return s.run();
 }
 
-void MailStore::drop_sync_state(const std::string& key) {
+Status MailStore::drop_sync_state(const std::string& key) {
     const std::lock_guard lock(db_.mutex());
     auto s = db_.prepare("DELETE FROM mail_sync_state WHERE key=?1");
     s.bind(1, key);
-    (void)s.run();
+    return s.run();
 }
 
 void MailStore::restart_sync() {

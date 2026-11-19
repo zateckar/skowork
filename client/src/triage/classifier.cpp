@@ -1,5 +1,7 @@
 #include "triage/classifier.h"
 
+#include "base/strings.h"
+
 #include <map>
 #include <set>
 
@@ -26,7 +28,25 @@ bool shallow_json(const std::string& text) {
     return depth == 0 && !in_string;
 }
 
-std::optional<json> strict_json(const std::string& text) {
+// A JSON answer may arrive inside one Markdown code fence (```json ... ```); anything else around it is invalid.
+std::optional<std::string> unfence(const std::string& text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos || text.compare(first, 3, "```") != 0) return text;
+    const auto line_end = text.find('\n', first);
+    if (line_end == std::string::npos) return std::nullopt;
+    const std::string info = trim(text.substr(first + 3, line_end - first - 3));
+    if (!info.empty() && to_lower(info) != "json") return std::nullopt;
+    std::string inner = text.substr(line_end + 1);
+    const auto last = inner.find_last_not_of(" \t\r\n");
+    if (last != std::string::npos && last >= 2 && inner.compare(last - 2, 3, "```") == 0) inner.resize(last - 2);
+    if (inner.find("```") != std::string::npos) return std::nullopt;
+    return inner;
+}
+
+std::optional<json> strict_json(const std::string& raw) {
+    const auto unfenced = unfence(raw);
+    if (!unfenced) return std::nullopt;
+    const std::string& text = *unfenced;
     if (text.size() > 65536 || !shallow_json(text)) return std::nullopt;
     bool duplicate = false;
     std::map<int, std::set<std::string>> keys;

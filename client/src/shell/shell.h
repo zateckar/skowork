@@ -478,13 +478,23 @@ public:
     void rebuild();
     void update_feed();      // a live event changed the snapshot
     void update_composer();  // the status changed (new Runs blocked or not)
+    // Event triage changed (triage.changed): the suggestion card of a suggestion Thread loads again.
+    void triage_changed();
     FeedView* feed() { return feed_; }
     ComposerView* composer() { return composer_; }
 
 private:
     void rebuild_banner();
+    // The suggestion card of a triage suggestion Thread (client/event-triage Suggestion Presentation).
+    void load_suggestion();
+    void rebuild_suggestion();
     Shell& shell_;
+    std::shared_ptr<int> alive_ = std::make_shared<int>(0);
     ui::Node* banner_ = nullptr;
+    ui::Node* suggestion_ = nullptr;
+    std::string suggestion_thread_;  // the Thread suggestion_data_ belongs to
+    json suggestion_data_ = nullptr;  // triage.suggestion
+    bool suggestion_busy_ = false;
     FeedView* feed_ = nullptr;
     std::unique_ptr<FeedView> kept_feed_;
     ComposerView* composer_ = nullptr;
@@ -905,6 +915,8 @@ public:
     void apps_changed();
     // The Agenda changed (agenda.changed): the Agenda view or the Agenda settings section loads again.
     void agenda_changed();
+    // Event triage changed (triage.changed): the Triage settings section loads again.
+    void triage_changed();
     // Speech setup moved on (speech.changed): the speech recognition block of Settings shows the new state.
     void speech_changed(const json& event);
     // The window's dictation moved on: the microphone check of the speech block follows it.
@@ -943,6 +955,8 @@ private:
     void load_agenda();
     void build_agenda_settings(ui::Node& card);
     void load_agenda_status();
+    void build_triage(ui::Node& card);
+    void load_triage();
     void open_app(const std::string& id, const std::u16string& title);
     void ask_delete_app(const std::string& id, const std::u16string& title);
     void ask_change_app(const std::string& id, const std::u16string& title);
@@ -989,6 +1003,9 @@ private:
     json automations_ = nullptr, automation_ = nullptr;
     json mail_ = nullptr;             // mail.status
     std::u16string mail_exclusion_;  // the exclusion being typed, kept across rebuilds
+    json triage_ = nullptr;                // triage.status
+    std::optional<std::u16string> triage_duties_;  // the responsibilities being edited, kept across rebuilds
+    std::u16string triage_folder_;         // the folder name being typed
     json connectors_ = nullptr;      // GET api/v1/connectors: this user's connectors (never a token)
     std::string connector_editing_;  // the connector whose token field is open
     json speech_ = nullptr;          // speech.status

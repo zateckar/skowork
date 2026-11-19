@@ -94,6 +94,7 @@ private:
     bool read_only_ = false;
     std::filesystem::path path_;
     std::recursive_mutex mx_;
+    long long savepoint_seq_ = 0;  // names of nested transactions
 };
 
 struct MigrationOutcome {

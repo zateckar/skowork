@@ -816,6 +816,9 @@ void Shell::emit(const std::string& event, const json& data) {
         if (is_page(route_.name)) page_->meetings_changed();
     } else if (event == "agenda.changed") {
         if (is_page(route_.name)) page_->agenda_changed();
+    } else if (event == "triage.changed") {
+        if (is_page(route_.name)) page_->triage_changed();
+        if (thread_) thread_->triage_changed();
     } else if (event == "apps.changed") {
         if (is_page(route_.name)) page_->apps_changed();
     } else if (event == "messaging.changed") {

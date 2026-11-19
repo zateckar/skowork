@@ -105,7 +105,7 @@ endif()
 add_test(NAME agenda_tests COMMAND agenda_tests)
 
 add_executable(triage_tests triage/classifier_test.cpp)
-target_link_libraries(triage_tests PRIVATE wb_triage GTest::gtest_main)
+target_link_libraries(triage_tests PRIVATE wb_triage_core GTest::gtest_main)
 if(WIN32)
   target_link_options(triage_tests PRIVATE -Wl,--subsystem,console)
   set_target_properties(triage_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -196,13 +196,14 @@ if(WIN32)
     shell/shell_test.cpp
     scheduler/scheduler_test.cpp
     mail/mail_test.cpp
+    mail/triage_test.cpp
     knowledge/knowledge_test.cpp
     meeting/meeting_test.cpp
     apps/apps_test.cpp
     messaging/messaging_test.cpp
     agenda/service_test.cpp
     app/agenda_intake_test.cpp)
-  target_link_libraries(win_tests PRIVATE wb_agenda wb_api_connectors wb_messaging wb_apps wb_meeting wb_knowledge wb_mail wb_telemetry wb_shell wb_ui wb_app wb_scheduler wb_browser wb_inbox wb_mcp wb_tools wb_extract miniz wb_sandbox wb_model wb_runtime GTest::gtest_main bcrypt ws2_32 iphlpapi)
+  target_link_libraries(win_tests PRIVATE wb_agenda wb_triage wb_api_connectors wb_messaging wb_apps wb_meeting wb_knowledge wb_mail wb_telemetry wb_shell wb_ui wb_app wb_scheduler wb_browser wb_inbox wb_mcp wb_tools wb_extract miniz wb_sandbox wb_model wb_runtime GTest::gtest_main bcrypt ws2_32 iphlpapi)
   # The stdio MCP server the client/mcp-client tests package; the official SDK server lives in dev/mcp-test-server.
   # The retrieval benchmark of client/knowledge-graph (add-knowledge-graph spike 1.1), run by hand.
   add_executable(kg_bench knowledge/kg_bench.cpp)

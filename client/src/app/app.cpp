@@ -47,6 +47,8 @@
 #include "app/agenda_intake.h"
 #include "app/agenda_rpc.h"
 #include "agenda/service.h"
+#include "app/triage_rpc.h"
+#include "triage/triage.h"
 #include "messaging/messaging.h"
 #include "mcp/manager.h"
 #include "model/model_client.h"
@@ -249,6 +251,8 @@ struct App {
     void messaging_push(const PushEnvelope& e);
     // The Agenda (client/agenda; add-agenda): its own intake from mail, calendar, meetings and Chats, the detection
     // queue, reminders and read-only preparation.
+    std::unique_ptr<triage::TriageService> triage_svc;  // event triage (improve-proactive-durable-work D1)
+    void start_triage();
     std::unique_ptr<agenda::Service> agenda_svc;
     std::atomic<agenda::Service*> agenda_live{nullptr};  // read by mail, meeting, channel and Run threads
     std::atomic<bool> agenda_ticking{false};
@@ -1698,7 +1702,10 @@ void App::start_mail() {
         });
     };
     me.changed = [this] {
-        pool.post([this] { update_mail_sources(); });
+        pool.post([this] {
+            update_mail_sources();
+            if (triage_svc) triage_svc->sweep();  // disconnect, exclusions: withdrawn suggestions
+        });
         MainThread::post([this] { if (ui && ui->is_open()) ui->emit("mail.changed", json::object()); });
     };
     mail_svc = std::make_unique<mail::MailService>(std::move(me));
@@ -1734,10 +1741,51 @@ void App::start_mail() {
     });
     register_mail_rpc(rpc, [this] { return mail_svc.get(); });
     register_connectors_rpc(rpc, [this] { return connector_request(); });
+    start_triage();
     pool.post([this] {
         mail_svc->start();
         update_mail_sources();
     });
+}
+
+// client/event-triage (improve-proactive-durable-work D1, D2): the triage service takes eligible mail and calendar changes in
+// through the mail sync's page transaction and raises suggestion Threads (origin system) the user starts or dismisses.
+void App::start_triage() {
+    if (!mail_svc || !store || !agent || !inbox) return;
+    triage::TriageEnv te;
+    te.db = &store->db();
+    te.clock = &system_clock();
+    te.mail = &mail_svc->store();
+    te.model = model.get();
+    te.background_paused = [this] { return gate.paused(); };
+    te.create_thread = [this](const std::string& title, const json& ref) -> Result<std::string> {
+        auto t = agent->runtime().create_thread(title);
+        if (!t) return t.error();
+        if (Status s = inbox->store().set_origin(*t, "system", ref); !s) return s.error();
+        (void)inbox->store().set_unread(*t, true);
+        return *t;
+    };
+    te.rename_thread = [this](const std::string& id, const std::string& title) { return inbox->store().rename(id, title); };
+    te.mark_unread = [this](const std::string& id) { return inbox->store().set_unread(id, true); };
+    te.delete_thread = [this](const std::string& id) {
+        pool.post([this, id] { (void)forget.forget("thread", id); });
+        return Status{};
+    };
+    te.set_origin_ref = [this](const std::string& id, const json& ref) { return inbox->store().set_origin(id, "system", ref); };
+    te.start_run = [this](const std::string& id, const std::string& text, const runtime::StartOptions& o) {
+        return agent->runtime().start_run(id, text, o);
+    };
+    te.changed = [this] { MainThread::post([this] { if (ui && ui->is_open()) ui->emit("triage.changed", json::object()); }); };
+    triage_svc = std::make_unique<triage::TriageService>(std::move(te));
+    mail_svc->set_page_sink([this](const std::vector<mail::PageChange>& c) { return triage_svc->take_in(c); });
+    mail_svc->on_cycle([this] { triage_svc->cycle_completed(); });
+    register_triage_rpc(rpc, [this] { return triage_svc.get(); });
+    forget.on_forget("source", "event-triage", [this](const std::string& id) {
+        if (id == "triage") return triage_svc->delete_data();
+        return Status{};
+    });
+    forget.on_forget("thread", "event-triage", [this](const std::string& id) { return triage_svc->thread_deleted(id); });
+    triage_svc->start();
 }
 
 // client/knowledge-graph (add-knowledge-graph): kg.db with its own key, the connectors (Threads from Run events, files,
@@ -2861,6 +2909,7 @@ void App::shutdown() {
     if (meeting_svc) meeting_svc->stop();
     if (knowledge_svc) knowledge_svc->stop();
     if (mail_svc) mail_svc->stop();
+    if (triage_svc) triage_svc->stop();
     calendar_offsets.reset();
     file_watcher.reset();
     {
@@ -2898,6 +2947,7 @@ void App::shutdown() {
     messaging_svc.reset();
     while (agenda_ticking.load()) std::this_thread::sleep_for(std::chrono::milliseconds(20));  // a tick on the pool ends first
     agenda_svc.reset();
+    triage_svc.reset();
     agent.reset();
     mail_svc.reset();
     enforcer.reset();

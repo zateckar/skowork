@@ -17,6 +17,7 @@
 #include "app/automations_rpc.h"
 #include "app/knowledge_rpc.h"
 #include "app/mail_rpc.h"
+#include "app/triage_rpc.h"
 #include "app/notices.h"
 #include "knowledge/core.h"
 #include "knowledge/kg_store.h"
@@ -7824,3 +7825,106 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
 }
 
 #include "live_generated_surface.inc"
+
+// improve-proactive-durable-work 2.1 and 2.5: Settings > Triage turns triage on, edits the scope and responsibilities,
+// shows the baseline and survives a reload; a suggestion Thread shows its card with reason and source, and Start work
+// and Dismiss are keyboard-reachable buttons. Everything is UI-only RPC against a real TriageService on app.db.
+TEST(ShellTriage, SettingsSectionAndSuggestionCard) {
+    Fixture f;
+    mail::MailStore mail(*f.in.env.db);
+    ASSERT_TRUE(mail.set_folders({{"f-inbox", "Inbox", "inbox"}}));
+    struct Model : model::IChatModel {
+        std::optional<model::RoleInfo> role_info(model::Role role) override {
+            if (role != model::Role::small) return std::nullopt;
+            model::RoleInfo info;
+            info.role = role;
+            info.kind = "chat";
+            return info;
+        }
+        model::ModelResult<model::ChatResponse> chat(const model::ChatRequest& r, const model::ChatSink&) override {
+            json results = json::array();
+            const json data = parse_json(r.messages.at(1).content).value_or(json::object());
+            for (const auto& e : data.value("events", json::array()))
+                results.push_back({{"id", jstr(e, "id")}, {"revision", jstr(e, "revision")}, {"outcome", "relevant"}, {"reason", "Budget owner"}});
+            model::ChatResponse out;
+            out.finish_reason = "stop";
+            out.text = json{{"results", results}}.dump();
+            return out;
+        }
+    } model;
+    std::atomic<ShellThread*> window{nullptr};
+    std::vector<std::string> started;
+    triage::TriageEnv te;
+    te.db = f.in.env.db.get();
+    te.clock = &f.in.env.clock;
+    te.mail = &mail;
+    te.model = &model;
+    std::string thread;
+    te.create_thread = [&f, &thread](const std::string& title, const json& ref) -> Result<std::string> {
+        auto t = f.in.env.rt->create_thread(title);
+        if (!t) return t.error();
+        if (Status s = f.in.svc->store().set_origin(*t, "system", ref); !s) return s.error();
+        thread = *t;
+        return *t;
+    };
+    te.rename_thread = [&f](const std::string& id, const std::string& title) { return f.in.svc->store().rename(id, title); };
+    te.start_run = [&started](const std::string& id, const std::string&, const runtime::StartOptions&) -> Result<std::string> {
+        started.push_back(id);
+        return std::string("run-1");
+    };
+    te.changed = [&window] {
+        if (ShellThread* w = window.load()) w->post([w] { w->main().emit("triage.changed", json::object()); });
+    };
+    triage::TriageService svc(std::move(te));
+    register_triage_rpc(f.rpc, [&svc] { return &svc; });
+
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    window = &w;
+    w.run([&] { w.main().open("#/settings"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("triage-enabled"); }));
+    EXPECT_FALSE(w.exists("triage-folders"));  // off by default
+    ASSERT_TRUE(w.with("triage-enabled", [](ui::Node& n) { return n.focusable && n.enabled; }));
+    ASSERT_TRUE(w.with("triage-enabled", [](ui::Node& n) { n.toggle(); return true; }));
+    ASSERT_TRUE(w.until([&] { return w.exists("triage-folder-inbox") && w.exists("triage-baseline"); }));
+    EXPECT_TRUE(w.exists("triage-calendar"));
+    EXPECT_TRUE(w.exists("triage-delete"));
+    // Responsibilities: typed and saved, kept by the host.
+    ASSERT_TRUE(w.with("triage-responsibilities", [](ui::Node& n) {
+        auto& field = static_cast<ui::TextField&>(n);
+        field.set_text(u"I own the Q4 budget");
+        if (field.on_change) field.on_change();
+        return n.focusable;
+    }));
+    ASSERT_TRUE(w.invoke("triage-responsibilities-save"));
+    ASSERT_TRUE(w.until([&] { return jstr(svc.status(), "responsibilities") == "I own the Q4 budget"; }));
+
+    // A relevant message after the baseline becomes a suggestion Thread with its card.
+    svc.cycle_completed();
+    mail::StoredMessage m;
+    m.id = "m1";
+    m.folder_id = "f-inbox";
+    m.change_key = "1";
+    m.subject = "Rozpočet Q4";
+    m.body = "Prosím o kontrolu rozpočtu.";
+    m.from = {"Petra Malá", "petra.mala@dodavatel-test.example"};
+    mail.upsert_message(m);
+    mail::PageChange c;
+    c.scope = "mail";
+    c.id = "m1";
+    c.fresh = true;
+    ASSERT_TRUE(f.in.env.db->transaction([&] { return svc.take_in({c}); }));
+    f.in.env.clock.advance(61s);
+    ASSERT_TRUE(svc.step());
+    ASSERT_FALSE(thread.empty()) << svc.status().dump();
+    w.run([&] { w.main().open(shell::thread_hash(thread)); });
+    ASSERT_TRUE(w.until([&] { return w.exists("thread-suggestion-start"); }));
+    EXPECT_NE(label_text(w, "thread-suggestion-source").find(u"Rozpočet Q4"), std::u16string::npos);
+    EXPECT_NE(label_text(w, "thread-suggestion-reason").find(u"Budget owner"), std::u16string::npos);
+    ASSERT_TRUE(w.with("thread-suggestion-dismiss", [](ui::Node& n) { return n.focusable && n.can_invoke(); }));
+    ASSERT_TRUE(w.invoke("thread-suggestion-start"));
+    ASSERT_TRUE(w.until([&] { return w.exists("thread-suggestion-status"); }));
+    EXPECT_EQ(started, std::vector<std::string>{thread});
+    EXPECT_FALSE(w.exists("thread-suggestion-start"));
+    window = nullptr;
+}

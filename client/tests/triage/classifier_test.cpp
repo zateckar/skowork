@@ -152,3 +152,17 @@ TEST(TriageClassifier, RejectsAnOversizedReasonAndDeeplyNestedResponse) {
     fake.response.text = std::string(33, '[') + "0" + std::string(33, ']');
     EXPECT_FALSE(classify(fake, "work", {{"a", "r", "text"}}));
 }
+
+TEST(TriageClassifier, AcceptsOneJsonCodeFenceAndRejectsOtherWrapping) {
+    FakeModel fake;
+    fake.response.finish_reason = "stop";
+    const std::string body = R"({"results":[{"id":"event-1","revision":"rev-a","outcome":"not_relevant","reason":""}]})";
+    fake.response.text = "```json\n" + body + "\n```";
+    EXPECT_TRUE(classify(fake, "Review budgets", {{"event-1", "rev-a", "text"}}));
+    fake.response.text = "```\n" + body + "\n```";
+    EXPECT_TRUE(classify(fake, "Review budgets", {{"event-1", "rev-a", "text"}}));
+    fake.response.text = "```python\n" + body + "\n```";
+    EXPECT_FALSE(classify(fake, "Review budgets", {{"event-1", "rev-a", "text"}}));
+    fake.response.text = "Here you go: " + body;
+    EXPECT_FALSE(classify(fake, "Review budgets", {{"event-1", "rev-a", "text"}}));
+}

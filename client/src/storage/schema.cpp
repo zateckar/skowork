@@ -605,6 +605,26 @@ ALTER TABLE runs ADD COLUMN recovery TEXT NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX runs_continues ON runs(continues_run_id) WHERE continues_run_id IS NOT NULL;
 ALTER TABLE occurrences ADD COLUMN held INTEGER NOT NULL DEFAULT 0;
 )sql"},
+        // client/event-triage (improve-proactive-durable-work design D1, D2): one row per source item that triage has
+        // taken in (identity, content revision, evaluation and suggestion state), and its settings and counters.
+        {2001, R"sql(
+CREATE TABLE triage_items(
+  scope TEXT NOT NULL CHECK(scope IN ('mail','calendar')),
+  item_id TEXT NOT NULL,
+  revision TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('pending','evaluated','expired','removed')),
+  outcome TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  thread_id TEXT NOT NULL DEFAULT '',
+  suggestion TEXT NOT NULL DEFAULT '' CHECK(suggestion IN ('','open','started','dismissed','withdrawn')),
+  dismissed_revision TEXT NOT NULL DEFAULT '',
+  queued_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(scope, item_id));
+CREATE INDEX triage_items_pending ON triage_items(state, queued_at);
+CREATE INDEX triage_items_thread ON triage_items(thread_id);
+CREATE TABLE triage_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+)sql"},
     };
     return migrations;
 }

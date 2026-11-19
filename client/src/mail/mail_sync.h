@@ -30,6 +30,18 @@ struct SyncReport {
     int folders = 0, messages = 0, events = 0, published = 0, resyncs = 0;
 };
 
+// One item change of a page, as client/event-triage takes it in (improve-proactive-durable-work design D1). `fresh`:
+// a new or changed item that is not the user's own mail, a draft, withheld or first-sync backfill.
+struct PageChange {
+    std::string scope;  // mail | calendar
+    std::string id;
+    bool removed = false;
+    bool fresh = false;
+    std::string folder_id, folder;  // mail: the folder's id and its well-known or display name
+};
+// Runs inside the page transaction; a failure rolls the whole page back and stops the cycle.
+using PageSink = std::function<Status(const std::vector<PageChange>&)>;
+
 class MailSync {
 public:
     MailSync(MailStore& store, const Clock& clock);
@@ -39,12 +51,19 @@ public:
     // that stops it (offline, not connected); items already processed stay.
     Result<SyncReport> sync_once(GraphClient& graph, const std::shared_ptr<CancelToken>& cancel = {});
     void on_event(std::function<void(const MailEvent&)> fn);
+    // The triage intake of each page, and what runs after every complete cycle.
+    void set_page_sink(PageSink sink);
+    void on_cycle(std::function<void()> fn);
     [[nodiscard]] Rules rules();
 
 private:
     Status sync_folder(const StoredFolder& f, SyncReport& r, const std::shared_ptr<CancelToken>& cancel);
     Status sync_calendar(SyncReport& r, const std::shared_ptr<CancelToken>& cancel);
     void publish(const MailEvent& e, SyncReport& r);
+    // Commits a page: `write` stores the source changes into `events`/`changes`, then the sink and `cursor` run in the
+    // same transaction. Listeners get the events only after the commit.
+    Status commit_page(const std::function<Status(std::vector<MailEvent>&, std::vector<PageChange>&)>& write,
+                       const std::function<Status()>& cursor, SyncReport& r);
 
     GraphClient* graph_ = nullptr;  // of the running cycle
     MailStore& store_;
@@ -53,7 +72,13 @@ private:
     std::mutex cfg_mx_;
     MailConfig cfg_;
     std::vector<std::function<void(const MailEvent&)>> listeners_;
+    PageSink sink_;
+    std::vector<std::function<void()>> cycle_listeners_;
 };
+
+// A page that lists an item twice with different content, or both live and removed, has no defensible current
+// revision: empty when the page is consistent, else the conflicting id.
+std::string conflicting_item(const std::vector<json>& items);
 
 // Folders whose new messages are not "received" mail (the user's own drafts and sent mail).
 bool own_mail_folder(const StoredFolder& f);

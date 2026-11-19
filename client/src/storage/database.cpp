@@ -148,6 +148,23 @@ Statement Database::prepare(std::string_view sql) {
 
 Status Database::transaction(const std::function<Status()>& fn) {
     const std::lock_guard lock(mx_);
+    if (sqlite3_get_autocommit(db_) == 0) {
+        // Nested: a savepoint, so a failure undoes only this part and reaches the caller (improve-proactive-durable-work D1).
+        const std::string sp = "wb_sp" + std::to_string(++savepoint_seq_);
+        if (auto s = exec("SAVEPOINT " + sp + ";"); !s) return s;
+        Status result = fn();
+        if (result) {
+            if (auto r = exec("RELEASE " + sp + ";"); !r) {
+                exec("ROLLBACK TO " + sp + ";");
+                exec("RELEASE " + sp + ";");
+                return r;
+            }
+        } else {
+            exec("ROLLBACK TO " + sp + ";");
+            exec("RELEASE " + sp + ";");
+        }
+        return result;
+    }
     if (auto s = exec("BEGIN IMMEDIATE;"); !s) return s;
     Status result = fn();
     if (result) {

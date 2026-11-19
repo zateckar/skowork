@@ -834,8 +834,9 @@ TEST(MailEndToEnd, ReplyToAThreadAndBookAMeeting) {
     EXPECT_EQ(count_kind(ev, "mail.received"), 0);
 }
 
-// Characterize the existing store boundary before wiring any durable intake to it.
-TEST(TriageSourceSpike, ExistingNestedMailWriteCanSilentlyAdvanceCursor) {
+// A store write nested in a page transaction is part of it: it commits with the cursor or rolls back with it
+// (improve-proactive-durable-work D1; this was a silently failed nested BEGIN before).
+TEST(TriageSourceSpike, NestedMailWriteCommitsAndRollsBackWithTheCursor) {
     MailDb fixture;
     auto& db = fixture.store->db();
     MailStore store(db);
@@ -843,13 +844,34 @@ TEST(TriageSourceSpike, ExistingNestedMailWriteCanSilentlyAdvanceCursor) {
     message.id = "spike-message";
     message.folder_id = "spike-folder";
     message.change_key = "revision-1";
-    const auto committed = db.transaction([&]() -> Status {
+    const auto rolled_back = db.transaction([&]() -> Status {
         EXPECT_EQ(store.upsert_message(message), MailStore::Change::created);
-        store.set_delta_link("spike", "advanced-cursor", 1);
-        return {};
+        EXPECT_TRUE(store.set_delta_link("spike", "advanced-cursor", 1));
+        return make_error("injected_failure", "the page failed");
+    });
+    ASSERT_FALSE(rolled_back);
+    EXPECT_FALSE(store.message(message.id));
+    EXPECT_EQ(store.delta_link("spike"), "");
+    const auto committed = db.transaction([&]() -> Status {
+        Status st;
+        EXPECT_EQ(store.upsert_message(message, &st), MailStore::Change::created);
+        if (!st) return st;
+        return store.set_delta_link("spike", "advanced-cursor", 1);
     });
     ASSERT_TRUE(committed);
-    EXPECT_FALSE(store.message(message.id));
+    EXPECT_TRUE(store.message(message.id));
+    EXPECT_EQ(store.delta_link("spike"), "advanced-cursor");
+    // A failed nested write reaches the caller instead of vanishing.
+    ASSERT_TRUE(db.exec("CREATE TRIGGER fail_mail BEFORE INSERT ON mail_messages BEGIN SELECT RAISE(ABORT,'disk full'); END;"));
+    StoredMessage other = message;
+    other.id = "spike-message-2";
+    const auto failed = db.transaction([&]() -> Status {
+        Status st;
+        store.upsert_message(other, &st);
+        if (!st) return st;
+        return store.set_delta_link("spike", "later-cursor", 2);
+    });
+    EXPECT_FALSE(failed);
     EXPECT_EQ(store.delta_link("spike"), "advanced-cursor");
 }
 

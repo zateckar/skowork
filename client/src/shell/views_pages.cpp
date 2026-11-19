@@ -34,6 +34,7 @@ const Section kSections[] = {
     {"mail", "settings.mail.title", false},             {"skills", "settings.skills.title", false},
     {"automations", "settings.automations.title", false}, {"knowledge", "settings.knowledge.title", false},
     {"meetings", "settings.meetings.title", false},      {"agenda", "settings.agenda.title", false},
+    {"triage", "settings.triage.title", false},
     {"privacy", "settings.privacy.title", false},
     {"policy", "settings.policy.title", false},          {"about", "settings.about_section.title", false},
 };
@@ -214,6 +215,7 @@ void PagePane::load() {
         load_knowledge();
         load_meetings();
         load_agenda_status();
+        load_triage();
         load_policy();
     } else if (r == RouteName::apps) {
         load_apps();
@@ -645,6 +647,8 @@ void PagePane::build_settings() {
             build_meetings(*c);
         } else if (id == "agenda") {
             build_agenda_settings(*c);
+        } else if (id == "triage") {
+            build_triage(*c);
         } else if (id == "skills") {
             build_skills(*c);
         } else if (id == "automations") {
