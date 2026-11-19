@@ -141,3 +141,13 @@ Verification runs the actual v0.1.0 source as a development build. Development b
 - **Startup order.** Startup handles every unanswered unknown call of a shutdown-failed Run, not only the Runs failed in this start. For each reconcilable call it first runs `ToolDef::reconcile`. A result that is succeeded or absent settles the call (`completed` or `abandoned`) and withdraws a stale recovery Question. A result that is unknown, an exception or a timeout leaves the call unknown. Reconciling again after a lost commit is harmless, because it is read-only. A Run answered Stop gets no new Questions.
 - **Deletion.** Deleting a Thread deletes its ledger rows together with its Runs.
 - **Presentation.** A Tool result whose outcome is unknown carries `outcome: "unknown"` next to `ok: false`. The feed shows it as "Outcome unknown", never as a result or an error. A Thread whose latest Run failed at a shutdown shows a recovery banner instead of an error banner. The banner names the calls with an unknown outcome, links to Action items while any is unanswered, and offers Continue only when `runs.recovery` says the Run can continue. It does not say whether a call took effect. `runs.recovery` and `runs.continue` are the host methods over `recovery_status` and `continue_run`. Run Retry of such a Run already takes the same path.
+
+### Validation record (2026-11-19)
+
+Development workstation, Windows 11 Pro 22631, GCC (MinGW-w64, winlibs) debug build, local dev stack with dev/graph-mock and the dev proxy.
+
+- `ctest -LE "desktop|e2e"`: 41 test executables. win_tests ran 996 tests: 984 passed and 11 skipped. The skips are child-process halves that run only from their parent test, plus tests gated on the environment (symlink privilege, footprint, live gateway). One failure was a regression from the ledger: thread deletion assumed the `tool_operations` table on an older schema. It is fixed, and its suite passes.
+- Task 5.1: `DurableEndToEnd.SuggestionStartApprovalShutdownAndSafeRecovery` passes against dev/graph-mock with a real process kill after the send.
+- Live gateway (task 2.4): `ModelE2E.TriageClassifiesAgainstResponsibilitiesThroughTheGateway` classified 6 of 6 items as expected and ignored the embedded instruction.
+- Fuzzing: `fuzz_triage_classifier` and `fuzz_graph_parse` smoke runs (50,000 mutations each, standalone GCC driver) pass. The libFuzzer runs stay with the CI fuzz job.
+- Not verified here: desktop-input and AppE2E suites, the remote-task end-to-end scenario of add-scheduled-and-remote-tasks (6.1), and the measurements on the baseline machine (verify-foundations-on-target 10.2).

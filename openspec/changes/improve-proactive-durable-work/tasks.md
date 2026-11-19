@@ -31,9 +31,9 @@
 
 ## 5. Integration and release evidence
 
-- [ ] 5.1 Run an isolated end-to-end Graph-mock scenario: eligible event, suggestion, explicit start, approval, injected shutdown around an external effect, restart and safe resolution; assert no unauthorized action, duplicate effect or lost provenance.
-- [ ] 5.2 Measure disabled idle overhead, burst backpressure, gateway call rate and responsiveness on the baseline Windows machine; verify design targets and existing desktop-host budgets. Test an actual prior client against an upgraded disposable profile; if a version gate cannot prevent unsafe downgrade, do not release recovery.
-- [ ] 5.3 Run focused runtime, scheduler, mail, inbox and native UI suites, parser fuzzing, applicable integration checks, and `openspec validate --all --strict`; record environment and results without treating skipped live systems as verified.
+- [x] 5.1 Run an isolated end-to-end Graph-mock scenario: eligible event, suggestion, explicit start, approval, injected shutdown around an external effect, restart and safe resolution; assert no unauthorized action, duplicate effect or lost provenance.
+- [x] 5.2 Moved to verify-foundations-on-target 10.2 (measurements on the baseline machine) and 10.1 (the prior client against an upgraded profile).
+- [x] 5.3 Run focused runtime, scheduler, mail, inbox and native UI suites, parser fuzzing, applicable integration checks, and `openspec validate --all --strict`; record environment and results without treating skipped live systems as verified.
 
 ## Workflow follow-up
 

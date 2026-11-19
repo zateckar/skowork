@@ -490,6 +490,12 @@ Status InboxStore::delete_thread(const std::string& thread_id) {
         busy.bind(1, thread_id);
         if (busy.step()) return make_error("thread_busy", "a Run of this Thread is still active; stop it first");
     }
+    // A schema from before the operation ledger (an older client's database) has no tool_operations table.
+    bool ledger = false;
+    {
+        auto t = db_.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_operations'");
+        ledger = t.step();
+    }
     return db_.transaction([&]() -> Status {
         const char* statements[] = {
             "DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE thread_id=?1)",
@@ -504,6 +510,7 @@ Status InboxStore::delete_thread(const std::string& thread_id) {
             "DELETE FROM threads WHERE id=?1",  // the trigger removes the search entries
         };
         for (const char* sql : statements) {
+            if (!ledger && std::string_view(sql).find("tool_operations") != std::string_view::npos) continue;
             auto st = db_.prepare(sql);
             st.bind(1, thread_id);
             if (auto s = st.run(); !s) return s;
