@@ -17,7 +17,7 @@ The combined baseline and lazily loaded definitions SHALL remain within the 4,00
 - **WHEN** a user asks for a Local app while Local app Tools are offered
 - **THEN** the first model request already contains apps.create, apps.open, files.read, files.write and files.edit, so the model can create, write and open the app on consecutive model Turns without find_tools
 
-#### Scenario: Model discovers another tool
+#### Scenario: Model discovers a tool
 - **WHEN** the model calls `find_tools` with the query "calendar"
 - **THEN** it receives matching tool names and descriptions only for available, permitted non-reserved Tools, and from the next model call the selected definitions follow the unchanged baseline in first-load order
 

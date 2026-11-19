@@ -173,3 +173,21 @@ In the Connections view, the admin console SHALL let platform-admins set and cle
 #### Scenario: Set recommended values
 - **WHEN** a platform-admin enters temperature 1.0, top_p 0.95 and top_k 20 for a chat model and saves
 - **THEN** the model's settings show the three values, and requests to the model carry them
+
+### Requirement: Team Knowledge Administration
+The admin console SHALL show platform-admins the items in control-plane/team-knowledge by Group, with title, owner, Source kind, size and last update, and let them remove an item with a reason after confirmation.
+
+#### Scenario: Review a Group's shared items
+- **WHEN** a platform-admin opens team knowledge for the Group engineering
+- **THEN** the console lists every item shared with engineering, with its owner and size
+
+### Requirement: LLM Connection Administration
+The admin console SHALL let platform-admins add, edit, test, enable, disable and delete LLM connections of control-plane/llm-gateway, see each connection's status and discovered models, and set each model's capabilities. The credential field is write-only. In the Models view, the model for each role and Group is chosen from the discovered models, showing the connection and the model's kind; a model of the wrong kind for the role (for example a chat model for `embed`) is marked.
+
+#### Scenario: Add a connection and use it
+- **WHEN** a platform-admin adds a connection, the console lists its models, and the admin picks one of them as the `main` model of a Group and publishes
+- **THEN** new Runs of that Group's users use the picked model through the new connection
+
+#### Scenario: Delete a connection in use
+- **WHEN** a platform-admin deletes a connection whose models are mapped in a published policy
+- **THEN** the console names the Groups and roles that use it and asks for confirmation before deleting

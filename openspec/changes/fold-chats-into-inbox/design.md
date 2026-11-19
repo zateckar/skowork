@@ -32,3 +32,6 @@ add-chats-in-inbox made every Chat an Inbox entry and kept the Chats navigation 
 - New Chat opened the dialog with the people picker and the name field. Start Chat stays disabled until someone is picked. Cancel closed it.
 - Tests: ShellChats.EntriesConversationNewChatLeaveAndOff (no Chats entry, `#/chats` opens the Inbox, busy, New Chat direct and team, leave, policy off) and the shell_core route and view tests. Golden images regenerated and reviewed.
 - Not checked: that the peer sees the busy change, and creating real Chats on the stack. The demo session has only one signed-in user.
+## Spec Note (2026-11-19)
+
+When the earlier Chats changes were archived, the accepted Chats View requirement grew past 500 characters. Its people picker moved to its own requirement, client/user-messaging Chat People Picker. This change's delta now modifies both: Chats View has no Chats navigation entry and gains New Chat, and Chat People Picker covers the members of any new Chat. The picker scenarios are unchanged.
