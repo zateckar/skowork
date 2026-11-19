@@ -1005,11 +1005,15 @@ private:
 
     void add_result(const std::string& call_id, const std::string& tool, bool ok, const std::string& content,
                     const std::optional<Provenance>& prov = std::nullopt, const json& attachment = nullptr,
-                    const json& files = nullptr) {
+                    const json& files = nullptr, bool unknown = false) {
         Provenance p = prov.value_or(Provenance{"runtime", "", "", true});
         p.at = now();
         json payload = {{"call_id", call_id}, {"tool", tool}, {"ok", ok}, {"content", content}, {"provenance", provenance_json(p)}};
         json event = {{"call_id", call_id}, {"tool", tool}, {"ok", ok}, {"content", content}};
+        if (unknown) {  // neither success nor failure: the views must not label it either (Recovery Choice Presentation)
+            payload["outcome"] = "unknown";
+            event["outcome"] = "unknown";
+        }
         if (attachment.is_object()) {
             payload["attachment"] = attachment;
             event["attachment"] = attachment;
@@ -1333,8 +1337,9 @@ private:
     std::string raise(const std::string& call_id, const std::string& kind, const json& payload) {
         auto action = store_.create_action(id_, kind, call_id, payload);
         if (!action) {
-            add_result(call_id, jstr(payload, "tool"), false,
-                       jbool(payload, "unknown_outcome") ? kLiveUnknownText : "The call could not be offered to the user.");
+            const bool unknown = jbool(payload, "unknown_outcome");
+            add_result(call_id, jstr(payload, "tool"), false, unknown ? kLiveUnknownText : "The call could not be offered to the user.",
+                       std::nullopt, nullptr, nullptr, unknown);
             return {};
         }
         auto seq = store_.append_event(id_, "interrupt", {{"action_id", action->id}, {"kind", kind}, {"call_id", call_id}});
@@ -1395,7 +1400,8 @@ private:
             const bool stop = answer != kContinueChoice;
             if (const std::string op = jstr(action.payload, "op_id"); !op.empty()) (void)store_.resolve_operation(op, stop ? "stop" : "continue");
             add_result(cid, tool, false,
-                       std::string(kLiveUnknownText) + (stop ? " The user stopped the Run." : " The user chose to continue without knowing."), user);
+                       std::string(kLiveUnknownText) + (stop ? " The user stopped the Run." : " The user chose to continue without knowing."), user,
+                       nullptr, nullptr, /*unknown=*/true);
             if (stop) stop_after_batch_ = true;
             return;
         }
@@ -2090,7 +2096,7 @@ json AgentRuntime::recovery_status(const std::string& run_id) {
     for (const auto& r : subtree(run_id))
         for (const auto& op : store_.operations_of_run(r.id))
             if (op.state == "unknown")
-                unknown.push_back({{"op_id", op.id}, {"run_id", op.run_id}, {"tool", op.tool}, {"resolution", op.resolution},
+                unknown.push_back({{"op_id", op.id}, {"run_id", op.run_id}, {"call_id", op.call_id}, {"tool", op.tool}, {"resolution", op.resolution},
                                    {"action_id", op.action_id}});
     const auto rec = store_.run(run_id);
     const auto cont = store_.continuation_of(run_id);

@@ -76,7 +76,7 @@ std::string signature(const FeedItem& it) {
     case ItemType::details: return s + it.text;
     case ItemType::tool:
         s += std::string(it.compact ? "c|" : "") + it.tool + "|" + it.risk + "|" + it.decision + "|" + it.reason + "|" + (it.edited ? "e" : "") + "|" + it.args.dump();
-        if (it.result) s += "|" + std::string(it.result->ok ? "ok" : "bad") + "|" + it.result->content;
+        if (it.result) s += "|" + std::string(it.result->unknown ? "unknown" : it.result->ok ? "ok" : "bad") + "|" + it.result->content;
         if (it.result)
             for (const FileRef& f : it.result->files) s += "|" + f.id;
         return s;
@@ -957,9 +957,12 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
             if (on) expanded_.insert(key);
             else expanded_.erase(key);
         };
-        const bool bad = it.result ? !it.result->ok : it.decision == "deny";
-        const std::u16string state = shell_.t(it.result ? (it.result->ok ? "feed.tool.result" : "feed.tool.error") : "feed.tool.pending");
-        card->header().emplace<ui::Badge>(u, state, bad ? Paint::error_background : it.result ? Paint::surface_alt : Paint::info_background,
+        // An unknown outcome is neither a result nor an error (Recovery Choice Presentation): it says only that it is unknown.
+        const bool unknown = it.result && it.result->unknown;
+        const bool bad = it.result ? !it.result->ok && !unknown : it.decision == "deny";
+        const char* state_key = !it.result ? "feed.tool.pending" : unknown ? "feed.tool.unknown" : it.result->ok ? "feed.tool.result" : "feed.tool.error";
+        const std::u16string state = shell_.t(state_key);
+        card->header().emplace<ui::Badge>(u, state, bad ? Paint::error_background : unknown ? Paint::warning_background : it.result ? Paint::surface_alt : Paint::info_background,
                                           Paint::text, id_of("tool-state-", it.key));
         if (it.edited)
             card->header().emplace<ui::Badge>(u, shell_.t("feed.tool.edited"), Paint::warning_background, Paint::text,
@@ -979,8 +982,8 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
         b.emplace<ui::Label>(u, shell_.t("feed.tool.args"), TextStyle::caption, Paint::text_secondary, true);
         code_box(shell_, b, id_of("tool-args-", it.key), it.args.dump(2));
         if (it.result) {
-            b.emplace<ui::Label>(u, shell_.t(it.result->ok ? "feed.tool.result" : "feed.tool.error"), TextStyle::caption, Paint::text_secondary, true);
-            code_box(shell_, b, id_of("tool-result-", it.key), it.result->content, it.result->ok ? Paint::text : Paint::error);
+            b.emplace<ui::Label>(u, shell_.t(state_key), TextStyle::caption, Paint::text_secondary, true);
+            code_box(shell_, b, id_of("tool-result-", it.key), it.result->content, it.result->ok || unknown ? Paint::text : Paint::error);
         }
         // Images the tool stored, and the sources knowledge.search cited, show under the card without expanding it.
         if (!produced_something(it)) return card;

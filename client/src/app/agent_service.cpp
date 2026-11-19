@@ -284,7 +284,19 @@ void AgentService::register_rpc(RpcRegistry& rpc, bool expose_on_pipe) {
         if (Status s = rt.cancel(*id); !s) return s.error();
         return json{{"ok", true}};
     });
-    rpc.add("actions.resolve", ex, [this, &rt](const json& p) -> Result<json> {
+    // Recovery Choice Presentation: what a shutdown-failed Run can do now, and its continuation.
+    rpc.add("runs.recovery", ex, [&rt](const json& p) -> Result<json> {
+        auto id = required(p, "run_id");
+        if (!id) return id.error();
+        return rt.recovery_status(*id);
+    });
+    rpc.add("runs.continue", ex, [&rt](const json& p) -> Result<json> {
+        auto id = required(p, "run_id");
+        if (!id) return id.error();
+        auto r = rt.continue_run(*id);
+        if (!r) return r.error();
+        return json{{"run_id", *r}};
+    });    rpc.add("actions.resolve", ex, [this, &rt](const json& p) -> Result<json> {
         auto id = required(p, "action_id");
         if (!id) return id.error();
         const std::string d = jstr(p, "decision");

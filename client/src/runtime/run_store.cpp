@@ -327,6 +327,7 @@ Result<long long> RunStore::reopen_failed(const std::string& run_id, const std::
                 result["content"] = kNotDispatchedText;
             } else {
                 result["content"] = child_tool(tool) ? std::string(kChildUnfinishedText) : std::string(kUnknownOutcomeText);
+                result["outcome"] = "unknown";
             }
             auto r = append_event_locked(run_id, "tool_result", result);
             if (!r) return r.error();

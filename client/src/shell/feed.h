@@ -35,6 +35,7 @@ struct ToolResult {
     std::vector<Citation> citations;
     // skills.save: the Skill editor route whose Publish dialog shares the saved Skill (add-agent-created-skills 2.8).
     std::string publish_route;
+    bool unknown = false;  // the outcome of the call is unknown: neither a result nor an error
 };
 
 // The Publish dialog route of a saved Skill: "#/skills/edit/<name>" for a successful skills.save call, else empty.

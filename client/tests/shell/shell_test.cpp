@@ -7928,3 +7928,56 @@ TEST(ShellTriage, SettingsSectionAndSuggestionCard) {
     EXPECT_FALSE(w.exists("thread-suggestion-start"));
     window = nullptr;
 }
+
+// improve-proactive-durable-work 4.2: a Run that stopped at a shutdown with a send in flight. The Thread names the unknown
+// outcome without calling the mail sent or unsent, sends the user to the Question first, and offers Continue only once
+// the runtime allows it; Continue starts the continuation and the banner goes.
+TEST(ShellRecovery, ShutdownFailedRunExplainsTheUnknownOutcomeAndContinues) {
+    std::string thread, failed;
+    Fixture f([&](Inbox& in) {
+        ToolDef send = make_tool(in.env, "mail.send", Risk::external);
+        send.core = true;
+        in.env.add_tool(send);
+        auto& store = in.env.rt->store();
+        thread = in.env.thread();
+        auto r = store.create_run(thread, {}, false);
+        ASSERT_TRUE(r);
+        failed = r->id;
+        ASSERT_TRUE(store.transition(failed, RunState::running));
+        ASSERT_TRUE(store.append_event(failed, "message", user_message_event("Send the budget to Eva")));
+        model::ChatMessage assistant;
+        assistant.role = "assistant";
+        assistant.tool_calls.push_back({"c1", "mail.send", json{{"to", "eva"}}.dump()});
+        ASSERT_TRUE(store.append_event(failed, "message", message_to_event(assistant)));
+        ASSERT_TRUE(store.append_event(failed, "tool_call", {{"call_id", "c1"}, {"tool", "mail.send"}, {"args", {{"to", "eva"}}}, {"decision", "allow"}}));
+        ASSERT_TRUE(store.begin_operation(failed, thread, "c1", "mail.send", {{"to", "eva"}}, "unknown"));
+        in.env.model.push_text("I could not confirm whether the mail went out.");
+    });
+    f.rpc.add("runs.recovery", RpcExposure::ui, [&f](const json& p) -> Result<json> { return f.in.env.rt->recovery_status(jstr(p, "run_id")); });
+    f.rpc.add("runs.continue", RpcExposure::ui, [&f](const json& p) -> Result<json> {
+        auto r = f.in.env.rt->continue_run(jstr(p, "run_id"));
+        if (!r) return r.error();
+        return json{{"run_id", *r}};
+    });
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open(shell::thread_hash(thread)); });
+    ASSERT_TRUE(w.until([&] { return w.exists("recovery-banner"); }));
+    EXPECT_NE(label_text(w, "recovery-banner-unknown").find(u"mail.send"), std::u16string::npos);
+    EXPECT_TRUE(w.exists("recovery-open-actions"));
+    EXPECT_FALSE(w.exists("recovery-continue"));  // the unknown outcome is answered first
+    const std::u16string body = label_text(w, "recovery-banner-body");
+    for (const char16_t* word : {u"was sent", u"not sent", u"failed"}) EXPECT_EQ(body.find(word), std::u16string::npos) << ui::to_utf8(body);
+
+    std::string question;
+    for (const auto& a : f.in.env.rt->pending_actions(thread))
+        if (jstr(a.payload, "raised_by") == "runtime.recovery") question = a.id;
+    ASSERT_FALSE(question.empty());
+    ASSERT_TRUE(f.in.env.rt->answer_question(question, "Continue without knowing"));
+    ASSERT_TRUE(w.until([&] { return w.exists("recovery-continue"); }));
+    EXPECT_FALSE(w.exists("recovery-open-actions"));
+    ASSERT_TRUE(w.invoke("recovery-continue"));
+    ASSERT_TRUE(w.until([&] { return !w.exists("recovery-banner"); }, 10000));
+    EXPECT_EQ(f.in.env.calls.count("mail.send"), 0);  // nothing was made again
+    EXPECT_FALSE(jstr(f.in.env.rt->recovery_status(failed), "continuation").empty());
+}

@@ -66,7 +66,7 @@ std::vector<std::string> summary(const std::vector<FeedItem>& items) {
             case ItemType::user: out.push_back("user:" + i.text); break;
             case ItemType::assistant: out.push_back(std::string("assistant") + (i.streaming ? "*" : "") + ":" + i.text); break;
             case ItemType::tool:
-                out.push_back("tool:" + i.tool + ":" + (i.result ? (i.result->ok ? "ok" : "err") : "pending") +
+                out.push_back("tool:" + i.tool + ":" + (i.result ? (i.result->unknown ? "unknown" : i.result->ok ? "ok" : "err") : "pending") +
                               (i.edited ? ":edited" : ""));
                 break;
             case ItemType::reasoning: out.push_back(std::string("reasoning") + (i.streaming ? "*" : "") + ":" + i.text); break;
@@ -1250,4 +1250,18 @@ TEST(RunSpeed, SpeedLineSitsAfterTheAnswerAndBeforeTheUsageLine) {
     EXPECT_EQ(items[2].speed->tokens_per_s, 50);
     EXPECT_EQ(items[3].type, ItemType::activity);
     ASSERT_TRUE(items[3].usage);
+}
+
+// improve-proactive-durable-work 4.2 (Recovery Choice Presentation): a call whose outcome is unknown is neither a result
+// nor an error, whether it was stored or arrives live.
+TEST(ShellFeed, AnUnknownOutcomeIsNeitherSentNorFailed) {
+    FeedSnapshot snap = snapshot({run("run_1", "failed")});
+    snap.runs[0].events = {
+        {1, "", "message", {{"role", "user"}, {"content", "Send it"}}},
+        {2, "", "tool_call", {{"call_id", "m1"}, {"tool", "mail.send"}, {"args", json::object()}, {"decision", "allow"}}},
+        {3, "", "tool_result", {{"call_id", "m1"}, {"tool", "mail.send"}, {"ok", false}, {"outcome", "unknown"}, {"content", "The outcome of this call is unknown."}}},
+        {4, "", "tool_call", {{"call_id", "m2"}, {"tool", "mail.send"}, {"args", json::object()}, {"decision", "allow"}}},
+        {5, "", "tool_result", {{"call_id", "m2"}, {"tool", "mail.send"}, {"ok", false}, {"content", "HTTP 400"}}},
+    };
+    EXPECT_EQ(summary(build_feed(snap)), (V{"user:Send it", "tool:mail.send:unknown", "tool:mail.send:err"}));
 }

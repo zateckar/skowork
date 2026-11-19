@@ -26,7 +26,7 @@
 ## 4. Background work visibility
 
 - [x] 4.1 Expose bounded sanitized Run and Child Run activity and durable state transitions from `client/src/runtime/`; test concurrent children, progress updates, interruption, cancellation, restart and redaction of secrets and raw Tool output.
-- [ ] 4.2 Project progress, pending steering, Action links and recovery choices into `client/src/inbox/` and `client/src/shell/`; verify live feed ordering, navigation, keyboard/UI Automation access, stale actions and restart reconstruction.
+- [x] 4.2 Project progress, pending steering, Action links and recovery choices into `client/src/inbox/` and `client/src/shell/`; verify live feed ordering, navigation, keyboard/UI Automation access, stale actions and restart reconstruction.
 - [x] 4.3 Reuse existing queue, steering and Stop paths and communicate delivery at the next safe boundary; test a long-running Tool, queued messages, parent/child cancellation and a pending Question.
 
 ## 5. Integration and release evidence

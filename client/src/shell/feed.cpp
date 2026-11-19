@@ -74,7 +74,7 @@ void fold_event(std::vector<FeedItem>& items, std::map<std::string, size_t>& too
     } else if (e.kind == "tool_result") {
         const auto t = tools.find(str(p, "call_id"));
         if (t != tools.end()) {
-            ToolResult r{jbool(p, "ok"), str(p, "content"), {}, {}, {}};
+            ToolResult r{jbool(p, "ok"), str(p, "content"), {}, {}, {}, str(p, "outcome") == "unknown"};
             if (r.ok) r.citations = citations_of(items[t->second].tool, r.content);
             r.publish_route = publish_route_of(items[t->second].tool, items[t->second].args, r.ok);
             if (const json* files = p.is_object() ? jobj(p, "files") : nullptr; files && files->is_array())

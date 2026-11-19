@@ -237,6 +237,19 @@ void ThreadPane::rebuild_banner() {
     const auto& snap = shell_.feed();
     const auto failure = snap ? latest_error(*snap) : std::nullopt;
     if (!failure) {
+        // A Run that stopped at a shutdown has no error event: its recovery choices take the banner's place.
+        const RunInfo* last = snap && !snap->runs.empty() ? &snap->runs.back() : nullptr;
+        if (last && last->state == "failed" && last->reason == "interrupted by shutdown" && last->parent_run_id.empty()) {
+            if (recovery_run_ != last->id) {
+                recovery_run_ = last->id;
+                recovery_ = nullptr;
+            }
+            load_recovery(last->id);
+            build_recovery(*banner_);
+        } else {
+            recovery_run_.clear();
+            recovery_ = nullptr;
+        }
         banner_->relayout();
         return;
     }
@@ -313,6 +326,82 @@ void ThreadPane::rebuild_banner() {
     }
     banner_->padding = {20, 4, 20, 8};
     banner_->relayout();
+}
+
+void ThreadPane::load_recovery(const std::string& run_id) {
+    std::weak_ptr<int> alive = alive_;
+    shell_.call("runs.recovery", {{"run_id", run_id}}, [this, alive, run_id](Result<json> res) {
+        if (!alive.lock() || run_id != recovery_run_) return;
+        json next = res ? *res : json(nullptr);
+        if (next == recovery_) return;  // unchanged: no rebuild, no second load
+        recovery_ = std::move(next);
+        rebuild_banner();
+    });
+}
+
+void ThreadPane::build_recovery(Node& banner) {
+    const json& r = recovery_;
+    if (!r.is_object()) return;
+    // Calls whose outcome is unknown, and those still waiting for the user's answer.
+    std::vector<std::string> unknown_tools;
+    int unanswered = 0;
+    if (const json* u = jobj(r, "unknown"); u && u->is_array())
+        for (const auto& op : *u) {
+            unknown_tools.push_back(jstr(op, "tool"));
+            if (jstr(op, "resolution").empty()) ++unanswered;
+        }
+    const bool stopped = jbool(r, "stopped"), continuable = jbool(r, "continuable");
+    std::u16string body;
+    if (stopped) body = shell_.t("thread.recovery.stopped");
+    else if (unanswered > 0) body = shell_.t("thread.recovery.answer_first", {{"count", ui::to_utf16(std::to_string(unanswered))}});
+    else if (continuable) body = shell_.t("thread.recovery.can_continue");
+    else body = shell_.t("thread.recovery.cannot_continue", {{"reason", ui::to_utf16(jstr(r, "blocker"))}});
+    auto* box = banner.emplace<ui::Box>("recovery-banner", Paint::surface_alt, 8, Paint::border);
+    box->role = ui::Role::group;
+    box->name = shell_.t("thread.recovery.title");
+    box->help = body;
+    box->axis = ui::Axis::row;
+    box->gap = 12;
+    box->padding = ui::Insets::xy(14, 12);
+    auto* text = box->emplace<Node>();
+    text->gap = 2;
+    text->emplace<ui::Label>(shell_.ui(), shell_.t("thread.recovery.title"), TextStyle::body_strong, Paint::text, true, "recovery-banner-title");
+    text->emplace<ui::Label>(shell_.ui(), body, TextStyle::body, Paint::text, true, "recovery-banner-body");
+    if (!unknown_tools.empty()) {
+        std::string list;
+        for (const auto& t : unknown_tools) list += (list.empty() ? "" : ", ") + t;
+        // Neither sent nor not sent: the outcome is unknown.
+        text->emplace<ui::Label>(shell_.ui(), shell_.t("thread.recovery.unknown", {{"tools", ui::to_utf16(list)}}), TextStyle::caption,
+                                 Paint::text_secondary, true, "recovery-banner-unknown");
+    }
+    auto* actions = box->emplace<Node>();
+    actions->axis = ui::Axis::row;
+    actions->width = Sizing::fit;
+    actions->gap = 6;
+    if (!stopped && unanswered > 0) {
+        auto* open = actions->emplace<ui::Button>(shell_.ui(), "recovery-open-actions", shell_.t("thread.recovery.open_actions"));
+        open->role = ui::Role::link;
+        open->on_click = [this] { shell_.navigate("#/inbox/action"); };
+    }
+    if (!stopped && continuable) {
+        auto* go = actions->emplace<ui::Button>(shell_.ui(), "recovery-continue", shell_.t("thread.recovery.continue"), ui::Button::Kind::primary);
+        go->enabled = !recovery_busy_;
+        const std::string run_id = recovery_run_;
+        go->on_click = [this, run_id] {
+            recovery_busy_ = true;
+            rebuild_banner();
+            std::weak_ptr<int> alive = alive_;
+            shell_.call("runs.continue", {{"run_id", run_id}}, [this, alive](Result<json> res) {
+                if (!alive.lock()) return;
+                recovery_busy_ = false;
+                if (!res) shell_.alert(res.error());
+                else shell_.announce(shell_.t("thread.recovery.continued"));
+                recovery_ = nullptr;
+                rebuild_banner();
+            });
+        };
+    }
+    banner_->padding = {20, 4, 20, 8};
 }
 
 // ---- Activity rail -------------------------------------------------------------------------------------------------

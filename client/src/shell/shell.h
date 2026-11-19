@@ -488,6 +488,9 @@ private:
     // The suggestion card of a triage suggestion Thread (client/event-triage Suggestion Presentation).
     void load_suggestion();
     void rebuild_suggestion();
+    // A shutdown-failed Run (Recovery Choice Presentation): what is unknown, and Continue when the runtime allows it.
+    void load_recovery(const std::string& run_id);
+    void build_recovery(ui::Node& banner);
     Shell& shell_;
     std::shared_ptr<int> alive_ = std::make_shared<int>(0);
     ui::Node* banner_ = nullptr;
@@ -495,6 +498,9 @@ private:
     std::string suggestion_thread_;  // the Thread suggestion_data_ belongs to
     json suggestion_data_ = nullptr;  // triage.suggestion
     bool suggestion_busy_ = false;
+    std::string recovery_run_;      // the shutdown-failed Run recovery_ describes
+    json recovery_ = nullptr;       // runs.recovery
+    bool recovery_busy_ = false;
     FeedView* feed_ = nullptr;
     std::unique_ptr<FeedView> kept_feed_;
     ComposerView* composer_ = nullptr;
