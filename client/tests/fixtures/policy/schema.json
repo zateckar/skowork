@@ -697,7 +697,7 @@
       "type": {
         "kind": "boolean"
       },
-      "default": false
+      "default": true
     },
     {
       "path": "meeting_capture.allow_series_auto",
@@ -2135,7 +2135,7 @@
             "type": "boolean",
             "x-owner": "client/meeting-capture",
             "x-merge": "scalar",
-            "default": false,
+            "default": true,
             "x-guardrail": "force"
           },
           "allow_series_auto": {

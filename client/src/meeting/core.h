@@ -28,7 +28,7 @@ struct AppEntry {
 struct Config {
     bool enabled = false;
     std::vector<AppEntry> apps;
-    bool allow_manual = false;
+    bool allow_manual = true;
     bool allow_series_auto = false;
     bool live_transcript = false;
     bool keep_audio = false;
@@ -169,6 +169,7 @@ struct Segment {
     std::string text;
     std::optional<EchoEvidence> evidence;  // local-track segments of a meeting with a remote track
     bool echo = false;                     // left out of the transcript as echo (Echo Removal From The Local Track)
+    bool unclear = false;                  // not recognisable in the meeting's language (Unclear Speech)
 };
 
 // The worker's result: {language, segments: [{track, start_ms, end_ms, speaker, text, evidence?, echo?}]}. Fails
@@ -185,10 +186,14 @@ std::vector<std::string> echo_tokens(std::string_view text);
 // Without a measurable echo path in the meeting (a headset), no span is correlated.
 std::vector<EchoEvidence> echo_evidence(const std::vector<std::int16_t>& local, const std::vector<std::int16_t>& remote,
                                         std::uint32_t rate, const std::vector<std::pair<long long, long long>>& spans_ms);
+// How alike two texts read, 0 to 1, after lower-casing and removing diacritics and punctuation: the best
+// character-level similarity of `a` to a window of `b` of about a's length (b may hold more speech around it).
+double text_similarity(std::string_view a, std::string_view b);
 // Marks the local segments that repeat remote speech heard through the loudspeakers: their words match a remote segment
 // that overlaps them or ended at most 1 second before (60% of 8 or more words, 80% of 6 or 7, all but one word of 4 or
-// 5, every word of fewer; a long segment is also compared with those remote segments joined), and their evidence is
-// correlated, and quiet as well for fewer than 6 words. Returns how many are marked.
+// 5, every word of fewer; a long segment is also compared with those remote segments joined), or, for 4 or more words,
+// their text is at least 60% similar to those remote segments joined (a garbled copy, improve-transcript-language D3);
+// and their evidence is correlated, and quiet as well for fewer than 6 words. Returns how many are marked.
 size_t mark_echo(std::vector<Segment>& segments);
 // The segments a transcript shows (echo left out).
 std::vector<Segment> heard(const std::vector<Segment>& segments);
@@ -214,10 +219,36 @@ std::string respell(std::string_view text, const std::vector<std::string>& vocab
 std::map<std::string, std::string> name_speakers(const std::vector<Segment>& segments, const std::string& user_name,
                                                  const std::vector<std::string>& attendees,
                                                  const std::map<std::string, std::string>& existing = {});
-// "[mm:ss] Name: text" lines, one per segment.
-std::string transcript_markdown(const std::vector<Segment>& segments, const std::map<std::string, std::string>& speakers);
-// Turns for client/knowledge-graph: [{speaker, start_ms, text}] with the speakers' names.
+// "[mm:ss] Name: text" lines, one per segment. Unclear segments show as "(unclear)" when `with_unclear` (what the user
+// reads) and are left out otherwise (the outputs message, Unclear Speech).
+std::string transcript_markdown(const std::vector<Segment>& segments, const std::map<std::string, std::string>& speakers,
+                                bool with_unclear = false);
+// Turns for client/knowledge-graph: [{speaker, start_ms, text}] with the speakers' names; echo and unclear left out.
 json knowledge_turns(const std::vector<Segment>& segments, const std::map<std::string, std::string>& speakers);
+
+// ---- the meeting's language (Transcript Keeps To The Meeting Language; improve-transcript-language D2) ----
+
+// The text has a letter outside the Latin script (all supported languages are written in it).
+bool other_script(std::string_view text);
+// A fragment of at most five words recognised in another language: at least half of its words are frequent function
+// words of another supported language and none is one of the meeting language's.
+bool foreign_fragment(std::string_view text, const std::string& language);
+// other_script or foreign_fragment.
+bool off_language(std::string_view text, const std::string& language);
+// A phrase Whisper is known to produce from silence or noise ("Titulky vytvořil …", "Thanks for watching").
+bool whisper_hallucination(std::string_view text);
+
+// ---- decoding units (Speech Decoded In Context; improve-transcript-language D1) ----
+
+// Consecutive spans of one track, as index ranges [first, last], joined while the gap to the next span is under
+// `gap_ms` and the unit (first span's start to last span's end) stays within `max_ms`.
+std::vector<std::pair<size_t, size_t>> join_spans(const std::vector<std::pair<long long, long long>>& spans_ms, long long gap_ms = 1000,
+                                                  long long max_ms = 20000);
+// A unit's recognised tokens (text, seconds from the unit's start) split back onto its spans (ms from the unit's start):
+// tokens form words at the word-start mark (U+2581) and each word goes to the last span that starts at most 100 ms
+// after it. Returns one text per span.
+std::vector<std::string> split_by_time(const std::vector<std::pair<std::string, float>>& tokens,
+                                       const std::vector<std::pair<long long, long long>>& spans_ms);
 
 // Languages transcription supports (Local CPU Transcription).
 bool supported_language(const std::string& code);
@@ -255,11 +286,19 @@ struct TrackAudio {
 
 // The engine behind the stt worker. The sherpa-onnx engine needs the models package (design D1); without it the
 // worker reports model_missing.
+// What one transcription does (show-meeting-transcription-progress D1).
+struct TranscribeOptions {
+    std::string language;   // a code, or empty to detect it
+    long long from_ms = 0;  // decode only speech that starts at or after this (a live pass, or the rest after one)
+    bool diarize = true;    // separate the speakers of every track but the user's own
+};
+
 class SpeechEngine {
 public:
     virtual ~SpeechEngine() = default;
-    // language: a code, or empty to detect it. Returns {language, segments}.
-    virtual Result<json> transcribe(const std::vector<TrackAudio>& tracks, const std::string& language) = 0;
+    // Returns {language, segments, turns?}. turns: {"<track>": [[start_ms, end_ms, cluster], ...]} for each diarized
+    // track, so speakers of segments kept from earlier passes can be labelled again (label_spans).
+    virtual Result<json> transcribe(const std::vector<TrackAudio>& tracks, const TranscribeOptions& options) = 0;
     // The meeting vocabulary the decoder favours (design D2); engines without hotwords ignore it.
     virtual void set_hotwords(std::vector<std::string> terms) { (void)terms; }
 };
@@ -297,7 +336,7 @@ std::vector<TrackAudio> join_parts(std::vector<TrackPart> parts);
 // loudness. The language is the requested one, else "en".
 class TestEngine : public SpeechEngine {
 public:
-    Result<json> transcribe(const std::vector<TrackAudio>& tracks, const std::string& language) override;
+    Result<json> transcribe(const std::vector<TrackAudio>& tracks, const TranscribeOptions& options) override;
 };
 
 // ---- Trigger kind meeting (Meeting Trigger Conditions) ----

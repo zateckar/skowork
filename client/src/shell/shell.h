@@ -446,6 +446,10 @@ private:
     void rebuild_attachments();
     void rebuild_skills();
     void rebuild_bar();
+    // Record Meeting From A New Thread (add-manual-meeting-capture): the default source at once, or the list of sources
+    // under `anchor`; a started capture opens the meeting's Thread.
+    void record_meeting(bool choose, const ui::Rect& anchor);
+    void start_recording(const std::string& source);
     std::optional<std::string> skill_query() const;  // the text after a leading `/` while it is one word
     std::vector<Skill> skill_matches() const;
 
@@ -467,6 +471,7 @@ private:
     size_t skill_index_ = 0;
     UINT_PTR save_timer_ = 0;
     bool busy_ = false;
+    bool recording_ = false;  // a Record meeting request is on its way
     std::string queued_sig_, bar_state_;  // what the queued list and the bar show
 };
 
@@ -480,10 +485,16 @@ public:
     void update_composer();  // the status changed (new Runs blocked or not)
     // Event triage changed (triage.changed): the suggestion card of a suggestion Thread loads again.
     void triage_changed();
+    // Meeting capture changed (meetings.changed): a meeting Thread's progress line loads again.
+    void meetings_changed();
     FeedView* feed() { return feed_; }
     ComposerView* composer() { return composer_; }
 
 private:
+    // Meeting Progress In Its Thread (show-meeting-transcription-progress D3): the stage of a meeting-origin Thread's
+    // meeting, polled every 5 seconds until it is done, with Transcribe now and Transcribe again.
+    void load_progress();
+    void rebuild_progress();
     void rebuild_banner();
     // The suggestion card of a triage suggestion Thread (client/event-triage Suggestion Presentation).
     void load_suggestion();
@@ -501,6 +512,12 @@ private:
     std::string recovery_run_;      // the shutdown-failed Run recovery_ describes
     json recovery_ = nullptr;       // runs.recovery
     bool recovery_busy_ = false;
+    ui::Node* progress_ = nullptr;
+    std::string progress_meeting_;      // the meeting progress_data_ belongs to
+    json progress_data_ = nullptr;      // meetings.progress
+    std::string progress_announced_;    // the stage last announced
+    UINT_PTR progress_timer_ = 0;
+    bool progress_busy_ = false;
     FeedView* feed_ = nullptr;
     std::unique_ptr<FeedView> kept_feed_;
     ComposerView* composer_ = nullptr;

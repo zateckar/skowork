@@ -191,6 +191,21 @@ void ThreadPane::rebuild() {
         }
     }
 
+    // A meeting's progress (show-meeting-transcription-progress D3): loaded once per Thread, polled while it runs.
+    progress_ = emplace<Node>("thread-meeting-progress");
+    if (e && e->origin_kind == "meeting" && !jstr(e->origin_ref, "meeting_id").empty()) {
+        if (const std::string mid = jstr(e->origin_ref, "meeting_id"); progress_meeting_ != mid) {
+            progress_meeting_ = mid;
+            progress_data_ = nullptr;
+            progress_announced_.clear();
+            load_progress();
+        }
+        rebuild_progress();
+    } else {
+        progress_meeting_.clear();
+        progress_data_ = nullptr;
+    }
+
     // A triage suggestion (client/event-triage): its card, loaded once per Thread and again on triage.changed.
     suggestion_ = emplace<Node>("thread-suggestion");
     if (e && e->origin_kind == "system" && jstr(e->origin_ref, "kind") == "triage") {

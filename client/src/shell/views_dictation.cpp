@@ -137,6 +137,7 @@ void Shell::dictation_changed() {
     for (DictateControl* c : controls)
         if (std::find(dictate_controls_.begin(), dictate_controls_.end(), c) != dictate_controls_.end()) c->update();
     if (page_ && route_.name == RouteName::settings) page_->speech_check_changed();
+    if (thread_) thread_->update_composer();  // Record meeting waits while a dictation runs
 }
 
 // ---- the Dictate control ---------------------------------------------------------------------------------------

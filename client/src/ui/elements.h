@@ -21,7 +21,7 @@ constexpr char16_t add = 0xE710, settings = 0xE713, back = 0xE72B, chevron_down 
                    check = 0xE73E, pin = 0xE718, archive = 0xE7B8, send = 0xE724, stop = 0xE71A, folder = 0xE8B7,
                    warning = 0xE7BA, error = 0xEA39, info = 0xE946, attach = 0xE723, fork = 0xEA3C, rename = 0xE8AC,
                    add_people = 0xE8FA, note = 0xE70B, leave = 0xF3B1, chat = 0xE8BD, calendar_day = 0xE8BF,
-                   calendar_week = 0xE8C0, history = 0xE81C, microphone = 0xE720;
+                   calendar_week = 0xE8C0, history = 0xE81C, microphone = 0xE720, record = 0xE7C8;
 }
 
 // A container with an optional background, border and corner radius.

@@ -194,19 +194,34 @@ Result<json> stt_request(const std::string& method, const json& params) {
             if (t.is_string() && terms.size() < 400) terms.push_back(t.get<std::string>());
         engine->set_hotwords(std::move(terms));
     }
-    auto r = engine->transcribe(tracks, jstr(params, "language"));
+    // A live pass decodes only speech from from_ms on and skips diarization (show-meeting-transcription-progress D1).
+    TranscribeOptions options;
+    options.language = jstr(params, "language");
+    options.from_ms = std::max(0LL, jint(params, "from_ms"));
+    options.diarize = !params.contains("diarize") || jbool(params, "diarize");
+    auto r = engine->transcribe(tracks, options);
     if (!r) return r;
     attach_echo_evidence(*r, tracks);
     // Dictation (add-dictation D5): a short dictation detected as an unsupported language is transcribed in the
     // fallback language (the window's) instead.
     if (const std::string lang = jstr(*r, "language"), fallback = jstr(params, "fallback_language");
         jstr(params, "language").empty() && !supported_language(lang) && supported_language(fallback)) {
-        r = engine->transcribe(tracks, fallback);
+        options.language = fallback;
+        r = engine->transcribe(tracks, options);
         if (!r) return r;
         attach_echo_evidence(*r, tracks);
     }
     if (const std::string lang = jstr(*r, "language"); !supported_language(lang))
         return make_error("unsupported_language", lang);
+    // The audio every track has on disk (ms from the meeting's start): a live pass ends here, since the newest second
+    // of a track may still be in its writer (show-meeting-transcription-progress D1).
+    long long audio_ms = -1;
+    for (const auto& t : tracks)
+        if (t.rate > 0) {
+            const long long ms = static_cast<long long>(t.pcm.size()) * 1000 / static_cast<long long>(t.rate);
+            audio_ms = audio_ms < 0 ? ms : std::min(audio_ms, ms);
+        }
+    (*r)["audio_ms"] = std::max(0LL, audio_ms);
     return r;
 }
 

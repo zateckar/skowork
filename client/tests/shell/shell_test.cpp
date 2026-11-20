@@ -6346,6 +6346,231 @@ TEST(ShellDictation, DictateInsertsAtTheCaretEscapeDiscardsAndAvailability) {
     }));
 }
 
+// add-manual-meeting-capture, Record Meeting From A New Thread: shown in the new Thread composer only while manual capture
+// is allowed; one click records the default source and opens the meeting's Thread; without a default, or from the
+// drop-down, the sources are listed and nothing is recorded until one is chosen; disabled while a capture runs.
+TEST(ShellMeetings, RecordMeetingFromANewThread) {
+    std::mutex mx;
+    json meetings = {{"manual", true}, {"capturing", false}};
+    std::string fallback = "app:4242";
+    std::vector<std::pair<std::string, json>> calls;
+    Fixture f;
+    const auto t = f.in.env.thread();
+    const auto app_status = [&] {
+        const std::lock_guard l(mx);
+        return json{{"version", {{"version", "0.1.0"}}},
+                    {"auth", {{"state", "signed_in"}}},
+                    {"control_plane", {{"configured", true}, {"connected", true}}},
+                    {"background", {{"paused_until", 0}}},
+                    {"storage", {{"read_only", false}, {"degraded", false}}},
+                    {"agent", {{"available", true}}},
+                    {"dictation", {{"enabled", true}, {"available", true}, {"reason", ""}}},
+                    {"meetings", meetings}};
+    };
+    f.rpc.add("app.status", RpcExposure::ui, [&](const json&) -> Result<json> { return app_status(); });
+    f.rpc.add("meetings.sources", RpcExposure::ui, [&](const json& p) -> Result<json> {
+        const std::lock_guard l(mx);
+        calls.emplace_back("meetings.sources", p);
+        return json{{"sources", {{{"source", "app:4242"}, {"name", "msedge.exe"}}, {{"source", "app:77"}, {"name", "spotify.exe"}},
+                                 {{"source", "system"}, {"name", ""}}, {{"source", "mic"}, {"name", ""}}}},
+                    {"default", fallback},
+                    {"language", "auto"}};
+    });
+    f.rpc.add("meetings.set_language", RpcExposure::ui, [&](const json& p) -> Result<json> {
+        const std::lock_guard l(mx);
+        calls.emplace_back("meetings.set_language", p);
+        return json::object();
+    });
+    f.rpc.add("meetings.capture", RpcExposure::ui, [&](const json& p) -> Result<json> {
+        const std::lock_guard l(mx);
+        calls.emplace_back("meetings.capture", p);
+        return json{{"meeting_id", "mtg_1"}, {"thread_id", t}};
+    });
+    const auto captured = [&] {
+        const std::lock_guard l(mx);
+        std::vector<std::string> out;
+        for (const auto& [m, p] : calls)
+            if (m == "meetings.capture") out.push_back(jstr(p, "source"));
+        return out;
+    };
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/new"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("composer-input") && w.exists("composer-record-meeting"); }));
+    Uia uia;
+    auto m = uia.by_id(w.hwnd());
+    EXPECT_EQ(m[L"composer-record-meeting"].name, L"Record meeting");
+    EXPECT_EQ(m[L"composer-record-meeting-sources"].name, L"Choose what to record");
+    std::vector<std::string> problems;
+    w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
+    EXPECT_TRUE(problems.empty()) << problems.front();
+
+    // Teams Call In The Browser: one click records the default source and opens the meeting's Thread.
+    ASSERT_TRUE(w.invoke("composer-record-meeting"));
+    ASSERT_TRUE(w.until([&] { return w.shell().route().thread_id == t; }));
+    EXPECT_EQ(captured(), std::vector<std::string>{"app:4242"});
+    EXPECT_FALSE(w.exists("composer-record-meeting")) << "only the new Thread composer offers it";
+
+    // Several Applications Play Audio: the list opens and nothing is recorded until a source is picked.
+    {
+        const std::lock_guard l(mx);
+        fallback.clear();
+    }
+    w.run([&] { w.main().open("#/threads/new"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("composer-record-meeting"); }));
+    ASSERT_TRUE(w.invoke("composer-record-meeting"));
+    ASSERT_TRUE(w.until([&] { return w.exists("record-meeting-app:77") && w.exists("record-meeting-system"); }));
+    EXPECT_EQ(captured().size(), 1u);
+    EXPECT_EQ(uia.by_id(w.hwnd())[L"record-meeting-app:4242"].name, L"Application: msedge.exe");
+    ASSERT_TRUE(w.invoke("record-meeting-system"));
+    ASSERT_TRUE(w.until([&] { return captured().size() == 2u; }));
+    EXPECT_EQ(captured()[1], "system");
+
+    // The drop-down lists the sources even when there is a default.
+    {
+        const std::lock_guard l(mx);
+        fallback = "app:4242";
+    }
+    w.run([&] { w.main().open("#/threads/new"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("composer-record-meeting-sources"); }));
+    ASSERT_TRUE(w.invoke("composer-record-meeting-sources"));
+    ASSERT_TRUE(w.until([&] { return w.exists("record-meeting-mic"); }));
+    EXPECT_EQ(captured().size(), 2u);
+    // Language Chosen Before Recording (improve-transcript-language 5.1): the list offers Automatic and the languages.
+    EXPECT_EQ(uia.by_id(w.hwnd())[L"record-meeting-language-auto"].name, L"Language: Automatic");
+    EXPECT_TRUE(w.exists("record-meeting-language-de"));
+    ASSERT_TRUE(w.invoke("record-meeting-language-cs"));
+    ASSERT_TRUE(w.until([&] {
+        const std::lock_guard l(mx);
+        return std::any_of(calls.begin(), calls.end(), [](const auto& c) { return c.first == "meetings.set_language" && jstr(c.second, "language") == "cs"; });
+    }));
+    EXPECT_EQ(captured().size(), 2u) << "choosing a language records nothing";
+
+    // A Capture Is Already Running: disabled, and the tooltip says why.
+    w.run([&] { w.main().open("#/threads/new"); });
+    {
+        const std::lock_guard l(mx);
+        meetings = {{"manual", true}, {"capturing", true}};
+    }
+    w.post([&] { w.main().emit("status", app_status()); });
+    bool on = true;
+    std::u16string help;
+    ASSERT_TRUE(w.until([&] {
+        w.with("composer-record-meeting", [&](ui::Node& n) {
+            on = n.enabled;
+            help = n.help;
+            return true;
+        });
+        return !on;
+    }));
+    EXPECT_EQ(help, u"A meeting is being recorded. Stop it on the recording indicator first.");
+
+    // Manual Capture Not Allowed: no button.
+    {
+        const std::lock_guard l(mx);
+        meetings = {{"manual", false}, {"capturing", false}};
+    }
+    w.post([&] { w.main().emit("status", app_status()); });
+    ASSERT_TRUE(w.until([&] { return !w.exists("composer-record-meeting") && w.exists("composer-input"); }));
+}
+
+// show-meeting-transcription-progress 3.3 and improve-transcript-language 5.1: a meeting Thread's progress line follows
+// the host's stage, with Transcribe now while it failed, and Transcribe again in a chosen language while audio is kept.
+TEST(ShellMeetings, ProgressLineInTheMeetingThread) {
+    std::mutex mx;
+    json progress = {{"id", "mtg_1"}, {"stage", "recording"}, {"reason", ""}, {"elapsed_ms", 754'000}, {"error", ""},
+                     {"can_transcribe_now", false}, {"can_transcribe_again", false}};
+    std::vector<std::pair<std::string, json>> calls;
+    Fixture f;
+    const auto t = f.in.env.thread();
+    ASSERT_TRUE(f.in.svc->store().set_origin(t, "meeting", {{"meeting_id", "mtg_1"}, {"title", "Supplier sync"}, {"link", "#/settings"}}));
+    f.rpc.add("meetings.progress", RpcExposure::ui, [&](const json& p) -> Result<json> {
+        const std::lock_guard l(mx);
+        calls.emplace_back("meetings.progress", p);
+        return progress;
+    });
+    for (const char* name : {"meetings.transcribe_now", "meetings.transcribe_again"}) {
+        const std::string method = name;
+        f.rpc.add(method, RpcExposure::ui, [&, method](const json& p) -> Result<json> {
+            const std::lock_guard l(mx);
+            calls.emplace_back(method, p);
+            return json::object();
+        });
+    }
+    const auto called = [&](const std::string& method) {
+        const std::lock_guard l(mx);
+        json last = nullptr;
+        for (const auto& [m, p] : calls)
+            if (m == method) last = p;
+        return last;
+    };
+    const auto set = [&](json p) {
+        {
+            const std::lock_guard l(mx);
+            progress = std::move(p);
+        }
+    };
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + t); });
+    Uia uia;
+    const auto text_becomes = [&](const std::wstring& want) {
+        for (int i = 0; i < 250; ++i) {
+            if (uia.by_id(w.hwnd())[L"thread-meeting-progress-text"].name == want) return true;
+            std::this_thread::sleep_for(20ms);
+        }
+        return false;
+    };
+    ASSERT_TRUE(text_becomes(L"Recording · 12:34"));
+    EXPECT_EQ(jstr(called("meetings.progress"), "id"), "mtg_1");
+
+    // Meeting Just Ended: the share and the time left.
+    set({{"id", "mtg_1"}, {"stage", "transcribing"}, {"reason", ""}, {"done", 0.42}, {"left_ms", 150'000}, {"error", ""},
+         {"can_transcribe_now", false}, {"can_transcribe_again", false}});
+    w.post([&] { w.main().emit("meetings.changed", json::object()); });
+    ASSERT_TRUE(text_becomes(L"Transcribing on this computer · 42% · about 3 min left"));
+    // Before a speed is measured: the share only.
+    set({{"id", "mtg_1"}, {"stage", "transcribing"}, {"reason", ""}, {"done", 0.1}, {"error", ""},
+         {"can_transcribe_now", false}, {"can_transcribe_again", false}});
+    w.post([&] { w.main().emit("meetings.changed", json::object()); });
+    ASSERT_TRUE(text_becomes(L"Transcribing on this computer · 10%"));
+    // Waiting On Battery Saver, with Transcribe now.
+    set({{"id", "mtg_1"}, {"stage", "waiting"}, {"reason", "deferred"}, {"error", ""}, {"can_transcribe_now", true},
+         {"can_transcribe_again", false}});
+    w.post([&] { w.main().emit("meetings.changed", json::object()); });
+    ASSERT_TRUE(text_becomes(L"Transcription waits until background work may run, for example when battery saver is off."));
+    ASSERT_TRUE(w.until([&] { return w.exists("thread-meeting-transcribe-now"); }));
+    ASSERT_TRUE(w.invoke("thread-meeting-transcribe-now"));
+    ASSERT_TRUE(w.until([&] { return !called("meetings.transcribe_now").is_null(); }));
+    EXPECT_EQ(jstr(called("meetings.transcribe_now"), "id"), "mtg_1");
+    // Summary Being Written.
+    set({{"id", "mtg_1"}, {"stage", "summarizing"}, {"reason", ""}, {"error", ""}, {"can_transcribe_now", false},
+         {"can_transcribe_again", false}});
+    w.post([&] { w.main().emit("meetings.changed", json::object()); });
+    ASSERT_TRUE(text_becomes(L"Transcript ready. Writing the summary…"));
+    // Transcription Failed: the reason.
+    set({{"id", "mtg_1"}, {"stage", "failed"}, {"reason", "failed"}, {"error", "The speech-to-text models are not installed."},
+         {"can_transcribe_now", true}, {"can_transcribe_again", false}});
+    w.post([&] { w.main().emit("meetings.changed", json::object()); });
+    ASSERT_TRUE(text_becomes(L"Transcription did not finish: The speech-to-text models are not installed."));
+    std::vector<std::string> problems;
+    w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
+    EXPECT_TRUE(problems.empty()) << problems.front();
+    // Done with the audio kept: Transcribe again in a chosen language.
+    set({{"id", "mtg_1"}, {"stage", "done"}, {"reason", ""}, {"error", ""}, {"can_transcribe_now", false}, {"can_transcribe_again", true}});
+    w.post([&] { w.main().emit("meetings.changed", json::object()); });
+    ASSERT_TRUE(w.until([&] { return w.exists("thread-meeting-transcribe-again"); }));
+    ASSERT_TRUE(w.invoke("thread-meeting-transcribe-again"));
+    ASSERT_TRUE(w.until([&] { return w.exists("transcribe-again-cs"); }));
+    ASSERT_TRUE(w.invoke("transcribe-again-cs"));
+    ASSERT_TRUE(w.until([&] { return !called("meetings.transcribe_again").is_null(); }));
+    EXPECT_EQ(jstr(called("meetings.transcribe_again"), "language"), "cs");
+    // Audio No Longer Kept, and done: no line.
+    set({{"id", "mtg_1"}, {"stage", "done"}, {"reason", ""}, {"error", ""}, {"can_transcribe_now", false}, {"can_transcribe_again", false}});
+    w.post([&] { w.main().emit("meetings.changed", json::object()); });
+    ASSERT_TRUE(w.until([&] { return !w.exists("thread-meeting-progress-text") && !w.exists("thread-meeting-transcribe-again"); }));
+}
+
 // client/speech-models Speech Repair And Removal, Explicit Speech Check (task 5.4): the speech block shows disk use and
 // the microphone state, Verify and Repair start the host's checks without recording, and only Test microphone records:
 // Stop shows the recognised text in the block, Cancel discards it, and the composer draft is untouched. Fixture

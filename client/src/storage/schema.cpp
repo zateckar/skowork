@@ -4,7 +4,8 @@
 // 600-699 telemetry, 700-799 computer-use, 800-899 skills, 900-999 scheduler, 1000-1099 mail-calendar,
 // 1100-1199 knowledge (app.db side), 1200-1299 meeting-capture, 1300-1399 skills additions made after them, 1400-1499 user-messaging,
 // 1500-1599 fix-long-thread-model-calls, 1600-1699 agent-created-skills, 1700-1799 improve-meeting-capture-quality,
-// 1800-1899 improve-skowork-and-knowledge-control, 1900-1999 agenda.
+// 1800-1899 improve-skowork-and-knowledge-control, 1900-1999 agenda, 2000-2099 proactive durable work,
+// 2100-2199 meeting transcription progress and language.
 #include "storage/app_store.h"
 
 namespace wb {
@@ -624,6 +625,12 @@ CREATE TABLE triage_items(
 CREATE INDEX triage_items_pending ON triage_items(state, queued_at);
 CREATE INDEX triage_items_thread ON triage_items(thread_id);
 CREATE TABLE triage_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+)sql"},
+        // client/meeting-capture (show-meeting-transcription-progress D1, D2; improve-transcript-language D4): where the
+        // next live pass starts, and the measured transcription speed and the remembered meeting language.
+        {2100, R"sql(
+ALTER TABLE meetings ADD COLUMN live_from_ms INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE meeting_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 )sql"},
     };
     return migrations;

@@ -400,6 +400,66 @@ void ComposerView::stop() {
     });
 }
 
+// ---- Record meeting ------------------------------------------------------------------------------------------------
+
+void ComposerView::record_meeting(bool choose, const ui::Rect& anchor) {
+    show_error({});
+    std::weak_ptr<int> alive = alive_;
+    shell_.call("meetings.sources", json::object(), [this, alive, choose, anchor](Result<json> r) {
+        if (!alive.lock()) return;
+        if (!r) return show_error(ui::to_utf16(r.error().message));
+        const std::string fallback = jstr(*r, "default");
+        if (!choose && !fallback.empty()) return start_recording(fallback);
+        // Several applications play audio, or none: the user picks; nothing is recorded until then.
+        auto menu = std::make_unique<ui::Menu>("record-meeting-menu", shell_.t("composer.record_meeting_sources"));
+        if (const json* src = jobj(*r, "sources"); src && src->is_array())
+            for (const json& s : *src) {
+                const std::string source = jstr(s, "source");
+                const std::u16string label = source == "system" ? shell_.t("settings.meetings.source_system")
+                                             : source == "mic"  ? shell_.t("settings.meetings.source_mic")
+                                                                : shell_.t("settings.meetings.source_app", {{"name", ui::to_utf16(jstr(s, "name"))}});
+                menu->add_item(shell_.ui(), "record-meeting-" + source, label, [this, alive, source] {
+                    if (alive.lock()) start_recording(source);
+                });
+            }
+        // Meeting Language Choice: the language the next recordings are transcribed in, remembered by the host.
+        const std::string current = jstr(*r, "language", "auto");
+        for (const char* lang : {"auto", "cs", "de", "en"}) {
+            const std::string l = lang;
+            const std::u16string lang_name = shell_.t(l == "auto" ? std::string("settings.general.dictation_auto") : "settings.general.dictation_lang." + l);
+            menu->add_item(shell_.ui(), "record-meeting-language-" + l, shell_.t("composer.record_meeting_language", {{"language", lang_name}}),
+                           [this, alive, l, lang_name] {
+                               shell_.call("meetings.set_language", {{"language", l}}, [this, alive, lang_name](Result<json> res) {
+                                   if (!alive.lock()) return;
+                                   if (!res) return show_error(ui::to_utf16(res.error().message));
+                                   shell_.announce(shell_.t("composer.record_meeting_language_set", {{"language", lang_name}}));
+                               });
+                           },
+                           l == current ? ui::icon::check : char16_t{0});
+        }
+        shell_.window().overlay().show(std::move(menu), anchor, true);
+        shell_.window().render();
+    });
+}
+
+void ComposerView::start_recording(const std::string& source) {
+    recording_ = true;
+    rebuild_bar();
+    std::weak_ptr<int> alive = alive_;
+    shell_.call("meetings.capture", {{"source", source}}, [this, alive](Result<json> r) {
+        if (!alive.lock()) return;
+        recording_ = false;
+        if (!r) {
+            rebuild_bar();
+            return show_error(ui::to_utf16(r.error().message));
+        }
+        shell_.announce(shell_.t("composer.record_meeting_started"));
+        rebuild_bar();
+        const std::string thread_id = jstr(*r, "thread_id");
+        if (!thread_id.empty()) shell_.navigate(thread_hash(thread_id));  // may replace this composer
+    });
+}
+
 void ComposerView::show_error(const std::u16string& text) {
     error_->set_text(text);
     const bool was = error_->visible;
@@ -507,7 +567,13 @@ void ComposerView::rebuild_bar() {
     const bool running = mine && running_run(*snap);
     const RunInfo* active = mine ? active_run(*snap) : nullptr;
     const bool blocked = !shell_.runs_blocked().empty() && !shell_.offline();
+    // Record meeting: in the new Thread composer while manual capture is allowed; not while a capture or a dictation runs.
+    const json meetings = shell_.status().value("meetings", json::object());
+    const bool record = key_ == "new" && jbool(meetings, "manual");
+    const bool capturing = jbool(meetings, "capturing");
+    const bool dictating = shell_.dictation_phase() != Shell::DictationPhase::idle;
     const std::string state = std::string(running ? "r" : "") + (active ? "a" : "") + (blocked ? "b" : "") + (busy_ ? "s" : "") +
+                              (record ? "m" : "") + (capturing ? "c" : "") + (dictating ? "d" : "") + (recording_ ? "g" : "") +
                               shell_.ui().strings.lang();
     if (state == bar_state_) return;
     bar_state_ = state;
@@ -521,6 +587,23 @@ void ComposerView::rebuild_bar() {
     attach->width = Sizing::fit;
     attach->on_click = [this] { pick(); };
     bar_->emplace<DictateControl>(shell_, "composer-dictate", "thread:" + key_, alive_, [this] { return field_; });
+    if (record) {
+        const bool can = !capturing && !dictating && !recording_;
+        const std::u16string why = capturing ? shell_.t("composer.record_meeting_capturing")
+                                   : dictating ? shell_.t("composer.record_meeting_dictating")
+                                               : std::u16string{};
+        auto* rec = bar_->emplace<ui::Button>(u, "composer-record-meeting", shell_.t("composer.record_meeting"),
+                                              ui::Button::Kind::subtle, ui::icon::record);
+        rec->width = Sizing::fit;
+        rec->enabled = can;
+        rec->help = why.empty() ? shell_.t("composer.record_meeting_help") : why;
+        rec->on_click = [this, rec] { record_meeting(false, rec->frame()); };
+        auto* pick = bar_->emplace<ui::IconButton>(u, "composer-record-meeting-sources", ui::icon::chevron_down,
+                                                   shell_.t("composer.record_meeting_sources"));
+        pick->enabled = can;
+        if (!why.empty()) pick->help = why;
+        pick->on_click = [this, pick] { record_meeting(true, pick->frame()); };
+    }
     auto* hint = bar_->emplace<ui::Label>(u, shell_.t(running ? "composer.hint_running" : "composer.hint_idle"), TextStyle::caption,
                                           Paint::text_secondary, true, "composer-hint");
     hint->padding.top = 7;

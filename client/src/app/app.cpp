@@ -393,6 +393,10 @@ json App::status() {
         j["agenda"] = a ? json{{"available", a->available()}, {"enabled", a->active()}} : json{{"available", false}, {"enabled", false}};
     }
     j["dictation"] = dictation_svc ? dictation_svc->status() : json{{"enabled", false}, {"available", false}, {"reason", ""}};
+    // Record Meeting From A New Thread: whether the composer offers it, and whether a capture runs.
+    j["meetings"] = meeting_svc ? json{{"manual", meeting_svc->available() && meeting_svc->config().allow_manual},
+                                       {"capturing", meeting_svc->capturing()}}
+                                : json{{"manual", false}, {"capturing", false}};
     j["telemetry"] = telemetry ? json{{"level", telemetry::to_string(telemetry->level())}, {"source", telemetry->level_source()},
                                        {"content_active", telemetry->content_active()}, {"pending", telemetry->pending()}}
                                  : json{{"level", "unavailable"}, {"content_active", false}};

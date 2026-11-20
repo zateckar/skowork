@@ -102,8 +102,9 @@ public:
     // ---- the Meetings settings section ----
     [[nodiscard]] json status();
     Status stop_capture();  // the indicator's Stop, or Stop in Settings
-    // Manual Audio Source Capture: "app:<pid>", "system" or "mic". Starting it counts as consent.
-    Status capture_manual(const std::string& source);
+    // Manual Audio Source Capture: "app:<pid>", "system" or "mic". Starting it counts as consent. Returns the meeting's
+    // {meeting_id, thread_id}, so the window can open its Thread (Record Meeting From A New Thread).
+    Result<json> capture_manual(const std::string& source);
     Status transcribe_now(const std::string& meeting_id);
     Status rename_speaker(const std::string& meeting_id, const std::string& speaker, const std::string& name);
     // Echo Review: a local segment left out as echo, by its start time, returns to the transcript.
@@ -113,7 +114,19 @@ public:
     Status remove_term(const std::string& term);
     Status remove_series(const std::string& series_id);
     Status forget(const std::string& meeting_id);  // the meeting, its audio and its knowledge item
+    // The manual capture sources: one entry per application with active audio (its processes grouped under the
+    // topmost one of the same name), then all system output and the microphone.
     [[nodiscard]] json audio_sources();
+    // The sources plus "default": the one application with active audio while the microphone is in use, or "".
+    // Also "language": the remembered Record meeting language ("auto", "cs", "de" or "en").
+    [[nodiscard]] json manual_sources();
+    // Meeting Language Choice: remembers the language a manual capture is transcribed in ("auto" detects it).
+    Status set_language(const std::string& language);
+    // Meeting Progress In Its Thread: {id, stage, reason, done?, left_ms?, elapsed_ms?, error, can_transcribe_now,
+    // can_transcribe_again}. stage: asking | recording | waiting | transcribing | summarizing | done | failed.
+    Result<json> progress(const std::string& meeting_id);
+    // Meeting Language Choice: transcribes a meeting whose audio is kept again, in `language`.
+    Status transcribe_again(const std::string& meeting_id, const std::string& language);
 
     MeetingStore& store() { return *store_; }
 
@@ -131,6 +144,9 @@ private:
     long long now() const { return env_.clock->unix_millis(); }
     void detected(const AppMatch& app);
     void ended(const AppMatch& app);
+    // The calendar event a meeting starting now belongs to, and copying it onto the meeting (detected or manual).
+    std::optional<CalendarEvent> calendar_match();
+    static void link_calendar(MeetingRecord& m, const CalendarEvent& cal);
     void raise_consent(MeetingRecord& m);
     void after_consent(MeetingRecord& m);
     void raise_notice(MeetingRecord& m);
@@ -150,6 +166,18 @@ private:
     void publish(const std::string& event, const MeetingRecord& m);
     void notify();
     json meeting_json(const MeetingRecord& m);
+    json progress_json(const MeetingRecord& m);
+    // Transcription Progress Estimate: the measured speed (meeting ms per ms), updated after each pass.
+    double speed();
+    void measured(long long meeting_ms, long long wall_ms);
+
+    // The transcription request under way, for the share done.
+    struct Running {
+        std::string meeting_id;
+        long long started = 0;   // wall clock
+        long long audio_ms = 0;  // meeting time this request transcribes
+    };
+    Running running_;
 
     MeetingEnv env_;
     std::unique_ptr<MeetingStore> store_;

@@ -21,7 +21,22 @@ void register_meeting_rpc(RpcRegistry& rpc, std::function<meeting::MeetingServic
     rpc.add("meetings.sources", RpcExposure::ui, [svc](const json&) -> Result<json> {
         auto s = svc();
         if (!s) return s.error();
-        return json{{"sources", (*s)->audio_sources()}};
+        return (*s)->manual_sources();
+    });
+    rpc.add("meetings.progress", RpcExposure::ui, [svc](const json& p) -> Result<json> {
+        auto s = svc();
+        if (!s) return s.error();
+        return (*s)->progress(jstr(p, "id"));
+    });
+    rpc.add("meetings.set_language", RpcExposure::ui, [svc, done](const json& p) -> Result<json> {
+        auto s = svc();
+        if (!s) return s.error();
+        return done((*s)->set_language(jstr(p, "language")));
+    });
+    rpc.add("meetings.transcribe_again", RpcExposure::ui, [svc, done](const json& p) -> Result<json> {
+        auto s = svc();
+        if (!s) return s.error();
+        return done((*s)->transcribe_again(jstr(p, "id"), jstr(p, "language")));
     });
     rpc.add("meetings.stop", RpcExposure::ui, [svc, done](const json&) -> Result<json> {
         auto s = svc();
@@ -31,7 +46,7 @@ void register_meeting_rpc(RpcRegistry& rpc, std::function<meeting::MeetingServic
     rpc.add("meetings.capture", RpcExposure::ui, [svc, done](const json& p) -> Result<json> {
         auto s = svc();
         if (!s) return s.error();
-        return done((*s)->capture_manual(jstr(p, "source")));
+        return (*s)->capture_manual(jstr(p, "source"));
     });
     rpc.add("meetings.transcribe_now", RpcExposure::ui, [svc, done](const json& p) -> Result<json> {
         auto s = svc();

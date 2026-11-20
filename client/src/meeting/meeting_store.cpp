@@ -8,7 +8,7 @@ namespace {
 
 constexpr const char* kColumns =
     "id,thread_id,state,source,app,title,event_id,series_id,event_link,attendees,detected_at,started_at,ended_at,pid,"
-    "audio_dir,audio_deleted,user_started,language,error,action_id,run_id,segments,speakers,vocabulary";
+    "audio_dir,audio_deleted,user_started,language,error,action_id,run_id,segments,speakers,vocabulary,live_from_ms";
 
 MeetingRecord read(const Statement& s) {
     MeetingRecord m;
@@ -42,6 +42,7 @@ MeetingRecord read(const Statement& s) {
     if (const auto v = parse_json(s.col_text(23)); v && v->is_array())
         for (const auto& x : *v)
             if (x.is_string()) m.vocabulary.push_back(x.get<std::string>());
+    m.live_from_ms = s.col_int(24);
     return m;
 }
 
@@ -56,13 +57,28 @@ Status MeetingStore::put(const MeetingRecord& m) {
     json vocabulary = json::array();
     for (const auto& t : m.vocabulary) vocabulary.push_back(t);
     auto s = db_.prepare(std::string("INSERT OR REPLACE INTO meetings(") + kColumns +
-                         ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)");
+                         ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)");
     s.bind(1, m.id).bind(2, m.thread_id).bind(3, m.state).bind(4, m.source).bind(5, m.app).bind(6, m.title);
     s.bind(7, m.event_id).bind(8, m.series_id).bind(9, m.event_link).bind(10, attendees.dump()).bind(11, m.detected_at);
     s.bind(12, m.started_at).bind(13, m.ended_at).bind(14, static_cast<long long>(m.pid)).bind(15, m.audio_dir);
     s.bind(16, m.audio_deleted ? 1 : 0).bind(17, m.user_started ? 1 : 0).bind(18, m.language).bind(19, m.error);
     s.bind(20, m.action_id).bind(21, m.run_id).bind(22, m.segments.dump()).bind(23, speakers.dump());
-    s.bind(24, vocabulary.dump());
+    s.bind(24, vocabulary.dump()).bind(25, m.live_from_ms);
+    return s.run();
+}
+
+std::optional<std::string> MeetingStore::state_value(const std::string& key) {
+    const std::lock_guard lock(db_.mutex());
+    auto s = db_.prepare("SELECT value FROM meeting_state WHERE key=?1");
+    s.bind(1, key);
+    if (!s.step()) return std::nullopt;
+    return s.col_text(0);
+}
+
+Status MeetingStore::set_state_value(const std::string& key, const std::string& value) {
+    const std::lock_guard lock(db_.mutex());
+    auto s = db_.prepare("INSERT OR REPLACE INTO meeting_state(key, value) VALUES(?1,?2)");
+    s.bind(1, key).bind(2, value);
     return s.run();
 }
 

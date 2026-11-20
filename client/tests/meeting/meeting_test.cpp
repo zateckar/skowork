@@ -75,7 +75,7 @@ TEST(MeetingCore, PolicyDefaultsAndMalformedValues) {
     auto c = parse_config(lookup(json::object()));
     ASSERT_TRUE(c);
     EXPECT_FALSE(c->enabled);
-    EXPECT_FALSE(c->allow_manual);
+    EXPECT_TRUE(c->allow_manual);
     EXPECT_FALSE(c->allow_series_auto);
     EXPECT_FALSE(c->live_transcript);
     EXPECT_FALSE(c->keep_audio);
@@ -326,6 +326,89 @@ TEST(MeetingEcho, EvidenceFollowsTheLoudspeakerLeak) {
 }
 
 // 3.1: building the meeting vocabulary.
+// improve-transcript-language 4.1: loudspeaker echo recognised badly is still echo when its audio follows the remote
+// track; a read-back two seconds later is not. Invented sentences in the pattern seen on 2026-11-20.
+TEST(MeetingEcho, GarbledCopyIsEchoAReadBackIsNot) {
+    const std::string remote = "Jo, jo, koukali se na to, bylo to docela náročné. Pak jsme měli schůzku s kolegy, myslím, že pan Novák a pan Kratochvíl.";
+    const std::string garbled = "No, ukali se na to, bylo to docela náročný. Far. Pak sme měli skůsku s kolegy asi, myslím, že pan Nosák a panáček.";
+    EXPECT_GE(text_similarity(garbled, remote), 0.6);
+    EXPECT_LT(text_similarity("Tak to pošlu zítra ráno celému týmu.", remote), 0.6);
+    std::vector<Segment> segs = {seg("remote", 55'000, 66'000, remote), seg("local", 55'200, 66'200, garbled, kCorrelated)};
+    EXPECT_EQ(mark_echo(segs), 1u);
+    EXPECT_TRUE(segs[1].echo);
+    // The same words said by the user two seconds after the participant finished: a read-back, kept.
+    std::vector<Segment> later = {seg("remote", 55'000, 66'000, remote), seg("local", 68'000, 78'000, garbled, kCorrelated)};
+    EXPECT_EQ(mark_echo(later), 0u);
+    // Without audio evidence the words alone never make echo.
+    std::vector<Segment> headset = {seg("remote", 55'000, 66'000, remote), seg("local", 55'200, 66'200, garbled, kUnrelated)};
+    EXPECT_EQ(mark_echo(headset), 0u);
+}
+
+// improve-transcript-language 3.1: the language check (Transcript Keeps To The Meeting Language).
+TEST(MeetingLanguage, OtherScriptAndForeignFragments) {
+    EXPECT_TRUE(other_script("Может, это в подстача"));
+    EXPECT_FALSE(other_script("Příliš žluťoučký kůň úpěl ďábelské ódy."));
+    EXPECT_FALSE(other_script("Größe, Übermaß und Ärger 42"));
+    // Short fragments recognised as English words in a Czech meeting.
+    EXPECT_TRUE(foreign_fragment("You done are.", "cs"));
+    EXPECT_TRUE(foreign_fragment("So we gonna hold.", "cs"));
+    EXPECT_TRUE(foreign_fragment("Yeah.", "cs"));
+    EXPECT_TRUE(foreign_fragment("Thank you.", "cs"));
+    EXPECT_FALSE(foreign_fragment("I'm snipe.", "cs")) << "\"i\" is a Czech word too: never decided against the meeting";
+    // Czech fragments, names and shared words pass.
+    EXPECT_FALSE(foreign_fragment("Jasně, můžeme na to.", "cs"));
+    EXPECT_FALSE(foreign_fragment("Co.", "cs"));
+    EXPECT_FALSE(foreign_fragment("OK.", "cs"));
+    EXPECT_FALSE(foreign_fragment("Intune.", "cs"));
+    // English Contribution In A Czech Meeting: a full sentence stays.
+    EXPECT_FALSE(foreign_fragment("I think we should move the release to the next sprint then.", "cs"));
+    EXPECT_FALSE(off_language("I think we should move the release to the next sprint then.", "cs"));
+    // In an English meeting English words are the meeting's.
+    EXPECT_FALSE(foreign_fragment("You done are.", "en"));
+    EXPECT_TRUE(foreign_fragment("Ja, genau.", "en"));
+    EXPECT_TRUE(off_language("Может, это", "en"));
+    // Whisper's silence phrases.
+    EXPECT_TRUE(whisper_hallucination("Titulky vytvořil JohnyX"));
+    EXPECT_TRUE(whisper_hallucination("Thanks for watching!"));
+    EXPECT_FALSE(whisper_hallucination("Děkuji, to je všechno."));
+}
+
+// Unclear Speech: shown to the user as "(unclear)", left out of the outputs message and the knowledge turns.
+TEST(MeetingLanguage, UnclearSegmentsStayOutOfOutputsAndKnowledge) {
+    Segment u = seg("remote", 1000, 2000, "(unclear)");
+    u.unclear = true;
+    const std::vector<Segment> segs = {seg("remote", 0, 900, "Dobrý den."), u, seg("remote", 2100, 3000, "Začneme.")};
+    const std::map<std::string, std::string> names = {{"s1", "Eva"}};
+    EXPECT_NE(transcript_markdown(segs, names, true).find("[00:01] Eva: (unclear)"), std::string::npos);
+    EXPECT_EQ(transcript_markdown(segs, names).find("unclear"), std::string::npos);
+    EXPECT_EQ(knowledge_turns(segs, names).size(), 2u);
+    // It survives storage.
+    auto back = parse_segments({{"segments", segments_json(segs)}});
+    ASSERT_TRUE(back);
+    EXPECT_TRUE((*back)[1].unclear);
+    EXPECT_FALSE((*back)[0].unclear);
+}
+
+// improve-transcript-language 2.1: decoding units and splitting their words back onto the spans.
+TEST(MeetingLanguage, DecodingUnitsJoinShortPausesAndSplitByTime) {
+    // Gaps of 0.6 s and 0.9 s join; 1.5 s does not; a unit stays within 20 s.
+    const std::vector<std::pair<long long, long long>> spans = {{0, 400}, {1000, 6000}, {6900, 9000}, {10500, 12000}, {12100, 31000}};
+    const auto units = join_spans(spans);
+    ASSERT_EQ(units.size(), 3u);
+    EXPECT_EQ(units[0], (std::pair<size_t, size_t>{0, 2}));
+    EXPECT_EQ(units[1], (std::pair<size_t, size_t>{3, 3}));  // the next span would make the unit 20.5 s long
+    EXPECT_EQ(units[2], (std::pair<size_t, size_t>{4, 4}));
+    EXPECT_EQ(join_spans({{0, 25000}}).size(), 1u);          // a long span stays on its own
+    EXPECT_EQ(join_spans({{0, 500}, {3000, 3500}}).size(), 2u);  // an isolated reply is decoded alone
+    // Tokens of a unit with spans at 0-0.4 s, 1.0-6.0 s and 6.9-9.0 s (times from the unit's start).
+    const std::string m = "\xE2\x96\x81";
+    const std::vector<std::pair<std::string, float>> tokens = {
+        {m + "Ano", 0.1f}, {".", 0.3f}, {m + "Tak", 1.2f}, {m + "za", 1.6f}, {"čne", 1.7f}, {"me", 1.8f}, {".", 2.0f},
+        {m + "Dob", 7.0f}, {"ře", 7.2f}, {".", 7.4f}};
+    const auto parts = split_by_time(tokens, {{0, 400}, {1000, 6000}, {6900, 9000}});
+    EXPECT_EQ(parts, (std::vector<std::string>{"Ano.", "Tak začneme.", "Dobře."}));
+}
+
 TEST(MeetingVocabulary, AttendeesOrganisationsAndUserTerms) {
     EXPECT_EQ(organisation_of("jan.novak@skoda-auto.cz"), "Skoda Auto");
     EXPECT_EQ(organisation_of("eva@mail.contoso.com"), "Contoso");
@@ -1170,6 +1253,7 @@ struct Meetings {
             const std::lock_guard lock(mx);
             if (s.kind == CaptureSource::Kind::process && fail_process) return make_error("audio", "process loopback is not available");
             sources.push_back(s);
+            writers.push_back(w);
             // The capture as it would arrive: the remote track has a loud and a quiet speaker, the local track the user.
             const bool local = s.kind == CaptureSource::Kind::mic && sources.size() > 1;
             const auto pcm = local ? concat({silence(2.2), tone(0.5, 3000)}) : concat({tone(1.0, 8000), silence(1.0), tone(1.0, 2000), silence(0.5)});
@@ -1395,6 +1479,13 @@ struct Meetings {
     std::string language = "en";
     bool fail_process = false;
     std::vector<CaptureSource> sources;
+    std::vector<std::shared_ptr<TrackWriter>> writers;  // the open tracks, for time passing in a capture
+    // Time passes in a running capture: every open track gets `seconds` of silence, which flushes what it held.
+    void record_silence(double seconds) {
+        const std::lock_guard lock(mx);
+        const auto pcm = silence(seconds);
+        for (auto& w : writers) EXPECT_TRUE(w->append(pcm.data(), pcm.size()));
+    }
     std::atomic<int> recorders_stopped{0}, indicators_live{0};
     std::atomic<bool> mic_trouble{false};
     std::vector<std::string> warnings;
@@ -2050,9 +2141,9 @@ TEST(MeetingService, InterruptedCaptureFinishesExpiresOrIsDeleted) {
     }
 }
 
-// Manual Audio Source Capture.
+// Manual Audio Source Capture: on by default; Manual Capture Turned Off By The Organisation.
 TEST(MeetingService, ManualCaptureOfAnApplicationWhenAllowed) {
-    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}, {"meeting_capture.allow_manual", false}});
     f.make();
     {
         const std::lock_guard lock(f.mx);
@@ -2062,25 +2153,374 @@ TEST(MeetingService, ManualCaptureOfAnApplicationWhenAllowed) {
     EXPECT_FALSE(f.svc->status().contains("sources"));
     {
         const std::lock_guard lock(f.mx);
-        f.policy["meeting_capture.allow_manual"] = true;
+        f.policy.erase("meeting_capture.allow_manual");  // the default allows it
     }
     f.svc->policy_changed();
     const json sources = f.svc->status()["sources"];
     ASSERT_EQ(sources.size(), 3u);
-    EXPECT_EQ(jstr(sources[0], "source"), "app:201");
+    EXPECT_EQ(jstr(sources[0], "source"), "app:200") << "the browser's child process is listed as the browser";
     EXPECT_EQ(jstr(sources[0], "name"), "chrome.exe");
-    // Capture a browser's app: starting it is the consent; the indicator shows.
-    ASSERT_TRUE(f.svc->capture_manual("app:200"));
+    // Teams In The Browser: starting it is the consent; the indicator shows; Manual Capture Tracks: the browser's
+    // process tree is the remote track and the microphone the local track.
+    const auto started = f.svc->capture_manual("app:200");
+    ASSERT_TRUE(started);
+    EXPECT_EQ(jstr(*started, "meeting_id"), f.only()->id);
+    EXPECT_EQ(jstr(*started, "thread_id"), f.only()->thread_id);
+    EXPECT_FALSE(jstr(*started, "thread_id").empty());
     EXPECT_EQ(f.asked_count(), 0u);
-    ASSERT_EQ(f.source_count(), 1u);
+    ASSERT_EQ(f.source_count(), 2u);
     EXPECT_EQ(f.sources[0].kind, CaptureSource::Kind::process);
     EXPECT_EQ(f.sources[0].pid, 200u);
+    EXPECT_EQ(f.sources[1].kind, CaptureSource::Kind::mic);
     EXPECT_EQ(f.indicators_live.load(), 1);
+    // No Calendar Event: titled after the source.
     EXPECT_EQ(f.only()->title, "Capture of Chrome");
+    EXPECT_TRUE(f.only()->event_id.empty());
+    const auto dir = path_from_utf8(f.only()->audio_dir);
+    EXPECT_TRUE(std::filesystem::exists(dir / L"remote.skau"));
+    EXPECT_TRUE(std::filesystem::exists(dir / L"local.skau"));
     EXPECT_FALSE(f.svc->capture_manual("mic")) << "one capture at a time";
     ASSERT_TRUE(f.svc->stop_capture());
     EXPECT_EQ(f.only()->state, "pending");
     EXPECT_FALSE(f.svc->capture_manual("app:99999"));
+}
+
+// Record Meeting From A New Thread: the default source is the one application with audio while the microphone is in use.
+TEST(MeetingService, ManualSourcesDefaultToTheOneApplicationInACall) {
+    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+    f.make();
+    const auto set = [&](std::vector<unsigned> pids, bool mic) {
+        const std::lock_guard lock(f.mx);
+        f.observation.session_pids = std::move(pids);
+        f.observation.mic_in_use = mic;
+    };
+    // Teams Call In The Browser: two of Chrome's processes play audio; it is one application, and the default.
+    {
+        const std::lock_guard lock(f.mx);
+        f.observation.processes.push_back({202, 200, "chrome.exe"});
+    }
+    set({201, 202}, true);
+    json s = f.svc->manual_sources();
+    ASSERT_EQ(s["sources"].size(), 3u);
+    EXPECT_EQ(jstr(s, "default"), "app:200");
+    // Several Applications Play Audio: no default, the user picks.
+    set({201, 300}, true);
+    s = f.svc->manual_sources();
+    EXPECT_EQ(s["sources"].size(), 4u);
+    EXPECT_EQ(jstr(s, "default"), "");
+    // Audio without the microphone is not a call.
+    set({201}, false);
+    EXPECT_EQ(jstr(f.svc->manual_sources(), "default"), "");
+    // Nothing plays: only system output and the microphone, no default.
+    set({}, true);
+    s = f.svc->manual_sources();
+    EXPECT_EQ(s["sources"].size(), 2u);
+    EXPECT_EQ(jstr(s, "default"), "");
+    // Manual capture not allowed: nothing.
+    {
+        const std::lock_guard lock(f.mx);
+        f.policy["meeting_capture.allow_manual"] = false;
+    }
+    f.svc->policy_changed();
+    set({201}, true);
+    s = f.svc->manual_sources();
+    EXPECT_TRUE(s["sources"].empty());
+    EXPECT_EQ(jstr(s, "default"), "");
+}
+
+// Manual Capture Tracks: all system output also records the microphone; Microphone Only records one track.
+TEST(MeetingService, ManualCaptureTracksPerSource) {
+    {
+        Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+        f.make();
+        ASSERT_TRUE(f.svc->capture_manual("system"));
+        ASSERT_EQ(f.source_count(), 2u);
+        EXPECT_EQ(f.sources[0].kind, CaptureSource::Kind::system);
+        EXPECT_EQ(f.sources[1].kind, CaptureSource::Kind::mic);
+    }
+    {
+        Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+        f.make();
+        ASSERT_TRUE(f.svc->capture_manual("mic"));
+        ASSERT_EQ(f.source_count(), 1u);
+        EXPECT_EQ(f.sources[0].kind, CaptureSource::Kind::mic);
+    }
+    {  // The microphone is recorded after the participant notice too.
+        Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", true}});
+        f.make();
+        ASSERT_TRUE(f.svc->capture_manual("system"));
+        EXPECT_EQ(f.source_count(), 0u);
+        f.svc->on_answer(f.last_asked().id, "I posted the notice");
+        ASSERT_EQ(f.source_count(), 2u);
+        EXPECT_EQ(f.sources[1].kind, CaptureSource::Kind::mic);
+    }
+}
+
+// Manual Capture Calendar Match: Scheduled Meeting In The Browser.
+TEST(MeetingService, ManualCaptureMatchesTheCalendar) {
+    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+    const long long now = f.env.clock.unix_millis();
+    f.calendar = {{"ev-supplier", "series-supplier", "Supplier sync", "https://teams.microsoft.com/l/meetup-join/1", "Eva",
+                   now + 3 * kMinMs, now + 63 * kMinMs, {"Eva Svobodová"}}};
+    f.make();
+    ASSERT_TRUE(f.svc->capture_manual("app:200"));
+    const auto m = f.only();
+    ASSERT_TRUE(m);
+    EXPECT_EQ(m->title, "Supplier sync");
+    EXPECT_EQ(m->event_id, "ev-supplier");
+    EXPECT_EQ(m->series_id, "series-supplier");
+    EXPECT_EQ(m->attendees, std::vector<std::string>{"Eva Svobodová"});
+    EXPECT_FALSE(m->vocabulary.empty());
+    EXPECT_EQ(jstr(f.origins[m->thread_id], "title"), "Supplier sync");
+}
+
+// Manual Capture Withdraws A Pending Offer: Detected Meeting Not Answered.
+TEST(MeetingService, ManualCaptureWithdrawsAPendingOffer) {
+    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+    f.make();
+    f.teams_call();
+    f.svc->tick();
+    const auto q = f.last_asked();
+    ASSERT_FALSE(q.id.empty());
+    const std::string offered = f.only()->id;
+    ASSERT_TRUE(f.svc->capture_manual("system"));
+    EXPECT_NE(std::find(f.withdrawn.begin(), f.withdrawn.end(), q.id), f.withdrawn.end());
+    const auto old = f.svc->store().get(offered);
+    ASSERT_TRUE(old);
+    EXPECT_EQ(old->state, "declined");
+    EXPECT_NE(std::find(f.deleted.begin(), f.deleted.end(), old->thread_id), f.deleted.end());
+    EXPECT_EQ(f.indicators_live.load(), 1);
+    // Answering the withdrawn Question later starts nothing.
+    f.svc->on_answer(q.id, "Start");
+    EXPECT_EQ(f.source_count(), 2u);
+    // While the manual capture runs, the still-running call is not offered again.
+    f.svc->tick();
+    EXPECT_EQ(f.asked_count(), 1u);
+}
+
+// show-meeting-transcription-progress 2.1: Live Transcription Of A Long Meeting, Speakers Across Live Passes.
+TEST(MeetingService, LiveTranscriptionDecodesEachSecondOnce) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}, {"meeting_capture.live_transcript", true}});
+    f.make();
+    f.teams_call();
+    f.svc->tick();
+    f.svc->on_answer(f.last_asked().id, "Start");
+    ASSERT_EQ(f.only()->state, "capturing");
+    // The fixture's tracks: remote speech at 0-1 s and 2-3 s, the user at 2.2-2.7 s. With 2 more seconds the tracks
+    // have 4 s on disk: the first remote segment is complete and kept; the second ends within the last 2 seconds, so it
+    // and everything after its start are decoded again by the next pass.
+    f.record_silence(2);
+    f.svc->run_transcriptions();
+    ASSERT_EQ(f.transcribe_calls.size(), 1u);
+    EXPECT_EQ(jint(f.transcribe_calls[0], "from_ms"), 0);
+    EXPECT_FALSE(f.transcribe_calls[0].value("diarize", true)) << "live passes skip speaker separation";
+    auto m = f.only();
+    ASSERT_EQ(m->segments.size(), 1u) << m->segments.dump();
+    EXPECT_EQ(m->live_from_ms, 1980);  // where the second remote segment starts
+    // A minute later: decoded from there, the rest kept now.
+    f.advance(61 * kSec);
+    f.record_silence(5);
+    f.svc->run_transcriptions();
+    ASSERT_EQ(f.transcribe_calls.size(), 2u);
+    EXPECT_EQ(jint(f.transcribe_calls[1], "from_ms"), 1980);
+    m = f.only();
+    const size_t n = m->segments.size();
+    ASSERT_EQ(n, 3u) << m->segments.dump();
+    EXPECT_GE(m->live_from_ms, 3000);
+    // Another minute without speech: only the audio from there is decoded; the kept segments stay.
+    f.advance(61 * kSec);
+    f.svc->run_transcriptions();
+    ASSERT_EQ(f.transcribe_calls.size(), 3u);
+    EXPECT_EQ(jint(f.transcribe_calls[2], "from_ms"), m->live_from_ms);
+    EXPECT_EQ(f.only()->segments.size(), n);
+    const json texts = f.only()->segments;
+    // The end: only the rest is decoded, with one diarization over the whole meeting; the kept segments take their
+    // speakers from it (the test engine splits the remote track into a loud and a quiet speaker).
+    f.hang_up();
+    f.advance(31 * kSec);
+    f.svc->tick();
+    ASSERT_EQ(f.only()->state, "pending");
+    f.svc->run_transcriptions();
+    ASSERT_EQ(f.transcribe_calls.size(), 4u);
+    EXPECT_GE(jint(f.transcribe_calls[3], "from_ms"), m->live_from_ms);
+    EXPECT_TRUE(f.transcribe_calls[3].value("diarize", true));
+    m = f.only();
+    EXPECT_EQ(m->live_from_ms, 0);
+    std::set<std::string> remote;
+    std::vector<std::string> said;
+    for (const auto& s : m->segments) {
+        if (jstr(s, "track") == "remote") remote.insert(jstr(s, "speaker"));
+        said.push_back(jstr(s, "text"));
+    }
+    EXPECT_EQ(remote, (std::set<std::string>{"s1", "s2"}));
+    std::vector<std::string> before;
+    for (const auto& s : texts) before.push_back(jstr(s, "text"));
+    EXPECT_EQ(said, before) << "each segment decoded once, in its live pass";
+}
+
+// show-meeting-transcription-progress 3.1: Meeting Progress In Its Thread, Transcription Progress Estimate.
+TEST(MeetingService, ProgressFollowsTheStages) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+    f.make();
+    f.teams_call();
+    f.svc->tick();
+    const std::string id = f.only()->id;
+    const auto stage = [&](const char* key = "stage") {
+        auto p = f.svc->progress(id);
+        return p ? jstr(*p, key) : std::string("?");
+    };
+    EXPECT_EQ(stage(), "asking");
+    f.svc->on_answer(f.last_asked().id, "Start");
+    f.advance(5 * kSec);
+    EXPECT_EQ(stage(), "recording");
+    EXPECT_EQ(jint(*f.svc->progress(id), "elapsed_ms"), 5000);
+    f.hang_up();
+    f.advance(31 * kSec);
+    f.svc->tick();
+    // Waiting On Battery Saver, then queued.
+    f.deferred = true;
+    EXPECT_EQ(stage(), "waiting");
+    EXPECT_EQ(stage("reason"), "deferred");
+    EXPECT_TRUE(jbool(*f.svc->progress(id), "can_transcribe_now"));
+    f.deferred = false;
+    EXPECT_EQ(stage("reason"), "queued");
+    // Meeting Just Ended: the share grows during the request and stays at most 95%; First Meeting On A Computer: no
+    // time left until a speed is measured.
+    std::vector<json> seen;
+    f.transcribe_override = [&](const json& q) -> Result<json> {
+        f.advance(2 * kSec);
+        seen.push_back(*f.svc->progress(id));
+        f.advance(3600 * kSec);
+        seen.push_back(*f.svc->progress(id));
+        return stt_request("stt.transcribe", q);
+    };
+    f.env.model.push_text("Summary.");
+    f.svc->run_transcriptions();
+    ASSERT_EQ(seen.size(), 2u);
+    EXPECT_EQ(jstr(seen[0], "stage"), "transcribing");
+    EXPECT_GT(seen[0]["done"].get<double>(), 0.0);
+    EXPECT_LT(seen[0]["done"].get<double>(), 0.95);
+    EXPECT_FALSE(seen[0].contains("left_ms"));
+    EXPECT_DOUBLE_EQ(seen[1]["done"].get<double>(), 0.95);
+    // Summary Being Written, then done.
+    EXPECT_EQ(stage(), "summarizing");
+    ASSERT_TRUE(f.settle(id));
+    EXPECT_EQ(stage(), "done");
+
+    // A second meeting on the same computer: the speed is known, so the time left is shown.
+    f.transcribe_override = [&](const json& q) -> Result<json> {
+        f.advance(1 * kSec);
+        seen.push_back(*f.svc->progress(f.svc->store().list()[0].id));
+        return stt_request("stt.transcribe", q);
+    };
+    f.teams_call();
+    f.svc->tick();
+    f.svc->on_answer(f.last_asked().id, "Start");
+    f.advance(40 * kSec);
+    f.hang_up();
+    f.advance(31 * kSec);
+    f.svc->tick();
+    f.env.model.push_text("Summary two.");
+    f.svc->run_transcriptions();
+    ASSERT_EQ(seen.size(), 3u);
+    EXPECT_EQ(jstr(seen[2], "stage"), "transcribing");
+    EXPECT_TRUE(seen[2].contains("left_ms")) << seen[2].dump();
+
+    // Transcription Failed: the reason is shown.
+    f.transcribe_override = [](const json&) -> Result<json> { return make_error("model_missing", "x"); };
+    f.teams_call();
+    f.svc->tick();
+    f.svc->on_answer(f.last_asked().id, "Start");
+    f.hang_up();
+    f.advance(31 * kSec);
+    f.svc->tick();
+    f.svc->run_transcriptions();
+    const auto failed = f.svc->progress(f.svc->store().list()[0].id);
+    ASSERT_TRUE(failed);
+    EXPECT_EQ(jstr(*failed, "stage"), "failed");
+    EXPECT_EQ(jstr(*failed, "error"), "The speech-to-text models are not installed.");
+}
+
+// improve-transcript-language 5.1: Meeting Language Choice and Transcribe Again.
+TEST(MeetingService, LanguageChoiceAndTranscribeAgain) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    {  // Language Chosen Before Recording: used without detection, remembered for the list.
+        Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+        f.make();
+        EXPECT_EQ(jstr(f.svc->manual_sources(), "language"), "auto");
+        EXPECT_FALSE(f.svc->set_language("fr"));
+        ASSERT_TRUE(f.svc->set_language("cs"));
+        EXPECT_EQ(jstr(f.svc->manual_sources(), "language"), "cs");
+        ASSERT_TRUE(f.svc->capture_manual("mic"));
+        EXPECT_EQ(f.only()->language, "cs");
+        ASSERT_TRUE(f.svc->stop_capture());
+        f.svc->run_transcriptions();
+        ASSERT_FALSE(f.transcribe_calls.empty());
+        EXPECT_EQ(jstr(f.transcribe_calls.back(), "language"), "cs");
+    }
+    {  // Transcribe Again while the audio is kept: the transcript is replaced, in the new language.
+        Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}, {"meeting_capture.keep_audio", true}});
+        f.make();
+        f.env.model.push_text("Summary.");
+        const std::string id = f.capture_one();
+        f.svc->run_transcriptions();
+        ASSERT_TRUE(f.settle(id));
+        EXPECT_TRUE(jbool(*f.svc->progress(id), "can_transcribe_again"));
+        EXPECT_FALSE(f.svc->transcribe_again(id, "fr"));
+        ASSERT_TRUE(f.svc->transcribe_again(id, "de"));
+        auto m = f.svc->store().get(id);
+        EXPECT_EQ(m->state, "pending");
+        EXPECT_TRUE(m->segments.empty());
+        f.env.model.push_text("Zusammenfassung.");
+        f.svc->run_transcriptions();
+        EXPECT_EQ(jstr(f.transcribe_calls.back(), "language"), "de");
+        ASSERT_TRUE(f.settle(id));
+        EXPECT_EQ(f.svc->store().get(id)->language, "de");
+        EXPECT_FALSE(f.svc->store().get(id)->segments.empty());
+    }
+    {  // Audio No Longer Kept: no transcribing again.
+        Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+        f.make();
+        f.env.model.push_text("Summary.");
+        const std::string id = f.capture_one();
+        f.svc->run_transcriptions();
+        ASSERT_TRUE(f.settle(id));
+        EXPECT_FALSE(jbool(*f.svc->progress(id), "can_transcribe_again"));
+        EXPECT_FALSE(f.svc->transcribe_again(id, "cs"));
+    }
+}
+
+// Manual Capture Tracks after a restart: Continue reopens the microphone beside the application.
+TEST(MeetingService, ManualCaptureContinuesWithBothTracks) {
+    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+    {
+        const std::lock_guard lock(f.mx);
+        f.observation.session_pids = {201};
+        f.observation.mic_in_use = true;
+        f.titles[200] = {"Meet - Supplier sync"};
+    }
+    f.make();
+    ASSERT_TRUE(f.svc->capture_manual("app:200"));
+    auto m = f.only();
+    ASSERT_EQ(m->state, "capturing");
+    f.svc->stop();
+    m->state = "capturing";
+    ASSERT_TRUE(f.svc->store().put(*m));
+    f.svc.reset();
+    f.advance(2 * kMinMs);
+    f.make();
+    EXPECT_EQ(f.only()->state, "interrupted");
+    f.svc->tick();
+    const auto q = f.last_asked();
+    ASSERT_EQ(q.prompt.rfind("Continue capture?", 0), 0u) << q.prompt;
+    f.svc->on_answer(q.id, "Continue");
+    m = f.only();
+    EXPECT_EQ(m->state, "capturing");
+    const auto dir = path_from_utf8(m->audio_dir);
+    EXPECT_TRUE(std::filesystem::exists(dir / L"remote.2.skau"));
+    EXPECT_TRUE(std::filesystem::exists(dir / L"local.2.skau"));
 }
 
 // 5.1: a long transcript is first summarised in parts (the map step).

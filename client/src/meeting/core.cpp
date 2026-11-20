@@ -104,7 +104,7 @@ Result<Config> parse_config(const PolicyLookup& policy) {
     std::optional<Error> err;
     const auto flag = [&](const char* key, bool fallback) { return read_bool(policy, key, fallback, err).value_or(fallback); };
     c.enabled = flag("enabled", false);
-    c.allow_manual = flag("allow_manual", false);
+    c.allow_manual = flag("allow_manual", true);
     c.allow_series_auto = flag("allow_series_auto", false);
     c.live_transcript = flag("live_transcript", false);
     c.keep_audio = flag("keep_audio", false);
@@ -365,6 +365,7 @@ Result<std::vector<Segment>> parse_segments(const json& j) {
         if (trim(g.text).empty()) continue;
         if (const json* e = jobj(s, "evidence"); e && e->is_object()) g.evidence = EchoEvidence{jbool(*e, "correlated"), jbool(*e, "quiet")};
         g.echo = g.track == "local" && jbool(s, "echo");
+        g.unclear = jbool(s, "unclear");
         out.push_back(std::move(g));
     }
     std::stable_sort(out.begin(), out.end(), [](const Segment& a, const Segment& b) { return a.start_ms < b.start_ms; });
@@ -377,6 +378,7 @@ json segments_json(const std::vector<Segment>& segments) {
         json j = {{"track", s.track}, {"start_ms", s.start_ms}, {"end_ms", s.end_ms}, {"speaker", s.speaker}, {"text", s.text}};
         if (s.evidence) j["evidence"] = {{"correlated", s.evidence->correlated}, {"quiet", s.evidence->quiet}};
         if (s.echo) j["echo"] = true;
+        if (s.unclear) j["unclear"] = true;
         a.push_back(std::move(j));
     }
     return a;
@@ -400,12 +402,14 @@ std::map<std::string, std::string> name_speakers(const std::vector<Segment>& seg
     return out;
 }
 
-std::string transcript_markdown(const std::vector<Segment>& segments, const std::map<std::string, std::string>& speakers) {
+std::string transcript_markdown(const std::vector<Segment>& segments, const std::map<std::string, std::string>& speakers,
+                                bool with_unclear) {
     std::string out;
     for (const auto& s : segments) {
-        if (s.echo) continue;
+        if (s.echo || (s.unclear && !with_unclear)) continue;
         const auto it = speakers.find(s.speaker);
-        out += "[" + mmss(s.start_ms) + "] " + (it != speakers.end() ? it->second : s.speaker) + ": " + trim(s.text) + "\n";
+        out += "[" + mmss(s.start_ms) + "] " + (it != speakers.end() ? it->second : s.speaker) + ": " +
+               (s.unclear ? std::string("(unclear)") : trim(s.text)) + "\n";
     }
     return out;
 }
@@ -413,7 +417,7 @@ std::string transcript_markdown(const std::vector<Segment>& segments, const std:
 json knowledge_turns(const std::vector<Segment>& segments, const std::map<std::string, std::string>& speakers) {
     json a = json::array();
     for (const auto& s : segments) {
-        if (s.echo) continue;
+        if (s.echo || s.unclear) continue;
         const auto it = speakers.find(s.speaker);
         a.push_back({{"speaker", it != speakers.end() ? it->second : s.speaker}, {"start_ms", s.start_ms}, {"text", s.text}});
     }
@@ -640,6 +644,13 @@ size_t mark_echo(std::vector<Segment>& segments) {
         }
         // Tracks are cut at different pauses: the echo of one sentence can straddle two remote segments.
         if (!match && mine.size() >= 8) match = shared(mine, joined) >= 0.7;
+        // Loudspeaker echo is recognised badly: a garbled copy shares few whole words but most of its letters
+        // (improve-transcript-language D3).
+        if (!match && mine.size() >= 4) {
+            std::string theirs;
+            for (const auto& w : joined) theirs += w + " ";
+            match = text_similarity(s.text, theirs) >= 0.6;
+        }
         if (match) s.echo = true, ++marked;
     }
     return marked;
@@ -649,6 +660,208 @@ std::vector<Segment> heard(const std::vector<Segment>& segments) {
     std::vector<Segment> out;
     for (const auto& s : segments)
         if (!s.echo) out.push_back(s);
+    return out;
+}
+
+namespace {
+
+// The base letter of a Czech or German letter with a diacritic (lower case).
+char32_t fold(char32_t c) {
+    switch (c) {
+    case 0xe1: case 0xe4: return 'a';
+    case 0x10d: return 'c';
+    case 0x10f: return 'd';
+    case 0xe9: case 0x11b: return 'e';
+    case 0xed: return 'i';
+    case 0x148: return 'n';
+    case 0xf3: case 0xf6: return 'o';
+    case 0x159: return 'r';
+    case 0x161: case 0xdf: return 's';
+    case 0x165: return 't';
+    case 0xfa: case 0x16f: case 0xfc: return 'u';
+    case 0xfd: return 'y';
+    case 0x17e: return 'z';
+    default: return c;
+    }
+}
+
+// Words of the text, lower case without diacritics, joined by single spaces.
+std::u32string plain(std::string_view text) {
+    std::u32string out;
+    bool space = false;
+    for (const char32_t c : decode_utf8(text)) {
+        if (is_word_char(c)) {
+            if (space && !out.empty()) out.push_back(' ');
+            out.push_back(fold(lower(c)));
+            space = false;
+        } else {
+            space = true;
+        }
+    }
+    return out;
+}
+
+size_t edit_distance(std::u32string_view a, std::u32string_view b) {
+    std::vector<size_t> row(b.size() + 1);
+    for (size_t j = 0; j <= b.size(); ++j) row[j] = j;
+    for (size_t i = 1; i <= a.size(); ++i) {
+        size_t diag = row[0];
+        row[0] = i;
+        for (size_t j = 1; j <= b.size(); ++j) {
+            const size_t up = row[j];
+            row[j] = std::min({row[j] + 1, row[j - 1] + 1, diag + (a[i - 1] == b[j - 1] ? 0 : 1)});
+            diag = up;
+        }
+    }
+    return row[b.size()];
+}
+
+}  // namespace
+
+double text_similarity(std::string_view a, std::string_view b) {
+    const std::u32string x = plain(a), y = plain(b);
+    if (x.empty() || y.empty()) return 0;
+    const auto ratio = [&](std::u32string_view w) {
+        return 1.0 - static_cast<double>(edit_distance(x, w)) / static_cast<double>(std::max(x.size(), w.size()));
+    };
+    if (y.size() <= x.size() + x.size() / 4) return std::max(0.0, ratio(y));
+    // b holds more speech: the best window of about a's length that starts at a word.
+    double best = 0;
+    const size_t len = std::min(y.size(), x.size() + x.size() / 8);
+    for (size_t at = 0; at + len / 2 < y.size(); ++at) {
+        if (at > 0 && y[at - 1] != ' ') continue;
+        best = std::max(best, ratio(std::u32string_view(y).substr(at, len)));
+    }
+    return best;
+}
+
+// ---- the meeting's language ------------------------------------------------------------------------------------------
+
+namespace {
+
+// Frequent function words per supported language: written for this check (improve-transcript-language D2), not taken
+// from a lexicon. A word both languages use belongs to each list it is common in; words that are common in all three
+// ("ok", "no", "super") are in none, so they never decide.
+const std::map<std::string, std::set<std::string>>& function_words() {
+    static const std::map<std::string, std::set<std::string>> lists = {
+        {"cs", {"a", "aby", "ale", "ani", "ano", "asi", "až", "bude", "budeme", "by", "byl", "byla", "bylo", "být", "co", "což",
+                "dobře", "do", "ho", "i", "já", "jak", "jako", "je", "jeho", "jen", "ještě", "jo", "jsem", "jsme", "jsou", "jste",
+                "k", "kde", "kdy", "když", "která", "které", "který", "mi", "my", "mám", "máme", "má", "mě", "mít", "na", "nad",
+                "ne", "nebo", "něco", "nějak", "není", "o", "od", "on", "ona", "oni", "po", "pod", "pak", "pro", "proč", "protože",
+                "před", "přes", "při", "prostě", "s", "se", "si", "tak", "taky", "také", "tady", "tam", "ten", "tento",
+                "to", "toho", "tom", "tu", "ty", "u", "už", "v", "ve", "vám", "vás", "však", "vy", "z", "za", "ze", "že", "teď",
+                "takže", "jasně", "díky", "děkuji", "dobrý", "den", "vlastně", "tedy", "mezi", "jsi", "jim", "jí", "nám"}},
+        {"en", {"a", "about", "all", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "could", "did", "do",
+                "does", "done", "for", "from", "get", "go", "gonna", "got", "had", "has", "have", "he", "her", "here", "him",
+                "his", "how", "i", "i'm", "if", "in", "is", "it", "it's", "just", "know", "let", "like", "me", "my", "not", "now",
+                "of", "on", "one", "or", "our", "out", "really", "right", "say", "see", "she", "should", "so", "some", "thank",
+                "thanks", "that", "the", "their", "them", "then", "there", "they", "think", "this", "to", "too", "up", "us",
+                "very", "was", "we", "well", "were", "what", "when", "where", "which", "who", "will", "with", "would", "yeah",
+                "yes", "you", "your", "m", "s", "t", "ll", "re", "ve", "don"}},
+        {"de", {"aber", "alle", "also", "am", "an", "auch", "auf", "aus", "bei", "bin", "bis", "bitte", "da", "dann", "das",
+                "dass", "dem", "den", "der", "des", "die", "doch", "du", "ein", "eine", "einen", "einer", "es", "für", "gut",
+                "haben", "hat", "hier", "ich", "ihr", "ihre", "im", "in", "ist", "ja", "jetzt", "kann", "kein", "können", "man",
+                "mit", "nach", "nein", "nicht", "noch", "nur", "oder", "schon", "sehr", "sein", "sich", "sie", "sind", "so",
+                "über", "und", "uns", "vom", "von", "vor", "war", "was", "weil", "wenn", "wer", "wie", "wir", "wird", "zu",
+                "zum", "zur", "danke", "genau", "gibt", "habe", "mal", "mein", "meine", "werden", "wurde", "würde"}},
+    };
+    return lists;
+}
+
+}  // namespace
+
+bool other_script(std::string_view text) {
+    for (const char32_t c : decode_utf8(text))
+        if (is_letter(c) && c > 0x24f) return true;  // Greek, Cyrillic and beyond: outside the Latin script
+    // Letters outside Latin that is_letter does not list (CJK, Arabic, ...).
+    for (const char32_t c : decode_utf8(text))
+        if (c >= 0x590 && c < 0x2000) return true;
+    for (const char32_t c : decode_utf8(text))
+        if (c >= 0x3000) return true;
+    return false;
+}
+
+bool foreign_fragment(std::string_view text, const std::string& language) {
+    const auto words = echo_tokens(text);
+    if (words.empty() || words.size() > 5) return false;
+    const auto& lists = function_words();
+    const auto own = lists.find(to_lower(language));
+    if (own == lists.end()) return false;
+    size_t foreign = 0;
+    for (const auto& w : words) {
+        if (own->second.count(w)) return false;  // a word of the meeting's language
+        for (const auto& [lang, list] : lists)
+            if (lang != own->first && list.count(w)) {
+                ++foreign;
+                break;
+            }
+    }
+    return foreign * 2 >= words.size();
+}
+
+bool off_language(std::string_view text, const std::string& language) {
+    return other_script(text) || foreign_fragment(text, language);
+}
+
+bool whisper_hallucination(std::string_view text) {
+    static const char* const phrases[] = {"titulky vytvořil", "titulky:", "titulky pro", "untertitel", "untertitelung",
+                                          "thanks for watching", "thank you for watching", "subtitles by", "amara.org",
+                                          "www.", "©", "copyright"};
+    const std::string t = to_lower(std::string(text));
+    for (const char* p : phrases)
+        if (t.find(p) != std::string::npos) return true;
+    return false;
+}
+
+// ---- decoding units ------------------------------------------------------------------------------------------------
+
+std::vector<std::pair<size_t, size_t>> join_spans(const std::vector<std::pair<long long, long long>>& spans, long long gap_ms,
+                                                  long long max_ms) {
+    std::vector<std::pair<size_t, size_t>> out;
+    for (size_t i = 0; i < spans.size(); ++i) {
+        if (!out.empty()) {
+            auto& u = out.back();
+            const bool near = spans[i].first - spans[u.second].second < gap_ms;
+            const bool fits = spans[i].second - spans[u.first].first <= max_ms;
+            if (near && fits) {
+                u.second = i;
+                continue;
+            }
+        }
+        out.emplace_back(i, i);
+    }
+    return out;
+}
+
+std::vector<std::string> split_by_time(const std::vector<std::pair<std::string, float>>& tokens,
+                                       const std::vector<std::pair<long long, long long>>& spans) {
+    std::vector<std::string> out(spans.size());
+    if (spans.empty()) return out;
+    static const std::string kMark = "\xE2\x96\x81";  // U+2581, a word's first token
+    std::string word;
+    long long word_ms = 0;
+    const auto place = [&] {
+        const std::string w = trim(word);
+        word.clear();
+        if (w.empty()) return;
+        size_t at = 0;
+        for (size_t k = 0; k < spans.size(); ++k)
+            if (spans[k].first <= word_ms + 100) at = k;
+        out[at] += (out[at].empty() ? "" : " ") + w;
+    };
+    for (const auto& [tok, sec] : tokens) {
+        std::string t = tok;
+        const bool starts = t.rfind(kMark, 0) == 0 || t.rfind(" ", 0) == 0;
+        if (starts) {
+            place();
+            t = t.substr(t.rfind(kMark, 0) == 0 ? kMark.size() : 1);
+            word_ms = static_cast<long long>(sec * 1000.0f);
+        } else if (word.empty()) {
+            word_ms = static_cast<long long>(sec * 1000.0f);
+        }
+        word += t;
+    }
+    place();
     return out;
 }
 
@@ -954,9 +1167,14 @@ std::vector<Span> energy_vad(const std::int16_t* pcm, size_t n, std::uint32_t ra
     return out;
 }
 
-Result<json> TestEngine::transcribe(const std::vector<TrackAudio>& tracks, const std::string& language) {
+Result<json> TestEngine::transcribe(const std::vector<TrackAudio>& tracks, const TranscribeOptions& options) {
+    const std::string& language = options.language;
     json segs = json::array();
+    json turns = json::object();
+    // "Segment N" counts every span of every track in order, decoded or not, so a span keeps its text in a pass that
+    // starts later (from_ms).
     int n = 0;
+    const long long from = options.from_ms;
     for (const auto& t : tracks) {
         const auto spans = energy_vad(t.pcm.data(), t.pcm.size(), t.rate);
         double lo = 1e18, hi = 0;
@@ -965,17 +1183,23 @@ Result<json> TestEngine::transcribe(const std::vector<TrackAudio>& tracks, const
             hi = std::max(hi, s.rms);
         }
         const bool own = t.track == "local";  // a manual microphone capture may hold a whole room
+        json track_turns = json::array();
         for (const auto& s : spans) {
+            ++n;
             // Two remote speakers by loudness: a stand-in for diarization that fixtures can steer.
-            const std::string speaker = own ? "me" : (hi > lo * 1.5 && s.rms > (lo + hi) / 2 ? "s2" : "s1");
-            segs.push_back({{"track", t.track},
-                            {"start_ms", static_cast<long long>(s.begin) * 1000 / t.rate},
-                            {"end_ms", static_cast<long long>(s.end) * 1000 / t.rate},
-                            {"speaker", speaker},
-                            {"text", "Segment " + std::to_string(++n)}});
+            const int cluster = hi > lo * 1.5 && s.rms > (lo + hi) / 2 ? 1 : 0;
+            const long long b = static_cast<long long>(s.begin) * 1000 / t.rate, e = static_cast<long long>(s.end) * 1000 / t.rate;
+            if (!own) track_turns.push_back({b, e, cluster});
+            if (b < from) continue;
+            const std::string speaker = own ? "me" : !options.diarize ? "s1" : (cluster == 1 ? "s2" : "s1");
+            segs.push_back({{"track", t.track}, {"start_ms", b}, {"end_ms", e}, {"speaker", speaker},
+                            {"text", "Segment " + std::to_string(n)}});
         }
+        if (!own && options.diarize) turns[t.track] = track_turns;
     }
-    return json{{"language", language.empty() ? "en" : language}, {"segments", segs}, {"engine", "test"}};
+    json out = {{"language", language.empty() ? "en" : language}, {"segments", segs}, {"engine", "test"}};
+    if (options.diarize) out["turns"] = turns;
+    return out;
 }
 
 // ---- Trigger kind meeting --------------------------------------------------------------------------------------------

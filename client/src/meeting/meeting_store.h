@@ -28,6 +28,9 @@ struct MeetingRecord {
     std::map<std::string, std::string> speakers;
     // The meeting vocabulary from the matched calendar event (improve-meeting-capture-quality D2, migration 1700).
     std::vector<std::string> vocabulary;
+    // Live transcription keeps the segments that start before this and decodes from here on (migration 2100,
+    // show-meeting-transcription-progress D1); 0: nothing transcribed live yet.
+    long long live_from_ms = 0;
 };
 
 class MeetingStore {
@@ -49,6 +52,11 @@ public:
     std::vector<std::string> terms();
     Status add_term(const std::string& term, long long now);
     Status remove_term(const std::string& term);
+
+    // Small values of the meeting service: "speed" (meeting ms transcribed per ms) and "language" (the remembered
+    // Record meeting language).
+    std::optional<std::string> state_value(const std::string& key);
+    Status set_state_value(const std::string& key, const std::string& value);
 
 private:
     Database& db_;

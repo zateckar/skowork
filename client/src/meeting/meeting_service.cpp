@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <set>
 
 namespace wb::meeting {
 namespace {
@@ -72,6 +73,9 @@ CaptureSource source_of(const MeetingRecord& m) {
            : m.source == "mic"  ? CaptureSource{CaptureSource::Kind::mic, 0}
                                 : CaptureSource{CaptureSource::Kind::process, m.pid};
 }
+
+// Manual Capture Tracks: the microphone is the local track beside every source except the microphone itself.
+bool with_mic(const MeetingRecord& m) { return m.source != "mic"; }
 
 std::string app_display(const std::string& process) {
     std::string n = process;
@@ -260,8 +264,7 @@ void MeetingService::detected(const AppMatch& app) {
     if (capture_) return;  // one capture at a time
     for (const auto& m : store_->in_states({"offered", "notice"}))
         if (m.pid == app.root) return;
-    std::optional<CalendarEvent> cal;
-    if (env_.calendar) cal = match_calendar(env_.calendar(now() - 4 * 60 * kMinute, now() + 15 * kMinute), now());
+    const std::optional<CalendarEvent> cal = calendar_match();
     // The meeting a restart interrupted: same application, and the same calendar event where it had one.
     for (auto m : store_->in_states({"interrupted"})) {
         if (!m.action_id.empty() || !iequals(m.app, app.process) || now() - m.ended_at >= kResumeWindow) continue;
@@ -275,13 +278,7 @@ void MeetingService::detected(const AppMatch& app) {
     m.source = "app:" + app.process;
     m.pid = app.root;
     m.detected_at = now();
-    if (cal) {
-        m.title = cal->subject;
-        m.event_id = cal->id;
-        m.series_id = cal->series_id;
-        m.attendees = cal->attendees;
-        m.vocabulary = meeting_terms(cal->attendees, cal->addresses);
-    }
+    if (cal) link_calendar(m, *cal);
     if (m.title.empty()) m.title = app_display(app.process) + " call";
     const json ref = {{"meeting_id", m.id}, {"title", m.title}, {"link", "#/settings"}};
     if (env_.create_thread) {
@@ -343,6 +340,19 @@ void MeetingService::ended(const AppMatch& app) {
         }
 }
 
+std::optional<CalendarEvent> MeetingService::calendar_match() {
+    if (!env_.calendar) return std::nullopt;
+    return match_calendar(env_.calendar(now() - 4 * 60 * kMinute, now() + 15 * kMinute), now());
+}
+
+void MeetingService::link_calendar(MeetingRecord& m, const CalendarEvent& cal) {
+    m.title = cal.subject;
+    m.event_id = cal.id;
+    m.series_id = cal.series_id;
+    m.attendees = cal.attendees;
+    m.vocabulary = meeting_terms(cal.attendees, cal.addresses);
+}
+
 void MeetingService::raise_consent(MeetingRecord& m) {
     std::vector<std::string> choices = {kStart, kNotNow};
     if (cfg_.allow_series_auto && !m.series_id.empty()) choices.push_back(kAlways);
@@ -359,7 +369,7 @@ void MeetingService::raise_consent(MeetingRecord& m) {
 
 void MeetingService::after_consent(MeetingRecord& m) {
     if (cfg_.require_notice) return raise_notice(m);
-    (void)begin_capture(m, source_of(m), starts_with(m.source, "app:") && !m.user_started);
+    (void)begin_capture(m, source_of(m), with_mic(m));
 }
 
 void MeetingService::raise_notice(MeetingRecord& m) {
@@ -491,12 +501,12 @@ void MeetingService::on_answer(const std::string& action_id, const std::string& 
     }
     if (m->state == "notice") {
         if (answer != kNoticeGiven) return decline(*m, "cancelled");
-        (void)begin_capture(*m, source_of(*m), starts_with(m->source, "app:") && !m->user_started);
+        (void)begin_capture(*m, source_of(*m), with_mic(*m));
     }
     if (m->state == "interrupted") {
         if (answer == kContinue && !capture_) {
             // The same meeting, in new part files; the participant notice is not repeated.
-            (void)begin_capture(*m, source_of(*m), starts_with(m->source, "app:") && !m->user_started,
+            (void)begin_capture(*m, source_of(*m), with_mic(*m),
                                 parts_in(audio_dir_of(env_.capture_dir, *m)) + 1);
             return;
         }
@@ -552,19 +562,58 @@ void MeetingService::live_step() {
         const std::lock_guard lock(mx_);
         vocabulary = vocabulary_of(*m);
     }
-    auto r = env_.transcribe({{"tracks", tracks}, {"language", m->language}, {"vocabulary", vocabulary}});
+    // Only the speech captured since the previous pass, without speaker separation (show-meeting-transcription-progress
+    // D1): each second of audio is decoded once, and the final pass labels the speakers.
+    const long long from = m->live_from_ms;
+    const long long t0 = now();
+    auto r = env_.transcribe({{"tracks", tracks}, {"language", m->language}, {"vocabulary", vocabulary}, {"from_ms", from}, {"diarize", false}});
     if (!r) return;
     auto segs = parse_segments(*r);
     if (!segs) return;
-    *segs = finish_segments(std::move(*segs), vocabulary);
+    // The end of the audio every track had on disk (the worker reports it); the wall clock when it does not.
+    const long long audio_end = std::max(from, r->contains("audio_ms") ? jint(*r, "audio_ms") : t0 - m->started_at);
+    measured(audio_end - from, now() - t0);
+    // Speech still going on at the end of the audio may be cut: the segments from the first one that ends in the last
+    // 2 seconds are decoded again, whole, by the next pass.
+    const long long cut = std::max(from, audio_end - 2000);
+    long long next = cut;
+    for (const auto& s : *segs)
+        if (s.end_ms > cut) next = std::min(next, s.start_ms);
+    next = std::max(next, from);
     const std::lock_guard lock(mx_);
     auto cur = store_->get(m->id);
     if (!cur || cur->state != "capturing") return;
+    std::vector<Segment> all;
+    if (auto kept = parse_segments({{"segments", cur->segments}}))
+        for (auto& s : *kept)
+            if (s.start_ms < from) all.push_back(std::move(s));
+    for (auto& s : *segs)
+        if (s.start_ms < next) all.push_back(std::move(s));
+    std::stable_sort(all.begin(), all.end(), [](const Segment& a, const Segment& b) { return a.start_ms < b.start_ms; });
+    all = finish_segments(std::move(all), vocabulary);
     cur->language = jstr(*r, "language");
-    cur->segments = segments_json(*segs);
-    cur->speakers = name_speakers(*segs, env_.user_name ? env_.user_name() : std::string{}, cur->attendees, cur->speakers);
+    cur->segments = segments_json(all);
+    cur->live_from_ms = next;
+    cur->speakers = name_speakers(all, env_.user_name ? env_.user_name() : std::string{}, cur->attendees, cur->speakers);
     (void)store_->put(*cur);
     notify();
+}
+
+double MeetingService::speed() {
+    const auto v = store_->state_value("speed");
+    if (!v) return 0;
+    char* end = nullptr;
+    const double d = std::strtod(v->c_str(), &end);
+    return end != v->c_str() && d > 0 && d < 1e6 ? d : 0;
+}
+
+void MeetingService::measured(long long meeting_ms, long long wall_ms) {
+    if (meeting_ms < 10'000 || wall_ms <= 0) return;  // too short to say anything
+    const double now_speed = static_cast<double>(meeting_ms) / static_cast<double>(wall_ms);
+    const std::lock_guard lock(mx_);
+    const double old = speed();
+    const double v = old > 0 ? 0.6 * old + 0.4 * now_speed : now_speed;  // a moving average of recent passes
+    (void)store_->set_state_value("speed", std::to_string(v));
 }
 
 void MeetingService::transcribe_one(MeetingRecord m) {
@@ -574,14 +623,26 @@ void MeetingService::transcribe_one(MeetingRecord m) {
         for (const auto& e : std::filesystem::directory_iterator(audio_dir_of(env_.capture_dir, m), ec))
             if (e.path().extension() == ".skau") tracks.push_back(path_to_utf8(e.path()));
     std::vector<std::string> vocabulary;
+    // After live passes only the rest is decoded; speakers are separated once, over the whole meeting
+    // (show-meeting-transcription-progress D1).
+    const long long from = m.live_from_ms;
+    const long long length = m.ended_at > m.started_at ? m.ended_at - m.started_at : 0;
+    const long long audio_ms = std::max(0LL, length - from);
     {
         const std::lock_guard lock(mx_);
         vocabulary = vocabulary_of(m);
+        running_ = {m.id, now(), audio_ms};
     }
+    notify();
+    json params = {{"tracks", tracks}, {"language", m.language}, {"vocabulary", vocabulary}};
+    if (from > 0) params["from_ms"] = from;
+    const long long t0 = now();
     Result<json> r = tracks.empty() ? Result<json>(make_error("no_audio", "The meeting has no audio."))
-                     : env_.transcribe ? env_.transcribe({{"tracks", tracks}, {"language", m.language}, {"vocabulary", vocabulary}})
+                     : env_.transcribe ? env_.transcribe(params)
                                        : Result<json>(make_error("model_missing", "Transcription is not available."));
+    if (r) measured(audio_ms, now() - t0);
     const std::lock_guard lock(mx_);
+    running_ = {};
     auto cur = store_->get(m.id);
     if (!cur) return;  // forgotten meanwhile
     m = *cur;
@@ -608,9 +669,40 @@ void MeetingService::transcribe_one(MeetingRecord m) {
         notify();
         return;
     }
+    if (from > 0) {
+        // The segments of the live passes, then the rest; every segment of a diarized track takes its speaker from the
+        // turns of the one diarization over the whole meeting.
+        std::vector<Segment> all;
+        if (auto kept = parse_segments({{"segments", m.segments}}))
+            for (auto& s : *kept)
+                if (s.start_ms < from) all.push_back(std::move(s));
+        for (auto& s : *segs) all.push_back(std::move(s));
+        std::stable_sort(all.begin(), all.end(), [](const Segment& a, const Segment& b) { return a.start_ms < b.start_ms; });
+        int next = 1;
+        std::vector<std::string> order;  // tracks in order of first speech, as the engine numbers them
+        for (const auto& s : all)
+            if (s.track != "local" && std::find(order.begin(), order.end(), s.track) == order.end()) order.push_back(s.track);
+        const json* turns_by_track = jobj(*r, "turns");
+        for (const auto& track : order) {
+            std::vector<Turn> turns;
+            if (turns_by_track && turns_by_track->is_object())
+                if (const json* t = jobj(*turns_by_track, track.c_str()); t && t->is_array())
+                    for (const auto& x : *t)
+                        if (x.is_array() && x.size() == 3)
+                            turns.push_back({x[0].get<long long>(), x[1].get<long long>(), x[2].get<int>()});
+            std::vector<std::pair<long long, long long>> ms;
+            std::vector<size_t> at;
+            for (size_t i = 0; i < all.size(); ++i)
+                if (all[i].track == track) ms.emplace_back(all[i].start_ms, all[i].end_ms), at.push_back(i);
+            const auto labels = label_spans(ms, turns, next);
+            for (size_t k = 0; k < at.size(); ++k) all[at[k]].speaker = labels[k];
+        }
+        *segs = std::move(all);
+    }
     *segs = finish_segments(std::move(*segs), vocabulary);
     m.language = jstr(*r, "language");
     m.segments = segments_json(*segs);
+    m.live_from_ms = 0;
     m.speakers = name_speakers(*segs, env_.user_name ? env_.user_name() : std::string{}, m.attendees, m.speakers);
     m.error.clear();
     // Audio Retention: the raw audio goes once the transcript exists, unless policy keeps it.
@@ -723,7 +815,86 @@ json MeetingService::meeting_json(const MeetingRecord& m) {
             {"source", m.source},   {"detected_at", m.detected_at}, {"started_at", m.started_at}, {"ended_at", m.ended_at},
             {"language", m.language}, {"error", m.error},      {"thread_id", m.thread_id}, {"event_id", m.event_id},
             {"series_id", m.series_id}, {"has_audio", !m.audio_deleted && !m.audio_dir.empty()},
-            {"speakers", speakers}, {"transcript", transcript_markdown(segs, m.speakers)}};
+            {"speakers", speakers}, {"transcript", transcript_markdown(segs, m.speakers, true)},
+            {"progress", progress_json(m)}};
+}
+
+json MeetingService::progress_json(const MeetingRecord& m) {
+    const std::string& st = m.state;
+    const bool audio = !m.audio_deleted && !m.audio_dir.empty();
+    json p = {{"id", m.id}, {"thread_id", m.thread_id}, {"stage", "done"}, {"reason", ""}, {"error", m.error},
+              {"can_transcribe_now", audio && (st == "pending" || st == "failed" || st == "unsupported")},
+              {"can_transcribe_again", audio && (st == "done" || st == "failed" || st == "unsupported")},
+              {"language", m.language}};
+    if (st == "offered" || st == "notice") {
+        p["stage"] = "asking";
+    } else if (st == "capturing") {
+        p["stage"] = "recording";
+        p["elapsed_ms"] = std::max(0LL, now() - m.started_at);
+    } else if (st == "interrupted") {
+        p["stage"] = "waiting";
+        p["reason"] = "interrupted";
+    } else if (st == "pending") {
+        p["stage"] = "waiting";
+        p["reason"] = capture_ ? "capture" : (!m.user_started && env_.deferred && env_.deferred()) ? "deferred" : "queued";
+    } else if (st == "transcribing") {
+        // Transcription Progress Estimate: the audio of this request over the measured speed; before a speed is measured
+        // an assumed one gives the share, and no time left is shown. The share stays below 95% until the answer.
+        p["stage"] = "transcribing";
+        double done = 0;
+        if (running_.meeting_id == m.id && running_.audio_ms > 0) {
+            const double measured_speed = speed();
+            const double elapsed = static_cast<double>(std::max(0LL, now() - running_.started));
+            const double expected = static_cast<double>(running_.audio_ms) / (measured_speed > 0 ? measured_speed : 4.0);
+            done = std::min(0.95, elapsed / std::max(1.0, expected));
+            if (measured_speed > 0) p["left_ms"] = static_cast<long long>(std::max(0.0, expected - elapsed));
+        }
+        p["done"] = done;
+    } else if (st == "summarizing") {
+        p["stage"] = "summarizing";
+    } else if (st != "done") {
+        p["stage"] = "failed";  // failed, unsupported, expired, discarded, declined
+        p["reason"] = st;
+    }
+    return p;
+}
+
+Result<json> MeetingService::progress(const std::string& meeting_id) {
+    const std::lock_guard lock(mx_);
+    const auto m = store_->get(meeting_id);
+    if (!m) return make_error("not_found", "No such meeting.");
+    return progress_json(*m);
+}
+
+Status MeetingService::set_language(const std::string& language) {
+    const std::string l = to_lower(language);
+    if (l != "auto" && !supported_language(l)) return make_error("invalid_params", "The language is auto, cs, de or en.");
+    const std::lock_guard lock(mx_);
+    return store_->set_state_value("language", l);
+}
+
+Status MeetingService::transcribe_again(const std::string& meeting_id, const std::string& language) {
+    const std::string l = to_lower(language);
+    if (!supported_language(l)) return make_error("invalid_params", "The language is cs, de or en.");
+    {
+        const std::lock_guard lock(mx_);
+        auto m = store_->get(meeting_id);
+        if (!m) return make_error("not_found", "No such meeting.");
+        if (m->audio_deleted || m->audio_dir.empty()) return make_error("no_audio", "The audio of this meeting is no longer kept.");
+        if (m->state != "done" && m->state != "failed" && m->state != "unsupported")
+            return make_error("busy", "The meeting is still being recorded or transcribed.");
+        m->language = l;
+        m->segments = json::array();
+        m->live_from_ms = 0;
+        m->run_id.clear();
+        m->error.clear();
+        m->state = "pending";
+        m->user_started = true;  // user-initiated: not deferred
+        (void)store_->put(*m);
+    }
+    notify();
+    wake_.notify_all();
+    return {};
 }
 
 bool MeetingService::capturing() {
@@ -766,18 +937,41 @@ void MeetingService::check_trouble() {
     notify();
 }
 
-json MeetingService::audio_sources() {
+json MeetingService::audio_sources() { return manual_sources()["sources"]; }
+
+json MeetingService::manual_sources() {
     json out = json::array();
-    if (!available() || !config().allow_manual) return out;
+    std::string fallback;
+    const std::string language = store_->state_value("language").value_or("auto");
+    if (!available() || !config().allow_manual) return {{"sources", out}, {"default", fallback}, {"language", language}};
+    bool mic = false;
     if (env_.observe) {
         const Observation o = env_.observe();
-        for (const unsigned pid : o.session_pids)
+        mic = o.mic_in_use;
+        const auto find = [&](unsigned pid) -> const Process* {
             for (const auto& p : o.processes)
-                if (p.pid == pid) out.push_back({{"source", "app:" + std::to_string(pid)}, {"name", p.name}});
+                if (p.pid == pid) return &p;
+            return nullptr;
+        };
+        // A browser plays audio from a child process: the source is the topmost process of the same name, whose tree
+        // the capture includes, and an application is listed once however many of its processes play audio.
+        std::set<unsigned> listed;
+        for (const unsigned pid : o.session_pids) {
+            const Process* p = find(pid);
+            if (!p) continue;
+            for (int depth = 0; depth < 32; ++depth) {
+                const Process* up = p->parent && p->parent != p->pid ? find(p->parent) : nullptr;
+                if (!up || !iequals(up->name, p->name)) break;
+                p = up;
+            }
+            if (listed.insert(p->pid).second) out.push_back({{"source", "app:" + std::to_string(p->pid)}, {"name", p->name}});
+        }
     }
+    // Record Meeting From A New Thread: one click records the one application with audio while the microphone is in use.
+    if (mic && out.size() == 1) fallback = jstr(out[0], "source");
     out.push_back({{"source", "system"}, {"name", ""}});
     out.push_back({{"source", "mic"}, {"name", ""}});
-    return out;
+    return {{"sources", out}, {"default", fallback}, {"language", language}};
 }
 
 Status MeetingService::stop_capture() {
@@ -787,7 +981,7 @@ Status MeetingService::stop_capture() {
     return {};
 }
 
-Status MeetingService::capture_manual(const std::string& source) {
+Result<json> MeetingService::capture_manual(const std::string& source) {
     std::string name;
     CaptureSource src;
     if (source == "system") {
@@ -810,6 +1004,12 @@ Status MeetingService::capture_manual(const std::string& source) {
     if (!available_) return make_error("unavailable", "Meeting capture is turned off by your organisation.");
     if (!cfg_.allow_manual) return make_error("not_allowed", "Manual capture is not allowed by your organisation.");
     if (capture_) return make_error("busy", "A capture is already running.");
+    // Manual Capture Withdraws A Pending Offer: only one capture runs at a time.
+    for (auto o : store_->in_states({"offered", "notice"})) {
+        if (env_.withdraw && !o.action_id.empty()) env_.withdraw(o.action_id, "A manual capture was started.");
+        asked_at_.erase(o.action_id);
+        decline(o, "a manual capture was started");
+    }
     MeetingRecord m;
     m.id = "mtg_" + random_urlsafe(9);
     m.state = "offered";
@@ -818,18 +1018,25 @@ Status MeetingService::capture_manual(const std::string& source) {
     m.pid = src.pid;
     m.user_started = true;  // starting it manually is the consent
     m.detected_at = now();
-    m.title = src.kind == CaptureSource::Kind::process ? "Capture of " + app_display(name) : name + " capture";
+    // Manual Capture Calendar Match: the same rule as for a detected meeting.
+    if (const auto cal = calendar_match()) link_calendar(m, *cal);
+    // Meeting Language Choice: a chosen language is used without detection.
+    if (const auto l = store_->state_value("language"); l && supported_language(*l)) m.language = *l;
+    if (m.title.empty())
+        m.title = src.kind == CaptureSource::Kind::process ? "Capture of " + app_display(name) : name + " capture";
     if (env_.create_thread) {
         auto t = env_.create_thread(m.title, {{"meeting_id", m.id}, {"title", m.title}, {"link", "#/settings"}});
         if (!t) return t.error();
         m.thread_id = *t;
     }
     (void)store_->put(m);
+    const json started = {{"meeting_id", m.id}, {"thread_id", m.thread_id}};
     if (cfg_.require_notice) {
         raise_notice(m);
-        return {};
+        return started;
     }
-    return begin_capture(m, src, false);
+    if (Status s = begin_capture(m, src, with_mic(m)); !s) return s.error();
+    return started;
 }
 
 Status MeetingService::transcribe_now(const std::string& meeting_id) {

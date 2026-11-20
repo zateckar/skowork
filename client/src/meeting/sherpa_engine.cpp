@@ -198,20 +198,27 @@ public:
     SherpaEngine(const Api* api, Paths paths, int threads, bool force_whisper)
         : api_(api), paths_(std::move(paths)), threads_(threads), force_whisper_(force_whisper) {}
 
-    Result<json> transcribe(const std::vector<TrackAudio>& tracks, const std::string& language) override {
+    Result<json> transcribe(const std::vector<TrackAudio>& tracks, const TranscribeOptions& options) override {
         for (const auto& t : tracks)
             if (static_cast<std::int32_t>(t.rate) != kRate) return make_error("invalid", "tracks are 16 kHz");
-        // 1. Speech spans per track.
-        std::vector<std::vector<Span>> spans;
+        // 1. Speech spans per track: VAD runs over the whole track, so spans stay the same from pass to pass; only those
+        // that start at or after from_ms are decoded (show-meeting-transcription-progress D1).
+        std::vector<std::vector<Span>> all, spans;
         for (const auto& t : tracks) {
             auto s = vad(t);
             if (!s) return s.error();
-            spans.push_back(std::move(*s));
+            std::vector<Span> todo;
+            for (const auto& x : *s)
+                if (to_ms(x.begin) >= options.from_ms) todo.push_back(x);
+            all.push_back(std::move(*s));
+            spans.push_back(std::move(todo));
         }
         trace("vad done");
-        // 2. Speakers: the user's own track is "me"; every other track is diarized, its speakers numbered in one
-        // sequence across tracks. Diarization runs before ASR so the two models are never loaded together.
+        // 2. Speakers: the user's own track is "me"; every other track is diarized whole, its speakers numbered in one
+        // sequence across tracks. Diarization runs before ASR so the two models are never loaded together. A live pass
+        // skips it: its speakers are provisional, and the turns of the final diarization label every kept segment.
         std::vector<std::vector<std::string>> speakers(tracks.size());
+        json turns_out = json::object();
         int next = 1;
         for (size_t i = 0; i < tracks.size(); ++i) {
             if (tracks[i].track == "local") {
@@ -219,40 +226,56 @@ public:
                 continue;
             }
             std::vector<Turn> turns;
-            if (spans[i].size() > 1) {
+            if (options.diarize && all[i].size() > 1) {
                 trace("diarization start");
                 auto d = diarize(tracks[i]);
                 trace("diarization done");
                 if (!d) return d.error();
                 turns = std::move(*d);
             }
+            if (options.diarize) {
+                json a = json::array();
+                for (const auto& t : turns) a.push_back({t.start_ms, t.end_ms, t.cluster});
+                turns_out[tracks[i].track] = a;
+            }
             std::vector<std::pair<long long, long long>> ms;
             for (const auto& s : spans[i]) ms.emplace_back(to_ms(s.begin), to_ms(s.end));
-            speakers[i] = label_spans(ms, turns, next);
+            speakers[i] = options.diarize ? label_spans(ms, turns, next) : std::vector<std::string>(spans[i].size(), "s1");
         }
         // 3. Language: the requested one, else a vote over up to three windows of speech, the user's own first.
-        std::string lang = to_lower(language);
+        std::string lang = to_lower(options.language);
         if (lang.empty()) {
             auto l = identify(tracks, spans);
             if (!l) return l.error();
             lang = *l;
         }
         json out = {{"language", lang}, {"segments", json::array()}, {"engine", std::string("sherpa-onnx ") + api_->SherpaOnnxGetVersionStr()}};
+        if (options.diarize) out["turns"] = turns_out;
         if (!supported_language(lang)) return out;  // the worker reports unsupported_language
-        // 4. ASR per span.
+        // 4. ASR in decoding units (Speech Decoded In Context).
         const bool parakeet = !force_whisper_ && parakeet_language(lang);
         out["asr"] = parakeet ? "parakeet-tdt-0.6b-v3" : "whisper-small";
         auto texts = recognize(tracks, spans, parakeet, lang);
         if (!texts) return texts.error();
+        // 5. Segments in another script, or short fragments in another language, are decoded again by Whisper small with
+        // the meeting's language set; what still does not fit is unclear (Transcript Keeps To The Meeting Language).
+        std::vector<std::vector<bool>> unclear(tracks.size());
+        for (size_t i = 0; i < tracks.size(); ++i) unclear[i].assign(spans[i].size(), false);
+        if (parakeet) {
+            auto again = redecode(tracks, spans, *texts, lang, unclear);
+            if (!again) return again.error();
+        }
         for (size_t i = 0; i < tracks.size(); ++i)
             for (size_t k = 0; k < spans[i].size(); ++k) {
                 const std::string& text = (*texts)[i][k];
-                if (text.empty()) continue;
-                out["segments"].push_back({{"track", tracks[i].track},
-                                           {"start_ms", to_ms(spans[i][k].begin)},
-                                           {"end_ms", to_ms(spans[i][k].end)},
-                                           {"speaker", speakers[i][k]},
-                                           {"text", text}});
+                if (text.empty() && !unclear[i][k]) continue;
+                json seg = {{"track", tracks[i].track},
+                            {"start_ms", to_ms(spans[i][k].begin)},
+                            {"end_ms", to_ms(spans[i][k].end)},
+                            {"speaker", speakers[i][k]},
+                            {"text", unclear[i][k] ? std::string("(unclear)") : text}};
+                if (unclear[i][k]) seg["unclear"] = true;
+                out["segments"].push_back(std::move(seg));
             }
         return out;
     }
@@ -428,25 +451,45 @@ private:
         std::vector<std::vector<std::string>> out(tracks.size());
         for (size_t i = 0; i < tracks.size(); ++i) {
             out[i].resize(spans[i].size());
-            for (size_t k0 = 0, k1 = 0; k0 < spans[i].size(); k0 = k1) {
-                k1 = k0 + 1;
-                size_t total = spans[i][k0].end - spans[i][k0].begin;
-                while (k1 < spans[i].size() && k1 - k0 < kBatch && total + (spans[i][k1].end - spans[i][k1].begin) <= kBatchSamples)
-                    total += spans[i][k1].end - spans[i][k1].begin, ++k1;
+            // Decoding units: Parakeet gets spans separated by short pauses together, up to 20 s, so a word or two is
+            // never decoded without its context (improve-transcript-language D1). Whisper takes spans one by one.
+            std::vector<std::pair<long long, long long>> ms;
+            for (const auto& s : spans[i]) ms.emplace_back(to_ms(s.begin), to_ms(s.end));
+            std::vector<std::pair<size_t, size_t>> units;
+            if (parakeet) units = join_spans(ms, 1000, static_cast<long long>(kBatchSamples / kRate) * 1000);
+            else
+                for (size_t k = 0; k < spans[i].size(); ++k) units.emplace_back(k, k);
+            const auto samples = [&](const std::pair<size_t, size_t>& u) { return spans[i][u.second].end - spans[i][u.first].begin; };
+            for (size_t u0 = 0, u1 = 0; u0 < units.size(); u0 = u1) {
+                u1 = u0 + 1;
+                size_t total = samples(units[u0]);
+                while (u1 < units.size() && u1 - u0 < kBatch && total + samples(units[u1]) <= kBatchSamples) total += samples(units[u1]), ++u1;
                 std::vector<const SherpaOnnxOfflineStream*> streams;
-                for (size_t k = k0; k < k1; ++k) {
-                    const auto& s = spans[i][k];
-                    const auto f = to_float(tracks[i].pcm.data() + s.begin, s.end - s.begin);
+                for (size_t u = u0; u < u1; ++u) {
+                    const size_t b = spans[i][units[u].first].begin, e = spans[i][units[u].second].end;
+                    const auto f = to_float(tracks[i].pcm.data() + b, e - b);
                     const auto* st = api_->SherpaOnnxCreateOfflineStream(rec);
                     api_->SherpaOnnxAcceptWaveformOffline(st, kRate, f.data(), static_cast<std::int32_t>(f.size()));
                     streams.push_back(st);
                 }
                 api_->SherpaOnnxDecodeMultipleOfflineStreams(rec, streams.data(), static_cast<std::int32_t>(streams.size()));
                 if (++batches % 50 == 1) trace("asr batch");
-                for (size_t k = k0; k < k1; ++k) {
-                    const auto* st = streams[k - k0];
+                for (size_t u = u0; u < u1; ++u) {
+                    const auto [first, last] = units[u];
+                    const auto* st = streams[u - u0];
                     if (const auto* r = api_->SherpaOnnxGetOfflineStreamResult(st)) {
-                        out[i][k] = trim(r->text ? std::string(r->text) : std::string());
+                        if (first == last || !r->timestamps || !r->tokens_arr || r->count <= 0) {
+                            out[i][first] = trim(r->text ? std::string(r->text) : std::string());
+                        } else {
+                            // The unit's words back onto its spans by their time.
+                            std::vector<std::pair<std::string, float>> tokens;
+                            for (std::int32_t t = 0; t < r->count; ++t)
+                                tokens.emplace_back(r->tokens_arr[t] ? std::string(r->tokens_arr[t]) : std::string(), r->timestamps[t]);
+                            std::vector<std::pair<long long, long long>> rel;
+                            for (size_t k = first; k <= last; ++k) rel.emplace_back(ms[k].first - ms[first].first, ms[k].second - ms[first].first);
+                            const auto parts = split_by_time(tokens, rel);
+                            for (size_t k = first; k <= last; ++k) out[i][k] = trim(parts[k - first]);
+                        }
                         api_->SherpaOnnxDestroyOfflineRecognizerResult(r);
                     }
                     api_->SherpaOnnxDestroyOfflineStream(st);
@@ -456,6 +499,55 @@ private:
         api_->SherpaOnnxDestroyOfflineRecognizer(rec);
         trace("asr done");
         return out;
+    }
+
+    // Segments off the meeting's language, decoded again one by one by Whisper small with the language set; a result
+    // that is empty, still off the language, or a known Whisper hallucination makes the segment unclear.
+    Status redecode(const std::vector<TrackAudio>& tracks, const std::vector<std::vector<Span>>& spans,
+                    std::vector<std::vector<std::string>>& texts, const std::string& lang, std::vector<std::vector<bool>>& unclear) const {
+        std::vector<std::pair<size_t, size_t>> todo;
+        for (size_t i = 0; i < tracks.size(); ++i)
+            for (size_t k = 0; k < spans[i].size(); ++k)
+                if (!texts[i][k].empty() && off_language(texts[i][k], lang)) todo.emplace_back(i, k);
+        if (todo.empty()) return {};
+        trace("redecode start");
+        SherpaOnnxOfflineRecognizerConfig c{};
+        c.feat_config.sample_rate = kRate;
+        c.feat_config.feature_dim = 80;
+        c.model_config.whisper.encoder = paths_.whisper_encoder.c_str();
+        c.model_config.whisper.decoder = paths_.whisper_decoder.c_str();
+        c.model_config.whisper.language = lang.c_str();
+        c.model_config.whisper.task = "transcribe";
+        c.model_config.whisper.tail_paddings = -1;
+        c.model_config.tokens = paths_.whisper_tokens.c_str();
+        c.model_config.num_threads = threads_;
+        c.model_config.provider = "cpu";
+        c.decoding_method = "greedy_search";
+        const auto* rec = api_->SherpaOnnxCreateOfflineRecognizer(&c);
+        if (!rec) {
+            // Without Whisper the segments cannot be checked again: they are unclear rather than foreign.
+            for (const auto& [i, k] : todo) unclear[i][k] = true;
+            return {};
+        }
+        for (const auto& [i, k] : todo) {
+            const auto& s = spans[i][k];
+            const auto f = to_float(tracks[i].pcm.data() + s.begin, s.end - s.begin);
+            const auto* st = api_->SherpaOnnxCreateOfflineStream(rec);
+            api_->SherpaOnnxAcceptWaveformOffline(st, kRate, f.data(), static_cast<std::int32_t>(f.size()));
+            const SherpaOnnxOfflineStream* one[] = {st};
+            api_->SherpaOnnxDecodeMultipleOfflineStreams(rec, one, 1);
+            std::string text;
+            if (const auto* r = api_->SherpaOnnxGetOfflineStreamResult(st)) {
+                text = trim(r->text ? std::string(r->text) : std::string());
+                api_->SherpaOnnxDestroyOfflineRecognizerResult(r);
+            }
+            api_->SherpaOnnxDestroyOfflineStream(st);
+            if (text.empty() || off_language(text, lang) || whisper_hallucination(text)) unclear[i][k] = true;
+            else texts[i][k] = text;
+        }
+        api_->SherpaOnnxDestroyOfflineRecognizer(rec);
+        trace("redecode done");
+        return {};
     }
 
     void set_hotwords(std::vector<std::string> terms) override { hotwords_ = std::move(terms); }
