@@ -10,6 +10,8 @@
 - [x] 2.2 Stream Time Limits (D2): first-byte, idle and maximum limits; `requestTimeoutMs` no longer aborts a stream body. Verify with tests: a 7-minute stream with short gaps completes (simulated clock), no first byte gives TIMEOUT, an idle gap after the first byte is cut and truncated
 - [x] 2.3 Prompt Cache Audit (D7): `ttft_ms` and `cached_tokens` columns and migration. Verify with tests: values recorded from a fake upstream's usage; empty when not reported
 
+- [x] 2.4 Forward only complete events (D9): hold a partial upstream event until its blank line, keep-alives during a mid-event stall, held bytes forwarded at the end and dropped before an error event; stream idle limit default 230 s. Verify with tests against a local fake upstream: a stall inside an event longer than several keep-alive intervals gets keep-alives and the event arrives intact; a last event without its blank line arrives unchanged; an event split across many chunks arrives intact. Status: done 2026-11-20; control-plane `npm test` 340 of 340 pass, including three new stream tests
+
 ## 3. Client
 
 - [x] 3.1 Request Timeouts and Retries (D3): read policy.llm.timeouts.*, apply changes to the next request, retry TIMEOUT once. Verify with unit tests using the in-test transport fake: policy value applied, TIMEOUT attempts counted

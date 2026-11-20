@@ -13,6 +13,7 @@ On 2026-11-10 the product owner reported that model requests often time out once
 ## What Changes
 
 - The gateway sends response headers at once and a keep-alive comment while it waits for the first token. It reports errors that occur after the headers as an error event in the stream. A stream is limited by the time to the first upstream token and by the idle time between tokens, not by a total duration.
+- The gateway forwards only complete upstream events and holds an incomplete one until it ends. Keep-alives then keep flowing while the upstream stalls in the middle of an event, which the organization LLM API does while the model writes a large tool call. The default stream idle limit is 230 seconds.
 - The client applies policy.llm.timeouts.*. It retries TIMEOUT once instead of three times. It requests every chat call as a stream, including summary requests.
 - The runtime keeps the prompt prefix byte-identical from Turn to Turn in a Thread:
   - The system prompt holds only what does not change within a Thread.
@@ -37,7 +38,7 @@ Out of scope:
 ### Modified Capabilities
 - `client/model-access`: Streaming Responses, Retries With Backoff and Request Timeouts are modified. Stream Errors is added.
 - `client/agent-runtime`: Run Lifecycle States (failed → queued for Retry), Run Context, Run Context Stability and Lazy Tool Loading are modified. Stable Prompt Prefix and Run Retry are added.
-- `control-plane/llm-gateway`: Backend Failover is modified. Stream Keep-Alive, Stream Time Limits and Prompt Cache Audit are added.
+- `control-plane/llm-gateway`: Backend Failover and Keep-Alive Between Events are modified. Stream Keep-Alive, Stream Time Limits and Prompt Cache Audit are added.
 
 ## Impact
 

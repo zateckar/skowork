@@ -87,28 +87,59 @@ describe('gateway streams', () => {
     await waitUntil(() => audit('ka1')?.outcome === 'ok');
   });
 
-  it('writes no keep-alive inside an upstream event that stalls half-way (fix-stream-gaps-and-parallel-file-edits D1)', async () => {
-    const chunk = (text: string) => JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] });
+  const delta = (text: string) => `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] })}\n\n`;
+  const finish = `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`;
+
+  it('holds an upstream event that stalls half-way and keeps sending keep-alives (fix-long-thread-model-calls D9)', async () => {
     a.handler = (_p, _b, res) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
-      res.write(`data: ${chunk('one ')}\n\n`);
-      const second = `data: ${chunk("padStart(2, '0')")}\n\n`;
-      res.write(second.slice(0, 20));
+      const second = delta("padStart(2, '0')");
+      res.write(delta('one ') + second.slice(0, 20));
+      // Longer than several keep-alive intervals, as when the upstream buffers while a tool call is written.
       setTimeout(() => {
         res.write(second.slice(20));
-        // Idle between events: keep-alives are allowed again.
-        setTimeout(() => {
-          res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`);
-          res.end();
-        }, 350);
-      }, 350);
+        res.end(finish);
+      }, 450);
     };
     const r = await stream('ka-mid');
     assert.equal(r.status, 200);
-    const evs = events(r.text);
-    assert.deepEqual(evs.slice(0, 2).map((e) => e.choices[0].delta.content), ['one ', "padStart(2, '0')"]);
+    assert.deepEqual(events(r.text).slice(0, 2).map((e) => e.choices[0].delta.content), ['one ', "padStart(2, '0')"]);
+    const stall = r.text.slice(r.text.indexOf('one '), r.text.indexOf('data: {"choices":[{"index":0,"delta":{"content":"padStart'));
+    const beats = stall.split('\n').filter((l) => l === ': keep-alive').length;
+    assert.ok(beats >= 2, `${beats} keep-alives during the stall`);
     assert.ok(!/padStart[^\n]*keep-alive/.test(r.text), 'no keep-alive inside the event');
-    assert.match(r.text.slice(r.text.indexOf('padStart')), /: keep-alive/);
+    assert.match(r.text, /\[DONE\]/);
+    await waitUntil(() => audit('ka-mid')?.outcome === 'ok');
+  });
+
+  it('forwards an event that arrives one byte at a time, and a blank line split across chunks, unchanged', async () => {
+    a.handler = (_p, _b, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const body = delta('byte by byte') + delta('split').slice(0, -1);
+      let i = 0;
+      const next = () => {
+        if (i < body.length) {
+          res.write(body[i++]);
+          setImmediate(next);
+        } else {
+          res.write('\n');
+          res.end(finish);
+        }
+      };
+      next();
+    };
+    const r = await stream('ka-bytes');
+    assert.deepEqual(events(r.text).slice(0, 2).map((e) => e.choices[0].delta.content), ['byte by byte', 'split']);
+    assert.match(r.text, /\[DONE\]/);
+  });
+
+  it('forwards a last event without its blank line unchanged before the stream ends', async () => {
+    a.handler = (_p, _b, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(delta('last') + 'data: [DONE]\n');
+    };
+    const r = await stream('ka-tail');
+    assert.equal(r.text, delta('last') + 'data: [DONE]\n');
   });
 
   it('fails over when a backend dies before its first byte, and the client sees one normal stream', async () => {

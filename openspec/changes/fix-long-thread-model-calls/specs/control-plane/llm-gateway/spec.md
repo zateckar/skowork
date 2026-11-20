@@ -3,7 +3,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Backend Failover
-The gateway SHALL support several upstream backends per mapped model. It sends requests only to healthy backends. It retries a failed non-streamed request, or a stream that failed before its first upstream byte was forwarded, on another healthy backend. Keep-alive comments are not upstream bytes. A stream that is cut after its first upstream byte was forwarded MUST NOT be retried. It ends without the `[DONE]` marker, so that the client detects the truncation (client/model-access Truncated Stream Detection), and its audit outcome is "truncated".
+The gateway SHALL support several upstream backends per mapped model. It sends requests only to healthy backends. It retries a failed non-streamed request, or a stream that failed before its first upstream byte arrived, on another healthy backend. Keep-alive comments are not upstream bytes. A stream that is cut after its first upstream byte arrived MUST NOT be retried.
 
 #### Scenario: Backend down
 - **WHEN** one of two backends for a model fails its health check
@@ -15,7 +15,26 @@ The gateway SHALL support several upstream backends per mapped model. It sends r
 
 #### Scenario: Stream cut mid-way
 - **WHEN** a backend connection drops after the first byte of a streamed response
-- **THEN** the stream to the client ends without the `[DONE]` marker, and the audit entry has the outcome "truncated"
+- **THEN** the gateway does not retry it, the stream to the client ends without the `[DONE]` marker so that the client detects the truncation (client/model-access Truncated Stream Detection), and the audit entry has the outcome "truncated"
+
+### Requirement: Keep-Alive Between Events
+The gateway SHALL forward the upstream bytes of a streamed response only up to the end of the last complete upstream event (one that ends with a blank line), and hold the rest unchanged until its blank line arrives. It MUST NOT write any bytes of its own inside an upstream event. Because the client receives only complete events, the gateway writes the keep-alive comment (Stream Keep-Alive) whenever nothing was sent for the keep-alive interval.
+
+#### Scenario: Upstream stalls inside an event
+- **WHEN** the upstream sends half of a `data:` line and then sends nothing for 80 seconds
+- **THEN** the client receives a keep-alive comment at least every keep-alive interval, then the whole event unchanged, with no bytes inside it
+
+#### Scenario: Upstream idle between events
+- **WHEN** the upstream sends nothing for longer than the keep-alive interval after a complete event
+- **THEN** the gateway writes a keep-alive comment
+
+#### Scenario: Last event without its blank line
+- **WHEN** the upstream stream ends after an event that lacks its closing blank line
+- **THEN** the client receives that event's bytes unchanged before the stream ends
+
+#### Scenario: Failure while part of an event is held
+- **WHEN** the stream fails with an error event (Stream Error Event) while part of an upstream event is held
+- **THEN** the held bytes are dropped, and the client receives the error event intact
 
 ## ADDED Requirements
 
@@ -38,11 +57,15 @@ A failure after the stream headers were sent SHALL be delivered as one stream ev
 - **THEN** the client receives an error event with code MODEL_UNAVAILABLE, and the stream ends without `[DONE]`
 
 ### Requirement: Stream Time Limits
-The gateway SHALL limit a streamed chat request only by three server settings: the time to the first upstream byte (default 180 seconds), the idle time between upstream chunks (default 120 seconds), and a maximum stream duration (default 20 minutes). A first-byte limit counts as a failure before the first byte (Backend Failover) and ends in TIMEOUT. An idle or maximum limit after the first byte cuts the stream.
+The gateway SHALL limit a streamed chat request only by three server settings: the time to the first upstream byte (default 180 seconds), the idle time between upstream chunks (default 230 seconds), and a maximum stream duration (default 20 minutes). A first-byte limit counts as a failure before the first byte (Backend Failover) and ends in TIMEOUT. An idle or maximum limit after the first byte cuts the stream.
 
 #### Scenario: Long answer
 - **WHEN** a reasoning model streams an answer for 7 minutes without pausing longer than the idle limit
 - **THEN** the stream completes normally
+
+#### Scenario: Tool call written without events
+- **WHEN** a backend sends no byte for 110 seconds after the first token while the model writes a large tool call
+- **THEN** the stream continues, and the client receives keep-alives during the silence
 
 #### Scenario: No first token
 - **WHEN** the only backend sends no byte within the first-byte limit

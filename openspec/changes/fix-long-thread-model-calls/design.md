@@ -42,7 +42,7 @@ For a streamed chat request the gateway sends `200` and the SSE headers as soon 
 ### D2. Stream time limits replace the total request timeout
 The gateway has three limits:
 - `SKOWORK_LLM_FIRST_TOKEN_TIMEOUT_MS`, default 180 s: from the upstream request to the first upstream byte.
-- `SKOWORK_LLM_STREAM_IDLE_MS`, default 120 s: between upstream chunks.
+- `SKOWORK_LLM_STREAM_IDLE_MS`, default 230 s: between upstream chunks. It was 120 s until D9 measured silences of up to 110 s while the model writes a large tool call.
 - `SKOWORK_LLM_STREAM_MAX_MS`, default 20 min: a backstop.
 
 `requestTimeoutMs` keeps bounding only non-streamed requests. For a streamed request, `SKOWORK_LLM_FIRST_TOKEN_TIMEOUT_MS` bounds the response headers and the first byte, and the body read is not tied to any request timeout.
@@ -125,11 +125,28 @@ The client now calls `WinHttpQueryDataAvailable` before each read and reads at m
 - *Asynchronous WinHTTP with callbacks:* more code for the same effect. Synchronous reads on the Run's worker thread are the existing model.
 - *A smaller buffer:* still holds back anything shorter than the buffer.
 
+### D9. The gateway forwards only complete events
+Found on 2026-11-20 on the release client (0.1.1-dev.29, which has D8) against the gamma control plane, which runs the latest image: building a Local app still failed with `TIMEOUT (timeout)`, the client's own idle timeout. Probes from the test machine showed why:
+
+- **The organization LLM API delivers its stream in blocks of about 16 KB**, with or without the gateway and Traefik in the path (7 bursts of median 16,205 bytes for one plain answer, 1–5 s apart). It sends no `Content-Encoding`, so this is buffering, not compression.
+- **vLLM sends no events while the model writes tool-call arguments.** The last partial block before that, cut in the middle of an event, stays in the upstream buffer until the tool call is complete. Measured silences: 47, 78, 80, 87 and 110 s. Each one split an event between two consecutive reasoning tokens, for example `{"index":0` | `,"delta":{"reasoning_content":" not"`.
+- **The gateway therefore held half an event and, by Keep-Alive Between Events, wrote no keep-alive.** No keep-alive reached the client in any probe, and the client's 60 s idle timeout fired.
+
+The gateway now forwards upstream bytes only up to the end of the last complete event and holds the rest until its blank line arrives. What it has sent always ends at an event boundary, so the keep-alive timer can write whenever nothing was sent for the interval. Held bytes are forwarded when the upstream stream ends. They are dropped before an error event, which would otherwise be merged into the incomplete event. Failover still depends on the first upstream byte arriving, not on its being forwarded.
+
+The stream idle limit rises from 120 s to 230 s. Upstream silence while a tool call is written grows with the size of the call, and the gateway should not cut an answer that is still being generated.
+
+**Alternatives considered**
+- *Raise the client's idle timeout:* a dead connection then hides for minutes, and every client version would need the change.
+- *Write keep-alives inside an event:* this corrupts the event (fix-stream-gaps-and-parallel-file-edits).
+- *Only ask the upstream owner to stop buffering:* the upstream would still send no events while a tool call is written. Without D9 that silence again holds back keep-alives whenever the upstream's own chunks end mid-event. The request to the owner is still worth making, because the buffering also makes streaming choppy.
+
 ## Risks / Trade-offs
 
 - **[Risk] Prefix caching is off on the upstream vLLM, or LiteLLM strips `cached_tokens`.** → **Mitigation:** spike 1.1 checks it before anything else. Without caching, D1–D3 still remove the timeouts, but long Threads stay slow. The finding is recorded here, and the upstream owner is asked to enable `--enable-prefix-caching`.
 - **[Risk] LiteLLM does not abort the vLLM request when the gateway disconnects, so abandoned attempts keep the GPU busy.** → **Mitigation:** spike 1.2 measures this. With TIMEOUT retried only once, at most one abandoned attempt overlaps its replacement.
-- **[Risk] A proxy between the client and the gateway buffers SSE and swallows the keep-alives.** → **Mitigation:** the gateway already sets `X-Accel-Buffering: no` and `Cache-Control: no-cache`. The acceptance test runs through the dev-proxy path that real workstations use.
+- **[Risk] A proxy between the client and the gateway buffers SSE and swallows the keep-alives.** → **Mitigation:** the gateway already sets `X-Accel-Buffering: no` and `Cache-Control: no-cache`. The acceptance test runs through the dev-proxy path that real workstations use. On gamma that path is Traefik with a CrowdSec bouncer. The 2026-11-20 probes found no extra buffering there, but showed no keep-alive passing through either. Acceptance 4.1 checks it after D9.
+- **[Risk] The organization LLM API buffers its stream (D9).** → **Mitigation:** D9 keeps keep-alives flowing anyway. The upstream owner is asked to turn off response buffering for `text/event-stream`, which would also make streaming smooth again.
 - **[Risk] The time on the user message makes the model mention the time unprompted.** → **Mitigation:** a fixed label "Current time:" on its own first line. A short eval checks five prompts for unprompted mentions.
 - **[Risk] Thread-wide loaded tools widen what the model sees in later Runs.** → **Mitigation:** policy is still enforced on every call, and only permitted tools can be loaded. The tool-schema bound stays the same.
 - **[Trade-off] Errors after the headers lose their HTTP status.** Clients must read the error event. The current client already does, and other consumers of the gateway are internal.
@@ -188,4 +205,4 @@ The script simulates a Thread that grows by about 6.7k tokens per Turn (a user m
   - Control plane: `npm test`, 262 of 262 pass, including 11 new gateway stream tests.
   - Client: `win_tests`, 690 of 690 pass; `base_tests`, 46 pass. Six shell tests had expected a product-name spelling that differed from the UI; their assertions were updated in this change.
 - **4.2 Unprompted time mentions:** 0 of 5. Five ordinary prompts (a thank-you note, an explanation, tips, a translation, a summary) went to the primary model with the "Current time:" line, and no answer mentioned the date or time.
-- **4.1 End to end:** pending. It needs the desktop client signed in at the organization IdP against the local control plane. Spike 1.3 already covers the upstream half: with the new layout the time to the first token stayed below 1 s up to 93k tokens.
+- **4.1 End to end:** pending. It needs the desktop client signed in at the organization IdP against the local control plane. A first attempt on 2026-11-20, against gamma, failed and led to D9. Spike 1.3 already covers the upstream half: with the new layout the time to the first token stayed below 1 s up to 93k tokens.

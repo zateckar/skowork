@@ -49,7 +49,7 @@ The runtime SHALL fix the Run context when a Run starts executing, so it does no
 - **THEN** every call of the Run sends the same system prompt and the same starting message
 
 ### Requirement: Lazy Tool Loading
-The runtime SHALL send only a core set of tool definitions plus the tools loaded in the Thread. The core set includes `find_tools` and `ask_user`. The `find_tools` meta-tool searches all permitted tools by name and description and loads the selected ones for the rest of the Thread. Loaded tools follow the core set in the order they were first loaded. When loading a tool would exceed the tool-definition bound, the earliest-loaded tools are dropped first. A loaded tool that policy no longer permits is dropped before the next request.
+The runtime SHALL send only a core set of tool definitions plus the tools loaded in the Thread. The core set includes `find_tools` and `ask_user`. The `find_tools` meta-tool searches all permitted tools by name and description and loads the selected ones for the rest of the Thread. Loaded tools follow the core set in the order they were first loaded. A loaded tool that policy no longer permits is dropped before the next request.
 
 #### Scenario: Model discovers a tool
 - **WHEN** the model calls `find_tools` with the query "calendar"
@@ -58,6 +58,10 @@ The runtime SHALL send only a core set of tool definitions plus the tools loaded
 #### Scenario: Next Run keeps loaded tools
 - **WHEN** a Run in a Thread loaded the calendar tools, and the user sends another message
 - **THEN** the new Run's first request contains the same tool definitions in the same order as the previous Run's last request
+
+#### Scenario: Tool-definition bound reached
+- **WHEN** loading a tool would exceed the tool-definition bound
+- **THEN** the earliest-loaded tools are dropped first, and the remaining tools keep their order
 
 #### Scenario: Forbidden tools are not discoverable
 - **WHEN** policy denies a tool for the user

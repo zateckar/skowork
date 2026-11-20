@@ -104,19 +104,33 @@ class StreamLimit extends Error {
   }
 }
 
+const EVENT_ENDS = ['\n\n', '\r\n\r\n', '\r\r'].map((s) => Buffer.from(s, 'latin1'));
+
+/** The end of the last complete SSE event in buf (just past its blank line), or 0; matches only from `from` on. */
+function lastEventEnd(buf: Buffer, from: number): number {
+  const tail = buf.subarray(from);
+  let end = 0;
+  for (const sep of EVENT_ENDS) {
+    const i = tail.lastIndexOf(sep);
+    if (i >= 0) end = Math.max(end, from + i + sep.length);
+  }
+  return end;
+}
+
 /**
  * The SSE response of a streamed chat request (fix-long-thread-model-calls D1). The headers are sent when a backend has
  * been acquired; a keep-alive comment follows whenever nothing was written for keepAliveMs. Comments are not upstream
- * bytes, so they do not count against failover. A keep-alive is written only between events, never inside an upstream
- * event that is still arriving (fix-stream-gaps-and-parallel-file-edits D1).
+ * bytes, so they do not count against failover. Upstream bytes are forwarded only up to the end of the last complete
+ * event, so the client never sees a partial event and a keep-alive can go out even while the upstream stalls inside
+ * one (fix-long-thread-model-calls D9).
  */
 class EventStream {
   readonly #res: Response;
   readonly #keepAliveMs: number;
   #started = false;
   #timer: NodeJS.Timeout | undefined;
-  /** The last bytes written, to tell whether the stream is at an event boundary (a blank line). */
-  #tail = '';
+  /** Upstream bytes of an event whose blank line has not arrived yet. */
+  #held: Buffer = Buffer.alloc(0);
   constructor(res: Response, keepAliveMs: number) {
     this.#res = res;
     this.#keepAliveMs = keepAliveMs;
@@ -136,34 +150,39 @@ class EventStream {
     this.#res.flushHeaders();
     this.#arm();
   }
-  write(data: Buffer | string) {
-    if (this.closed) return;
-    this.#res.write(data);
-    if (data.length > 0) {
-      const s = typeof data === 'string' ? data.slice(-4) : data.subarray(Math.max(0, data.length - 4)).toString('latin1');
-      this.#tail = (this.#tail + s).slice(-4);
-    }
-    this.#arm();
-  }
-  /** True before any byte and after a complete event (its blank line). */
-  get #atBoundary() {
-    return this.#tail === '' || this.#tail.endsWith('\n\n') || this.#tail.endsWith('\r\n\r\n') || this.#tail.endsWith('\r\r');
+  /** Upstream bytes: the complete events go out now, the rest of an unfinished event waits for its blank line. */
+  forward(data: Buffer) {
+    if (this.closed || data.length === 0) return;
+    // A separator can straddle the held bytes and the new chunk, so the search starts 3 bytes before the join.
+    const from = Math.max(0, this.#held.length - 3);
+    const all = this.#held.length ? Buffer.concat([this.#held, data]) : data;
+    const end = lastEventEnd(all, from);
+    if (end > 0) this.#write(all.subarray(0, end));
+    this.#held = Buffer.from(all.subarray(end));
   }
   /** One error event, in the shape of the error body (sendError), then the end of the stream without [DONE]. */
   error(code: string, message: string, extra: ErrorExtra) {
-    this.write(`data: ${JSON.stringify({ error: { code, message, ...extra } })}\n\n`);
+    this.#held = Buffer.alloc(0);
+    this.#write(`data: ${JSON.stringify({ error: { code, message, ...extra } })}\n\n`);
     this.end();
   }
   end() {
+    if (this.#held.length) this.#write(this.#held);
+    this.#held = Buffer.alloc(0);
     clearTimeout(this.#timer);
     this.#timer = undefined;
     if (!this.closed) this.#res.end();
+  }
+  #write(data: Buffer | string) {
+    if (this.closed) return;
+    this.#res.write(data);
+    this.#arm();
   }
   #arm() {
     clearTimeout(this.#timer);
     this.#timer = setTimeout(() => {
       if (this.closed) return;
-      if (this.#atBoundary) this.#res.write(': keep-alive\n\n');
+      this.#res.write(': keep-alive\n\n');
       this.#arm();
     }, this.#keepAliveMs);
   }
@@ -860,7 +879,7 @@ export class Gateway {
         while (!chunk.done) {
           const buf = Buffer.from(chunk.value);
           scanner.feed(buf);
-          out.write(buf);
+          out.forward(buf);
           armIdle();
           chunk = await raceAbort(reader.read(), signal);
         }

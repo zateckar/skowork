@@ -252,7 +252,7 @@ export function loadConfig(e: NodeJS.ProcessEnv = process.env): Config {
       imageTimeoutMs: num(e.SKOWORK_LLM_IMAGE_TIMEOUT_MS, 120_000),
       keepAliveMs: num(e.SKOWORK_LLM_KEEPALIVE_MS, 15_000),
       firstTokenTimeoutMs: num(e.SKOWORK_LLM_FIRST_TOKEN_TIMEOUT_MS, 180_000),
-      streamIdleTimeoutMs: num(e.SKOWORK_LLM_STREAM_IDLE_MS, 120_000),
+      streamIdleTimeoutMs: num(e.SKOWORK_LLM_STREAM_IDLE_MS, 230_000),
       streamMaxMs: num(e.SKOWORK_LLM_STREAM_MAX_MS, 1_200_000),
       fallbackCooldownMs: num(e.SKOWORK_LLM_FALLBACK_COOLDOWN_MS, 120_000),
       healthCheckIntervalMs: num(e.SKOWORK_LLM_HEALTH_INTERVAL_MS, 10_000),
