@@ -90,6 +90,8 @@ public:
     [[nodiscard]] std::vector<ThreadSummary> list_threads(int limit);
     [[nodiscard]] bool thread_exists(const std::string& id);
     Status set_thread_title(const std::string& id, const std::string& title);
+    // The Thread's title; empty when it has none or does not exist.
+    [[nodiscard]] std::string thread_title(const std::string& id);
 
     // Creates a Run in state queued (the "state" event is the first entry of its log).
     Result<RunRecord> create_run(const std::string& thread_id, const Origin& origin, bool unattended,

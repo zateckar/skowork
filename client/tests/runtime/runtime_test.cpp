@@ -4674,6 +4674,16 @@ TEST(RunContext, FormatsDateTimeZoneUserAndFolders) {
     EXPECT_NE(format_run_time(c).find("UTC-05:30"), std::string::npos);
 }
 
+// add-common-sense-knowledge-triage design D4: knowledge indexes a Thread without the current-time line.
+TEST(RunContext, StripRunTimeRemovesOnlyTheLeadingTimeLine) {
+    EXPECT_EQ(strip_run_time("Current time: Friday 20 November 2026, 11:17 (2026-11-20), UTC+01:00\n\nCreate a passkeys app"),
+              "Create a passkeys app");
+    EXPECT_EQ(strip_run_time("Current time: Friday 20 November 2026, 11:17 (2026-11-20), UTC+01:00\r\nHi"), "Hi");
+    EXPECT_EQ(strip_run_time("Create a passkeys app\nCurrent time: later"), "Create a passkeys app\nCurrent time: later");
+    EXPECT_EQ(strip_run_time("Current time: only"), "");
+    EXPECT_EQ(strip_run_time(""), "");
+}
+
 // ==== fix-long-thread-model-calls: Stable Prompt Prefix, Thread-wide tools, Run Retry =================================
 
 namespace {

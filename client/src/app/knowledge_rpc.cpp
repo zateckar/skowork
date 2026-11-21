@@ -2,6 +2,7 @@
 
 #include "base/strings.h"
 #include "base/time.h"
+#include "runtime/run_context.h"
 
 #include <algorithm>
 
@@ -297,11 +298,14 @@ std::optional<json> knowledge_thread_item(runtime::RunStore& runs, const std::st
     for (const auto& r : runs.runs_in_thread(thread_id))
         if (const auto ms = parse_iso8601_ms(r.ended_at.empty() ? r.created_at : r.ended_at)) at = std::max(at, *ms);
     json messages = json::array();
-    std::string title;
+    // Without the run context the client adds to a Run's first message, titled by the Thread when it has a title
+    // (add-common-sense-knowledge-triage design D4).
+    std::string title = utf8_truncate(trim(runs.thread_title(thread_id)), 80);
     for (const auto& m : runs.conversation(thread_id)) {
         if (m.role != "user" && m.role != "assistant") continue;
-        if (title.empty() && m.role == "user") title = utf8_truncate(trim(m.content.substr(0, m.content.find('\n'))), 80);
-        messages.push_back({{"role", m.role}, {"text", m.content}, {"at", at}});
+        const std::string text = m.role == "user" ? runtime::strip_run_time(m.content) : m.content;
+        if (title.empty() && m.role == "user") title = utf8_truncate(trim(text.substr(0, text.find('\n'))), 80);
+        messages.push_back({{"role", m.role}, {"text", text}, {"at", at}});
     }
     return json{{"title", title.empty() ? std::string("Thread") : title}, {"messages", messages}};
 }

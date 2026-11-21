@@ -695,6 +695,10 @@ public:
     std::vector<EntitySearchRow> find_entities_page(const std::string& query, int limit,
                                                     const std::optional<EntityCursor>& after = std::nullopt);
     bool entity_has_directory_relation(long long entity_id);
+    // A relation or a user fact names the entity (add-common-sense-knowledge-triage design D8).
+    bool entity_has_facts(long long entity_id);
+    // A relation connects the two entities, in either direction (duplicate resolution veto, design D7).
+    bool entities_related(long long a, long long b);
     std::vector<ItemRow> entity_evidence_items(long long entity_id, long long after_item_id, int limit);
     std::vector<ItemRow> entity_alias_items(long long entity_id, const std::string& normalized_alias, long long after_item_id, int limit);
     std::vector<EntityRow> entities_in_chunks(const std::vector<long long>& chunk_ids);
@@ -710,6 +714,22 @@ public:
     std::optional<int> importance_mark(const std::string& subject_name, const std::string& predicate, const std::string& object_name);
     Status set_importance(long long relation_id, int mark);
     void set_relation_rating(long long relation_id, const RelationRating& rating);
+    // One-time cleanup when the common-sense triage rules change (add-common-sense-knowledge-triage design D3): relations
+    // from passages that the gates reject and that carry no user mark are deleted, the others without a mark are left
+    // unrated so the background rating rates them again, and meta triage.rules becomes `version`. Returns the number
+    // removed, or -1 when the stored rules are already at `version` (or the schema predates salience).
+    Result<int> apply_triage_rules(int version, const std::vector<std::string>& local_apps = {});
+    // Ids and names of the entities of a type (duplicate resolution and the user's Person, design D5, D7).
+    std::vector<std::pair<long long, std::string>> entity_names(const std::string& type);
+    // Entities with an id above `after`, with their type, name, email, key and relation count, at most `limit`.
+    struct EntityBrief {
+        long long id = 0;
+        std::string type, name, email, key;
+        long long relations = 0;
+    };
+    std::vector<EntityBrief> entities_after(long long after, int limit);
+    // Every entity in brief, at most `limit`, most related first (candidates for duplicate resolution).
+    std::vector<EntityBrief> entity_briefs(int limit);
     // Up to `limit` relations not rated yet, from the newest Sources first, with their chunk id (background rating, D7).
     std::vector<RelationRow> unscored_relations(int limit);
     // The highest salience of the relations extracted from each chunk (only chunks with relations appear).

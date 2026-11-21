@@ -45,6 +45,16 @@ std::string format_run_time(const RunContextInfo& c) {
     return std::string("Current time: ") + date + utc_offset(c.utc_offset_minutes);
 }
 
+std::string strip_run_time(std::string_view text) {
+    constexpr std::string_view kPrefix = "Current time: ";
+    if (text.substr(0, kPrefix.size()) != kPrefix) return std::string(text);
+    const auto nl = text.find('\n');
+    if (nl == std::string_view::npos) return {};
+    text.remove_prefix(nl + 1);
+    while (!text.empty() && (text.front() == '\n' || text.front() == '\r')) text.remove_prefix(1);
+    return std::string(text);
+}
+
 std::string format_run_context(const RunContextInfo& c) {
     // Nothing here changes from Run to Run, so the system prompt stays byte-stable (Stable Prompt Prefix); the time
     // travels with the Run's starting message (format_run_time).

@@ -3,6 +3,7 @@
 #include "base/strings.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 
@@ -827,6 +828,194 @@ std::string importance_level(double salience) {
     if (!std::isfinite(salience)) return "normal";
     if (salience >= 0.7) return "high";
     return salience < 0.35 ? "low" : "normal";
+}
+
+// ---- Common-sense triage (add-common-sense-knowledge-triage design D2) ------------------------------------------------
+
+namespace {
+
+bool one_of(std::string_view s, std::initializer_list<std::string_view> list) {
+    return std::find(list.begin(), list.end(), s) != list.end();
+}
+
+bool self_word(const std::string& n) {
+    return one_of(n, {"me", "i", "myself", "user", "the user", "ja", "ich", "uzivatel", "benutzer", "nutzer"});
+}
+
+// A name that only labels a participant: a speaker or participant word, optionally numbered, or the user as "me".
+bool placeholder_name(const std::string& n) {
+    if (self_word(n) || n == "you") return true;
+    std::string_view s = n;
+    while (!s.empty() && (std::isdigit(static_cast<unsigned char>(s.back())) || s.back() == ' ')) s.remove_suffix(1);
+    return one_of(s, {"speaker", "mluvci", "recnik", "sprecher", "redner", "participant", "ucastnik", "teilnehmer",
+                      "unknown", "unknown speaker", "neznamy", "unbekannt", "attendee", "guest", "host"});
+}
+
+// A file path or a file name with a common file extension, as the agent's working files are named.
+bool path_name(std::string_view raw) {
+    const std::string n = trim(raw);
+    if (n.find('\\') != std::string::npos) return true;
+    // "External Vendor / Microsite" names two things; a path has no spaces around its slashes.
+    if (n.find(' ') != std::string::npos) return false;
+    if (n.find('/') != std::string::npos) return true;
+    const auto dot = n.rfind('.');
+    if (dot == std::string::npos || dot == 0 || dot + 1 >= n.size()) return false;
+    return one_of(to_lower(n.substr(dot + 1)),
+                  {"html", "htm", "js", "mjs", "ts", "tsx", "jsx", "css", "json", "md", "txt", "py", "cpp", "h", "hpp",
+                   "c", "cs", "java", "ps1", "sh", "bat", "cmd", "yml", "yaml", "xml", "csv", "log", "ini", "toml", "sql",
+                   "png", "jpg", "jpeg", "gif", "svg", "exe", "dll", "zip"});
+}
+
+// A predicate that only says that something came up, not what is true about it.
+bool meta_predicate(std::string_view predicate) {
+    std::string p = to_lower(trim(predicate));
+    std::replace(p.begin(), p.end(), ' ', '_');
+    std::replace(p.begin(), p.end(), '-', '_');
+    if (p.find("discuss") != std::string::npos || p.find("mention") != std::string::npos) return true;
+    if (p.size() > 6 && p.compare(p.size() - 6, 6, "_about") == 0) return true;
+    return one_of(p, {"about", "is_about", "relates_to", "related_to", "refers_to", "concerns", "covers", "notes",
+                      "talks_with", "talked_with", "speaks_with", "spoke_with"});
+}
+
+// A well-known AI assistant or model (design D6): its name alone, or followed by a version or size ("gpt 4o", "claude 3").
+bool ai_assistant_name(const std::string& n) {
+    static const std::initializer_list<std::string_view> names = {
+        "kimi", "chatgpt", "gpt", "openai gpt", "claude", "gemini", "copilot", "microsoft copilot", "github copilot",
+        "llama", "mistral", "deepseek", "qwen", "grok", "perplexity"};
+    for (const auto& a : names) {
+        if (n == a) return true;
+        if (n.size() > a.size() && n.compare(0, a.size(), a) == 0) {
+            // "gpt 4o", "gpt4", "claude 3 5 sonnet": the name, then a version that starts with a digit.
+            const size_t at = n[a.size()] == ' ' ? a.size() + 1 : a.size();
+            if (at < n.size() && std::isdigit(static_cast<unsigned char>(n[at]))) return true;
+        }
+    }
+    return false;
+}
+
+size_t edit_distance(std::string_view a, std::string_view b);
+
+// Folded names that differ by a few letters, spaces not counted: at most 2 up to 8 letters, else a quarter of the length.
+bool similar_spelling(std::string a, std::string b) {
+    a.erase(std::remove(a.begin(), a.end(), ' '), a.end());
+    b.erase(std::remove(b.begin(), b.end(), ' '), b.end());
+    const size_t longer = std::max(a.size(), b.size());
+    const size_t limit = longer <= 8 ? 2 : longer / 4;
+    return longer - std::min(a.size(), b.size()) <= limit && edit_distance(a, b) <= limit;
+}
+
+// A name containing a Local App's id or title as whole words, ignoring a trailing "app" (design D6).
+bool local_app_name(const std::string& n, const std::vector<std::string>& apps) {
+    const auto strip_app = [](std::string s) {
+        if (s.size() > 4 && s.compare(s.size() - 4, 4, " app") == 0) s.resize(s.size() - 4);
+        return s;
+    };
+    const std::string bare = strip_app(n), padded = " " + bare + " ";
+    for (const auto& app : apps) {
+        const std::string a = strip_app(normalize_name(app));
+        if (a.size() < 3) continue;
+        if (padded.find(" " + a + " ") != std::string::npos) return true;
+        // The model's spelling of the app ("Passkey explainer app" for "Passkeys Explained"): a small edit distance.
+        if (a.size() >= 6 && a.find(' ') != std::string::npos && similar_spelling(bare, a)) return true;
+    }
+    return false;
+}
+
+size_t edit_distance(std::string_view a, std::string_view b) {
+    std::vector<size_t> prev(b.size() + 1), cur(b.size() + 1);
+    for (size_t j = 0; j <= b.size(); ++j) prev[j] = j;
+    for (size_t i = 1; i <= a.size(); ++i) {
+        cur[0] = i;
+        for (size_t j = 1; j <= b.size(); ++j)
+            cur[j] = std::min({prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1)});
+        std::swap(prev, cur);
+    }
+    return prev[b.size()];
+}
+
+// Words of a folded name without honorifics.
+std::vector<std::string> name_words(std::string_view name) {
+    std::vector<std::string> out;
+    for (auto& w : split(normalize_name(name), ' '))
+        if (!w.empty() && !one_of(w, {"pan", "pani", "herr", "frau", "mr", "ms", "mrs", "dr", "ing", "the"})) out.push_back(w);
+    return out;
+}
+
+}  // namespace
+
+bool self_reference_name(std::string_view name) { return self_word(normalize_name(name)); }
+
+std::string common_sense_reject_name(std::string_view name, std::string_view source, const std::vector<std::string>& local_apps) {
+    const std::string n = normalize_name(name);
+    if (n.empty()) return {};
+    if (one_of(n, {"skowork", "skowork assistant", "skowork agent", "assistant", "the assistant", "ai assistant",
+                   "asistent", "assistent"}))
+        return "assistant";
+    if (placeholder_name(n)) return "placeholder";
+    if (source == "threads") {
+        if (path_name(name)) return "path";
+        if (ai_assistant_name(n)) return "assistant";
+        if (local_app_name(n, local_apps)) return "local_app";
+    }
+    return {};
+}
+
+std::string common_sense_reject(std::string_view subject, std::string_view predicate, std::string_view object,
+                                std::string_view source, const std::vector<std::string>& local_apps) {
+    if (auto r = common_sense_reject_name(subject, source, local_apps); !r.empty()) return r;
+    if (auto r = common_sense_reject_name(object, source, local_apps); !r.empty()) return r;
+    if (meta_predicate(predicate)) return "meta";
+    if (normalize_name(subject) == normalize_name(object)) return "self";
+    return {};
+}
+
+bool similar_entity_names(std::string_view a, std::string_view b) {
+    const auto wa = name_words(a), wb = name_words(b);
+    if (wa.empty() || wb.empty()) return false;
+    std::string ja, jb;  // the folded names without honorifics
+    for (const auto& w : wa) ja += (ja.empty() ? "" : " ") + w;
+    for (const auto& w : wb) jb += (jb.empty() ? "" : " ") + w;
+    if (ja == jb) return true;
+    // Spaces do not count ("Pro 4T" and "Pro4T").
+    if (similar_spelling(ja, jb)) return true;
+    // One contains the other as whole words ("Archiv" in "Archiv system"), or they share a longer word.
+    const std::string pa = " " + ja + " ", pb = " " + jb + " ";
+    if (pa.find(" " + jb + " ") != std::string::npos || pb.find(" " + ja + " ") != std::string::npos) return true;
+    for (const auto& x : wa)
+        if (x.size() >= 4 && std::find(wb.begin(), wb.end(), x) != wb.end()) return true;
+    return false;
+}
+
+std::optional<std::vector<std::vector<int>>> parse_entity_groups(std::string_view text, int count) {
+    std::string_view body = text;
+    if (const size_t fence = body.find("```"); fence != std::string_view::npos) {
+        body.remove_prefix(fence + 3);
+        if (const size_t nl = body.find('\n'); nl != std::string_view::npos && nl < 16) body.remove_prefix(nl + 1);
+        if (const size_t close = body.find("```"); close != std::string_view::npos) body = body.substr(0, close);
+    }
+    const size_t open = body.find('{'), close = body.rfind('}');
+    if (open == std::string_view::npos || close == std::string_view::npos || close < open) return std::nullopt;
+    auto j = parse_json(body.substr(open, close - open + 1));
+    if (!j || !j->is_object()) return std::nullopt;
+    std::vector<std::vector<int>> out;
+    const json* list = jobj(*j, "groups");
+    if (!list || !list->is_array()) return out;
+    std::vector<bool> used(static_cast<size_t>(std::max(count, 0)), false);
+    for (const auto& g : *list) {
+        if (!g.is_array()) continue;
+        std::vector<int> group;
+        for (const auto& v : g) {
+            if (!v.is_number_integer()) continue;
+            const long long i = v.get<long long>();
+            if (i < 0 || i >= count || used[static_cast<size_t>(i)]) continue;
+            used[static_cast<size_t>(i)] = true;
+            group.push_back(static_cast<int>(i));
+        }
+        if (group.size() >= 2) out.push_back(std::move(group));
+        else
+            for (int i : group) used[static_cast<size_t>(i)] = false;
+    }
+    return out;
 }
 
 }  // namespace wb::knowledge

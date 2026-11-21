@@ -9,6 +9,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <limits>
@@ -16,6 +17,7 @@
 #include <queue>
 #include <set>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 
 namespace wb::knowledge {
@@ -4362,6 +4364,21 @@ std::vector<EntitySearchRow> KgStore::find_entities_page(const std::string& quer
     return out;
 }
 
+bool KgStore::entities_related(long long a, long long b) {
+    const std::lock_guard lock(db_->mutex());
+    auto s = db_->prepare("SELECT 1 FROM relations WHERE (subject=?1 AND object=?2) OR (subject=?2 AND object=?1) LIMIT 1");
+    s.bind(1, a).bind(2, b);
+    return s.step();
+}
+
+bool KgStore::entity_has_facts(long long entity_id) {
+    const std::lock_guard lock(db_->mutex());
+    auto s = db_->prepare("SELECT 1 FROM relations WHERE subject=?1 OR object=?1 UNION ALL "
+                          "SELECT 1 FROM facts_user WHERE entity_id=?1 LIMIT 1");
+    s.bind(1, entity_id);
+    return s.step();
+}
+
 bool KgStore::entity_has_directory_relation(long long entity_id) {
     const std::lock_guard lock(db_->mutex());
     auto s = db_->prepare("SELECT 1 FROM relations WHERE (subject=?1 OR object=?1) AND chunk_id IS NULL LIMIT 1");
@@ -4580,6 +4597,88 @@ void KgStore::set_relation_rating(long long relation_id, const RelationRating& r
         .bind(4, utf8_truncate(rating.statement, kMaxStatementBytes))
         .bind(5, static_cast<long long>(rating.scored ? 1 : 0));
     (void)s.run();
+}
+
+Result<int> KgStore::apply_triage_rules(int version, const std::vector<std::string>& local_apps) {
+    const std::lock_guard lock(db_->mutex());
+    if (db_->user_version() < kKgSalienceSchemaVersion) return -1;
+    const std::string stored = meta("triage.rules");
+    if (!stored.empty() && std::atoi(stored.c_str()) >= version) return -1;
+    // Facts are rated again only for a new rubric; rules 1 and 2 were applied with rubric 1.
+    const std::string stored_rubric = meta("triage.rubric");
+    const int rubric = !stored_rubric.empty() ? std::atoi(stored_rubric.c_str()) : (!stored.empty() && std::atoi(stored.c_str()) >= 1 ? 1 : 0);
+    const bool rate_again = rubric < kTriageRubric;
+    int removed = 0;
+    Status s = db_->transaction([&]() -> Status {
+        // Relations from passages whose Source the gates judge; user facts live elsewhere and are never touched.
+        // User marks are kept by normalised entity names and the predicate (add-knowledge-salience design D6).
+        std::set<std::tuple<std::string, std::string, std::string>> marked;
+        {
+            auto m = db_->prepare("SELECT subject, predicate, object FROM importance_marks");
+            while (m.step()) marked.emplace(m.col_text(0), m.col_text(1), m.col_text(2));
+        }
+        std::vector<long long> reject, rerate;
+        {
+            auto q = db_->prepare(
+                "SELECT r.id, s.name, r.predicate, o.name, i.source FROM relations r "
+                "JOIN entities s ON s.id=r.subject JOIN entities o ON o.id=r.object "
+                "JOIN chunks c ON c.id=r.chunk_id JOIN items i ON i.id=c.item_id");
+            while (q.step()) {
+                const std::string subject = q.col_text(1), predicate = q.col_text(2), object = q.col_text(3);
+                if (marked.count({normalize_name(subject), predicate, normalize_name(object)})) continue;  // the user's mark wins
+                if (!common_sense_reject(subject, predicate, object, q.col_text(4), local_apps).empty()) reject.push_back(q.col_int(0));
+                else rerate.push_back(q.col_int(0));
+            }
+        }
+        if (!reject.empty())
+            if (Status d = db_->exec("DELETE FROM relations WHERE id IN (" + id_list(reject) + ")"); !d) return d;
+        removed = static_cast<int>(reject.size());
+        // What remains without a mark is rated again by the background rating under the new rubric.
+        if (rate_again && !rerate.empty())
+            if (Status u = db_->exec("UPDATE relations SET scored=0 WHERE id IN (" + id_list(rerate) + ")"); !u) return u;
+        if (Status o = delete_orphan_entities(*db_); !o) return o;
+        auto m = db_->prepare("INSERT OR REPLACE INTO meta(key, value) VALUES('triage.rules', ?1), ('triage.rubric', ?2)");
+        m.bind(1, std::to_string(version)).bind(2, std::to_string(kTriageRubric));
+        return m.run();
+    });
+    if (!s) return s.error();
+    return removed;
+}
+
+std::vector<std::pair<long long, std::string>> KgStore::entity_names(const std::string& type) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<std::pair<long long, std::string>> out;
+    auto s = db_->prepare("SELECT id, name FROM entities WHERE type=?1 ORDER BY id");
+    s.bind(1, type);
+    while (s.step()) out.emplace_back(s.col_int(0), s.col_text(1));
+    return out;
+}
+
+namespace {
+constexpr const char* kEntityBriefSelect =
+    "SELECT e.id, e.type, e.name, e.email, e.key, "
+    "(SELECT count(*) FROM relations r WHERE r.subject=e.id OR r.object=e.id) FROM entities e ";
+KgStore::EntityBrief read_brief(Statement& s) {
+    return {s.col_int(0), s.col_text(1), s.col_text(2), s.col_text(3), s.col_text(4), s.col_int(5)};
+}
+}  // namespace
+
+std::vector<KgStore::EntityBrief> KgStore::entities_after(long long after, int limit) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<EntityBrief> out;
+    auto s = db_->prepare(std::string(kEntityBriefSelect) + "WHERE e.id>?1 ORDER BY e.id LIMIT ?2");
+    s.bind(1, after).bind(2, limit);
+    while (s.step()) out.push_back(read_brief(s));
+    return out;
+}
+
+std::vector<KgStore::EntityBrief> KgStore::entity_briefs(int limit) {
+    const std::lock_guard lock(db_->mutex());
+    std::vector<EntityBrief> out;
+    auto s = db_->prepare(std::string(kEntityBriefSelect) + "ORDER BY 6 DESC, e.id LIMIT ?1");
+    s.bind(1, limit);
+    while (s.step()) out.push_back(read_brief(s));
+    return out;
 }
 
 std::vector<RelationRow> KgStore::unscored_relations(int limit) {

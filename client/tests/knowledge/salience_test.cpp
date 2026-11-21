@@ -234,3 +234,96 @@ TEST(KnowledgeSalience, ImportanceIsShownAsALevelNotANumber) {
     EXPECT_EQ(importance_level(0.1), "low");
     EXPECT_EQ(importance_level(std::nan("")), "normal");
 }
+
+// ==== add-common-sense-knowledge-triage (task 1.1): the gates, with relations observed on the test machine ==============
+
+TEST(KnowledgeCommonSense, AssistantItselfIsNeverAFact) {
+    EXPECT_EQ(common_sense_reject("Skowork", "edits", "index.html", "threads"), "assistant");
+    EXPECT_EQ(common_sense_reject("Skowork", "works_on", "Passkeys Explained App", "threads"), "assistant");
+    EXPECT_EQ(common_sense_reject("DZCRZKN", "asked", "Skowork", "threads"), "assistant");
+    EXPECT_EQ(common_sense_reject_name("SKOWORK", "meetings"), "assistant");
+    EXPECT_EQ(common_sense_reject_name("Skowork team", "threads"), "");  // a team is named, not the assistant
+}
+
+TEST(KnowledgeCommonSense, PlaceholderParticipantsInThreeLanguages) {
+    for (const char* name : {"Speaker 1", "Speaker 2", "speaker", "Mluvčí 3", "Řečník 1", "Sprecher 2", "Teilnehmer 4",
+                             "Účastník 1", "Me", "I", "the user", "Uživatel", "Ich", "Já", "Unknown speaker"})
+        EXPECT_EQ(common_sense_reject_name(name, "meetings"), "placeholder") << name;
+    for (const char* name : {"Petr Speaker", "Jana Nováková", "Pan Šep", "Medusa", "Ichthys"})
+        EXPECT_EQ(common_sense_reject_name(name, "meetings"), "") << name;
+    EXPECT_EQ(common_sense_reject("Speaker 1", "requires_approval_from", "FIG", "meetings"), "placeholder");
+    EXPECT_EQ(common_sense_reject("Me", "member_of", "FIP", "meetings"), "placeholder");
+}
+
+TEST(KnowledgeCommonSense, MetaPredicatesOnlySaySomethingCameUp) {
+    for (const char* p : {"discusses", "discussed_with", "is_discussed_in", "mentions", "mentioned_in", "talks_about",
+                          "asks_about", "requests_info_about", "relates_to", "related to", "refers-to", "covers", "is_about"})
+        EXPECT_EQ(common_sense_reject("Capture of Edge", p, "DZC", "meetings"), "meta") << p;
+    for (const char* p : {"decides", "leads", "must_not_connect_to", "responsible_for", "includes", "requires", "uses",
+                          "deployed_in", "contact_for"})
+        EXPECT_EQ(common_sense_reject("Public microsite", p, "Production database", "meetings"), "") << p;
+}
+
+TEST(KnowledgeCommonSense, SelfReferenceAndThreadFilePaths) {
+    EXPECT_EQ(common_sense_reject("Archivas", "uses", "ARCHIVAS", "meetings"), "self");
+    EXPECT_EQ(common_sense_reject("passkeys-explained/public/index.html", "is_file_of", "Passkeys Explained App", "threads"), "path");
+    EXPECT_EQ(common_sense_reject("HTML application", "has_bug", "index.html", "threads"), "path");
+    EXPECT_EQ(common_sense_reject_name("C:\\Users\\jana\\notes.txt", "threads"), "path");
+    // Outside Threads a document may be named by its file name, and names with spaces are not paths.
+    EXPECT_EQ(common_sense_reject_name("Budget 2027.xlsx", "threads"), "");
+    EXPECT_EQ(common_sense_reject_name("index.html", "files"), "");
+    EXPECT_EQ(common_sense_reject_name("ASP.NET", "threads"), "");
+    EXPECT_EQ(common_sense_reject_name("External Vendor / Microsite", "threads"), "");  // observed: two names, not a path
+}
+
+TEST(KnowledgeCommonSense, SelfReferencesAreTheUser) {
+    for (const char* name : {"Me", "I", "the user", "Já", "Ich", "Uživatel", "Benutzer"}) EXPECT_TRUE(self_reference_name(name)) << name;
+    for (const char* name : {"Speaker 1", "Jana", "Ichthys", "Medium"}) EXPECT_FALSE(self_reference_name(name)) << name;
+}
+
+TEST(KnowledgeCommonSense, AssistantsAndLocalAppsOnlyInThreads) {
+    for (const char* name : {"Kimi", "ChatGPT", "GPT-4o", "gpt 5", "Claude", "Claude 3.5 Sonnet", "Gemini", "Copilot",
+                             "GitHub Copilot", "DeepSeek", "Qwen"})
+        EXPECT_EQ(common_sense_reject_name(name, "threads"), "assistant") << name;
+    // Outside Threads they may be people or products; and similar names are not assistants.
+    EXPECT_EQ(common_sense_reject_name("Kimi", "meetings"), "");
+    EXPECT_EQ(common_sense_reject_name("Gemini project", "threads"), "");
+    EXPECT_EQ(common_sense_reject_name("Claudette", "threads"), "");
+    const std::vector<std::string> apps = {"passkeys-explained", "Passkeys Explained"};
+    for (const char* name : {"Passkeys Explained App", "passkeys-explained", "Passkeys Explained"})
+        EXPECT_EQ(common_sense_reject_name(name, "threads", apps), "local_app") << name;
+    EXPECT_EQ(common_sense_reject_name("Passkeys", "threads", apps), "");
+    // Observed after re-extraction: the model's own spelling of the app.
+    EXPECT_EQ(common_sense_reject_name("Passkey explainer app", "threads", apps), "local_app");
+    EXPECT_EQ(common_sense_reject_name("Passport expiry", "threads", apps), "");
+    EXPECT_EQ(common_sense_reject_name("Passkeys Explained App", "files", apps), "");
+}
+
+TEST(KnowledgeCommonSense, SimilarNamesFromTheTestMachine) {
+    const std::pair<const char*, const char*> same[] = {
+        {"Ship", "ŠIP"}, {"Archivas", "Archibas"}, {"Archivas", "Archivá"}, {"Pro 4T", "Pro4T"}, {"Pan Dvořák", "Dvořák"},
+        {"Varianta A", "Variant A"}, {"Gira", "Jiřa"}, {"Moap team", "Moap tým"}, {"Public microsite", "Public microsites"},
+        {"Produkční ship", "Production ship"}, {"Entra", "Entru"}};
+    for (const auto& [a, b] : same) EXPECT_TRUE(similar_entity_names(a, b)) << a << " / " << b;
+    const std::pair<const char*, const char*> apart[] = {{"F5", "Fixit"}, {"Archivas", "Microsite"}, {"Jana Nováková", "Petr Dvořák"}};
+    for (const auto& [a, b] : apart) EXPECT_FALSE(similar_entity_names(a, b)) << a << " / " << b;
+}
+
+TEST(KnowledgeCommonSense, EntityGroupsAreReadAndCheckedLikeOtherAnswers) {
+    const auto g = parse_entity_groups("```json\n{\"groups\": [[0, 2], [1], [3, 3, 4], [2, 5], [9, 1]]}\n```", 6);
+    ASSERT_TRUE(g);
+    // [1] is alone, the repeated 3 counts once, 2 is already grouped, 9 is out of range so [1] is alone again.
+    ASSERT_EQ(g->size(), 2u);
+    EXPECT_EQ((*g)[0], (std::vector<int>{0, 2}));
+    EXPECT_EQ((*g)[1], (std::vector<int>{3, 4}));
+    EXPECT_FALSE(parse_entity_groups("no json", 3));
+    EXPECT_TRUE(parse_entity_groups("{}", 3)->empty());
+}
+
+TEST(KnowledgeCommonSense, UsefulObservedFactsPass) {
+    EXPECT_EQ(common_sense_reject("Public microsites", "isolated_from", "Production database", "meetings"), "");
+    EXPECT_EQ(common_sense_reject("Pan Šep", "manages", "Ship", "threads"), "");
+    EXPECT_EQ(common_sense_reject("Dvořák", "responsible_for", "ŠIP", "threads"), "");
+    EXPECT_EQ(common_sense_reject("F5", "should_call", "Production ship", "threads"), "");
+    EXPECT_EQ(common_sense_reject("Hozák", "contact_for", "FIO", "meetings"), "");
+}

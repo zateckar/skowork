@@ -78,6 +78,10 @@ struct KnowledgeEnv {
     std::function<std::vector<std::string>()> thread_ids;
     // The signed-in user (name, email): knowledge.remember stores facts about them, and their domain marks internal people.
     std::function<std::pair<std::string, std::string>()> user;
+    // Other names of the signed-in user, such as the account principal (add-common-sense-knowledge-triage design D5).
+    std::function<std::vector<std::string>()> user_names;
+    // The ids and titles of the user's Local Apps (add-common-sense-knowledge-triage design D6).
+    std::function<std::vector<std::string>()> local_apps;
     // Background work is deferred (pause, battery saver, presentation; client/desktop-host).
     std::function<bool()> deferred;
     std::function<void()> changed;  // status changed (settings section)
@@ -167,6 +171,10 @@ public:
     // One round of background work: queued items, the periodic sweep, then one embedding, extraction and enrichment
     // batch. Returns whether anything was done. The background thread calls it; tests call it directly.
     bool step();
+    // The one-time cleanup when the triage rules change (add-common-sense-knowledge-triage design D3, D5): merges "Me"
+    // and the user's names into the user's Person, then removes rejected facts. Returns the facts removed, -1 when the
+    // stored rules are current. step() runs it once per process; tests call it directly.
+    Result<int> apply_triage_cleanup();
     // The host's background gate changed (deferral lifted, pause ended): look for work now instead of at the next poll.
     void wake();
     // step() until nothing is left to do (tests), at most `max_rounds`.
@@ -464,6 +472,17 @@ private:
     std::vector<SourceContext> passage_contexts(const std::vector<ChunkRow>& batch);
     // Background rating of existing facts (design D7): one bounded batch, within the scoring share of the budget.
     bool score_step();
+    // The signed-in user as knowledge names them (add-common-sense-knowledge-triage design D5): the Person name to store,
+    // the address, and the normalised names that mean the user (display name, address, its local part, principal).
+    struct UserIdentity {
+        std::string name, email;
+        std::set<std::string> keys;
+    };
+    UserIdentity user_identity() const;
+    // Merges Person entities named "Me" or with one of the user's names into the user's Person (design D5).
+    int merge_user_entities();
+    // Duplicate entity resolution (design D7): one bounded, model-confirmed batch within the rating share.
+    bool resolve_step();
     // Retrieval weights (design D5) applied to ranked passages; `candidates` keep their order when no weight applies.
     void apply_salience_weights(std::vector<Passage>& candidates);
     void notify();
@@ -492,6 +511,7 @@ private:
     std::mutex extraction_deferred_mx_;
     std::map<long long, DeferredExtraction> extraction_deferred_;
     bool isolate_extraction_ = false;
+    bool triage_rules_applied_ = false;  // the one-time triage cleanup was checked in this process (worker thread only)
     int isolated_extract_failures_ = 0;
     std::string last_embed_error_, last_extract_error_, last_categorize_error_;
     long long categorize_retry_at_ = 0;

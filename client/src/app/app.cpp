@@ -1877,7 +1877,22 @@ void App::start_knowledge() {
         if (email.empty() && tokens) email = tokens->user_principal();
         return {std::string{}, email};
     };
-    ke.deferred = [this] { return quota.indexing_paused() || !gate.may_run(WorkKind::indexing); };
+    // add-common-sense-knowledge-triage design D5, D6: the account principal is another name of the user, and the
+    // user's Local Apps are the agent's own work products.
+    ke.user_names = [this]() -> std::vector<std::string> {
+        if (!tokens) return {};
+        return {tokens->user_principal()};
+    };
+    ke.local_apps = [this]() -> std::vector<std::string> {
+        std::vector<std::string> out;
+        if (!local_apps) return out;
+        for (const auto& a : local_apps->list()) {
+            out.push_back(a.id);
+            if (!a.manifest.name.empty()) out.push_back(a.manifest.name);
+        }
+        return out;
+    };
+    ke.deferred =[this] { return quota.indexing_paused() || !gate.may_run(WorkKind::indexing); };
     ke.changed = [this] { MainThread::post([this] { if (ui && ui->is_open()) ui->emit("knowledge.changed", json::object()); }); };
     // control-plane/team-knowledge (add-knowledge-sharing): only while the control channel is connected.
     ke.team = [this](const std::string& method, const std::string& path, const json& body) -> Result<json> {

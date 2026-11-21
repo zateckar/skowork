@@ -65,6 +65,11 @@ struct FakeGateway {
     std::vector<SalienceRule> salience_rules;
     // The user message of the last extraction request.
     std::string last_extraction_request;
+    // The feature and system instruction of every chat request (add-common-sense-knowledge-triage).
+    std::vector<std::pair<std::string, std::string>> system_prompts;
+    // Duplicate entity resolution (feature knowledge.resolve): the answer to a request; no groups when unset.
+    std::function<std::string(const model::ChatRequest&)> resolve;
+    int resolve_calls = 0;
     // The background rating (feature knowledge.score) answers every fact with this rating.
     double score_salience = 0.2;
     std::string score_durability = "trivial";
@@ -122,6 +127,8 @@ struct FakeGateway {
     model::ModelResult<model::ChatResponse> chat(const model::ChatRequest& req) {
         const std::lock_guard lock(mx);
         ++chat_calls;
+        if (!req.messages.empty() && req.messages.front().role == "system")
+            system_prompts.emplace_back(req.feature, req.messages.front().content);
         if (!reject_passage.empty() && req.messages.back().content.find(reject_passage) != std::string::npos) {
             model::ModelFailure f;
             f.code = model::code::invalid_request;
@@ -149,6 +156,13 @@ struct FakeGateway {
                 ratings.push_back({{"i", i}, {"salience", score_salience}, {"durability", score_durability}});
             model::ChatResponse r;
             r.text = json{{"ratings", ratings}}.dump();
+            r.finish_reason = "stop";
+            return r;
+        }
+        if (req.feature == "knowledge.resolve") {
+            ++resolve_calls;
+            model::ChatResponse r;
+            r.text = resolve ? resolve(req) : R"({"groups": []})";
             r.finish_reason = "stop";
             return r;
         }
@@ -336,6 +350,11 @@ struct Kg {
             return out;
         };
         e.user = [] { return std::pair<std::string, std::string>{"Jan Novák", "jan.novak@acme-test.example"}; };
+        e.user_names = [] { return std::vector<std::string>{"JNOVAK1"}; };
+        e.local_apps = [this] {
+            const std::lock_guard lock(mx);
+            return local_apps;
+        };
         e.deferred = [this] { return deferred.load(); };
         if (team) e.team = [this](const std::string& m, const std::string& p, const json& b) { return team(m, p, b); };
         e.publication = [this](const std::string& m, const std::string& p, const std::string& b) -> Result<json> {
@@ -392,6 +411,7 @@ struct Kg {
     std::map<std::string, json> threads, mail, mail_messages, chats;
     std::set<std::string> denied_read_paths;
     std::atomic<bool> deferred{false};
+    std::vector<std::string> local_apps;  // ids and titles of the user's Local Apps (add-common-sense-knowledge-triage D6)
     std::atomic<bool> fail_file_reads{false};
     std::atomic<bool> fail_document_extract{false};
     std::function<void(const std::string&, const json&)> after_index;
@@ -5890,6 +5910,332 @@ TEST(KnowledgeSalience, NewFactsAreRatedByTheExtractionThatStoredThem) {
     EXPECT_TRUE(rels[0].scored);  // rated by the extraction that stored it
     EXPECT_DOUBLE_EQ(rels[0].salience, kDefaultSalience);
     EXPECT_EQ(rels[0].durability, "lasting");
+}
+
+// ==== add-common-sense-knowledge-triage (tasks 1.2, 1.3, 2.1) ===========================================================
+
+TEST(KnowledgeCommonSense, GatesDropAgentWorkLogMetaAndPlaceholdersAndCreateNoEntitiesForThem) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    kg.gw.salience_rules = {
+        {"Fixing the app", "Skowork", "edits", "index.html", "temporary", "Skowork edits index.html.", 0.8, true},
+        {"Edge capture", "Capture of Edge", "discusses", "DZC", "lasting", "The meeting discusses DZC.", 0.7, false},
+        {"Variant plan", "Speaker 1", "will_confirm", "Variant A", "temporary", "Speaker 1 will confirm variant A.", 0.7, true},
+        {"Memo decision", "Jana Nováková", "decides", "Phoenix", "lasting", "Jana Nováková decided the Phoenix budget.", 0.9, true},
+    };
+    kg.add_thread("work", {{"user", "Fixing the app"}});
+    kg.add_thread("edge", {{"user", "Edge capture notes"}});
+    kg.add_thread("plan", {{"user", "Variant plan"}});
+    kg.add_thread("memo", {{"user", "Memo decision on the Phoenix budget"}});
+    kg.svc->sweep_now();
+    kg.idle();
+    auto& store = kg.svc->store();
+    // Only the useful fact is stored.
+    const auto jana = store.find_entities("Jana Nováková", 1);
+    ASSERT_EQ(jana.size(), 1u);
+    EXPECT_EQ(store.relations_of(jana[0].id, 10).size(), 1u);
+    // No entity for Skowork, the file the agent edited, or the placeholder speaker, though the passages mention them.
+    EXPECT_TRUE(store.find_entities("Skowork", 1).empty());
+    EXPECT_TRUE(store.find_entities("index.html", 1).empty());
+    EXPECT_TRUE(store.find_entities("Speaker 1", 1).empty());
+    EXPECT_TRUE(store.find_entities("DZC", 1).empty());  // named only by the meta fact
+    // The rejected candidates count as not kept for Threads, without their content.
+    EXPECT_EQ(kg.svc->status()["salience"]["dropped_today"]["threads"].get<long long>(), 3);
+}
+
+TEST(KnowledgeCommonSense, ExtractionAndRatingInstructionsCarryTheRubric) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    kg.gw.salience_rules = {{"Team plan", "Jana Nováková", "works_on", "Phoenix", "lasting", "Jana works on Phoenix.", 0.9, true}};
+    kg.add_thread("plan", {{"user", "Team plan for Phoenix"}});
+    kg.svc->sweep_now();
+    kg.idle();
+    ASSERT_TRUE(kg.svc->store().db().exec("UPDATE relations SET scored=0"));
+    kg.idle();
+    ASSERT_GE(kg.gw.system_prompts.size(), 2u);
+    bool extraction = false, rating = false;
+    for (const auto& [feature, system] : kg.gw.system_prompts) {
+        const bool rubric = system.find("Keep test:") != std::string::npos && system.find("Leave out:") != std::string::npos &&
+                            system.find("Salience anchors:") != std::string::npos;
+        if (feature == "knowledge.extract") extraction = extraction || rubric;
+        if (feature == "knowledge.score") rating = rating || rubric;
+    }
+    EXPECT_TRUE(extraction);
+    EXPECT_TRUE(rating);
+}
+
+TEST(KnowledgeCommonSense, UserMarkWinsOverTheGates) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    kg.gw.salience_rules = {{"Variant plan", "Speaker 1", "approves", "Variant A", "lasting", "Speaker 1 approves variant A.", 0.9, true}};
+    // The user marked this fact important before (by its names), so the gates do not reject it.
+    ASSERT_TRUE(kg.svc->store().db().exec(
+        "INSERT INTO importance_marks(subject, predicate, object, mark) VALUES('speaker 1','approves','variant a',1)"));
+    kg.add_thread("plan", {{"user", "Variant plan"}});
+    kg.svc->sweep_now();
+    kg.idle();
+    const auto speaker = kg.svc->store().find_entities("Speaker 1", 1);
+    ASSERT_EQ(speaker.size(), 1u);
+    const auto rels = kg.svc->store().relations_of(speaker[0].id, 10);
+    ASSERT_EQ(rels.size(), 1u);
+    EXPECT_DOUBLE_EQ(rels[0].salience, 1.0);
+}
+
+TEST(KnowledgeCommonSense, CleanupRemovesStoredNoiseOnceKeepsMarksAndRatesTheRestAgain) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    kg.gw.salience_rules = {
+        {"Memo decision", "Jana Nováková", "decides", "Phoenix", "lasting", "Jana Nováková decided the Phoenix budget.", 0.9, true},
+        {"Team plan", "Petr Dvořák", "works_on", "Phoenix", "lasting", "Petr works on Phoenix.", 0.6, true},
+    };
+    kg.add_thread("memo", {{"user", "Memo decision on the Phoenix budget"}});
+    kg.add_thread("plan", {{"user", "Team plan for Phoenix"}});
+    kg.svc->sweep_now();
+    kg.idle();
+    auto& store = kg.svc->store();
+    // Facts stored under older rules: rewrite two stored relations into noise the gates now reject, and mark one.
+    const auto jana = store.find_entities("Jana Nováková", 1), petr = store.find_entities("Petr Dvořák", 1);
+    ASSERT_EQ(jana.size(), 1u);
+    ASSERT_EQ(petr.size(), 1u);
+    const long long noise = store.relations_of(petr[0].id, 10).at(0).id;
+    const long long kept = store.relations_of(jana[0].id, 10).at(0).id;
+    ASSERT_TRUE(store.db().exec("UPDATE relations SET predicate='discusses' WHERE id=" + std::to_string(noise)));
+    ASSERT_TRUE(store.db().exec("UPDATE relations SET predicate='mentions' WHERE id=" + std::to_string(kept)));
+    ASSERT_TRUE(store.db().exec("INSERT INTO importance_marks(subject, predicate, object, mark) VALUES('jana novakova','mentions','phoenix',1)"));
+    ASSERT_TRUE(store.db().exec("UPDATE relations SET scored=1"));
+    store.set_meta("triage.rules", "0");
+
+    // The next step cleans up once: the unmarked noise goes, the marked fact stays, the items stay searchable.
+    kg.gw.score_salience = 0.8;
+    kg.gw.score_durability = "lasting";
+    auto removed = store.apply_triage_rules(kTriageRules);
+    ASSERT_TRUE(removed);
+    EXPECT_EQ(*removed, 1);
+    EXPECT_FALSE(store.relation(noise).has_value());
+    ASSERT_TRUE(store.relation(kept).has_value());
+    EXPECT_EQ(store.meta("triage.rules"), std::to_string(kTriageRules));
+    EXPECT_TRUE(kg.found(kg.svc->search("Team plan Phoenix", {}), "Team plan for Phoenix"));
+    // Applying the same rules again changes nothing.
+    removed = store.apply_triage_rules(kTriageRules);
+    ASSERT_TRUE(removed);
+    EXPECT_EQ(*removed, -1);
+    // The marked fact keeps its mark and is not sent for rating again.
+    EXPECT_TRUE(store.relation(kept)->scored);
+    EXPECT_TRUE(store.unscored_relations(10).empty());
+}
+
+TEST(KnowledgeCommonSense, MeAndTheUsersAccountNameAreTheSignedInUser) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    kg.gw.salience_rules = {
+        {"Pro decision", "Me", "decided_against", "Pro 4T", "lasting", "I decided against Pro 4T.", 0.9, true},
+        {"Account plan", "JNOVAK1", "approves", "Variant A", "lasting", "JNOVAK1 approves variant A.", 0.9, true},
+        {"Speaker plan", "Speaker 1", "approves", "Variant B", "lasting", "Speaker 1 approves variant B.", 0.9, true},
+    };
+    kg.add_thread("pro", {{"user", "Pro decision"}});
+    kg.add_thread("account", {{"user", "Account plan"}});
+    kg.add_thread("speaker", {{"user", "Speaker plan"}});
+    kg.svc->sweep_now();
+    kg.idle();
+    auto& store = kg.svc->store();
+    EXPECT_TRUE(store.find_entities("Me", 1).empty());
+    EXPECT_TRUE(store.find_entities("JNOVAK1", 1).empty());
+    EXPECT_TRUE(store.find_entities("Speaker 1", 1).empty());  // a speaker label is not the user
+    const auto jan = store.find_entities("jan.novak@acme-test.example", 1);
+    ASSERT_EQ(jan.size(), 1u);
+    EXPECT_EQ(jan[0].name, "Jan Novák");
+    std::set<std::string> predicates;
+    for (const auto& r : store.relations_of(jan[0].id, 10)) predicates.insert(r.predicate);
+    EXPECT_EQ(predicates, (std::set<std::string>{"decided_against", "approves"}));
+}
+
+TEST(KnowledgeCommonSense, CleanupMergesAnExistingMeIntoTheUser) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    kg.gw.salience_rules = {{"Memo decision", "Petr Dvořák", "decides", "Phoenix", "lasting", "Petr decided.", 0.9, true}};
+    kg.add_thread("memo", {{"user", "Memo decision on Phoenix"}});
+    kg.svc->sweep_now();
+    kg.idle();
+    auto& store = kg.svc->store();
+    // A "Me" stored by an older client: rename Petr to Me, as extraction before this change would have stored it.
+    const auto petr = store.find_entities("Petr Dvořák", 1);
+    ASSERT_EQ(petr.size(), 1u);
+    const long long rel = store.relations_of(petr[0].id, 10).at(0).id;
+    ASSERT_TRUE(store.db().exec("UPDATE entities SET name='Me', key='person-name:me' WHERE id=" + std::to_string(petr[0].id)));
+    store.set_meta("triage.rules", "0");
+    const auto removed = kg.svc->apply_triage_cleanup();
+    ASSERT_TRUE(removed);
+    EXPECT_EQ(*removed, 0);  // merged into the user, so the gates keep it
+    const auto r = store.relation(rel);
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->subject_name, "Jan Novák");
+}
+
+TEST(KnowledgeCommonSense, ThreadFactsAboutAssistantsAndLocalAppsAreNotKept) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    kg.local_apps = {"passkeys-explained", "Passkeys Explained"};
+    kg.gw.salience_rules = {
+        {"Review plan", "Kimi", "works_on", "Phoenix", "lasting", "Kimi works on Phoenix.", 0.8, true},
+        {"App plan", "Petr Dvořák", "requested", "Passkeys Explained App", "lasting", "Petr asked for the app.", 0.9, true},
+        {"Memo decision", "Jana Nováková", "decides", "Phoenix", "lasting", "Jana decided.", 0.9, true},
+    };
+    kg.add_thread("review", {{"user", "Review plan"}});
+    kg.add_thread("app", {{"user", "App plan"}});
+    kg.add_thread("memo", {{"user", "Memo decision on Phoenix"}});
+    kg.svc->sweep_now();
+    kg.idle();
+    auto& store = kg.svc->store();
+    EXPECT_TRUE(store.find_entities("Kimi", 1).empty());
+    EXPECT_TRUE(store.find_entities("Passkeys Explained App", 1).empty());
+    EXPECT_EQ(store.relations_of(store.find_entities("Jana Nováková", 1).at(0).id, 10).size(), 1u);
+}
+
+TEST(KnowledgeCommonSense, DuplicateNamesAreMergedAsTheModelConfirmsAndAUserSplitStays) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    kg.gw.salience_rules = {
+        {"Ship plan", "Petr Dvořák", "works_on", "Ship", "lasting", "Petr works on Ship.", 0.8, true},
+        {"SIP plan", "Pan Šep", "manages", "ŠIP", "lasting", "Pan Šep manages ŠIP.", 0.8, true},
+        {"Portal plan", "Petr Dvořák", "uses", "Ship portal", "lasting", "Petr uses Ship portal.", 0.8, true},
+    };
+    // The model groups Ship and ŠIP and leaves Ship portal apart.
+    std::vector<std::string> asked;
+    kg.gw.resolve = [&asked](const model::ChatRequest& req) {
+        const std::string& user = req.messages.back().content;
+        asked.push_back(user);
+        std::vector<int> group;
+        for (const auto& line : wb::split(user, '\n')) {
+            const auto colon = line.find(": ");
+            if (colon == std::string::npos) continue;
+            const std::string name = line.substr(colon + 2, line.rfind(" (") - colon - 2);
+            if (name == "Ship" || name == "ŠIP") group.push_back(std::stoi(line.substr(0, colon)));
+        }
+        return json{{"groups", json::array({group})}}.dump();
+    };
+    kg.add_thread("ship", {{"user", "Ship plan"}});
+    kg.add_thread("sip", {{"user", "SIP plan"}});
+    kg.add_thread("portal", {{"user", "Portal plan"}});
+    kg.svc->sweep_now();
+    kg.idle();
+    auto& store = kg.svc->store();
+    ASSERT_GE(kg.gw.resolve_calls, 1);
+    const auto ship = store.find_entities("Ship", 5);
+    const auto sip = store.find_entities("ŠIP", 1);
+    ASSERT_EQ(sip.size(), 1u);
+    long long ship_id = 0, portal_id = 0;
+    for (const auto& e : ship) {
+        if (e.name == "Ship" || e.name == "ŠIP") ship_id = e.id;
+        if (e.name == "Ship portal") portal_id = e.id;
+    }
+    EXPECT_EQ(sip[0].id, ship_id);  // one entity with both names
+    ASSERT_NE(portal_id, 0);
+    EXPECT_NE(portal_id, ship_id);
+    EXPECT_EQ(store.relations_of(ship_id, 10).size(), 2u);  // the facts of both names
+    // The user splits ŠIP off again: a later resolution pass does not merge it back.
+    auto split = kg.svc->split_entity(ship_id, "ŠIP");
+    ASSERT_TRUE(split);
+    store.set_meta("resolve.after", "0");
+    kg.idle();
+    EXPECT_NE(store.find_entities("ŠIP", 1).at(0).id, store.find_entities("Ship portal", 1).at(0).id);
+    EXPECT_EQ(store.find_entities("ŠIP", 1).at(0).id, *split);
+}
+
+TEST(KnowledgeCommonSense, EntitiesAFactConnectsAreNeverMerged) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    kg.gw.salience_rules = {
+        {"Archive plan", "Petr Dvořák", "uses", "Archivas", "lasting", "Petr uses Archivas.", 0.8, true},
+        {"Services plan", "Petr Dvořák", "runs", "Archivas Services", "lasting", "Petr runs Archivas Services.", 0.8, true},
+    };
+    kg.add_thread("archive", {{"user", "Archive plan"}});
+    kg.add_thread("services", {{"user", "Services plan"}});
+    kg.svc->sweep_now();
+    kg.idle();
+    auto& store = kg.svc->store();
+    const long long archivas = store.find_entities("Archivas", 1).at(0).id;
+    const long long services = store.find_entities("Archivas Services", 1).at(0).id;
+    // A stored fact says they are separate; the model nevertheless groups them.
+    const auto rel = store.relations_of(archivas, 10).at(0);
+    store.add_relation(services, "separate_from", archivas, 0.9, "", "", rel.chunk_id);
+    kg.gw.resolve = [](const model::ChatRequest& req) {
+        std::vector<int> group;
+        for (const auto& line : wb::split(req.messages.back().content, '\n'))
+            if (line.find("Archiv") != std::string::npos) group.push_back(std::stoi(line.substr(0, line.find(':'))));
+        return json{{"groups", json::array({group})}}.dump();
+    };
+    store.set_meta("resolve.after", "0");
+    kg.idle();
+    ASSERT_GE(kg.gw.resolve_calls, 1);
+    ASSERT_TRUE(store.entity(archivas).has_value());
+    ASSERT_TRUE(store.entity(services).has_value());
+    EXPECT_TRUE(store.entities_related(archivas, services));
+}
+
+TEST(KnowledgeCommonSense, EntitiesWithoutFactsAreNotListedButTheirPassagesAreFound) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    // DZC is mentioned in the passage, but its only candidate fact is a meta fact the gates reject.
+    kg.gw.salience_rules = {
+        {"Edge capture", "Capture of Edge", "discusses", "DZC", "lasting", "The meeting discusses DZC.", 0.7, true},
+        {"Memo decision", "Jana Nováková", "decides", "Phoenix", "lasting", "Jana decided.", 0.9, true},
+    };
+    kg.add_thread("edge", {{"user", "Edge capture: DZC identity process"}});
+    kg.add_thread("memo", {{"user", "Memo decision on Phoenix"}});
+    kg.svc->sweep_now();
+    kg.idle();
+    ASSERT_FALSE(kg.svc->store().find_entities("DZC", 1).empty());  // still linked to its passage
+    const json listed = kg.svc->entities_page("", 50, nullptr)["entities"];
+    bool dzc = false, jana = false;
+    for (const auto& e : listed) {
+        dzc = dzc || e["name"] == "DZC";
+        jana = jana || e["name"] == "Jana Nováková";
+    }
+    EXPECT_FALSE(dzc);
+    EXPECT_TRUE(jana);
+    // Looked up by name it is still there (curation such as merge and split needs it).
+    EXPECT_EQ(kg.svc->entities_page("DZC", 10, nullptr)["entities"].size(), 1u);
+    const auto found = kg.svc->search("DZC identity process", {});
+    std::string titles;
+    for (const auto& p : found.passages) titles += p.title + " | ";
+    EXPECT_TRUE(kg.found(found, "Edge capture: DZC identity process")) << titles;
+}
+
+TEST(KnowledgeCommonSense, CleanupIndexesThreadsAgain) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    kg.add_thread("plan", {{"user", "Old wording of the plan"}});
+    kg.svc->sweep_now();
+    kg.idle();
+    // The Thread's text changes without a finished-Thread notice, as the run-time line does on upgrade.
+    kg.add_thread("plan", {{"user", "Brake roadmap for 2027"}});
+    kg.svc->sweep_now();
+    kg.idle();
+    EXPECT_FALSE(kg.found(kg.svc->search("Brake roadmap 2027", {}), "Brake roadmap for 2027"));  // the sweep skips it
+    kg.svc->store().set_meta("triage.rules", "1");
+    ASSERT_TRUE(kg.svc->apply_triage_cleanup());
+    kg.idle();
+    EXPECT_TRUE(kg.found(kg.svc->search("Brake roadmap 2027", {}), "Brake roadmap for 2027"));
+}
+
+TEST(KnowledgeCommonSense, CleanupLeavesUnmarkedFactsForTheBackgroundRating) {
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    kg.gw.salience_rules = {{"Team plan", "Petr Dvořák", "works_on", "Phoenix", "lasting", "Petr works on Phoenix.", 0.6, true}};
+    kg.add_thread("plan", {{"user", "Team plan for Phoenix"}});
+    kg.svc->sweep_now();
+    kg.idle();
+    auto& store = kg.svc->store();
+    const auto petr = store.find_entities("Petr Dvořák", 1);
+    ASSERT_EQ(petr.size(), 1u);
+    const long long id = store.relations_of(petr[0].id, 10).at(0).id;
+    EXPECT_TRUE(store.relation(id)->scored);
+    // New gate rules with the same rubric: ratings stay.
+    store.set_meta("triage.rules", "1");
+    ASSERT_TRUE(store.apply_triage_rules(kTriageRules));
+    EXPECT_TRUE(store.relation(id)->scored);
+    // A new rubric: every unmarked fact is rated again.
+    store.set_meta("triage.rules", "0");
+    store.set_meta("triage.rubric", "0");
+    ASSERT_TRUE(store.apply_triage_rules(kTriageRules));
+    EXPECT_FALSE(store.relation(id)->scored);  // rated again under the new rubric
+    EXPECT_EQ(store.meta("triage.rubric"), std::to_string(kTriageRubric));
+    // The background rating rates it, here as low: it stays, hidden from current answers.
+    kg.gw.score_salience = 0.2;
+    kg.gw.score_durability = "trivial";
+    kg.idle();
+    ASSERT_TRUE(store.relation(id).has_value());
+    EXPECT_TRUE(store.relation(id)->scored);
+    EXPECT_DOUBLE_EQ(store.relation(id)->salience, 0.2);
+    EXPECT_TRUE(kg.svc->current_relation(*store.relation(id), KnowledgeFilter{}).is_null());
 }
 
 TEST(KnowledgeTeamSearch, TeamPassagesCarryOwnerAndGroupsAndOfflineIsSaid) {

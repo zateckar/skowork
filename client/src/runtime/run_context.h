@@ -3,6 +3,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
 namespace wb::runtime {
 
@@ -20,6 +21,8 @@ std::string format_run_context(const RunContextInfo& info);
 
 // The first line of the message that starts a Run: "Current time: Thursday 22 October 2026, 09:05 (2026-10-22), UTC+02:00".
 std::string format_run_time(const RunContextInfo& info);
+// The message without a leading current-time line written by format_run_time, and the blank lines after it.
+std::string strip_run_time(std::string_view text);
 
 // Collects the context now from Windows (local time, time zone, known folders). `user` is the signed-in user.
 RunContextInfo collect_run_context(const std::string& user);

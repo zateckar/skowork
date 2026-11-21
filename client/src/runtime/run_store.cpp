@@ -167,6 +167,12 @@ bool RunStore::thread_exists(const std::string& id) {
     return st.step();
 }
 
+std::string RunStore::thread_title(const std::string& id) {
+    auto st = db_.prepare("SELECT title FROM threads WHERE id=?1");
+    st.bind(1, id);
+    return st.step() ? st.col_text(0) : std::string{};
+}
+
 Status RunStore::set_thread_title(const std::string& id, const std::string& title) {
     auto st = db_.prepare("UPDATE threads SET title=?2, updated_at=?3 WHERE id=?1");
     st.bind(1, id).bind(2, title).bind(3, now());

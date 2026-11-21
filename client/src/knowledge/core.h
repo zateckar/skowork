@@ -179,4 +179,38 @@ double weighted_score(double score, double weight);
 // The importance level the Knowledge view shows (design D6): high, normal or low, never a number.
 std::string importance_level(double salience);
 
+// ---- Common-sense triage (add-common-sense-knowledge-triage design D2) ------------------------------------------------
+
+// The version of the triage rules; a stored lower version triggers the one-time cleanup (design D3).
+// 2: the cleanup also queues every Thread for indexing, so Threads indexed with the run-time line are indexed again.
+// 3: Local App names match spelling variants. 4: rubric 2 is rated.
+inline constexpr int kTriageRules = 4;
+// The version of the rating rubric (design D1): facts are rated again only when it changes, not with every rules
+// change. Rules 1 and 2 came with rubric 1. Rubric 2: "Me" and the passage author are the user, not a placeholder.
+inline constexpr int kTriageRubric = 2;
+// The output cap of extraction, rating and resolution requests: a reasoning model spends it on reasoning first.
+inline constexpr int kKnowledgeOutputTokens = 8192;
+// Why an entity name is never kept: "assistant" (Skowork itself; in a Thread also a well-known AI assistant or model,
+// design D6), "placeholder" (Speaker 1, Me, the user, ...), "path" (a file path or file name named in a Thread) or
+// "local_app" (a Thread naming one of `local_apps`, ids or titles). Empty when the name passes. `source` is the Source
+// kind of the passage.
+std::string common_sense_reject_name(std::string_view name, std::string_view source,
+                                     const std::vector<std::string>& local_apps = {});
+// Why a candidate relation is never stored: a name reason above, "meta" (a predicate that only says something was
+// discussed, mentioned or relates to something) or "self" (subject and object are the same). Empty when it passes.
+std::string common_sense_reject(std::string_view subject, std::string_view predicate, std::string_view object,
+                                std::string_view source, const std::vector<std::string>& local_apps = {});
+// "Me", "I", "the user" and their cs and de equivalents: the author of a meeting capture, Thread or note (design D5).
+bool self_reference_name(std::string_view name);
+
+// ---- Duplicate entity resolution (add-common-sense-knowledge-triage design D7) -----------------------------------------
+
+// Whether two entity names are similar enough to ask the model whether they name the same thing: a small edit distance
+// of the folded names, one containing the other as a word, or a shared word of 4 or more characters (honorifics
+// dropped).
+bool similar_entity_names(std::string_view a, std::string_view b);
+// The answer to a resolution request: {"groups": [[i, j, ...], ...]}. Indexes outside 0..count-1 and repeats are
+// dropped, and groups with fewer than two names are ignored; nullopt when the answer is not JSON.
+std::optional<std::vector<std::vector<int>>> parse_entity_groups(std::string_view text, int count);
+
 }  // namespace wb::knowledge
