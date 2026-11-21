@@ -50,11 +50,18 @@ The client SHALL provide the tools teams.search (text, conversation, sender, dat
 - **THEN** matching messages are returned with conversation, sender, time and text, most recent first
 
 ### Requirement: Teams Event Feed
-The client SHALL publish "Teams message", "Teams message updated" and "Teams message deleted" events for messages in conversations that are not excluded, for the Source teams of client/knowledge-graph, for client/agenda and for client/daily-report. A "Teams message" event SHALL say whether the message is addressed to the user (a one-to-one chat, or a mention of the user). The first read after enabling SHALL publish no events.
+The client SHALL publish "Teams message", "Teams message updated" and "Teams message deleted" events for messages in conversations that are not excluded, for the Source teams of client/knowledge-graph, for client/agenda and for client/daily-report. A "Teams message" event SHALL say whether the message is addressed to the user (a one-to-one chat, or a mention of the user).
 
 #### Scenario: Mention in a group chat
 - **WHEN** a colleague mentions the user in a group chat
 - **THEN** a "Teams message" event that is marked as addressed to the user is published once
+
+### Requirement: Teams Backfill Without Events
+The first read after enabling, or after choosing another profile, SHALL publish no "Teams message" or "Teams message updated" events, and neither SHALL the first read of a conversation that is no longer excluded. Removals of stored messages are still published.
+
+#### Scenario: Turned back on after two weeks
+- **WHEN** the user turns Teams chats off for two weeks and then on again
+- **THEN** the messages of those two weeks are stored without "Teams message" events
 
 ### Requirement: Teams Is Read Only
 The client SHALL NOT send Teams messages, reactions or read receipts, and SHALL NOT change presence. A reply to a Teams message is prepared as mail or copied by the user (client/agenda Sending A Prepared Draft).

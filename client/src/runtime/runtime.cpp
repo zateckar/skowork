@@ -1127,7 +1127,24 @@ private:
             const std::string cid = jstr(c, "id");
             const auto it = s.calls.find(cid);
             if (it != s.calls.end() && it->second.has_result) continue;
-            add_result(cid, jstr(c, "tool"), false, "The call was not executed: " + why + ".");
+            // A call that ran but whose outcome is unknown is not reported as not executed (Uncertain Tool Outcomes).
+            bool unknown = false;
+            if (it != s.calls.end() && !it->second.action_id.empty())
+                if (const auto a = store_.action(it->second.action_id)) unknown = jbool(a->payload, "unknown_outcome");
+            // A subagent that started has done part of its work: stopped, not "not executed".
+            if (it != s.calls.end() && !it->second.child_run.empty()) {
+                if (const auto child = store_.run(it->second.child_run); child && !is_terminal(child->state))
+                    (void)rt_.cancel(child->id, why);
+                add_result(cid, jstr(c, "tool"), false,
+                           "The subagent was stopped before it finished (" + why + "). Steps it already took may have taken effect.",
+                           std::nullopt, nullptr, nullptr, true);
+                continue;
+            }
+            add_result(cid, jstr(c, "tool"), false,
+                       unknown ? "The outcome of the call is unknown: it may or may not have taken effect, and the user did not "
+                                 "confirm it before the Run stopped (" + why + "). Say so; do not claim either outcome."
+                               : "The call was not executed: " + why + ".",
+                       std::nullopt, nullptr, nullptr, unknown);  // shown as neither success nor failure
         }
         complete_batch(batch);
     }
@@ -1162,6 +1179,9 @@ private:
                 if (!decide_call(i, call, work)) {
                     execute(work);  // the calls admitted before the limit still run
                     close_batch_unexecuted(batch, "tool call limit reached");
+                    // Approvals and questions of this batch can no longer be acted on: closed with the limit as reason,
+                    // not left open through the final answer.
+                    rt_.resolve_open_actions(id_, "tool call limit reached");
                     pending_limit_ = "tool call limit reached";  // Final Answer At A Limit: the loop asks for the answer
                     return BatchOutcome::complete;
                 }
@@ -1517,22 +1537,35 @@ private:
             tokens[i] = static_cast<long long>(rt_.calibrated(rt_.cfg_.role, estimate_context_tokens(c)));
             offload[i] = c.size() > policy_cap || tokens[i] > result_cap_tokens;
         }
-        {
-            long long total = 0;
-            for (size_t i = 0; i < work.size(); ++i)
-                if (plain(work[i]) && !offload[i]) total += tokens[i];
-            while (total > response_cap_tokens) {
-                size_t largest = work.size();
-                for (size_t i = 0; i < work.size(); ++i)
-                    if (plain(work[i]) && !offload[i] && (largest == work.size() || tokens[i] > tokens[largest])) largest = i;
-                if (largest == work.size()) break;
-                offload[largest] = true;
-                total -= tokens[largest];
-            }
-        }
         // Bytes kept when an offloaded result cannot be stored: within both caps, at one byte per token at worst.
         const size_t inline_cap = std::min(policy_cap, static_cast<size_t>(result_cap_tokens));
         const size_t preview_budget = std::min(inline_cap, static_cast<size_t>(std::max(256, rt_.cfg_.tool_result_preview_bytes)));
+        {
+            // An offloaded result still sends its preview, its marker and the attachment header: it counts at that size.
+            // The preview's share of the result's tokens, in proportion to its share of the bytes.
+            constexpr long long kOffloadOverheadTokens = 120;
+            const auto cost = [&](size_t i) {
+                if (!offload[i]) return tokens[i];
+                const size_t size = std::max<size_t>(1, work[i].out.content.size());
+                const long long preview = static_cast<long long>(static_cast<double>(tokens[i]) * std::min<double>(1.0, double(preview_budget) / double(size)));
+                return std::min(tokens[i], preview + kOffloadOverheadTokens);
+            };
+            long long total = 0;
+            for (size_t i = 0; i < work.size(); ++i)
+                if (plain(work[i])) total += cost(i);
+            while (total > response_cap_tokens) {
+                // Only a result longer than its preview saves anything when offloaded.
+                size_t largest = work.size();
+                for (size_t i = 0; i < work.size(); ++i)
+                    if (plain(work[i]) && !offload[i] && work[i].out.content.size() > preview_budget &&
+                        (largest == work.size() || tokens[i] > tokens[largest]))
+                        largest = i;
+                if (largest == work.size()) break;
+                total -= cost(largest);
+                offload[largest] = true;
+                total += cost(largest);
+            }
+        }
 
         for (size_t wi = 0; wi < work.size(); ++wi) {
             auto& w = work[wi];

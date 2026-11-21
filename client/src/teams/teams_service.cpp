@@ -26,8 +26,17 @@ constexpr size_t kMaxText = 20'000;
 std::string iso(long long ms) { return iso8601_utc(sys_clock::time_point(std::chrono::milliseconds(ms))); }
 
 Result<Extraction> default_read(const std::filesystem::path& cache, const std::filesystem::path& private_dir) {
-    auto snap = snapshot_cache(cache, private_dir);
+    // One snapshot folder per profile: table files are reused by name and size, and file numbers repeat across databases.
+    char sub[24];
+    std::snprintf(sub, sizeof sub, "p%016llx", static_cast<unsigned long long>(std::hash<std::wstring>{}(cache.wstring())));
+    auto snap = snapshot_cache(cache, private_dir / sub);
     if (!snap) return snap.error();
+    // Snapshots of other profiles, or from before per-profile folders, are private chat data no longer used.
+    std::error_code ec;
+    std::vector<std::filesystem::path> stale;
+    for (std::filesystem::directory_iterator it(private_dir, ec), end; !ec && it != end; it.increment(ec))
+        if (it->path().filename() != std::filesystem::path(sub)) stale.push_back(it->path());
+    for (const auto& p : stale) std::filesystem::remove_all(p, ec);
     auto db = LevelDbReader::open(*snap);
     if (!db) return db.error();
     return extract(IdbCatalog::build(*db));
@@ -226,11 +235,20 @@ json TeamsService::status() {
 }
 
 Status TeamsService::configure(const json& params) {
-    if (params.contains("profile") && params["profile"].is_string())
-        if (Status s = put_state("profile", params["profile"].get<std::string>()); !s) return s;
+    // Turning Teams on, or reading another profile, starts with a backfill again: no events for what is already there.
+    if (params.contains("profile") && params["profile"].is_string()) {
+        const std::string profile = params["profile"].get<std::string>();
+        if (profile != state("profile")) {
+            if (Status s = put_state("profile", profile); !s) return s;
+            if (Status s = put_state("baseline", ""); !s) return s;
+        }
+    }
     if (params.contains("enabled") && params["enabled"].is_boolean()) {
         const bool on = params["enabled"].get<bool>();
         if (on && !available()) return make_error("unavailable", "The organisation has turned off Teams chats (policy.teams.mode).");
+        const bool was_on = state("enabled") == "1";
+        if (on && !was_on)
+            if (Status s = put_state("baseline", ""); !s) return s;
         if (Status s = put_state("enabled", on ? "1" : "0"); !s) return s;
         if (on) request_sync();
     }
@@ -239,36 +257,45 @@ Status TeamsService::configure(const json& params) {
 }
 
 Status TeamsService::exclude(const std::string& conversation_id, bool excluded) {
-    auto list = excluded_conversations();
-    std::erase(list, conversation_id);
-    if (excluded) list.push_back(conversation_id);
-    if (Status s = put_state("excluded", json(list).dump()); !s) return s;
     std::vector<TeamsEvent> gone;
-    if (excluded) {
+    {
+        // One transaction under the database lock: a sync reads the exclusions inside its own write transaction, and no
+        // tool sees the conversation excluded but still stored.
         const std::lock_guard lock(env_.db->mutex());
         Status s = env_.db->transaction([&]() -> Status {
-            auto q = env_.db->prepare("SELECT id FROM teams_messages WHERE conversation_id=?1");
+            auto list = excluded_conversations();
+            std::erase(list, conversation_id);
+            if (excluded) list.push_back(conversation_id);
+            if (Status r = put_state("excluded", json(list).dump()); !r) return r;
+            // An un-excluded conversation comes back without events for what it already holds.
+            auto quiet = parse_json(state("quiet", "[]")).value_or(json::array());
+            if (!quiet.is_array()) quiet = json::array();
+            if (!excluded) quiet.push_back(conversation_id);
+            if (Status r = put_state("quiet", quiet.dump()); !r) return r;
+            if (!excluded) return {};
+            auto q = env_.db->prepare("SELECT id, at_ms FROM teams_messages WHERE conversation_id=?1");
             q.bind(1, conversation_id);
-            while (q.step()) gone.push_back({"teams.deleted", conversation_id, q.col_text(0)});
+            while (q.step()) gone.push_back({"teams.deleted", conversation_id, q.col_text(0), false, false, q.col_int(1)});
             if (Status r = env_.db->prepare("DELETE FROM teams_messages WHERE conversation_id=?1").bind(1, conversation_id).run(); !r) return r;
             if (Status r = env_.db->prepare("DELETE FROM teams_search WHERE conversation_id=?1").bind(1, conversation_id).run(); !r) return r;
             return env_.db->prepare("DELETE FROM teams_conversations WHERE id=?1").bind(1, conversation_id).run();
         });
         if (!s) return s;
-    } else {
-        request_sync();
     }
+    if (!excluded) request_sync();
     publish(gone);
     if (env_.changed) env_.changed();
     return {};
 }
 
 Status TeamsService::forget() {
+    // After any running read: it would otherwise write the copy and the snapshot files back.
+    const std::lock_guard cycle(sync_mx_);
     std::vector<TeamsEvent> gone;
     {
         const std::lock_guard lock(env_.db->mutex());
-        auto q = env_.db->prepare("SELECT conversation_id, id FROM teams_messages");
-        while (q.step()) gone.push_back({"teams.deleted", q.col_text(0), q.col_text(1)});
+        auto q = env_.db->prepare("SELECT conversation_id, id, at_ms FROM teams_messages");
+        while (q.step()) gone.push_back({"teams.deleted", q.col_text(0), q.col_text(1), false, false, q.col_int(2)});
         Status s = env_.db->transaction([&]() -> Status {
             for (const char* sql : {"DELETE FROM teams_messages", "DELETE FROM teams_search", "DELETE FROM teams_conversations", "DELETE FROM teams_state"})
                 if (Status r = env_.db->exec(sql); !r) return r;
@@ -306,16 +333,52 @@ void TeamsService::publish(const std::vector<TeamsEvent>& events) {
 
 // ---- sync (Teams Sync, Teams Event Feed) ----
 
+// Conversation types the organisation excludes leave the copy, also when the policy changed after they were stored.
+Status TeamsService::purge_excluded_types() {
+    const auto types = excluded_types();
+    if (types.empty()) return {};
+    std::vector<TeamsEvent> gone;
+    {
+        const std::lock_guard lock(env_.db->mutex());
+        Status s = env_.db->transaction([&]() -> Status {
+            for (const auto& type : types) {
+                auto q = env_.db->prepare(
+                    "SELECT m.conversation_id, m.id, m.at_ms FROM teams_messages m JOIN teams_conversations c ON c.id=m.conversation_id WHERE c.type=?1");
+                q.bind(1, type);
+                while (q.step()) gone.push_back({"teams.deleted", q.col_text(0), q.col_text(1), false, false, q.col_int(2)});
+                const char* purge[] = {
+                    "DELETE FROM teams_search WHERE conversation_id IN (SELECT id FROM teams_conversations WHERE type=?1)",
+                    "DELETE FROM teams_messages WHERE conversation_id IN (SELECT id FROM teams_conversations WHERE type=?1)",
+                    "DELETE FROM teams_conversations WHERE type=?1"};
+                for (const char* sql : purge)
+                    if (Status r = env_.db->prepare(sql).bind(1, type).run(); !r) return r;
+            }
+            return {};
+        });
+        if (!s) return s;
+    }
+    publish(gone);
+    return {};
+}
+
 Result<TeamsReport> TeamsService::sync_now() {
     if (!enabled()) return make_error("unavailable", "Teams chats are not turned on");
     const std::lock_guard cycle(sync_mx_);
+    // Before the read, so a policy change takes effect even when the cache cannot be read.
+    if (Status s = purge_excluded_types(); !s) return s.error();
     const auto profile = chosen_profile();
     if (profile.empty() && !env_.local_app_data.empty()) {
         const std::lock_guard lock(mx_);
         last_error_ = "No new Teams data was found on this computer.";
         return make_error("not_found", last_error_);
     }
-    auto ex = env_.read(profile);
+    // The decoders read untrusted files: anything they throw (out of memory included) fails this read, not the client.
+    Result<Extraction> ex = make_error("io", "The Teams data could not be read.");
+    try {
+        ex = env_.read(profile);
+    } catch (const std::exception& e) {
+        ex = make_error("io", std::string("The Teams data could not be read: ") + e.what());
+    }
     if (!ex) {
         const std::lock_guard lock(mx_);
         last_error_ = ex.error().message;
@@ -327,7 +390,7 @@ Result<TeamsReport> TeamsService::sync_now() {
         last_counts_ = {{"skipped", ex->skipped}, {"blobs", ex->blobs}, {"decode_errors", ex->decode_errors}};
         last_error_.clear();
     }
-    if (ex->conversations.empty() && ex->messages.empty() && (ex->skipped > 0 || ex->decode_errors > 0)) {
+    if (ex->conversations.empty() && ex->messages.empty() && (ex->skipped > 0 || ex->decode_errors > 0 || ex->blobs > 0)) {
         // Unrecognised cache: the local copy stays as it is.
         const std::lock_guard lock(mx_);
         last_error_ = "The Teams data on this computer was not recognised; the local copy was not changed.";
@@ -336,9 +399,10 @@ Result<TeamsReport> TeamsService::sync_now() {
 
     const long long now = env_.clock->unix_millis();
     const long long cutoff = now - policy_int("teams.sync_days", 30, 1) * kDayMs;
-    const auto excluded = excluded_conversations();
     const auto types = excluded_types();
-    const bool backfill = state("baseline").empty();
+    // Read inside the write transaction below (under the database lock), so a concurrent exclude, Turn off or forget wins.
+    std::vector<std::string> excluded, quiet;
+    bool backfill = false;
 
     // Who the user is: the database owner's MRI, or the profile whose address is the mail account.
     std::string me = to_lower(ex->user_mri);
@@ -350,16 +414,33 @@ Result<TeamsReport> TeamsService::sync_now() {
     }
     std::map<std::string, TeamsConversation> convs;
     for (const auto& c : ex->conversations) convs[c.id] = c;
+    // A conversation whose record was not read gets its type from its id, as it is stored.
+    const auto type_of = [&](const std::string& conv) {
+        const auto it = convs.find(conv);
+        return it != convs.end() ? it->second.type : conversation_type(json::object(), conv);
+    };
     const auto skip = [&](const std::string& conv) {
         if (std::find(excluded.begin(), excluded.end(), conv) != excluded.end()) return true;
-        const auto it = convs.find(conv);
-        const std::string type = it != convs.end() ? it->second.type : std::string("group");
+        const std::string type = type_of(conv);
         return std::find(types.begin(), types.end(), type) != types.end();
+    };
+    const auto listed = [](const std::string& json_list) {
+        std::vector<std::string> out;
+        if (auto j = parse_json(json_list); j && j->is_array())
+            for (const auto& x : *j)
+                if (x.is_string()) out.push_back(x.get<std::string>());
+        return out;
     };
 
     TeamsReport r;
     std::vector<TeamsEvent> events;
     const std::lock_guard lock(env_.db->mutex());
+    if (!enabled()) return make_error("unavailable", "Teams chats are not turned on");
+    // Another profile chosen while this one was read: its first read is the backfill, not this one.
+    if (chosen_profile() != profile) return make_error("unavailable", "The Teams profile changed during the read.");
+    excluded = excluded_conversations();
+    quiet = listed(state("quiet", "[]"));
+    backfill = state("baseline").empty();
     Status written = env_.db->transaction([&]() -> Status {
         std::set<std::string> touched;
         for (const auto& m : ex->messages) {
@@ -372,7 +453,7 @@ Result<TeamsReport> TeamsService::sync_now() {
                 d.bind(1, m.conversation_id).bind(2, m.id);
                 if (Status s = d.run(); !s) return s;
                 (void)env_.db->prepare("DELETE FROM teams_search WHERE conversation_id=?1 AND message_id=?2").bind(1, m.conversation_id).bind(2, m.id).run();
-                if (!backfill) events.push_back({"teams.deleted", m.conversation_id, m.id, false, false, m.at_ms});
+                events.push_back({"teams.deleted", m.conversation_id, m.id, false, false, m.at_ms});
                 ++r.removed;
                 continue;
             }
@@ -390,8 +471,7 @@ Result<TeamsReport> TeamsService::sync_now() {
             bool mentions_me = false;
             for (const auto& mr : m.mention_mris)
                 if (!me.empty() && to_lower(mr) == me) mentions_me = true;
-            const auto conv = convs.find(m.conversation_id);
-            const bool one_to_one = conv != convs.end() && conv->second.type == "chat";
+            const bool one_to_one = type_of(m.conversation_id) == "chat";
             const auto person = people.find(to_lower(m.sender_mri));
             std::string name = m.sender_name.empty() && person != people.end() ? person->second.name : m.sender_name;
             const std::string email = person != people.end() ? person->second.email : std::string{};
@@ -411,6 +491,7 @@ Result<TeamsReport> TeamsService::sync_now() {
             touched.insert(m.conversation_id);
             ++r.messages;
             if (backfill || m.system) continue;
+            if (std::find(quiet.begin(), quiet.end(), m.conversation_id) != quiet.end()) continue;
             events.push_back({fresh ? "teams.message" : "teams.updated", m.conversation_id, m.id, one_to_one || mentions_me, mine, m.at_ms});
         }
         for (const auto& [id, c] : convs) {
@@ -429,11 +510,17 @@ Result<TeamsReport> TeamsService::sync_now() {
         if (Status s = env_.db->prepare("DELETE FROM teams_search WHERE message_id IN (SELECT id FROM teams_messages WHERE at_ms < ?1)").bind(1, cutoff).run(); !s) return s;
         if (Status s = env_.db->prepare("DELETE FROM teams_messages WHERE at_ms < ?1").bind(1, cutoff).run(); !s) return s;
         if (Status s = env_.db->prepare("INSERT OR REPLACE INTO teams_state(key, value) VALUES('last_read', ?1)").bind(1, std::to_string(now)).run(); !s) return s;
-        if (backfill)
+        // The baseline is set by the first read that found messages: an empty or not yet filled cache is no baseline.
+        if (backfill && !ex->messages.empty())
             if (Status s = env_.db->prepare("INSERT OR REPLACE INTO teams_state(key, value) VALUES('baseline', ?1)").bind(1, std::to_string(now)).run(); !s)
                 return s;
-        if (!me.empty())
+        if (Status s = env_.db->exec("DELETE FROM teams_state WHERE key='quiet'"); !s) return s;
+        if (!me.empty()) {
             if (Status s = env_.db->prepare("INSERT OR REPLACE INTO teams_state(key, value) VALUES('me', ?1)").bind(1, me).run(); !s) return s;
+            // The user may have become known only now (the mail account connected later): stored messages follow.
+            if (Status s = env_.db->prepare("UPDATE teams_messages SET mine = (lower(sender_mri) = ?1) WHERE mine <> (lower(sender_mri) = ?1)").bind(1, me).run(); !s)
+                return s;
+        }
         return {};
     });
     if (!written) return written.error();
@@ -486,19 +573,49 @@ std::vector<StoredTeamsMessage> TeamsService::messages(const std::string& conver
     return out;
 }
 
+std::vector<StoredTeamsMessage> TeamsService::messages_before(const std::string& conversation_id, long long at_ms, const std::string& id,
+                                                              long long from, size_t limit) {
+    std::vector<StoredTeamsMessage> out;
+    if (limit == 0) return out;
+    const std::lock_guard lock(env_.db->mutex());
+    auto q = env_.db->prepare(std::string("SELECT ") + kMessageColumns +
+                              " FROM teams_messages WHERE conversation_id=?1 AND (at_ms<?2 OR (at_ms=?2 AND id<?3)) AND at_ms>=?4 AND system=0 "
+                              "ORDER BY at_ms DESC, id DESC LIMIT ?5");
+    q.bind(1, conversation_id).bind(2, at_ms).bind(3, id).bind(4, from).bind(5, static_cast<long long>(limit));
+    while (q.step()) out.push_back(row_message(q));
+    std::reverse(out.begin(), out.end());
+    return out;
+}
+
+std::vector<StoredTeamsMessage> TeamsService::messages_after(const std::string& conversation_id, long long at_ms, const std::string& id,
+                                                             long long to, size_t limit) {
+    std::vector<StoredTeamsMessage> out;
+    const std::lock_guard lock(env_.db->mutex());
+    auto q = env_.db->prepare(std::string("SELECT ") + kMessageColumns +
+                              " FROM teams_messages WHERE conversation_id=?1 AND (at_ms>?2 OR (at_ms=?2 AND id>?3)) AND at_ms<?4 AND system=0 "
+                              "ORDER BY at_ms ASC, id ASC LIMIT ?5");
+    q.bind(1, conversation_id).bind(2, at_ms).bind(3, id).bind(4, to).bind(5, static_cast<long long>(limit));
+    while (q.step()) out.push_back(row_message(q));
+    return out;
+}
+
 std::vector<StoredTeamsMessage> TeamsService::search(const std::string& text, const std::string& conversation_id, const std::string& sender,
                                                      long long since, long long until, size_t limit) {
     std::vector<StoredTeamsMessage> out;
     const std::lock_guard lock(env_.db->mutex());
-    std::string sql = std::string("SELECT ") + kMessageColumns + " FROM teams_messages m WHERE system=0";
+    std::string cols;
+    for (auto c : split(kMessageColumns, ',')) cols += (cols.empty() ? "m." : ",m.") + std::string(trim(c));
     const std::string fq = fts_query(text);
-    if (!fq.empty())
-        sql += " AND EXISTS (SELECT 1 FROM teams_search s WHERE teams_search MATCH ?1 AND s.conversation_id=m.conversation_id AND s.message_id=m.id)";
-    if (!conversation_id.empty()) sql += " AND conversation_id=?2";
-    if (!sender.empty()) sql += " AND (lower(sender_name) LIKE ?3 OR lower(sender_email) LIKE ?3)";
-    if (since) sql += " AND at_ms>=?4";
-    if (until) sql += " AND at_ms<?5";
-    sql += " ORDER BY at_ms DESC LIMIT ?6";
+    // With words, the full-text index drives the query (one MATCH), not one MATCH per stored message.
+    std::string sql = "SELECT " + cols +
+                      (fq.empty() ? std::string(" FROM teams_messages m WHERE m.system=0")
+                                  : std::string(" FROM teams_search s JOIN teams_messages m ON m.conversation_id=s.conversation_id AND "
+                                                "m.id=s.message_id WHERE teams_search MATCH ?1 AND m.system=0"));
+    if (!conversation_id.empty()) sql += " AND m.conversation_id=?2";
+    if (!sender.empty()) sql += " AND (lower(m.sender_name) LIKE ?3 OR lower(m.sender_email) LIKE ?3)";
+    if (since) sql += " AND m.at_ms>=?4";
+    if (until) sql += " AND m.at_ms<?5";
+    sql += " ORDER BY m.at_ms DESC LIMIT ?6";
     auto q = env_.db->prepare(sql);
     if (!fq.empty()) q.bind(1, fq);
     if (!conversation_id.empty()) q.bind(2, conversation_id);
@@ -661,18 +778,25 @@ std::vector<ToolDef> TeamsService::tools() {
         const auto c = conversation(conv);
         if (!c) return ToolOutput::failure("Not found: no such Teams conversation in the local copy.");
         const size_t limit = static_cast<size_t>(std::clamp<long long>(jint(a, "limit", 50), 1, 200));
-        long long from = 0, to = 0;
+        std::vector<StoredTeamsMessage> found;
         if (!id.empty()) {
             const auto m = message(conv, id);
             if (!m) return ToolOutput::failure("Not found: no such Teams message in the local copy.");
-            from = m->at_ms - 2 * 3'600'000;
-            to = m->at_ms + 2 * 3'600'000;
+            // The message itself always: up to half the limit before it (with it) and the rest after it, within two hours.
+            const size_t before_n = (limit - 1) / 2;
+            found = messages_before(conv, m->at_ms, m->id, m->at_ms - 2 * 3'600'000, before_n);
+            found.push_back(*m);
+            if (limit > found.size()) {
+                auto after = messages_after(conv, m->at_ms, m->id, m->at_ms + 2 * 3'600'000, limit - found.size());
+                found.insert(found.end(), std::make_move_iterator(after.begin()), std::make_move_iterator(after.end()));
+            }
         } else {
-            to = parse_iso8601_ms(jstr(a, "until")).value_or(env_.clock->unix_millis() + 1);
-            from = parse_iso8601_ms(jstr(a, "since")).value_or(to - 7 * kDayMs);
+            const long long to = parse_iso8601_ms(jstr(a, "until")).value_or(env_.clock->unix_millis() + 1);
+            const long long from = parse_iso8601_ms(jstr(a, "since")).value_or(to - 7 * kDayMs);
+            found = messages(conv, from, to, limit);
         }
         json list = json::array();
-        for (const auto& m : messages(conv, from, to, limit)) list.push_back(message_json(m));
+        for (const auto& m : found) list.push_back(message_json(m));
         ToolOutput o = ToolOutput::success(json{{"conversation", display_name(*c)}, {"type", c->type}, {"messages", list}}.dump());
         o.provenance = provenance(conv);
         return o;

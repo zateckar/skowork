@@ -835,6 +835,8 @@ TEST(MeetingSherpa, FixtureMeetingIsTranscribedDiarizedAndMerged) {
 TEST(MeetingSherpa, VocabularyHotwordsAndRespelling) {
     WB_REQUIRES_DEV_ENDPOINTS();
     if (!models_fetched()) GTEST_SKIP() << "client/models/stt is not fetched (dev/scripts/fetch-stt-models.ps1)";
+    // The Czech fixture is optional (fetch-stt-models.ps1 does not download it); without it there is nothing to decode.
+    if (!std::filesystem::exists(stt_fixtures() / "parakeet-cs.wav")) GTEST_SKIP() << "Czech fixture not fetched";
     SttRun r;
     const std::string cs = r.track(L"cs.skau", TrackKind::remote, concat({silence(0.5), wav16k("parakeet-cs.wav"), silence(0.5)}));
     const std::vector<std::string> vocabulary = {"Břetislav", "Oldřich"};

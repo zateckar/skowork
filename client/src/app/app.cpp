@@ -527,8 +527,14 @@ void App::tick() {
     // The Daily report: written once a working day at the user's time (client/daily-report).
     if (ticks % 5 == 4 && report_live.load() && !report_ticking.exchange(true))
         pool.post([this] {
-            if (auto* r = report_live.load()) r->tick();
-            report_ticking = false;
+            try {
+                if (auto* r = report_live.load()) r->tick();
+            } catch (const std::exception& e) {
+                log::warn(kLog, std::string("daily report: ") + e.what());
+            } catch (...) {
+                log::warn(kLog, "daily report: unknown error");
+            }
+            report_ticking = false;  // shutdown waits on this flag
         });
     // Telemetry batches every 60 seconds or 500 records (design D3); a footprint sample every hour.
     if (telemetry && ticks % 5 == 3 && !telemetry_flushing && telemetry->flush_due()) {
@@ -1765,11 +1771,34 @@ report::Digest App::collect_digest(long long since, long long now) {
                                m.mentions_me || (c && c->type == "chat")});
         }
     if (auto* a = agenda_live.load(); a && a->active()) {
+        // "Due within two working days": until the end of the second working day after today (the report's working
+        // days; Monday to Friday by default).
+        const auto raw = store ? store->setting("daily_report.settings") : std::nullopt;
+        const report::Settings rs = report::parse_settings(raw ? parse_json(*raw).value_or(json::object()) : json::object());
+        long long soon_until = day_end;
+        {
+            std::tm d2{};
+            localtime_s(&d2, &tt);
+            d2.tm_hour = d2.tm_min = d2.tm_sec = 0;
+            for (int found = 0, step = 0; found < 2 && step < 14; ++step) {
+                d2.tm_mday += 1;
+                d2.tm_isdst = -1;
+                (void)std::mktime(&d2);  // normalises the date and tm_wday
+                std::tm next = d2;
+                next.tm_mday += 1;
+                next.tm_isdst = -1;
+                const std::time_t end = std::mktime(&next);
+                if (rs.days[static_cast<size_t>(d2.tm_wday)]) {
+                    ++found;
+                    soon_until = static_cast<long long>(end) * 1000;
+                }
+            }
+        }
         const json l = a->list();
         for (const auto& it : l.value("items", json::array())) {
             const long long due = jint(it, "due_at"), created = jint(it, "created_at");
             const bool overdue = due > 0 && due < now;
-            const bool soon = due > 0 && due < now + 3LL * 86'400'000;
+            const bool soon = due > 0 && due < soon_until;
             const bool fresh = created >= since;
             if (!overdue && !soon && !fresh) continue;
             d.agenda.push_back({jstr(it, "id"), jstr(it, "title"), due ? local_iso(due) : std::string{}, overdue, fresh, jbool(it, "prepared")});
@@ -1898,6 +1927,13 @@ void App::register_local_sources_rpc() {
     rpc.add("daily_report.write_now", RpcExposure::ui, [this](const json&) -> Result<json> {
         auto* r = report_live.load();
         if (!r) return make_error("unavailable", "The Daily report is not available.");
+        // One writer at a time with the scheduled tick (at most one report per day; shutdown waits for it).
+        if (report_ticking.exchange(true)) return make_error("busy", "A Daily report is being written.");
+        struct Release {
+            std::atomic<bool>& flag;
+            ~Release() { flag = false; }  // also when write_now throws: shutdown waits on this flag
+        } release{report_ticking};
+        if (!report_live.load()) return make_error("unavailable", "The Daily report is not available.");  // shutting down
         auto t = r->write_now();
         if (!t) return t.error();
         return json{{"thread_id", *t}};
@@ -1973,9 +2009,17 @@ void App::register_local_sources_rpc() {
                 if (!m) return std::nullopt;
                 const auto c = t->conversation(m->conversation_id);
                 return TeamsReplySource{*m, c ? t->display_name(*c) : std::string("Teams")};
-            });
-        out["outlook"] = mail_svc && mail_svc->connection() && mail_svc->connection()->local();
-        out["can_send"] = mail_svc && mail_svc->available();
+            },
+            mail_svc ? mail_svc->account() : std::string{});
+        // Offered only where policy allows the call (tools.rules); the call itself is checked again on press.
+        const auto permitted = [this](const std::string& tool) {
+            if (!enforcer || !mail_svc) return false;
+            for (const auto& t : mail_svc->tools())
+                if (t.id == tool) return enforcer->tool_permitted(tool, runtime::effective_risk(t, json::object()));  // rules, risk classes, defaults
+            return false;
+        };
+        out["outlook"] = mail_svc && mail_svc->connection() && mail_svc->connection()->local() && permitted("mail.draft");
+        out["can_send"] = mail_svc && mail_svc->available() && permitted("mail.send");
         return out;
     });
     const auto mail_tool = [this](const std::string& id) -> std::optional<runtime::ToolDef> {
@@ -1984,26 +2028,61 @@ void App::register_local_sources_rpc() {
             if (t.id == id) return std::move(t);
         return std::nullopt;
     };
+    // Policy decides these calls like any other (client/policy-enforcement): a deny stops them; the user's press, with
+    // the whole message on screen, is the approval a require_approval decision asks for, and is recorded as such. A
+    // rewrite is refused: the message sent must be exactly the one on screen.
+    const auto policy_check = [this](const runtime::ToolDef& def, const json& args, const std::string& call_id) -> Status {
+        if (!enforcer) return make_error("unavailable", "the policy handler is not running");
+        runtime::ToolCallInfo call;
+        call.run.run_id = "user:agenda";
+        call.call_id = call_id;
+        call.tool = def.id;
+        call.args = args;
+        call.risk = runtime::effective_risk(def, args);
+        call.risk_declared = runtime::risk_is_declared(def);
+        if (def.resources_of) call.resources = def.resources_of(args);
+        const runtime::ToolDecision d = enforcer->before_tool_call(call);
+        if (d.kind == runtime::ToolDecision::Kind::deny) return make_error("denied", "Policy does not allow this: " + d.reason);
+        if (d.kind == runtime::ToolDecision::Kind::rewrite) return make_error("denied", "Policy would change this message; it was not sent.");
+        if (d.kind == runtime::ToolDecision::Kind::require_approval) enforcer->record_resolution(call.run.run_id, call_id, def.id, "approve");
+        return {};
+    };
+    const auto reply_args = [](const json& p) -> Result<json> {
+        const json to = p.value("to", json::array());
+        if (!to.is_array() || to.empty()) return make_error("bad_request", "The reply has no recipient.");
+        if (trim(jstr(p, "body")).empty()) return make_error("bad_request", "The reply is empty.");
+        json args = {{"to", to}, {"cc", p.value("cc", json::array())}, {"subject", jstr(p, "subject")}, {"body", jstr(p, "body")}};
+        if (!jstr(p, "reply_to").empty()) args["reply_to"] = jstr(p, "reply_to");
+        return args;
+    };
     // The user's Send, with the whole message on screen, is the approval mail.send requires; no Run is involved.
-    rpc.add("agenda.send_draft", RpcExposure::ui, [mail_tool](const json& p) -> Result<json> {
+    rpc.add("agenda.send_draft", RpcExposure::ui, [mail_tool, policy_check, reply_args](const json& p) -> Result<json> {
         auto send = mail_tool("mail.send");
         if (!send) return make_error("unavailable", "Mail is not available.");
-        json args = {{"to", p.value("to", json::array())}, {"cc", p.value("cc", json::array())}, {"subject", jstr(p, "subject")},
-                     {"body", jstr(p, "body")}};
-        if (!jstr(p, "reply_to").empty()) args["reply_to"] = jstr(p, "reply_to");
+        auto built = reply_args(p);
+        if (!built) return built.error();
+        json args = std::move(*built);
         runtime::ToolContext ctx;
         ctx.call_id = "agenda-send-" + std::to_string(system_clock().unix_millis());
+        if (Status s = policy_check(*send, args, ctx.call_id); !s) return s.error();
         const auto r = send->run(ctx, args);
+        // Started but not confirmed: the form closes, so a second press cannot send it twice.
+        if (r.outcome_unknown)
+            return json{{"sent", false},
+                        {"unknown", true},
+                        {"message", "The mail may have been sent. Check Sent Items in Outlook before sending it again."}};
         if (!r.ok) return make_error("send_failed", r.content);
         return json{{"sent", true}};
     });
-    rpc.add("agenda.open_draft_in_outlook", RpcExposure::ui, [this, mail_tool](const json& p) -> Result<json> {
+    rpc.add("agenda.open_draft_in_outlook", RpcExposure::ui, [this, mail_tool, policy_check](const json& p) -> Result<json> {
         auto draft = mail_tool("mail.draft");
         if (!draft || !mail_svc) return make_error("unavailable", "Mail is not available.");
         json args = {{"to", p.value("to", json::array())}, {"cc", p.value("cc", json::array())}, {"subject", jstr(p, "subject")},
                      {"body", jstr(p, "body")}};
         if (!jstr(p, "reply_to").empty()) args["reply_to"] = jstr(p, "reply_to");
         runtime::ToolContext ctx;
+        ctx.call_id = "agenda-draft-" + std::to_string(system_clock().unix_millis());
+        if (Status s = policy_check(*draft, args, ctx.call_id); !s) return s.error();
         const auto r = draft->run(ctx, args);
         if (!r.ok) return make_error("draft_failed", r.content);
         const auto j = parse_json(r.content);
@@ -3371,6 +3450,11 @@ void App::shutdown() {
     knowledge_live = nullptr;
     messaging_live = nullptr;
     agenda_live = nullptr;
+    report_live = nullptr;
+    // A report being written on the pool uses the inbox, which goes before the pool does.
+    while (report_ticking.load()) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    teams_live = nullptr;
+    if (teams_svc) teams_svc->stop();  // its sync thread uses the store, the mail account and the pool
     if (dictation_svc) (void)dictation_svc->cancel();  // the audio of a recording goes with it (Dictation Privacy)
     if (meeting_svc) meeting_svc->stop();
     if (knowledge_svc) knowledge_svc->stop();
@@ -3410,6 +3494,7 @@ void App::shutdown() {
     dictation_svc.reset();
     meeting_svc.reset();
     knowledge_svc.reset();
+    teams_svc.reset();
     messaging_svc.reset();
     while (agenda_ticking.load()) std::this_thread::sleep_for(std::chrono::milliseconds(20));  // a tick on the pool ends first
     agenda_svc.reset();

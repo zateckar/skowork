@@ -1393,14 +1393,19 @@ TEST(ShellFeed, CtrlCWithTheComposerFocusedCopiesTheMessageSelection) {
 
     // The window copies through the clipboard (Window::copy_text), so the test reads the clipboard back.
     w.key(ui::kKeyC, true);
+    // Other processes on the machine (clipboard history, a clipboard manager) may hold the clipboard right after the
+    // copy, so the read is retried for a moment.
     std::wstring clip;
-    if (::OpenClipboard(nullptr)) {
-        if (HANDLE h = ::GetClipboardData(CF_UNICODETEXT))
-            if (auto* p = static_cast<const wchar_t*>(::GlobalLock(h))) {
-                clip = p;
-                ::GlobalUnlock(h);
-            }
-        ::CloseClipboard();
+    for (int attempt = 0; attempt < 100 && clip.empty(); ++attempt) {
+        if (::OpenClipboard(nullptr)) {
+            if (HANDLE h = ::GetClipboardData(CF_UNICODETEXT))
+                if (auto* p = static_cast<const wchar_t*>(::GlobalLock(h))) {
+                    clip = p;
+                    ::GlobalUnlock(h);
+                }
+            ::CloseClipboard();
+        }
+        if (clip.empty()) ::Sleep(10);
     }
     EXPECT_EQ(clip, L"beta gamma");
     std::u16string draft;
@@ -5533,8 +5538,17 @@ TEST(ShellKnowledge, SaveMailAndChatAsNote) {
         // The saved note shows where it came from, as a link; sharing it names the copied content.
         const std::string note_row = "knowledge-row-n" + std::to_string(store.notes()[0].id);
         ASSERT_TRUE(w.until([&] { return w.exists(note_row); }));
-        ASSERT_TRUE(w.invoke(note_row));
-        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-origin"); })) << "origin";
+        // The row can still be the one listed before the note was indexed: such a row has no item yet and opens the
+        // note's editor. The list reloads on knowledge.changed, so the row is opened again until it is the indexed one.
+        const auto open_indexed_note = [&](const std::string& row) {
+            for (int attempt = 0; attempt < 10; ++attempt) {
+                w.run([&] { w.main().emit("knowledge.changed", json::object()); });
+                if (!w.until([&] { return w.exists(row); })) return false;
+                if (w.invoke(row) && w.until([&] { return w.exists("knowledge-item-origin"); }, 1000)) return true;
+            }
+            return false;
+        };
+        ASSERT_TRUE(open_indexed_note(note_row)) << "origin";
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-share"); })) << "share";
         EXPECT_EQ(label("knowledge-item-origin"), u"Saved from mail: Falcon budget");
         ASSERT_TRUE(w.invoke("knowledge-share"));
@@ -5582,9 +5596,7 @@ TEST(ShellKnowledge, SaveMailAndChatAsNote) {
         for (const auto& n : store.notes())
             if (n.origin_kind == "chat") chat_note = n.id;
         ASSERT_TRUE(chat_note);
-        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-row-n" + std::to_string(chat_note)); }));
-        ASSERT_TRUE(w.invoke("knowledge-row-n" + std::to_string(chat_note)));
-        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-item-origin"); }));
+        ASSERT_TRUE(open_indexed_note("knowledge-row-n" + std::to_string(chat_note))) << "chat origin";
         EXPECT_EQ(label("knowledge-item-origin"), u"Saved from Chat: Falcon team");
         ASSERT_TRUE(w.invoke("knowledge-share"));
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-share-copied"); }));

@@ -4,6 +4,8 @@
 #include "base/strings.h"
 #include "base/time.h"
 
+#include <algorithm>
+
 namespace wb {
 
 agenda::SourceItem agenda_teams_item(const teams::StoredTeamsMessage& m, const teams::StoredConversation& c, const std::string& conversation_name,
@@ -30,15 +32,35 @@ agenda::SourceItem agenda_teams_item(const teams::StoredTeamsMessage& m, const t
 
 json agenda_reply_prefill(const json& item, const std::string& draft,
                           const std::function<std::optional<mail::StoredMessage>(const std::string& id)>& mail_message,
-                          const std::function<std::optional<TeamsReplySource>(const std::string& id)>& teams_message) {
+                          const std::function<std::optional<TeamsReplySource>(const std::string& id)>& teams_message, const std::string& me) {
     json out = {{"id", jstr(item, "id")}, {"body", draft},  {"to", json::array()}, {"cc", json::array()},
                 {"subject", jstr(item, "title")}, {"reply_to", ""}, {"source", ""}};
+    const std::string self = to_lower(me);
     for (const auto& s : item.value("sources", json::array())) {
         const std::string kind = jstr(s, "kind"), sid = jstr(s, "id");
         if (kind == "mail" && mail_message) {
             const auto m = mail_message(sid);
             if (!m || m->withheld || m->from.address.empty()) continue;
-            out["to"] = json::array({m->from.address});
+            // Reply-all: To is the sender, Cc the other recipients; never the user. For the user's own mail, To is
+            // whom it went to.
+            std::vector<std::string> seen;
+            const auto add = [&](json& list, const std::string& address) {
+                const std::string a = to_lower(address);
+                if (a.empty() || a == self || std::find(seen.begin(), seen.end(), a) != seen.end()) return;
+                seen.push_back(a);
+                list.push_back(address);
+            };
+            json to = json::array(), cc = json::array();
+            const bool own = !self.empty() && to_lower(m->from.address) == self;
+            if (own) {
+                for (const auto& p : m->to) add(to, p.address);
+            } else {
+                add(to, m->from.address);
+                for (const auto& p : m->to) add(cc, p.address);
+            }
+            for (const auto& p : m->cc) add(cc, p.address);
+            out["to"] = to;
+            out["cc"] = cc;
             const std::string subj = m->subject;
             out["subject"] = to_lower(subj).rfind("re:", 0) == 0 ? subj : "RE: " + subj;
             out["reply_to"] = m->id;
@@ -48,7 +70,9 @@ json agenda_reply_prefill(const json& item, const std::string& draft,
         if (kind == "teams" && teams_message) {
             const auto t = teams_message(sid);
             if (!t) continue;
-            if (!t->message.sender_email.empty()) out["to"] = json::array({t->message.sender_email});
+            // The user's own message has no one to answer: To stays for the user to fill in.
+            const bool own = t->message.mine || (!self.empty() && to_lower(t->message.sender_email) == self);
+            if (!own && !t->message.sender_email.empty()) out["to"] = json::array({t->message.sender_email});
             out["subject"] = "RE: " + t->conversation_name;
             out["source"] = "teams";
             return out;

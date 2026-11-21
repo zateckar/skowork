@@ -124,9 +124,15 @@ struct DiskStat {
     long long size = 0, modified = 0;
     bool directory = false;
 };
-std::optional<DiskStat> stat_path(const std::string& path) {
+std::optional<DiskStat> stat_path(const std::string& path, bool* missing = nullptr) {
     WIN32_FILE_ATTRIBUTE_DATA d{};
-    if (!::GetFileAttributesExW(widen(path).c_str(), GetFileExInfoStandard, &d)) return std::nullopt;
+    const std::wstring w = widen(path);
+    if (!::GetFileAttributesExW(w.c_str(), GetFileExInfoStandard, &d)) {
+        const DWORD err = ::GetLastError();
+        if (missing) *missing = err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND;
+        return std::nullopt;
+    }
+    if (missing) *missing = false;
     DiskStat s;
     s.size = (static_cast<long long>(d.nFileSizeHigh) << 32) | d.nFileSizeLow;
     s.modified = (static_cast<long long>(d.ftLastWriteTime.dwHighDateTime) << 32) | d.ftLastWriteTime.dwLowDateTime;
@@ -138,7 +144,8 @@ std::optional<DiskStat> stat_path(const std::string& path) {
 void record_written(SeenFiles& seen, const std::string& thread_id, const std::string& written, std::string_view bytes) {
     const auto st = stat_path(written);
     if (!st) return;
-    seen.put(thread_id, seen_key(written), FileState{st->size, st->modified, sha256_hex(bytes)});
+    // The same bytes the overwrite check hashes: at most the first kMaxFileBytes.
+    seen.put(thread_id, seen_key(written), FileState{st->size, st->modified, sha256_hex(bytes.substr(0, static_cast<size_t>(kMaxFileBytes)))});
 }
 
 class MemorySeenFiles final : public SeenFiles {
@@ -516,8 +523,11 @@ std::optional<std::string> overwrite_refusal(const FileToolsEnv& env, const Tool
     // A path the policy does not let the agent write is refused by the write itself, without telling whether it exists.
     const auto canonical = policy::canonicalize(path);
     if (!canonical || !policy::check_path(*canonical, policy::Access::write, rules).allowed) return std::nullopt;
-    const auto st = stat_path(*canonical);
-    if (!st) return std::nullopt;  // a new file
+    bool missing = false;
+    const auto st = stat_path(*canonical, &missing);
+    if (!st && missing) return std::nullopt;  // a new file
+    // Any other failure (access denied, a sharing error) fails closed: the file may exist.
+    if (!st) return path + " could not be checked before replacing it. The file is unchanged.";
     if (st->directory) return path + " is a folder.";
     const long long max_read = std::max<long long>(1, policy_int(env, "tools.files.max_read_kb", 256)) * 1024;
     const std::string cannot = path + " is too large or not a text file, so it cannot be replaced with files.write. Use files.edit "
@@ -532,7 +542,7 @@ std::optional<std::string> overwrite_refusal(const FileToolsEnv& env, const Tool
                                        "The file is unchanged.";
     if (st->size != seen->size || st->modified != seen->modified) return changed;
     auto h = policy::open_for_read(path, rules);
-    if (!h) return changed;
+    if (!h) return path + " cannot be read to check it before replacing it, so it is not replaced. The file is unchanged.";
     auto data = read_all(h->get(), kMaxFileBytes);
     if (!data || sha256_hex(*data) != seen->sha256) return changed;
     return std::nullopt;

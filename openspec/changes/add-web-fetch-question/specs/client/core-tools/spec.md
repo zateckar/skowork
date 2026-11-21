@@ -14,7 +14,7 @@ web.fetch SHALL accept an optional `question` of at most 1,000 characters with f
 - **THEN** the text is cut to fit, and the result states how many kilobytes of the page the answer is based on
 
 ### Requirement: Web Fetch Question Fallback
-When the user has no `small` role or its request fails, web.fetch SHALL return the page text as it would without a question, with a note that the question could not be answered. A question with format raw MUST fail before any request is made.
+When the user has no `small` role or its request fails, web.fetch SHALL return the page text as it would without a question, with a note that the question could not be answered. A question with format raw MUST fail before any request is made. A page answered with a status other than 2xx is returned as it would be without a question, with its status, and no question is asked of it.
 
 #### Scenario: Small role not granted
 - **WHEN** the agent calls web.fetch with a question for a user whose policy grants no `small` role

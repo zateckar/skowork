@@ -187,3 +187,52 @@ TEST(TeamsService, ForgetDeletesTheCopy) {
     EXPECT_FALSE(fx.svc->enabled());
     EXPECT_EQ(jint(fx.svc->status(), "messages", -1), 0);
 }
+
+TEST(TeamsService, TurningBackOnAndUnexcludingPublishNothingForOldMessages) {
+    TeamsFixture fx;
+    fx.say("19:grp@thread.v2", "g1", kPetra, "first", fx.now - kHour);
+    ASSERT_TRUE(fx.svc->configure({{"enabled", true}}));
+    ASSERT_TRUE(fx.svc->sync_now());
+    ASSERT_TRUE(fx.svc->configure({{"enabled", false}}));
+    fx.say("19:grp@thread.v2", "g2", kPetra, "while off", fx.now);
+    ASSERT_TRUE(fx.svc->configure({{"enabled", true}}));
+    ASSERT_TRUE(fx.svc->sync_now());
+    EXPECT_EQ(count(fx.take(), "teams.message"), 0);  // the first read after turning on is a backfill again
+
+    ASSERT_TRUE(fx.svc->exclude("19:grp@thread.v2", true));
+    EXPECT_EQ(count(fx.take(), "teams.deleted"), 2);
+    ASSERT_TRUE(fx.svc->exclude("19:grp@thread.v2", false));
+    ASSERT_TRUE(fx.svc->sync_now());
+    EXPECT_EQ(count(fx.take(), "teams.message"), 0);  // its messages come back without events
+    EXPECT_TRUE(fx.svc->message("19:grp@thread.v2", "g2"));
+    fx.say("19:grp@thread.v2", "g3", kPetra, "new", fx.now);
+    ASSERT_TRUE(fx.svc->sync_now());
+    EXPECT_EQ(count(fx.take(), "teams.message"), 1);  // later messages are events again
+}
+
+TEST(TeamsService, PolicyExcludedTypesLeaveTheStoredCopy) {
+    TeamsFixture fx;
+    fx.say("19:grp@thread.v2", "g1", kPetra, "x", fx.now);
+    fx.say("19:meeting_abc@thread.v2", "mt1", kPetra, "meeting note", fx.now);  // no conversation record: typed by its id
+    ASSERT_TRUE(fx.svc->configure({{"enabled", true}}));
+    ASSERT_TRUE(fx.svc->sync_now());
+    EXPECT_TRUE(fx.svc->message("19:meeting_abc@thread.v2", "mt1"));
+    fx.policy["teams.excluded_types"] = json::array({"group", "meeting"});
+    ASSERT_TRUE(fx.svc->sync_now());
+    EXPECT_FALSE(fx.svc->message("19:grp@thread.v2", "g1"));
+    EXPECT_FALSE(fx.svc->message("19:meeting_abc@thread.v2", "mt1"));
+    EXPECT_TRUE(fx.svc->search("", "", "", 0, 0, 50).empty());
+}
+
+TEST(TeamsService, TheUsersOwnMessagesAreMarkedOnceTheUserIsKnown) {
+    TeamsFixture fx;
+    fx.cache.user_mri.clear();
+    fx.cache.profiles.clear();  // nothing tells who the user is yet
+    fx.say("19:grp@thread.v2", "g1", kMe, "mine", fx.now);
+    ASSERT_TRUE(fx.svc->configure({{"enabled", true}}));
+    ASSERT_TRUE(fx.svc->sync_now());
+    EXPECT_FALSE(fx.svc->message("19:grp@thread.v2", "g1")->mine);
+    fx.cache.user_mri = kMe;
+    ASSERT_TRUE(fx.svc->sync_now());
+    EXPECT_TRUE(fx.svc->message("19:grp@thread.v2", "g1")->mine);
+}

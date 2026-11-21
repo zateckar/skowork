@@ -91,6 +91,12 @@ public:
     std::optional<StoredTeamsMessage> message(const std::string& conversation_id, const std::string& id);
     // Messages of a conversation in [from, to), oldest first, at most `limit`.
     std::vector<StoredTeamsMessage> messages(const std::string& conversation_id, long long from, long long to, size_t limit);
+    // Messages before (at_ms, id) from `from` on, oldest first, at most `limit` (the newest of them).
+    std::vector<StoredTeamsMessage> messages_before(const std::string& conversation_id, long long at_ms, const std::string& id, long long from,
+                                                    size_t limit);
+    // Messages after (at_ms, id) and before `to`, oldest first, at most `limit`.
+    std::vector<StoredTeamsMessage> messages_after(const std::string& conversation_id, long long at_ms, const std::string& id, long long to,
+                                                   size_t limit);
     // Newest first; empty text lists by time.
     std::vector<StoredTeamsMessage> search(const std::string& text, const std::string& conversation_id, const std::string& sender,
                                            long long since, long long until, size_t limit);
@@ -117,6 +123,7 @@ private:
     long long policy_int(const std::string& key, long long fallback, long long min);
     std::filesystem::path chosen_profile();
     void loop();
+    Status purge_excluded_types();
     void publish(const std::vector<TeamsEvent>& events);
 
     TeamsEnv env_;

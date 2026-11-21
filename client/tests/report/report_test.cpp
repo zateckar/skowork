@@ -39,6 +39,13 @@ TEST(DailyReportCore, Schedule) {
     EXPECT_TRUE(report_due(s, at(23, 1, 9, 30), "2026-11-20"));  // started late on Monday
     EXPECT_FALSE(report_due(s, at(23, 1, 9, 30), "2026-11-23")); // already written today
     EXPECT_FALSE(report_due(s, at(23, 1, 18, 5), ""));           // after 18:00 nothing is written
+    {
+        Settings evening = s;
+        evening.hour = 18;
+        evening.minute = 30;
+        EXPECT_TRUE(report_due(evening, at(23, 1, 18, 30), ""));   // an evening time still fires
+        EXPECT_FALSE(report_due(evening, at(23, 1, 19, 45), ""));  // but does not catch up for long
+    }
     EXPECT_FALSE(report_due(s, at(21, 6, 9, 0), ""));            // Saturday
     s.enabled = false;
     EXPECT_FALSE(report_due(s, at(23, 1, 9, 0), ""));

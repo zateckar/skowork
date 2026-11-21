@@ -115,7 +115,10 @@ ToolDef web_fetch_tool(WebToolEnv env) {
         // Web Fetch Question Fallback: a question with format raw fails before any request.
         const std::string question = trim(jstr(a, "question"));
         if (!question.empty() && format == "raw") return ToolOutput::failure("question works only with format \"text\"; no request was sent.");
-        if (question.size() > kWebQuestionMaxChars)
+        // Characters, as the schema's maxLength counts them: UTF-8 bytes that do not continue a character.
+        const size_t question_chars = static_cast<size_t>(
+            std::count_if(question.begin(), question.end(), [](char ch) { return (static_cast<unsigned char>(ch) & 0xC0) != 0x80; }));
+        if (question_chars > kWebQuestionMaxChars)
             return ToolOutput::failure("question must be at most " + std::to_string(kWebQuestionMaxChars) + " characters; no request was sent.");
         const auto p = e->policy ? e->policy() : nullptr;
         policy::EgressGuard guard([p] { return p; });
@@ -176,7 +179,8 @@ ToolDef web_fetch_tool(WebToolEnv env) {
         // Web Fetch Question (add-web-fetch-question design D3, D4): the small role answers from the page text, cut to
         // fit its window; without the role, or when it fails, the page text comes back with a note.
         auto finish_text = [&](const std::string& title, std::string text) -> ToolOutput {
-            if (question.empty()) {
+            // An error page is returned as it is, with its status: no question is asked of it.
+            if (question.empty() || !out.ok) {
                 out.content = head + "\n" + text;
                 return out;
             }

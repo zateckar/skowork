@@ -2988,7 +2988,12 @@ TEST(RuntimeLargeResults, ParallelResultsStayWithinHalfTheWindow) {
     ASSERT_TRUE(env.wait(id, RunState::succeeded));
     int offloaded = 0;
     for (const char* c : {"a", "b", "c", "d"}) offloaded += attached(env, id, c) ? 1 : 0;
-    EXPECT_EQ(offloaded, 2);
+    // Two whole results (~13.6k tokens) plus two previews (~1.5k each) would pass the 16k cap: the previews count too.
+    EXPECT_EQ(offloaded, 3);
+    size_t sent = 0;
+    for (const auto& m : env.model.requests()[1].messages)
+        if (m.role == "tool") sent += estimate_context_tokens(m.content);
+    EXPECT_LE(sent, 32768u / 2);
     // Results are still given to the model in the order of the calls.
     const auto& req = env.model.requests()[1];
     std::vector<std::string> order;

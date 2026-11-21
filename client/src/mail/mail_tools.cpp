@@ -40,6 +40,8 @@ std::string local_iso(long long ms) {
 }
 
 ToolOutput fail(const Error& e) {
+    // Started but not confirmed (the Local Outlook backend's 60-second limit): the Run asks the user, never retries.
+    if (e.code == "unknown_outcome") return ToolOutput::unknown(e.message);
     if (e.code == "offline")
         return ToolOutput::failure("offline: Microsoft Graph cannot be reached, so this was not done. (" + e.message + ")");
     if (e.code == "not_connected")

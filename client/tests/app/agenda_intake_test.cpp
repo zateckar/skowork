@@ -198,6 +198,37 @@ TEST(AgendaIntake, AReplyToAMailSourceIsPrefilledAsAReply) {
     EXPECT_EQ(jstr(p, "source"), "");
 }
 
+TEST(AgendaIntake, AMailReplyCopiesTheOtherRecipientsButNeverTheUser) {
+    const json item = {{"id", "a3"}, {"title", "Answer"}, {"sources", json::array({{{"kind", "mail"}, {"id", "M2"}}})}};
+    mail::StoredMessage m;
+    m.id = "M2";
+    m.subject = "Plan";
+    m.from = {"Petr", "petr@example.cz"};
+    m.to = {{"Me", "Me@Example.cz"}, {"Eva", "eva@example.cz"}};
+    m.cc = {{"Jan", "jan@example.cz"}, {"Petr again", "PETR@example.cz"}};
+    const auto mail = [&](const std::string&) -> std::optional<mail::StoredMessage> { return m; };
+    json p = agenda_reply_prefill(item, "x", mail, {}, "me@example.cz");
+    EXPECT_EQ(p["to"], json::array({"petr@example.cz"}));
+    EXPECT_EQ(p["cc"], json::array({"eva@example.cz", "jan@example.cz"}));  // reply-all, without the user or duplicates
+    // The user's own mail: the reply goes to whom it was sent, not back to the user.
+    m.from = {"Me", "me@example.cz"};
+    m.to = {{"Eva", "eva@example.cz"}};
+    m.cc = {};
+    p = agenda_reply_prefill(item, "x", mail, {}, "me@example.cz");
+    EXPECT_EQ(p["to"], json::array({"eva@example.cz"}));
+    EXPECT_TRUE(p["cc"].empty());
+}
+
+TEST(AgendaIntake, AReplyToTheUsersOwnTeamsMessageHasNoRecipient) {
+    const json item = {{"id", "a4"}, {"title", "Send specs"}, {"sources", json::array({{{"kind", "teams"}, {"id", "19:c|m4"}}})}};
+    const auto teams = [](const std::string&) -> std::optional<TeamsReplySource> {
+        return TeamsReplySource{teams_msg("m4", "", "I'll send the specs", 1, true), "Petr"};
+    };
+    const json p = agenda_reply_prefill(item, "Specs attached.", {}, teams);
+    EXPECT_TRUE(p["to"].empty());
+    EXPECT_EQ(jstr(p, "source"), "teams");
+}
+
 TEST(AgendaIntake, AReplyToATeamsSourceGoesToTheSendersAddress) {
     const json item = {{"id", "a2"}, {"title", "Send the test report"}, {"sources", json::array({{{"kind", "teams"}, {"id", "19:grp@thread.v2|m3"}}})}};
     const auto teams = [](const std::string& id) -> std::optional<TeamsReplySource> {

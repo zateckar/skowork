@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <deque>
 #include <fstream>
+#include <atomic>
 #include <future>
 #include <map>
 #include <mutex>
@@ -61,6 +62,9 @@ Error to_error(const ComError& e) {
     const std::string detail = e.what + " (" + hex + ")";
     if (busy(e.hr)) return make_error("throttled", "Outlook is busy (a dialog may be open): " + detail);
     if (gone(e.hr)) return make_error("offline", "Outlook is not running: " + detail);
+    // MAPI network error, and a provider failing in cached mode while offline: transient, not a bad request.
+    if (e.hr == static_cast<HRESULT>(0x80040115) || e.hr == static_cast<HRESULT>(0x8004011D))
+        return make_error("offline", "Outlook cannot reach the mail server: " + detail);
     if (e.hr == E_ABORT || e.hr == E_ACCESSDENIED) return make_error("access_denied", "Outlook refused the request: " + detail);
     if (e.hr == kNotFound) return make_error("not_found", "ErrorItemNotFound: " + detail);
     return make_error("bad_request", "Outlook: " + detail);
@@ -100,11 +104,20 @@ public:
     IDispatch* get() const { return p_; }
 
     Var invoke(const wchar_t* name, WORD flags, std::vector<VARIANT> args = {}) const {
-        if (!p_) throw ComError{E_POINTER, "no object for " + narrow(name)};
+        const auto clear_args = [&] {
+            for (auto& a : args) VariantClear(&a);  // the arguments own their BSTRs and references
+        };
+        if (!p_) {
+            clear_args();
+            throw ComError{E_POINTER, "no object for " + narrow(name)};
+        }
         DISPID id = 0;
         LPOLESTR n = const_cast<LPOLESTR>(name);
         HRESULT hr = p_->GetIDsOfNames(IID_NULL, &n, 1, LOCALE_USER_DEFAULT, &id);
-        if (FAILED(hr)) throw ComError{hr, "no member " + narrow(name)};
+        if (FAILED(hr)) {
+            clear_args();
+            throw ComError{hr, "no member " + narrow(name)};
+        }
         std::reverse(args.begin(), args.end());  // IDispatch takes arguments right to left
         DISPPARAMS dp{};
         dp.cArgs = static_cast<UINT>(args.size());
@@ -332,6 +345,7 @@ struct ComOutlookSession::Impl {
     std::condition_variable cv;
     std::deque<std::function<void()>> queue;
     bool stopping = false;
+    bool finished = false;  // the worker left its loop and released its COM objects
     std::thread worker;
     // Worker-thread state.
     Disp app, ns;
@@ -339,14 +353,19 @@ struct ComOutlookSession::Impl {
     explicit Impl(std::function<bool()> start) : may_start(std::move(start)) {
         worker = std::thread([this] { loop(); });
     }
+    // Only after stop() returned true: the worker is gone, nothing touches this state any more.
     ~Impl() {
-        {
-            const std::lock_guard lock(mx);
-            stopping = true;
-        }
+        if (worker.joinable()) worker.join();
+    }
+
+    // Drops queued calls and waits up to `wait` for the running one. False: a call is stuck inside Outlook, and the
+    // caller must leak this Impl (the worker still uses it, and COM objects are released only on their own thread).
+    bool stop(std::chrono::milliseconds wait) {
+        std::unique_lock lock(mx);
+        stopping = true;
+        queue.clear();  // a dropped call's promise breaks; nobody waits on it once the session is being destroyed
         cv.notify_all();
-        // A call stuck inside Outlook cannot be interrupted: the thread is left to finish on its own.
-        if (worker.joinable()) worker.detach();
+        return cv.wait_for(lock, wait, [this] { return finished; });
     }
 
     void loop() {
@@ -357,7 +376,7 @@ struct ComOutlookSession::Impl {
             {
                 std::unique_lock lock(mx);
                 cv.wait(lock, [this] { return stopping || !queue.empty(); });
-                if (stopping && queue.empty()) break;
+                if (stopping) break;
                 job = std::move(queue.front());
                 queue.pop_front();
             }
@@ -366,6 +385,9 @@ struct ComOutlookSession::Impl {
         ns = Disp();
         app = Disp();
         if (SUCCEEDED(init)) CoUninitialize();
+        const std::lock_guard lock(mx);
+        finished = true;
+        cv.notify_all();
     }
 
     // Attaches to Outlook on the worker thread.
@@ -390,13 +412,24 @@ struct ComOutlookSession::Impl {
         log::info(kLog, "attached to Outlook");
     }
 
+    // `repeatable`: the call has no side effect, so "Outlook busy" may run it again from the start. A call that creates,
+    // sends, moves or deletes is never re-run: a dialog after Send would otherwise send twice.
+    enum CallState : int { kQueued = 0, kRunning = 1, kAbandoned = 2 };
+
     template <typename T>
-    Result<T> run(std::function<T()> fn) {
+    Result<T> run(std::function<T()> fn, bool repeatable = true) {
         auto promise = std::make_shared<std::promise<Result<T>>>();
         auto future = promise->get_future();
+        // queued -> running when the worker starts it; queued -> abandoned when the caller stops waiting first. An
+        // abandoned call never runs (a mail reported as not sent must not go out later).
+        auto state = std::make_shared<std::atomic<int>>(kQueued);
         {
             const std::lock_guard lock(mx);
-            queue.push_back([this, fn = std::move(fn), promise]() mutable {
+            if (stopping) return make_error("offline", "Outlook session is closing");
+            // The job holds the only promise: dropping it at stop breaks the caller's future at once.
+            queue.push_back([this, fn = std::move(fn), promise = std::move(promise), state, repeatable]() mutable {
+                int expected = kQueued;
+                if (!state->compare_exchange_strong(expected, kRunning)) return;
                 long long delay = 1000;
                 for (int attempt = 1;; ++attempt) {
                     try {
@@ -408,9 +441,14 @@ struct ComOutlookSession::Impl {
                             ns = Disp();
                             app = Disp();
                         }
-                        if (busy(e.hr) && attempt < 5) {
+                        if (busy(e.hr) && repeatable && attempt < 5) {
                             log::info(kLog, "Outlook is busy; retrying in " + std::to_string(delay) + " ms");
-                            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                            // Woken by stop(), so closing the session does not wait out the backoff.
+                            std::unique_lock wait_lock(mx);
+                            if (cv.wait_for(wait_lock, std::chrono::milliseconds(delay), [this] { return stopping; })) {
+                                promise->set_value(Result<T>(make_error("offline", "Outlook session is closing")));
+                                return;
+                            }
                             delay = std::min<long long>(delay * 2, 30'000);
                             continue;
                         }
@@ -424,16 +462,35 @@ struct ComOutlookSession::Impl {
             });
         }
         cv.notify_all();
-        if (future.wait_for(kCallLimit) != std::future_status::ready)
-            return make_error("offline", "Outlook did not answer within 60 seconds");
-        return future.get();
+        if (future.wait_for(kCallLimit) != std::future_status::ready) {
+            int expected = kQueued;
+            if (state->compare_exchange_strong(expected, kAbandoned) || repeatable)
+                return make_error("offline", "Outlook did not answer within 60 seconds");
+            if (future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {  // finished just now
+                try {
+                    return future.get();
+                } catch (const std::future_error&) {
+                    return make_error("offline", "Outlook session is closing");
+                }
+            }
+            // Started but not finished: it may still take effect, so it must not be repeated blindly.
+            return make_error("unknown_outcome",
+                              "Outlook did not finish within 60 seconds; the action may still take effect. Check Outlook before repeating it.");
+        }
+        try {
+            return future.get();
+        } catch (const std::future_error&) {  // dropped at stop
+            return make_error("offline", "Outlook session is closing");
+        }
     }
 
-    Status run_status(std::function<void()> fn) {
-        auto r = run<bool>([fn = std::move(fn)] {
-            fn();
-            return true;
-        });
+    Status run_status(std::function<void()> fn, bool repeatable = true) {
+        auto r = run<bool>(
+            [fn = std::move(fn)] {
+                fn();
+                return true;
+            },
+            repeatable);
         if (!r) return r.error();
         return {};
     }
@@ -444,8 +501,11 @@ struct ComOutlookSession::Impl {
         try {
             return ns.obj(L"GetItemFromID", {vstr(id)});
         } catch (const ComError& e) {
-            if (gone(e.hr) || busy(e.hr)) throw;
-            throw ComError{kNotFound, "no item with that id"};
+            // Only "no such item" means gone: a network or store error must not make the sync drop the message.
+            constexpr HRESULT kMapiNotFound = static_cast<HRESULT>(0x8004010F), kMapiInvalidEntryId = static_cast<HRESULT>(0x80040107);
+            if (e.hr == kMapiNotFound || e.hr == kMapiInvalidEntryId || e.hr == E_INVALIDARG || e.hr == kNotFound)
+                throw ComError{kNotFound, "no item with that id"};
+            throw;
         }
     }
 
@@ -504,8 +564,16 @@ struct ComOutlookSession::Impl {
 
     std::vector<OlRecipient> recipients_of(const Disp& it, bool meeting) {
         std::vector<OlRecipient> out;
-        Disp rs = it.obj(L"Recipients");
-        const long n = rs.num(L"Count");
+        // Reports (non-delivery), posts and other non-mail items in a mail folder have no recipients.
+        Disp rs;
+        long n = 0;
+        try {
+            rs = it.obj(L"Recipients");
+            n = rs.num(L"Count");
+        } catch (const ComError& e) {
+            if (gone(e.hr) || busy(e.hr)) throw;
+            return out;
+        }
         for (long i = 1; i <= n && i <= 500; ++i) {
             Disp r = rs.obj(L"Item", {vint(i)});
             OlRecipient x;
@@ -553,7 +621,8 @@ struct ComOutlookSession::Impl {
         } catch (const ComError& e) {
             if (gone(e.hr) || busy(e.hr)) throw;
         }
-        if (received <= 0 || received > 2958465) received = it.date(L"CreationTime");  // drafts have no received time
+        // Drafts have no received time; Outlook's "no date" is 1 January 4501 (OLE date 949998).
+        if (received <= 0 || received >= 949998) received = it.date(L"CreationTime");
         m.received = local_to_utc_ms(received);
         m.modified = local_to_utc_ms(it.date(L"LastModificationTime"));
         m.from = sender_of(it);
@@ -701,7 +770,13 @@ struct ComOutlookSession::Impl {
 };
 
 ComOutlookSession::ComOutlookSession(std::function<bool()> may_start) : impl_(std::make_unique<Impl>(std::move(may_start))) {}
-ComOutlookSession::~ComOutlookSession() = default;
+ComOutlookSession::~ComOutlookSession() {
+    // A call stuck inside Outlook cannot be interrupted: its worker keeps the Impl, which is then left to it on purpose.
+    if (!impl_->stop(std::chrono::seconds(5))) {
+        log::warn(kLog, "an Outlook call did not finish; leaving its thread");
+        (void)impl_.release();
+    }
+}
 
 std::string ComOutlookSession::state() {
     auto r = impl_->run<bool>([] { return true; });
@@ -710,8 +785,8 @@ std::string ComOutlookSession::state() {
 }
 
 Result<OlAddress> ComOutlookSession::me() {
-    return impl_->run<OlAddress>([this] {
-        auto& I = *impl_;
+    return impl_->run<OlAddress>([s = impl_.get()] {
+        auto& I = *s;
         OlAddress a;
         Disp user = I.ns.obj(L"CurrentUser");
         a.name = user.try_str(L"Name");
@@ -736,12 +811,12 @@ Result<OlAddress> ComOutlookSession::me() {
 }
 
 Result<std::vector<OlFolder>> ComOutlookSession::folders() {
-    return impl_->run<std::vector<OlFolder>>([this] { return impl_->list_folders(); });
+    return impl_->run<std::vector<OlFolder>>([s = impl_.get()] { return s->list_folders(); });
 }
 
 Result<std::vector<OlRow>> ComOutlookSession::rows(const std::string& folder_id, long long received_since) {
-    return impl_->run<std::vector<OlRow>>([this, folder_id, received_since] {
-        auto& I = *impl_;
+    return impl_->run<std::vector<OlRow>>([s = impl_.get(), folder_id, received_since] {
+        auto& I = *s;
         Disp folder = I.ns.obj(L"GetFolderFromID", {vstr(folder_id)});
         // The table reads a whole folder without opening items (design D2).
         const std::string filter = received_since > 0 ? "[ReceivedTime] >= '" + jet_date(utc_ms_to_local(received_since)) + "'" : std::string{};
@@ -768,12 +843,12 @@ Result<std::vector<OlRow>> ComOutlookSession::rows(const std::string& folder_id,
 }
 
 Result<OlMessage> ComOutlookSession::message(const std::string& id) {
-    return impl_->run<OlMessage>([this, id] { return impl_->to_message(impl_->item(id)); });
+    return impl_->run<OlMessage>([s = impl_.get(), id] { return s->to_message(s->item(id)); });
 }
 
 Result<std::vector<OlMessage>> ComOutlookSession::find(const MessageQuery& q) {
-    return impl_->run<std::vector<OlMessage>>([this, q] {
-        auto& I = *impl_;
+    return impl_->run<std::vector<OlMessage>>([s = impl_.get(), q] {
+        auto& I = *s;
         std::vector<Disp> folders;
         if (!q.folder_id.empty()) {
             folders.push_back(I.ns.obj(L"GetFolderFromID", {vstr(q.folder_id)}));
@@ -796,24 +871,46 @@ Result<std::vector<OlMessage>> ComOutlookSession::find(const MessageQuery& q) {
         }
         std::string filter;
         for (const auto& c : clauses) filter += (filter.empty() ? "@SQL=" : " AND ") + c;
-        std::vector<OlMessage> out;
+        // Up to `limit` newest matches from each folder, read as (time, id) only; then only the newest `limit` overall
+        // are opened as messages (opening an item reads its recipients and body: far slower).
+        std::vector<std::pair<double, std::string>> hits;
         for (const auto& f : folders) {
             Disp items = f.obj(L"Items");
             items.call(L"Sort", {vstr("[ReceivedTime]"), vbool(true)});
             Disp found = filter.empty() ? items : items.obj(L"Restrict", {vstr(filter)});
             Disp it = found.obj(L"GetFirst");
-            size_t scanned = 0;
-            while (it && out.size() < q.limit * 2 && scanned < 5000) {
+            size_t scanned = 0, taken = 0;
+            while (it && taken < q.limit && scanned < 5000) {
                 ++scanned;
-                if (!q.conversation_id.empty()) {
-                    if (it.try_str(L"ConversationID") != q.conversation_id) {
-                        it = found.obj(L"GetNext");
-                        continue;
+                if (q.conversation_id.empty() || it.try_str(L"ConversationID") == q.conversation_id) {
+                    double received = 0;
+                    try {
+                        received = it.date(L"ReceivedTime");
+                    } catch (const ComError& e) {
+                        if (gone(e.hr) || busy(e.hr)) throw;
                     }
+                    // As to_message dates it: a draft's "no date" (4501) is its creation time.
+                    if (received <= 0 || received >= 949998) {
+                        try {
+                            received = it.date(L"CreationTime");
+                        } catch (const ComError& e) {
+                            if (gone(e.hr) || busy(e.hr)) throw;
+                        }
+                    }
+                    hits.emplace_back(received, it.str(L"EntryID"));
+                    ++taken;
                 }
-                out.push_back(I.to_message(it));
-                if (out.size() >= q.limit && q.conversation_id.empty()) break;
                 it = found.obj(L"GetNext");
+            }
+        }
+        std::sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        if (hits.size() > q.limit) hits.resize(q.limit);
+        std::vector<OlMessage> out;
+        for (const auto& h : hits) {
+            try {
+                out.push_back(I.to_message(I.item(h.second)));
+            } catch (const ComError& e) {
+                if (gone(e.hr) || busy(e.hr)) throw;  // an item that went away meanwhile is left out
             }
         }
         return out;
@@ -821,8 +918,8 @@ Result<std::vector<OlMessage>> ComOutlookSession::find(const MessageQuery& q) {
 }
 
 Result<std::vector<OlAttachment>> ComOutlookSession::attachments(const std::string& message_id) {
-    return impl_->run<std::vector<OlAttachment>>([this, message_id] {
-        Disp atts = impl_->item(message_id).obj(L"Attachments");
+    return impl_->run<std::vector<OlAttachment>>([s = impl_.get(), message_id] {
+        Disp atts = s->item(message_id).obj(L"Attachments");
         std::vector<OlAttachment> out;
         const long n = atts.num(L"Count");
         for (long i = 1; i <= n; ++i) {
@@ -840,8 +937,8 @@ Result<std::vector<OlAttachment>> ComOutlookSession::attachments(const std::stri
 }
 
 Result<std::string> ComOutlookSession::attachment_bytes(const std::string& message_id, const std::string& attachment_id) {
-    return impl_->run<std::string>([this, message_id, attachment_id] {
-        Disp atts = impl_->item(message_id).obj(L"Attachments");
+    return impl_->run<std::string>([s = impl_.get(), message_id, attachment_id] {
+        Disp atts = s->item(message_id).obj(L"Attachments");
         const long index = std::stol(attachment_id);
         if (index < 1 || index > atts.num(L"Count")) throw ComError{kNotFound, "no such attachment"};
         Disp a = atts.obj(L"Item", {vint(index)});
@@ -849,7 +946,12 @@ Result<std::string> ComOutlookSession::attachment_bytes(const std::string& messa
         GetTempPathW(MAX_PATH, dir);
         wchar_t file[MAX_PATH];
         GetTempFileNameW(dir, L"skw", 0, file);
-        a.call(L"SaveAsFile", {vstr(narrow(file))});
+        try {
+            a.call(L"SaveAsFile", {vstr(narrow(file))});
+        } catch (...) {
+            DeleteFileW(file);
+            throw;
+        }
         std::ifstream in(std::filesystem::path(file), std::ios::binary);
         std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         in.close();
@@ -859,29 +961,29 @@ Result<std::string> ComOutlookSession::attachment_bytes(const std::string& messa
 }
 
 Result<OlMessage> ComOutlookSession::create_reply(const std::string& id, const std::string& kind, const std::string& comment) {
-    return impl_->run<OlMessage>([this, id, kind, comment] {
-        auto& I = *impl_;
+    return impl_->run<OlMessage>([s = impl_.get(), id, kind, comment] {
+        auto& I = *s;
         Disp src = I.item(id);
         Disp r = src.obj(kind == "reply_all" ? L"ReplyAll" : kind == "forward" ? L"Forward" : L"Reply");
         if (!comment.empty()) r.put(L"Body", vstr(comment + "\r\n\r\n" + r.str(L"Body")));
         r.call(L"Save");
         return I.to_message(r);
-    });
+    }, false);
 }
 
 Result<OlMessage> ComOutlookSession::create_draft(const DraftPatch& p) {
-    return impl_->run<OlMessage>([this, p] {
-        auto& I = *impl_;
+    return impl_->run<OlMessage>([s = impl_.get(), p] {
+        auto& I = *s;
         Disp m = I.app.obj(L"CreateItem", {vint(olMailItem)});
         I.apply(m, p);
         m.call(L"Save");
         return I.to_message(m);
-    });
+    }, false);
 }
 
 Result<OlMessage> ComOutlookSession::update_draft(const std::string& id, const DraftPatch& p) {
-    return impl_->run<OlMessage>([this, id, p] {
-        auto& I = *impl_;
+    return impl_->run<OlMessage>([s = impl_.get(), id, p] {
+        auto& I = *s;
         Disp m = I.item(id);
         I.apply(m, p);
         m.call(L"Save");
@@ -890,21 +992,21 @@ Result<OlMessage> ComOutlookSession::update_draft(const std::string& id, const D
 }
 
 Status ComOutlookSession::send(const std::string& draft_id) {
-    return impl_->run_status([this, draft_id] { impl_->item(draft_id).call(L"Send"); });
+    return impl_->run_status([s = impl_.get(), draft_id] { s->item(draft_id).call(L"Send"); }, false);
 }
 
 Status ComOutlookSession::send_new(const DraftPatch& p) {
-    return impl_->run_status([this, p] {
-        auto& I = *impl_;
+    return impl_->run_status([s = impl_.get(), p] {
+        auto& I = *s;
         Disp m = I.app.obj(L"CreateItem", {vint(olMailItem)});
         I.apply(m, p);
         m.call(L"Send");
-    });
+    }, false);
 }
 
 Result<OlMessage> ComOutlookSession::move(const std::string& id, const std::string& folder_id) {
-    return impl_->run<OlMessage>([this, id, folder_id] {
-        auto& I = *impl_;
+    return impl_->run<OlMessage>([s = impl_.get(), id, folder_id] {
+        auto& I = *s;
         Disp dest = I.ns.obj(L"GetFolderFromID", {vstr(folder_id)});
         Disp moved = I.item(id).obj(L"Move", {[&] {
                                          VARIANT v;
@@ -915,16 +1017,16 @@ Result<OlMessage> ComOutlookSession::move(const std::string& id, const std::stri
                                          return v;
                                      }()});
         return I.to_message(moved);
-    });
+    }, false);
 }
 
 Status ComOutlookSession::remove(const std::string& id) {
-    return impl_->run_status([this, id] { impl_->item(id).call(L"Delete"); });
+    return impl_->run_status([s = impl_.get(), id] { s->item(id).call(L"Delete"); }, false);
 }
 
 Result<std::vector<OlEvent>> ComOutlookSession::events(long long from, long long to, size_t limit) {
-    return impl_->run<std::vector<OlEvent>>([this, from, to, limit] {
-        auto& I = *impl_;
+    return impl_->run<std::vector<OlEvent>>([s = impl_.get(), from, to, limit] {
+        auto& I = *s;
         Disp items = I.default_folder(olFolderCalendar).obj(L"Items");
         // Recurrences are expanded only on a sorted collection with IncludeRecurrences set before Restrict.
         items.call(L"Sort", {vstr("[Start]")});
@@ -945,8 +1047,8 @@ Result<std::vector<OlEvent>> ComOutlookSession::events(long long from, long long
 }
 
 Result<OlEvent> ComOutlookSession::event(const std::string& id) {
-    return impl_->run<OlEvent>([this, id] {
-        auto& I = *impl_;
+    return impl_->run<OlEvent>([s = impl_.get(), id] {
+        auto& I = *s;
         if (const auto occ = split_occurrence_id(id)) {
             const auto at = parse_stamp(occ->second);
             if (!at) throw ComError{kNotFound, "malformed occurrence id"};
@@ -958,8 +1060,8 @@ Result<OlEvent> ComOutlookSession::event(const std::string& id) {
 }
 
 Result<OlEvent> ComOutlookSession::save_event(const std::string& id, const EventPatch& p) {
-    return impl_->run<OlEvent>([this, id, p] {
-        auto& I = *impl_;
+    return impl_->run<OlEvent>([s = impl_.get(), id, p] {
+        auto& I = *s;
         Disp e;
         if (id.empty()) {
             e = I.app.obj(L"CreateItem", {vint(olAppointmentItem)});
@@ -984,12 +1086,12 @@ Result<OlEvent> ComOutlookSession::save_event(const std::string& id, const Event
         // A meeting sends its invitations or updates (calendar.create is risk class external).
         if (e.num(L"MeetingStatus") == olMeeting) e.call(L"Send");
         return I.to_event(e);
-    });
+    }, false);
 }
 
 Status ComOutlookSession::respond(const std::string& id, const std::string& response, const std::string& comment) {
-    return impl_->run_status([this, id, response, comment] {
-        auto& I = *impl_;
+    return impl_->run_status([s = impl_.get(), id, response, comment] {
+        auto& I = *s;
         Disp e;
         if (const auto occ = split_occurrence_id(id)) {
             const auto at = parse_stamp(occ->second);
@@ -1004,12 +1106,12 @@ Status ComOutlookSession::respond(const std::string& id, const std::string& resp
             if (!comment.empty()) reply.put(L"Body", vstr(comment));
             reply.call(L"Send");
         }
-    });
+    }, false);
 }
 
 Result<std::string> ComOutlookSession::free_busy(const std::string& address, long long from, int interval_minutes, int slots) {
-    return impl_->run<std::string>([this, address, from, interval_minutes, slots] {
-        auto& I = *impl_;
+    return impl_->run<std::string>([s = impl_.get(), address, from, interval_minutes, slots] {
+        auto& I = *s;
         Disp r = I.ns.obj(L"CreateRecipient", {vstr(address)});
         if (!r.call(L"Resolve").v.boolVal) throw ComError{kNotFound, "the address could not be resolved"};
         const double local = utc_ms_to_local(from);
@@ -1019,14 +1121,23 @@ Result<std::string> ComOutlookSession::free_busy(const std::string& address, lon
         std::string out;
         for (int i = 0; i < slots; ++i) {
             const size_t k = static_cast<size_t>(offset + i);
-            out += k < all.size() ? all[k] : '0';
+            out += k < all.size() ? all[k] : '2';  // no published data is not free time
         }
         return out;
     });
 }
 
 Status ComOutlookSession::display(const std::string& id) {
-    return impl_->run_status([this, id] { impl_->item(id).call(L"Display", {vbool(false)}); });
+    return impl_->run_status([s = impl_.get(), id] {
+        // An occurrence id is "<series EntryID>.<start stamp>": the occurrence opens from the series' pattern.
+        if (const auto occ = split_occurrence_id(id)) {
+            const auto at = parse_stamp(occ->second);
+            if (!at) throw ComError{kNotFound, "malformed occurrence id"};
+            s->item(occ->first).obj(L"GetRecurrencePattern").obj(L"GetOccurrence", {vdate(*at)}).call(L"Display", {vbool(false)});
+            return;
+        }
+        s->item(id).call(L"Display", {vbool(false)});
+    });
 }
 
 }  // namespace wb::mail::outlook

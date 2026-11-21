@@ -76,8 +76,10 @@ std::string day_key(const LocalTime& t) {
 bool report_due(const Settings& s, const LocalTime& now, const std::string& last_day) {
     if (!s.enabled || now.wday < 0 || now.wday > 6 || !s.days[static_cast<size_t>(now.wday)]) return false;
     if (last_day == day_key(now)) return false;
+    // A late start catches up until 18:00; a chosen time at or after 18:00 still gets its hour.
     const int minutes = now.hour * 60 + now.minute;
-    return minutes >= s.hour * 60 + s.minute && now.hour < kLastStartHour;
+    const int chosen = s.hour * 60 + s.minute;
+    return minutes >= chosen && minutes < std::max(kLastStartHour * 60, chosen + 60);
 }
 
 namespace {

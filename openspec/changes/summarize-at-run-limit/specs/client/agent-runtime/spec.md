@@ -12,7 +12,7 @@ The runtime SHALL enforce per-Run limits from policy.llm.run_limits.attended and
 ## ADDED Requirements
 
 ### Requirement: Final Answer At A Limit
-At a limit, the runtime SHALL give each unexecuted tool call a result stating that the limit stopped it, then make one final model call without tool definitions asking for what was done, found and remains. That call does not count toward model_calls and is made even after wall_minutes. The Run ends succeeded with its answer and records the limit as a Run event. If the call fails or gives no answer, the Run fails with a reason naming the limit.
+At a limit, the runtime SHALL give each unexecuted tool call a result stating that the limit stopped it (Open Calls At A Limit), then make one final model call without tool definitions asking for what was done, found and remains. That call is made even though model_calls or wall_minutes is reached; it is recorded in the Run's usage. The Run ends succeeded with its answer and records the limit as a Run event. If the call fails or gives no answer, the Run fails with a reason naming the limit.
 
 #### Scenario: Answer at the tool call limit
 - **WHEN** a Run reaches its maximum number of tool calls while the model has requested two more tool calls
@@ -21,6 +21,13 @@ At a limit, the runtime SHALL give each unexecuted tool call a result stating th
 #### Scenario: Final call fails
 - **WHEN** a Run reaches its maximum number of model calls and the final model call fails with MODEL_UNAVAILABLE
 - **THEN** the Run fails with reason "model call limit reached"
+
+### Requirement: Open Calls At A Limit
+Before the final model call at a limit, a call of the batch whose outcome is unknown (Uncertain Tool Outcomes) SHALL get a result stating that its outcome is unknown, never that it was not executed. A subagent of the batch that has not finished SHALL be cancelled, and its call SHALL get a result stating that it was stopped. Approvals and Questions still open in the Run SHALL be resolved as cancelled with the limit as reason.
+
+#### Scenario: Unknown outcome at the tool call limit
+- **WHEN** a Run reaches its maximum number of tool calls in a batch where a mail.send call timed out with an unknown outcome
+- **THEN** that call's result says its outcome is unknown, its Question is resolved as cancelled, and the final answer does not claim the mail was or was not sent
 
 ### Requirement: Child Run At A Limit
 When a Child Run ends at a limit (Final Answer At A Limit), the result its parent receives SHALL state that the subagent stopped at that limit, followed by the child's final answer.

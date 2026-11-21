@@ -415,6 +415,9 @@ TEST(InboxComposer, EnterQueuesForTheNextTurnAndCtrlEnterSteersTheActiveRun) {
     auto first = in.svc->send(t, "start", MessageMode::queue);
     ASSERT_TRUE(first);
     ASSERT_TRUE(in.env.wait(first->run_id, RunState::running));
+    // Running is set before the loop delivers pending messages and calls the model: until the (blocked) first model
+    // call is under way, a steering message would be delivered at once and never show as pending.
+    ASSERT_TRUE(in.env.wait_for([&] { return in.env.model.request_count() == 1; }));
     auto queued = in.svc->send(t, "then this", MessageMode::queue);
     ASSERT_TRUE(queued);
     EXPECT_TRUE(queued->run_id.empty());

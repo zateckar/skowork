@@ -398,7 +398,8 @@ Result<LevelDbReader> LevelDbReader::open(const std::filesystem::path& dir) {
     std::vector<std::pair<std::uint64_t, std::filesystem::path>> logs;
     std::error_code ec;
     for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
-        const auto n = log_file_number(it->path().filename().string());
+        const auto u8 = it->path().filename().u8string();  // never throws for names outside the ANSI code page
+        const auto n = log_file_number(std::string(u8.begin(), u8.end()));
         if (!n) continue;
         if (*n >= manifest->log_number || (manifest->prev_log_number != 0 && *n == manifest->prev_log_number))
             logs.emplace_back(*n, it->path());

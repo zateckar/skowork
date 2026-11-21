@@ -19,8 +19,11 @@ struct TeamsReplySource {
 
 // {id, body, to, cc, subject, reply_to, source} from the Agenda item (agenda.list shape), the draft text, and lookups of
 // its mail and Teams sources. The first mail or Teams source that is still available decides the recipient and subject.
+// A mail reply goes to the sender with the other recipients in Cc (reply-all); `me`, the user's address, is never a
+// recipient, and a reply to the user's own message is not addressed to the user.
 json agenda_reply_prefill(const json& item, const std::string& draft,
                           const std::function<std::optional<mail::StoredMessage>(const std::string& id)>& mail_message,
-                          const std::function<std::optional<TeamsReplySource>(const std::string& id)>& teams_message);
+                          const std::function<std::optional<TeamsReplySource>(const std::string& id)>& teams_message,
+                          const std::string& me = {});
 
 }  // namespace wb

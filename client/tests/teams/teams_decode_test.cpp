@@ -586,6 +586,22 @@ TEST(TeamsV8, CyclesLimitsAndErrors) {
         flat += "A" + varint(2) + "^" + varint(static_cast<std::uint64_t>(i)) + "^" + varint(static_cast<std::uint64_t>(i)) + "$" + varint(0) + varint(2);
     flat += "$" + varint(0) + varint(41);
     EXPECT_EQ(deserialize_idb_value(flat).error().code, "too_large");
+
+    // Sparse arrays: an index past the declared length is dropped, and holes count against the limit.
+    std::string sparse = kEnvelope + "a" + varint(0) + "U" + varint(65535) + "_" + "@" + varint(1) + varint(0);
+    const auto empty = deserialize_idb_value(sparse);
+    ASSERT_TRUE(empty.ok()) << empty.error().code;
+    EXPECT_EQ(*empty, json::array());
+    std::string holes = kEnvelope + "A" + varint(40);
+    for (int i = 0; i < 40; ++i) holes += "a" + varint(65536) + "U" + varint(65535) + "_" + "@" + varint(1) + varint(65536);
+    holes += "$" + varint(0) + varint(40);
+    EXPECT_EQ(deserialize_idb_value(holes).error().code, "too_large");  // 40 x 65536 holes, from a few hundred bytes
+
+    // Back-references repeat strings: the JSON's bytes are capped, not just its nodes.
+    std::string big = kEnvelope + "A" + varint(200) + "o" + v8_str("k") + "\"" + varint(1 << 20) + std::string(1 << 20, 'x') + "{" + varint(1);
+    for (int i = 1; i < 200; ++i) big += "^" + varint(1);
+    big += "$" + varint(0) + varint(200);
+    EXPECT_EQ(deserialize_idb_value(big).error().code, "too_large");
 }
 
 TEST(TeamsV8, SnappyWrappedAndBlob) {

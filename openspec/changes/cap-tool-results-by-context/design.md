@@ -21,7 +21,7 @@ Alternatives considered:
 
 ### D2: Cap one response's results together at half of the context budget
 
-After each result is capped (D1), the runtime adds up the estimated tokens of all results of one model response that complete together. Calls that complete later, after an Approval or a Question, are counted with the calls that complete with them. Above 50% of the window, it offloads results largest first, ties in the order the model returned them, until the rest fits. Offloaded results get the ordinary preview and reference.
+After each result is capped (D1), the runtime adds up the estimated tokens of all results of one model response that complete together. Calls that complete later, after an Approval or a Question, are counted with the calls that complete with them. Above 50% of the window, it offloads results largest first, ties in the order the model returned them, until the rest fits. Offloaded results get the ordinary preview and reference, and count in the total at that size (the preview's share of the result's tokens plus about 120 tokens for the marker and header); a result not longer than its preview is never offloaded for the total, since that would save nothing.
 
 Alternatives considered:
 - Lower policy.llm.max_parallel_tools for small windows: loses the speed-up for small results, which are the common case.

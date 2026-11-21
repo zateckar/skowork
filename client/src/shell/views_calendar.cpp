@@ -502,14 +502,17 @@ void PagePane::build_draft(Node& parent) {
     actions->gap = 8;
     // Send: the whole message is on screen, so this press is the user's approval of exactly this message.
     auto* send = button(*actions, "agenda-draft-send", shell_.t("agenda.draft.send"), [this, params] {
-        act("agenda", "agenda.send_draft", params(), [this](const json&) {
-            shell_.announce(shell_.t("agenda.draft.sent"));
+        act("agenda", "agenda.send_draft", params(), [this](const json& r) {
+            // An unconfirmed send closes the form too, with the host's note, so it is not pressed again.
+            shell_.announce(jbool(r, "unknown") ? ui::to_utf16(jstr(r, "message")) : shell_.t("agenda.draft.sent"));
             draft_ = nullptr;
             draft_item_.clear();
             load_agenda();
         });
     }, ui::Button::Kind::primary);
-    send->enabled = busy_.empty() && jbool(draft_, "can_send") && !split_addresses(draft_to_).empty() && !draft_body_.empty();
+    // The fields change without a rebuild, so an empty To or body is refused by the host (agenda.send_draft) and shown
+    // as the error line, not decided here once at build time.
+    send->enabled = busy_.empty() && jbool(draft_, "can_send");
     if (jbool(draft_, "outlook"))
         button(*actions, "agenda-draft-outlook", shell_.t("agenda.draft.open_in_outlook"), [this, params] {
             act("agenda", "agenda.open_draft_in_outlook", params(), [this](const json&) { shell_.announce(shell_.t("agenda.draft.opened")); });

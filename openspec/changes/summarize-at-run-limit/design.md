@@ -8,7 +8,7 @@ The runtime checks model_calls and wall_minutes before each model call, and tool
 
 ### D1: One final model call without tools
 
-At a limit, the runtime closes every unexecuted call of the current batch with a result stating that it was not executed because of the limit, so each call in the conversation has its result. Then it appends one user-role instruction and makes one model call without tool definitions:
+At a limit, the runtime closes every unexecuted call of the current batch with a result stating that it was not executed because of the limit, so each call in the conversation has its result. A call that ran with an unknown outcome is told as unknown instead (it may have taken effect), and the Run's open Approvals and Questions are resolved as cancelled with the limit as reason, since nothing can act on them after the final answer. Then it appends one user-role instruction and makes one model call without tool definitions:
 
 > The Run has reached its <limit> and cannot use tools any more. Answer the user now: what you did, what you found, and what remains to do. Do not say the task is finished unless it is.
 
@@ -29,7 +29,7 @@ Alternatives considered:
 
 ### D3: The final call is outside the limits
 
-The final call does not count toward model_calls, and it is made even when wall_minutes has passed. It is bounded by the ordinary request timeouts of client/model-access, and compaction applies to it as to any request. It is made at most once per Run.
+The final call is not blocked by model_calls (it is recorded in the Run's usage and model call count like any call), and it is made even when wall_minutes has passed. It is bounded by the ordinary request timeouts of client/model-access, and compaction applies to it as to any request. It is made at most once per Run.
 
 ### D4: A Child Run's parent knows the result is partial
 

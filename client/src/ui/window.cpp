@@ -458,7 +458,14 @@ void Window::open_link(const std::u16string& url) {
 }
 
 void Window::copy_text(const std::u16string& text) {
-    if (!::OpenClipboard(hwnd_)) return;
+    // Another process (a clipboard manager, clipboard history, a remote session) may hold the clipboard for a moment
+    // after any change: try again briefly instead of losing the copy.
+    bool open = false;
+    for (int attempt = 0; attempt < 20 && !open; ++attempt) {
+        open = ::OpenClipboard(hwnd_) != 0;
+        if (!open) ::Sleep(10);
+    }
+    if (!open) return;
     ::EmptyClipboard();
     const size_t bytes = (text.size() + 1) * sizeof(char16_t);
     if (HGLOBAL h = ::GlobalAlloc(GMEM_MOVEABLE, bytes)) {

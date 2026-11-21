@@ -4,6 +4,7 @@
 #include "base/strings.h"
 #include "base/url.h"
 #include "mail/filter.h"
+#include "platform/log.h"
 
 #include <algorithm>
 #include <set>
@@ -368,6 +369,14 @@ Result<json> OutlookGraph::next_page(const std::string& seq_id, int page_size) {
                 // Gone between the table read and now: removed, and not part of the next snapshot.
                 seq.snapshot.erase(id);
                 value.push_back({{"id", id}, {"@removed", {{"reason", "deleted"}}}});
+                continue;
+            }
+            if (m.error().code == "bad_request") {
+                // An item Outlook cannot read now: skipped instead of stalling the folder's sync for good. Its snapshot
+                // key no longer matches any change key, so the next cycle fetches it again, and a later deletion is
+                // still reported.
+                log::warn("outlook", "skipped an item that could not be read: " + m.error().message);
+                seq.snapshot[id] = "\x01unreadable";
                 continue;
             }
             seq.to_fetch.push_back(id);  // retried by the next attempt of this page

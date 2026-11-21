@@ -14,11 +14,15 @@ The client SHALL write Daily reports only after the user enables them, and only 
 - **THEN** no report is written and no source content is sent to a model for it
 
 ### Requirement: Daily Report Schedule
-The client SHALL write at most one Daily report per working day, at the chosen time. When the client was not running at that time, it SHALL write the report on its first start that day before 18:00. It SHALL NOT write reports for missed days, and it follows the deferral rules of client/desktop-host.
+The client SHALL write at most one Daily report per working day, at the chosen time. When the client was not running at that time, it SHALL write the report on its first start that day before 18:00, or within an hour of the chosen time when that time is 17:00 or later. It SHALL NOT write reports for missed days, and it follows the deferral rules of client/desktop-host.
 
 #### Scenario: Laptop started late
 - **WHEN** the report time is 08:00 and the user starts the laptop at 09:30 on a working day
 - **THEN** that day's report is written soon after the client starts
+
+#### Scenario: Evening report time
+- **WHEN** the report time is 18:30 and the client is running then on a working day
+- **THEN** that day's report is written at 18:30
 
 #### Scenario: Weekend
 - **WHEN** Saturday is not a working day

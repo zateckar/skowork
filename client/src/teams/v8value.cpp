@@ -4,6 +4,7 @@
 // budget and cycles cut to null.
 #include "teams/v8value.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -17,6 +18,11 @@ namespace wb::teams {
 namespace {
 
 constexpr std::size_t kMaxSparseLength = 1u << 16;
+// Array elements and object members together, including ones that point at the shared null: an arena of a million
+// nodes stays small, a million holes per array does not.
+constexpr std::size_t kMaxEntries = kV8MaxNodes;
+// Bytes of strings and keys the JSON may hold after back-references are expanded.
+constexpr std::size_t kMaxJsonBytes = 64u << 20;
 
 struct Node {
     enum class Kind : std::uint8_t { null_value, boolean, number, string, object, array, ref };
@@ -49,6 +55,7 @@ public:
     Result<json> to_json(std::size_t root) {
         visiting_.assign(nodes_.size(), false);
         budget_ = kV8MaxNodes;
+        bytes_ = kMaxJsonBytes;
         json out;
         if (!convert(root, out, 0)) return make_error("too_large", "value expands beyond the node limit");
         return out;
@@ -67,6 +74,12 @@ private:
         if (nodes_.size() >= kV8MaxNodes) return fail("too_large", "too many values");
         nodes_.push_back(std::move(n));
         out = nodes_.size() - 1;
+        return true;
+    }
+    // Counts `n` more array elements or object members against kMaxEntries.
+    bool add_entries(std::size_t n) {
+        if (n > kMaxEntries - entries_) return fail("too_large", "too many values");
+        entries_ += n;
         return true;
     }
     // Reserves an object id for a node (V8 numbers JS receivers in the order they are created).
@@ -127,7 +140,7 @@ private:
     }
 
     // Key/value pairs until `end_tag`; then the trailing property count varint (and `extra` more varints).
-    bool read_properties(std::size_t node, std::uint8_t end_tag, int extra, int depth, bool sparse) {
+    bool read_properties(std::size_t node, std::uint8_t end_tag, int extra, int depth, bool sparse, std::size_t sparse_length = 0) {
         for (;;) {
             std::uint8_t tag = 0;
             if (!peek_tag(tag)) return false;
@@ -142,12 +155,18 @@ private:
             if (!read_value(k, depth + 1) || !read_value(v, depth + 1)) return false;
             Node& target = nodes_[node];
             if (target.kind == Node::Kind::object) {
+                if (!add_entries(1)) return false;
                 target.props.emplace_back(key_of(k), v);
             } else if (sparse && nodes_[k].kind == Node::Kind::number) {
+                // Only indexes inside the declared length; the holes up to it count as entries.
                 const double d = nodes_[k].num;
-                if (d >= 0 && d < static_cast<double>(kMaxSparseLength) && d == std::floor(d)) {
+                const std::size_t limit = std::min(sparse_length, kMaxSparseLength);
+                if (d >= 0 && d < static_cast<double>(limit) && d == std::floor(d)) {
                     const auto i = static_cast<std::size_t>(d);
-                    if (target.items.size() <= i) target.items.resize(i + 1, 0);
+                    if (target.items.size() <= i) {
+                        if (!add_entries(i + 1 - target.items.size())) return false;
+                        target.items.resize(i + 1, 0);
+                    }
                     target.items[i] = v;
                 }
             }
@@ -225,6 +244,7 @@ private:
                 n.kind = Node::Kind::array;
                 if (!new_node(std::move(n), out)) return false;
                 assign_id(out);
+                if (!add_entries(length)) return false;
                 nodes_[out].items.reserve(length);
                 for (std::uint32_t i = 0; i < length; ++i) {
                     std::size_t e = 0;
@@ -239,7 +259,7 @@ private:
                 n.kind = Node::Kind::array;
                 if (!new_node(std::move(n), out)) return false;
                 assign_id(out);
-                return read_properties(out, '@', 1, depth, true);
+                return read_properties(out, '@', 1, depth, true, length);
             }
             case 'D':
                 n.kind = Node::Kind::number;
@@ -289,7 +309,7 @@ private:
                         return varint32(ignored);
                     }
                     std::size_t k = 0, v = 0;
-                    if (!read_value(k, depth + 1) || !read_value(v, depth + 1)) return false;
+                    if (!read_value(k, depth + 1) || !read_value(v, depth + 1) || !add_entries(1)) return false;
                     nodes_[out].props.emplace_back(key_of(k), v);
                 }
             }
@@ -306,7 +326,7 @@ private:
                         return varint32(ignored);
                     }
                     std::size_t v = 0;
-                    if (!read_value(v, depth + 1)) return false;
+                    if (!read_value(v, depth + 1) || !add_entries(1)) return false;
                     nodes_[out].items.push_back(v);
                 }
             }
@@ -358,7 +378,12 @@ private:
             case Node::Kind::null_value: out = nullptr; return true;
             case Node::Kind::boolean: out = n.b; return true;
             case Node::Kind::number: out = n.num; return true;
-            case Node::Kind::string: out = n.str; return true;
+            case Node::Kind::string:
+                // Strings count in bytes too: a back-reference repeats them.
+                if (n.str.size() > bytes_) return false;
+                bytes_ -= n.str.size();
+                out = n.str;
+                return true;
             default: break;
         }
         visiting_[idx] = true;
@@ -366,6 +391,11 @@ private:
         if (n.kind == Node::Kind::object) {
             out = json::object();
             for (const auto& [k, v] : n.props) {
+                if (k.size() > bytes_) {
+                    ok = false;
+                    break;
+                }
+                bytes_ -= k.size();
                 json child;
                 if (!(ok = convert(v, child, depth + 1))) break;
                 out[k] = std::move(child);
@@ -388,6 +418,8 @@ private:
     std::vector<std::size_t> ids_;
     std::vector<bool> visiting_;
     std::size_t budget_ = 0;
+    std::size_t bytes_ = 0;
+    std::size_t entries_ = 0;
     Error err_;
 };
 

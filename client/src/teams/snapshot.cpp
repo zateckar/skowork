@@ -37,6 +37,11 @@ Status read_shared(const fs::path& path, std::string& out) {
     if (h == INVALID_HANDLE_VALUE) {
         const DWORD err = GetLastError();
         if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) return make_error("vanished", "file disappeared");
+        // A file deleted while another process still holds it open refuses new opens until it is gone (delete pending),
+        // and so does a query of its attributes: treated like a vanished file, so the snapshot is retried once. A file
+        // whose attributes can be read is a real access denial.
+        if (err == ERROR_ACCESS_DENIED && GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+            return make_error("vanished", "file is being deleted");
         return make_error("io", "cannot open a cache file");
     }
     char buf[1 << 16];
@@ -72,16 +77,25 @@ Status read_shared(const fs::path& path, std::string& out) {
 Status write_private(const fs::path& path, const std::string& data) {
     fs::path tmp = path;
     tmp += ".tmp";
+    std::error_code ec;
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         if (!f) return make_error("io", "cannot write the snapshot");
         f.write(data.data(), static_cast<std::streamsize>(data.size()));
-        if (!f) return make_error("io", "cannot write the snapshot");
+        f.flush();
+        f.close();
+        // A short write (disk full) must not be renamed into place.
+        if (f.fail()) {
+            fs::remove(tmp, ec);
+            return make_error("io", "cannot write the snapshot");
+        }
     }
-    std::error_code ec;
-    fs::remove(path, ec);
-    fs::rename(tmp, path, ec);
-    if (ec) return make_error("io", "cannot place the snapshot file");
+    fs::rename(tmp, path, ec);  // replaces an existing file
+    if (ec) {
+        std::error_code rec;
+        fs::remove(tmp, rec);
+        return make_error("io", "cannot place the snapshot file");
+    }
     return {};
 }
 
@@ -96,7 +110,23 @@ bool has_ext(const std::string& name, const char* ext) {
     return name.size() > e.size() && name.compare(name.size() - e.size(), e.size(), e) == 0;
 }
 
+std::string file_name(const fs::path& p) {
+    const auto s = p.filename().u8string();  // never throws for names outside the ANSI code page
+    return std::string(s.begin(), s.end());
+}
+
 Status attempt(const fs::path& src, const fs::path& dst) {
+    // The folder is listed before CURRENT and the MANIFEST are read: a flush in between then names a table the listing
+    // lacks, which is caught below and retried. Listed after, the flushed log would be gone and its table not live yet.
+    std::set<std::string> tables_present, logs_present;
+    std::error_code ec;
+    for (fs::directory_iterator it(src, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = file_name(it->path());
+        if (has_ext(name, ".ldb") || has_ext(name, ".sst")) tables_present.insert(name);
+        else if (has_ext(name, ".log")) logs_present.insert(name);
+    }
+    if (ec) return make_error("io", "cannot list the cache folder");
+
     std::string current;
     if (Status s = read_shared(src / "CURRENT", current); !s)
         return s.error().code == "vanished" ? make_error("not_found", "no CURRENT file") : s;
@@ -105,15 +135,6 @@ Status attempt(const fs::path& src, const fs::path& dst) {
     std::string manifest;
     if (Status s = read_shared(src / manifest_name, manifest); !s) return s;  // vanished: CURRENT moved on, retry
     const auto parsed = parse_manifest(manifest);
-
-    std::set<std::string> tables_present, logs_present;
-    std::error_code ec;
-    for (fs::directory_iterator it(src, ec), end; !ec && it != end; it.increment(ec)) {
-        const std::string name = it->path().filename().string();
-        if (has_ext(name, ".ldb") || has_ext(name, ".sst")) tables_present.insert(name);
-        else if (has_ext(name, ".log")) logs_present.insert(name);
-    }
-    if (ec) return make_error("io", "cannot list the cache folder");
 
     std::set<std::string> tables;
     if (parsed) {
@@ -148,7 +169,7 @@ Status attempt(const fs::path& src, const fs::path& dst) {
     std::vector<fs::path> stale;
     for (fs::directory_iterator it(dst, ec), end; !ec && it != end; it.increment(ec)) {
         std::error_code tec;
-        if (it->is_regular_file(tec) && !keep.count(it->path().filename().string())) stale.push_back(it->path());
+        if (it->is_regular_file(tec) && !keep.count(file_name(it->path()))) stale.push_back(it->path());
     }
     for (const auto& p : stale) fs::remove(p, ec);
     return {};
@@ -174,7 +195,7 @@ std::vector<std::filesystem::path> find_teams_profiles(const std::filesystem::pa
     std::vector<std::pair<fs::file_time_type, fs::path>> found;
     std::error_code ec;
     for (fs::directory_iterator it(base, ec), end; !ec && it != end; it.increment(ec)) {
-        const std::string name = it->path().filename().string();
+        const std::string name = file_name(it->path());
         if (name.rfind("WV2Profile_", 0) != 0) continue;
         const fs::path db = it->path() / "IndexedDB" / "https_teams.microsoft.com_0.indexeddb.leveldb";
         std::error_code dec;

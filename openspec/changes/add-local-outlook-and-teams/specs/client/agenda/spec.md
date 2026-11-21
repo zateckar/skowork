@@ -40,3 +40,14 @@ When a preparation produced a draft reply to a mail or Teams source, the client 
 #### Scenario: Reply to a Teams message
 - **WHEN** the prepared item came from a Teams message
 - **THEN** the form addresses the mail to the Teams sender's address, and the user can also copy the text to answer in Teams
+
+### Requirement: Prepared Draft Recipients And Policy
+A reply to a mail source SHALL go to its sender with the other recipients in Cc, and never to the user; a reply to the user's own message SHALL NOT be addressed to the user. Sending and Open in Outlook are decided by client/policy-enforcement like any mail.send or mail.draft call: an action policy denies is not offered, and a request for it is refused.
+
+#### Scenario: Reply-all without the user
+- **WHEN** the source mail went to the user and Eva, with Jan in Cc
+- **THEN** the form's To is the sender and its Cc is Eva and Jan
+
+#### Scenario: Sending denied by policy
+- **WHEN** policy denies mail.send
+- **THEN** the send form offers no Send, and a send request is refused without sending

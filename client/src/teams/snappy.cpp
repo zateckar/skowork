@@ -12,6 +12,8 @@ Result<std::string> snappy_decompress(std::string_view in, std::size_t max_outpu
     std::uint32_t declared = 0;
     if (!c.varint32(declared)) return make_error("snappy", "bad length header");
     if (declared > max_output) return make_error("too_large", "snappy output exceeds the limit");
+    // A copy element of 3 bytes yields at most 64: anything claiming more than ~22x its input is not Snappy.
+    if (declared / 22 > in.size()) return make_error("snappy", "declared length larger than the input can produce");
     std::string out;
     out.reserve(declared);
     while (!c.empty()) {
