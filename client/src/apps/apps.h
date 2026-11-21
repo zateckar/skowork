@@ -227,6 +227,9 @@ struct AppToolsEnv {
     AppManager* apps = nullptr;
     AppServer* server = nullptr;
     std::function<void(const std::string& url)> open_url;  // the user's default browser
+    // Told about each file apps.create writes for a new app, so the scaffold counts as written by the agent in its Thread
+    // (client/core-tools Seen File Content). Unset: nothing is recorded.
+    std::function<void(const std::string& thread_id, const std::string& path)> created_file;
 };
 std::vector<runtime::ToolDef> app_tools(AppToolsEnv env);
 

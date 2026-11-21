@@ -110,6 +110,16 @@ void fold_event(std::vector<FeedItem>& items, std::map<std::string, size_t>& too
         it.type = ItemType::error;
         it.error = error_of(p);
         items.push_back(std::move(it));
+    } else if (e.kind == "run_limit") {
+        // Run Limit Note (summarize-at-run-limit design D2): from the client's record, not from the model's text.
+        it.type = ItemType::limit;
+        it.reason = str(p, "limit");
+        const json* limits = p.is_object() ? jobj(p, "limits") : nullptr;
+        const char* field = it.reason == "tool call limit reached"    ? "tool_calls"
+                            : it.reason == "model call limit reached" ? "model_calls"
+                                                                      : "wall_minutes";
+        it.text = limits ? std::to_string(jint(*limits, field)) : std::string();
+        items.push_back(std::move(it));
     }
     // state, resolution, subagent, compaction: shown elsewhere
 }

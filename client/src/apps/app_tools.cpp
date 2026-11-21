@@ -63,7 +63,12 @@ public:
         }
         if (!r) return ToolOutput::failure(r.error().message);
         json out = {{"app", r->id}, {"folder", r->folder}, {"manifest", r->manifest.to_json()}, {"how_to", kHowTo}};
-        if (existing.empty()) out["files"] = {"app.json", r->manifest.entry, "public\\index.html"};
+        if (existing.empty()) {
+            out["files"] = {"app.json", r->manifest.entry, "public\\index.html"};
+            if (env_.created_file)
+                for (const std::string& rel : {std::string("app.json"), r->manifest.entry, std::string("public\\index.html")})
+                    env_.created_file(ctx.thread_id, r->folder + "\\" + rel);
+        }
         return ToolOutput::success(out.dump(2));
     }
 

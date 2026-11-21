@@ -34,6 +34,7 @@ const Section kSections[] = {
     {"mail", "settings.mail.title", false},             {"skills", "settings.skills.title", false},
     {"automations", "settings.automations.title", false}, {"knowledge", "settings.knowledge.title", false},
     {"meetings", "settings.meetings.title", false},      {"agenda", "settings.agenda.title", false},
+    {"daily_report", "settings.daily_report.title", false}, {"teams", "settings.teams.title", false},
     {"triage", "settings.triage.title", false},
     {"privacy", "settings.privacy.title", false},
     {"policy", "settings.policy.title", false},          {"about", "settings.about_section.title", false},
@@ -215,12 +216,16 @@ void PagePane::load() {
         load_knowledge();
         load_meetings();
         load_agenda_status();
+        load_daily_report();
+        load_teams();
         load_triage();
         load_policy();
     } else if (r == RouteName::apps) {
         load_apps();
     } else if (r == RouteName::agenda) {
         load_agenda();
+    } else if (r == RouteName::calendar) {
+        load_calendar();
     } else if (r == RouteName::automation) {
         const std::string id = shell_.route().trigger;
         shell_.call("automations.get", {{"id", id}}, [this, alive, id](Result<json> res) {
@@ -284,6 +289,7 @@ void PagePane::rebuild() {
                       : r.name == RouteName::knowledge    ? "titles.knowledge"
                       : r.name == RouteName::apps         ? "titles.apps"
                       : r.name == RouteName::agenda       ? "titles.agenda"
+                      : r.name == RouteName::calendar     ? "titles.calendar"
 
                       : r.name == RouteName::settings     ? "titles.settings"
                       : r.name == RouteName::telemetry    ? "titles.telemetry"
@@ -330,6 +336,9 @@ void PagePane::rebuild() {
     } else if (r.name == RouteName::agenda) {
         button(*head, "agenda-refresh", shell_.t("agenda.refresh"), [this] { load_agenda(); });
         build_agenda();
+    } else if (r.name == RouteName::calendar) {
+        button(*head, "calendar-refresh", shell_.t("calendar.refresh"), [this] { load_calendar(); });
+        build_calendar();
     } else if (r.name == RouteName::knowledge) {
         std::unique_ptr<KnowledgeView> v = std::move(kept_knowledge_view_);
         if (!v) v = std::make_unique<KnowledgeView>(shell_);
@@ -647,6 +656,10 @@ void PagePane::build_settings() {
             build_meetings(*c);
         } else if (id == "agenda") {
             build_agenda_settings(*c);
+        } else if (id == "daily_report") {
+            build_daily_report(*c);
+        } else if (id == "teams") {
+            build_teams(*c);
         } else if (id == "triage") {
             build_triage(*c);
         } else if (id == "skills") {

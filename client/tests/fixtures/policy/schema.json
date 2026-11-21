@@ -66,6 +66,18 @@
       "default": "on"
     },
     {
+      "path": "daily_report.mode",
+      "owner": "client/daily-report",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
       "path": "dictation.mode",
       "owner": "client/dictation",
       "type": {
@@ -344,6 +356,18 @@
       "default": "on"
     },
     {
+      "path": "knowledge.sources.teams",
+      "owner": "client/knowledge-graph",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
       "path": "knowledge.sources.threads",
       "owner": "client/knowledge-graph",
       "type": {
@@ -559,6 +583,19 @@
         ]
       },
       "default": "oauth"
+    },
+    {
+      "path": "mail.backend",
+      "owner": "client/mail-calendar",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "auto",
+          "graph",
+          "outlook"
+        ]
+      },
+      "default": "auto"
     },
     {
       "path": "mail.excluded_labels",
@@ -1056,6 +1093,53 @@
       }
     },
     {
+      "path": "teams.excluded_types",
+      "owner": "client/teams-chats",
+      "type": {
+        "kind": "list",
+        "item": {
+          "kind": "enum",
+          "values": [
+            "chat",
+            "group",
+            "meeting",
+            "channel"
+          ]
+        }
+      },
+      "default": []
+    },
+    {
+      "path": "teams.mode",
+      "owner": "client/teams-chats",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on"
+    },
+    {
+      "path": "teams.sync_days",
+      "owner": "client/teams-chats",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 30
+    },
+    {
+      "path": "teams.sync_interval_minutes",
+      "owner": "client/teams-chats",
+      "type": {
+        "kind": "integer",
+        "min": 1
+      },
+      "default": 10
+    },
+    {
       "path": "telemetry.buffer_max_mb",
       "owner": "client/telemetry",
       "type": {
@@ -1450,6 +1534,23 @@
           }
         }
       },
+      "daily_report": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "x-owner": "client/daily-report",
+            "x-merge": "scalar",
+            "default": "on",
+            "x-guardrail": "max-level"
+          }
+        }
+      },
       "dictation": {
         "type": "object",
         "additionalProperties": false,
@@ -1733,6 +1834,17 @@
                 "default": "on",
                 "x-guardrail": "max-level"
               },
+              "teams": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "on"
+                ],
+                "x-owner": "client/knowledge-graph",
+                "x-merge": "scalar",
+                "default": "on",
+                "x-guardrail": "max-level"
+              },
               "threads": {
                 "type": "string",
                 "enum": [
@@ -1985,6 +2097,18 @@
             "x-merge": "scalar",
             "default": "oauth",
             "x-guardrail": "max-level"
+          },
+          "backend": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "graph",
+              "outlook"
+            ],
+            "x-owner": "client/mail-calendar",
+            "x-merge": "scalar",
+            "default": "auto",
+            "x-guardrail": "force"
           },
           "excluded_labels": {
             "type": "array",
@@ -2495,6 +2619,55 @@
             "type": "string",
             "x-owner": "client/local-storage",
             "x-merge": "scalar"
+          }
+        }
+      },
+      "teams": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "excluded_types": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "chat",
+                "group",
+                "meeting",
+                "channel"
+              ]
+            },
+            "x-owner": "client/teams-chats",
+            "x-merge": "union",
+            "default": [],
+            "x-guardrail": "add"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "x-owner": "client/teams-chats",
+            "x-merge": "scalar",
+            "default": "on",
+            "x-guardrail": "max-level"
+          },
+          "sync_days": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/teams-chats",
+            "x-merge": "scalar",
+            "default": 30,
+            "x-guardrail": "cap"
+          },
+          "sync_interval_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "x-owner": "client/teams-chats",
+            "x-merge": "scalar",
+            "default": 10,
+            "x-guardrail": "floor"
           }
         }
       },

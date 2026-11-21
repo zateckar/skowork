@@ -61,6 +61,28 @@ std::string wrap_untrusted(std::string_view content, std::string_view nonce, std
 
 size_t estimate_context_tokens(std::string_view text) { return estimate_text_tokens(text); }
 
+PreviewCut preview_cut(std::string_view content, size_t budget) {
+    if (content.size() <= budget) return {content.size(), content.size()};
+    const auto continuation = [&](size_t i) { return i < content.size() && (static_cast<unsigned char>(content[i]) & 0xC0) == 0x80; };
+    size_t head = budget / 2;
+    while (head > 0 && continuation(head)) --head;  // never inside a character
+    if (head > 0) {
+        // Back to the last line break within reach, so the head ends with a whole line.
+        const size_t from = head > kPreviewLineSnap ? head - kPreviewLineSnap : 0;
+        const size_t nl = content.rfind('\n', head - 1);
+        if (nl != std::string_view::npos && nl >= from) head = nl + 1;
+    }
+    size_t tail = content.size() - (budget - head);
+    while (tail < content.size() && continuation(tail)) ++tail;
+    if (tail > 0 && content[tail - 1] != '\n') {
+        // Forward to the next line break within reach, so the tail starts with a whole line.
+        const size_t nl = content.find('\n', tail);
+        if (nl != std::string_view::npos && nl + 1 - tail <= kPreviewLineSnap && nl + 1 < content.size()) tail = nl + 1;
+    }
+    if (tail < head) tail = head;
+    return {head, tail};
+}
+
 size_t estimate_request_tokens(const std::vector<model::ChatMessage>& messages, const std::vector<model::ToolSpec>& tools) {
     size_t n = 0;
     for (const auto& t : tools)

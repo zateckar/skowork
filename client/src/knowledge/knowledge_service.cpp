@@ -325,6 +325,8 @@ void KnowledgeService::mail_event(const std::string& kind, const std::string& id
     enqueue({removed ? "remove" : "upsert", source, id, 2, nullptr});
 }
 
+void KnowledgeService::teams_item(const std::string& id, bool removed) { enqueue({removed ? "remove" : "upsert", "teams", id, 2, nullptr}); }
+
 void KnowledgeService::meeting_transcript(const std::string& meeting_id, const std::string& title, long long start_ms,
                                           const std::vector<Turn>& turns, const std::string& ref) {
     json t = json::array();
@@ -379,7 +381,7 @@ bool KnowledgeService::process_task(const Task& t) {
         return true;
     }
     if (t.source == "threads") index_thread(t.id, t.priority);
-    else if (t.source == "mail" || t.source == "calendar") index_mail(t.source, t.id, t.priority);
+    else if (t.source == "mail" || t.source == "calendar" || t.source == "teams") index_mail(t.source, t.id, t.priority);
     else if (t.source == "files") index_file(t.id, t.priority);
     else if (t.source == "notes") index_note(t.id, t.priority);
     else if (t.source == "meetings") index_meeting(t);
@@ -884,7 +886,7 @@ void KnowledgeService::reconcile() {
         for (const auto& id : env_.thread_ids())
             if (!store_->item_hash("threads", id)) enqueue({"upsert", "threads", id, 0, nullptr});
     }
-    for (const std::string kind : {"mail", "calendar"}) {
+    for (const std::string kind : {"mail", "calendar", "teams"}) {
         if (!source_active(kind) || !env_.mail_ids) continue;
         const auto ids = env_.mail_ids(kind);
         const std::set<std::string> have(ids.begin(), ids.end());

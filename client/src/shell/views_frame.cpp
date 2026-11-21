@@ -18,7 +18,7 @@ namespace {
 namespace glyph {
 constexpr char16_t inbox = 0xE715, unread = 0xE8BD, action = 0xE7BA, running = 0xE768, all = 0xE8FD, archive = 0xE7B8,
                    status = 0xE9D9, settings = 0xE713, about = 0xE946, folder = 0xE8B7, add = 0xE710, knowledge = 0xE8F1, apps = 0xE71D,
-                   chats = 0xE8F2, agenda = 0xE787;
+                   chats = 0xE8F2, agenda = 0xE787, calendar = 0xE8BF;
 }
 
 // One entry of the navigation: an icon, a label (hidden when compact), a count; selected for the current place.
@@ -174,6 +174,10 @@ void NavPane::rebuild() {
     if (const json* ag = jobj(shell_.status(), "agenda"); ag && jbool(*ag, "available") && jbool(*ag, "enabled"))
         vs->emplace<NavItem>(shell_.ui(), "nav-agenda", glyph::agenda, shell_.t("views.agenda"), 0, r.name == RouteName::agenda, compact_,
                              [this] { shell_.navigate("#/agenda"); });
+    // The Calendar page while mail and calendar are available (client/calendar-view Calendar Page).
+    if (const json* cal = jobj(shell_.status(), "calendar"); cal && jbool(*cal, "available"))
+        vs->emplace<NavItem>(shell_.ui(), "nav-calendar", glyph::calendar, shell_.t("views.calendar"), 0, r.name == RouteName::calendar, compact_,
+                             [this] { shell_.navigate("#/calendar"); });
 
     auto* fh = emplace<Node>("nav-folders-header");
     fh->axis = ui::Axis::row;

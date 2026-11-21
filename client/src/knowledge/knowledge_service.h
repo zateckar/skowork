@@ -163,6 +163,8 @@ public:
     Status thread_forgotten(const std::string& thread_id);
     // A mail-calendar event: mail.received, mail.updated, mail.deleted, event.created, event.updated, event.cancelled.
     void mail_event(const std::string& kind, const std::string& id);
+    // A Teams conversation day changed or left the local Teams copy (Teams Chat Source; id "<conversation>|<YYYY-MM-DD>").
+    void teams_item(const std::string& id, bool removed);
     // The meetings connector (client/meeting-capture): a finished transcript, indexed in the meetings Source.
     void meeting_transcript(const std::string& meeting_id, const std::string& title, long long start_ms,
                             const std::vector<Turn>& turns, const std::string& ref);

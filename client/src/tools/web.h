@@ -20,7 +20,18 @@ struct WebToolEnv {
     std::string quarantine_dir;   // <data root>\quarantine
     Extractor extract;            // null: documents are saved to the quarantine instead
     HttpClient* client = nullptr; // null: a client of the tool's own
+    // client/core-tools Web Fetch Question (add-web-fetch-question): one request to the `small` role without tools,
+    // attributed to the calling Run; and that role's context window in tokens, 0 when the user has no `small` role.
+    // Either unset: a question is not answered and the page text is returned with a note.
+    std::function<Result<std::string>(const std::string& system, const std::string& user, runtime::ToolContext& ctx)> ask_small;
+    std::function<long long()> small_context_window;
 };
+
+inline constexpr size_t kWebQuestionMaxChars = 1000;
+// The page text sent with a question: what fits the small role's window after room for the prompt and the answer, at
+// a conservative 2.4 bytes per token.
+inline constexpr long long kWebQuestionReserveTokens = 4096;
+size_t web_question_page_bytes(long long small_context_window);
 
 runtime::ToolDef web_fetch_tool(WebToolEnv env);
 

@@ -9,13 +9,37 @@ namespace {
 
 constexpr char kLog[] = "mail";
 constexpr char kAccount[] = "mail.account";
+constexpr char kBackendUsed[] = "mail.backend_used";
+constexpr char kOutlookPrefix[] = "mail.outlook.";
+constexpr char kMayStart[] = "mail.outlook.may_start";
 
 bool same_connection(const MailConfig& a, const MailConfig& b) {
-    return a.available == b.available && a.graph_base_url == b.graph_base_url && a.auth == b.auth && a.authority == b.authority &&
-           a.tenant_id == b.tenant_id && a.client_id == b.client_id && a.scopes == b.scopes;
+    return a.available == b.available && a.backend == b.backend && a.graph_base_url == b.graph_base_url && a.auth == b.auth &&
+           a.authority == b.authority && a.tenant_id == b.tenant_id && a.client_id == b.client_id && a.scopes == b.scopes;
 }
 
 }  // namespace
+
+bool MailService::ready(const Connection& c) {
+    if (!c.cfg.available) return false;
+    if (c.local()) return true;  // Outlook availability shows per call (offline while it is not running)
+    return c.auth->state() == GraphAuthState::connected;
+}
+
+void MailService::backend_in_use(const MailConfig& cfg) {
+    // Mail Backend Selection: ids differ between backends, so a switch empties the copy; the refill is a backfill.
+    if (!cfg.available) return;
+    const std::string used = env_.store->setting(kBackendUsed).value_or("");
+    if (used == cfg.backend) return;
+    if (!used.empty()) {
+        log::info(kLog, "mail backend changed from " + used + " to " + cfg.backend + "; the local copy is refilled");
+        store_.clear();
+        const std::lock_guard lock(mx_);
+        account_.clear();
+    }
+    (void)env_.store->delete_setting(kAccount);
+    (void)env_.store->set_setting(kBackendUsed, cfg.backend);
+}
 
 MailService::MailService(MailEnv env) : env_(std::move(env)), store_(env_.store->db()), sync_(store_, *env_.clock) {
     sync_.on_event([this](const MailEvent& e) {
@@ -36,7 +60,24 @@ std::shared_ptr<Connection> MailService::make_connection(const MailConfig& cfg) 
     c->auth = std::make_unique<GraphAuth>(cfg, *env_.store, *env_.clock, *env_.launcher, env_.broker);
     c->auth->set_login_hint(env_.login_hint);
     c->graph = std::make_unique<GraphClient>(cfg.graph_base_url, *c->auth, env_.dev_build);
-    c->auth->on_state_changed([this](GraphAuthState s) { auth_changed(s); });
+    if (cfg.available && cfg.backend == "outlook" && env_.outlook_factory) {
+        c->session = env_.outlook_factory([this] { return outlook_may_start(); });
+        if (c->session) {
+            AppStore* store = env_.store;
+            outlook::Persist persist{
+                [store](const std::string& k) { return store->setting(std::string(kOutlookPrefix) + k); },
+                [store](const std::string& k, const std::string& v) { (void)store->set_setting(std::string(kOutlookPrefix) + k, v); }};
+            c->outlook = std::make_unique<outlook::OutlookGraph>(*c->session, *env_.clock, std::move(persist));
+            auto* og = c->outlook.get();
+            c->graph->set_local([og](const GraphCall& call) { return og->handle(call.method, call.path, call.body, call.page_size); });
+        }
+    }
+    if (cfg.available && cfg.backend == "outlook" && !c->outlook) {
+        c->cfg.available = false;
+        c->cfg.unavailable_code = "outlook_missing";
+        c->cfg.unavailable_reason = "classic Outlook cannot be used on this computer";
+    }
+    if (!c->local()) c->auth->on_state_changed([this](GraphAuthState s) { auth_changed(s); });
     return c;
 }
 
@@ -53,8 +94,9 @@ void MailService::auth_changed(GraphAuthState s) {
 }
 
 void MailService::start() {
-    const MailConfig cfg = read_config(env_.policy, env_.tool_permitted, env_.dev_build);
+    const MailConfig cfg = read_config(env_.policy, env_.tool_permitted, env_.dev_build, env_.outlook_installed);
     if (!cfg.available && cfg.unavailable_code == "policy_error" && env_.policy_error) env_.policy_error(cfg.unavailable_reason);
+    backend_in_use(cfg);
     auto conn = make_connection(cfg);
     {
         const std::lock_guard lock(mx_);
@@ -62,8 +104,9 @@ void MailService::start() {
         account_ = env_.store->setting(kAccount).value_or("");
     }
     sync_.set_config(cfg);
-    conn->auth->start();
+    if (!conn->local()) conn->auth->start();
     if (env_.background_sync && !thread_.joinable()) thread_ = std::thread([this] { loop(); });
+    if (conn->local()) request_sync();
 }
 
 void MailService::stop() {
@@ -78,7 +121,7 @@ void MailService::stop() {
 }
 
 void MailService::policy_changed() {
-    const MailConfig cfg = read_config(env_.policy, env_.tool_permitted, env_.dev_build);
+    const MailConfig cfg = read_config(env_.policy, env_.tool_permitted, env_.dev_build, env_.outlook_installed);
     std::shared_ptr<Connection> old;
     {
         const std::lock_guard lock(mx_);
@@ -94,12 +137,14 @@ void MailService::policy_changed() {
         return;
     }
     if (!cfg.available && cfg.unavailable_code == "policy_error" && env_.policy_error) env_.policy_error(cfg.unavailable_reason);
+    backend_in_use(cfg);
     auto conn = make_connection(cfg);
     {
         const std::lock_guard lock(mx_);
         conn_ = conn;
     }
-    conn->auth->start();
+    if (conn->local()) request_sync();
+    else conn->auth->start();
     if (env_.changed) env_.changed();
 }
 
@@ -120,7 +165,22 @@ bool MailService::available() {
 
 bool MailService::connected() {
     auto c = connection();
-    return c && c->cfg.available && c->auth->state() == GraphAuthState::connected;
+    return c && ready(*c);
+}
+
+bool MailService::outlook_may_start() { return env_.store->setting(kMayStart).value_or("") == "1"; }
+
+Status MailService::set_outlook_may_start(bool on) {
+    Status s = env_.store->set_setting(kMayStart, on ? "1" : "0");
+    if (s && on) request_sync();
+    if (env_.changed) env_.changed();
+    return s;
+}
+
+Status MailService::open_in_outlook(const std::string& id) {
+    auto c = connection();
+    if (!c || !c->local()) return make_error("unavailable", "Open in Outlook needs the Local Outlook backend");
+    return c->session->display(id);
 }
 
 Rules MailService::rules() { return sync_.rules(); }
@@ -133,8 +193,8 @@ std::string MailService::account() {
 Result<json> MailService::directory_user(const std::string& upn) {
     auto c = connection();
     if (!c || !c->cfg.available) return make_error("unavailable", c ? c->cfg.unavailable_reason : "mail is not started");
-    if (!c->cfg.directory_enabled) return make_error("unavailable", "directory lookups are not enabled by policy");
-    if (c->auth->state() != GraphAuthState::connected) return make_error("not_connected", "the mailbox is not connected");
+    if (!c->cfg.directory_enabled || c->local()) return make_error("unavailable", "directory lookups are not enabled by policy");
+    if (!ready(*c)) return make_error("not_connected", "the mailbox is not connected");
     GraphCall u;
     u.path = "/users/" + url_encode(upn) + "?$select=displayName,mail,userPrincipalName,department,jobTitle";
     u.cancel = cancel_;
@@ -160,11 +220,15 @@ Status MailService::connect() {
         const std::lock_guard lock(mx_);
         asked_interaction_ = false;
     }
+    if (c->local()) {
+        request_sync();
+        return {};
+    }
     return c->auth->connect();
 }
 
 void MailService::disconnect() {
-    if (auto c = connection()) c->auth->disconnect();
+    if (auto c = connection(); c && !c->local()) c->auth->disconnect();
     store_.clear();
     {
         const std::lock_guard lock(mx_);
@@ -192,7 +256,7 @@ void MailService::request_sync() {
 Result<SyncReport> MailService::sync_now() {
     auto c = connection();
     if (!c || !c->cfg.available) return make_error("unavailable", c ? c->cfg.unavailable_reason : "mail is not started");
-    if (c->auth->state() != GraphAuthState::connected) return make_error("not_connected", "the mailbox is not connected");
+    if (!ready(*c)) return make_error("not_connected", "the mailbox is not connected");
     if (account().empty()) {
         GraphCall me;
         me.path = "/me?$select=mail,userPrincipalName,displayName";
@@ -249,8 +313,18 @@ json MailService::status() {
     j["available"] = cfg.available;
     j["unavailable_code"] = cfg.unavailable_code;
     j["unavailable_reason"] = cfg.unavailable_reason;
-    j["state"] = c ? to_string(c->auth->state()) : "disconnected";
-    j["error"] = c ? c->auth->last_error() : std::string{};
+    j["backend"] = cfg.backend;
+    j["backend_policy"] = cfg.backend_policy;
+    if (c && c->local()) {
+        const std::string st = c->session->state();
+        j["outlook_state"] = st;
+        j["state"] = st == "running" ? "connected" : "disconnected";
+        j["error"] = st == "running" ? std::string{} : std::string("Outlook is not running");
+        j["outlook_may_start"] = outlook_may_start();
+    } else {
+        j["state"] = c ? to_string(c->auth->state()) : "disconnected";
+        j["error"] = c ? c->auth->last_error() : std::string{};
+    }
     j["mock"] = cfg.auth == "mock";
     j["account"] = account();
     j["scopes"] = cfg.scopes;

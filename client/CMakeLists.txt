@@ -54,6 +54,8 @@ add_subdirectory(src/shell)  # likewise
 add_subdirectory(src/mail)  # likewise
 add_subdirectory(src/knowledge)  # likewise
 add_subdirectory(src/meeting)  # likewise
+add_subdirectory(src/teams)
+add_subdirectory(src/report)
 add_subdirectory(src/triage)
 add_subdirectory(src/agenda)  # the Windows part is guarded inside
 

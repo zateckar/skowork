@@ -1319,7 +1319,16 @@ TEST(RuntimeLoop, ChangedPolicyControlsParallelToolsOnTheNextRun) {
     EXPECT_EQ(peak.load(), 2);
 }
 
-TEST(RuntimeLoop, ModelCallLimitFailsTheRun) {
+namespace {
+std::string limit_of(Env& env, const std::string& run) {
+    for (const auto& e : env.rt->events(run))
+        if (e.kind == "run_limit") return jstr(e.payload, "limit");
+    return {};
+}
+}  // namespace
+
+// Final Answer At A Limit (summarize-at-run-limit): one more call without tools, and the Run succeeds with its answer.
+TEST(RuntimeLoop, ModelCallLimitEndsWithAFinalAnswerWithoutTools) {
     RuntimeConfig cfg;
     cfg.attended.model_calls = 3;
     Env env(cfg);
@@ -1327,12 +1336,36 @@ TEST(RuntimeLoop, ModelCallLimitFailsTheRun) {
     t.core = true;
     env.add_tool(t);
     env.start();
-    for (int i = 0; i < 10; ++i) env.model.push_calls({{"c" + std::to_string(i), "t.loop", {}}});
+    for (int i = 0; i < 3; ++i) env.model.push_calls({{"c" + std::to_string(i), "t.loop", {}}});
+    env.model.push_text("I looped three times; the rest remains.");
     const auto id = env.run(env.thread(), "loop forever");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded)) << env.rec(id).reason;
+    EXPECT_EQ(limit_of(env, id), "model call limit reached");
+    const auto reqs = env.model.requests();
+    ASSERT_EQ(reqs.size(), 4u);
+    EXPECT_TRUE(reqs[3].tools.empty());
+    EXPECT_NE(reqs[3].messages.back().content.find("cannot use tools any more"), std::string::npos);
+    // The instruction is request-only: it is not part of the stored conversation.
+    for (const auto& m : env.rt->conversation(env.rec(id).thread_id)) EXPECT_EQ(m.content.find("cannot use tools any more"), std::string::npos);
+    EXPECT_EQ(env.rt->conversation(env.rec(id).thread_id).back().content, "I looped three times; the rest remains.");
+}
+
+TEST(RuntimeLoop, AFailedFinalCallFailsTheRunWithTheLimit) {
+    RuntimeConfig cfg;
+    cfg.attended.model_calls = 1;
+    Env env(cfg);
+    ToolDef t = make_tool(env, "t.loop", Risk::read);
+    t.core = true;
+    env.add_tool(t);
+    env.start();
+    env.model.push_calls({{"c0", "t.loop", {}}});
+    env.model.push_failure(failure(model::code::model_unavailable, "down"));
+    const auto id = env.run(env.thread(), "loop");
     ASSERT_TRUE(env.wait(id, RunState::failed));
     EXPECT_EQ(env.rec(id).reason, "model call limit reached");
-    EXPECT_EQ(env.model.request_count(), 3u);
+    EXPECT_TRUE(limit_of(env, id).empty());
 }
+
 
 TEST(RuntimeLoop, RunLimitsFollowCurrentPolicy) {
     std::atomic<int> limit{1};
@@ -1378,7 +1411,7 @@ TEST(RuntimeLoop, PolicyLimitsSelectBothRunModesAndKeepFallbacks) {
     EXPECT_EQ(cfg.policy_limit("missing", 4), 4);
 }
 
-TEST(RuntimeLoop, ToolCallLimitFailsTheRunAndFillsInTheOpenResults) {
+TEST(RuntimeLoop, ToolCallLimitFillsInTheOpenResultsAndEndsWithAFinalAnswer) {
     RuntimeConfig cfg;
     cfg.attended.tool_calls = 2;
     Env env(cfg);
@@ -1387,15 +1420,19 @@ TEST(RuntimeLoop, ToolCallLimitFailsTheRunAndFillsInTheOpenResults) {
     env.add_tool(t);
     env.start();
     env.model.push_calls({{"c1", "t.x", {}}, {"c2", "t.x", {}}, {"c3", "t.x", {}}});
+    env.model.push_text("Two of three done; c3 remains.");
     const auto thread = env.thread();
     const auto id = env.run(thread, "many");
-    ASSERT_TRUE(env.wait(id, RunState::failed));
-    EXPECT_EQ(env.rec(id).reason, "tool call limit reached");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded)) << env.rec(id).reason;
+    EXPECT_EQ(limit_of(env, id), "tool call limit reached");
     EXPECT_EQ(env.calls.count("t.x"), 2);
-    // The history stays valid for the model: every call has a result.
+    EXPECT_EQ(env.tool_content(id, "c3"), "The call was not executed: tool call limit reached.");
+    // The history stays valid for the model: every call has a result, then the final answer.
     const auto conv = env.rt->conversation(thread);
-    ASSERT_EQ(conv.size(), 5u);
+    ASSERT_EQ(conv.size(), 6u);
     EXPECT_EQ(conv[4].tool_call_id, "c3");
+    EXPECT_EQ(conv[5].content, "Two of three done; c3 remains.");
+    EXPECT_TRUE(env.model.requests().back().tools.empty());
 }
 
 TEST(RuntimeLoop, WallTimeLimitUsesActiveTimeOnly) {
@@ -1441,10 +1478,11 @@ TEST(RuntimeLoop, UnattendedRunsUseTheUnattendedLimits) {
     env.add_tool(t);
     env.start();
     env.model.push_calls({{"c1", "t.x", {}}});
-    env.model.push_text("never");
+    env.model.push_text("partial result of the scheduled task");
     const auto id = env.run(env.thread(), "scheduled", true);
-    ASSERT_TRUE(env.wait(id, RunState::failed));
-    EXPECT_EQ(env.rec(id).reason, "model call limit reached");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded)) << env.rec(id).reason;
+    EXPECT_EQ(limit_of(env, id), "model call limit reached");  // the unattended limit of one model call applied
+    EXPECT_TRUE(env.model.requests().back().tools.empty());
     EXPECT_TRUE(env.rec(id).unattended);
 }
 
@@ -2789,9 +2827,13 @@ TEST(RuntimeLargeResults, TwoMegabyteResultBecomesAPreviewAndAnAttachmentReadInP
     EXPECT_NE(preview->content.find(std::to_string(big.size()) + " bytes"), std::string::npos);
     EXPECT_NE(preview->content.find("<<<untrusted-data id="), std::string::npos);
     EXPECT_NE(preview->content.find(big.substr(0, 200)), std::string::npos);
-    // The event log keeps the preview, not the whole text.
+    // Tool Result Previews: the end is kept too, behind a marker that says what was left out and how to read it.
+    const std::string last_line = big.substr(big.rfind('\n', big.size() - 2) + 1);
+    EXPECT_NE(preview->content.find(last_line), std::string::npos) << preview->content.substr(preview->content.size() - 300);
+    EXPECT_NE(preview->content.find("bytes left out, from offset"), std::string::npos);
+    // The event log keeps the preview and its marker, not the whole text.
     for (const auto& e : env.rt->events(id))
-        if (e.kind == "tool_result" && jstr(e.payload, "call_id") == "c1") EXPECT_LE(jstr(e.payload, "content").size(), 4096u);
+        if (e.kind == "tool_result" && jstr(e.payload, "call_id") == "c1") EXPECT_LE(jstr(e.payload, "content").size(), 4096u + 200u);
     // read_attachment returns the requested part, with the attachment's provenance.
     const auto* part = tool_message(reqs[2], "c2");
     ASSERT_NE(part, nullptr);
@@ -2805,6 +2847,154 @@ TEST(RuntimeLargeResults, TwoMegabyteResultBecomesAPreviewAndAnAttachmentReadInP
     const auto other = env.run(env.thread(), "read someone else's attachment");
     ASSERT_TRUE(env.wait(other, RunState::succeeded));
     EXPECT_EQ(env.tool_content(other, "c3").rfind("No attachment", 0), 0u);
+}
+
+// ---- Tool Result Previews (keep-result-preview-ends) ----
+
+TEST(RuntimePreviewCut, KeepsStartAndEndAtLineBreaks) {
+    std::string text;
+    for (int i = 0; i < 1000; ++i) text += "line " + std::to_string(i) + "\n";
+    const PreviewCut cut = preview_cut(text, 4096);
+    ASSERT_GT(cut.head_end, 0u);
+    EXPECT_EQ(text[cut.head_end - 1], '\n');
+    EXPECT_EQ(text[cut.tail_begin - 1], '\n');
+    EXPECT_LE(cut.head_end + (text.size() - cut.tail_begin), 4096u);
+    EXPECT_GT(cut.head_end, 1500u);
+    EXPECT_GT(text.size() - cut.tail_begin, 1500u);
+    EXPECT_EQ(text.substr(cut.tail_begin).substr(text.size() - cut.tail_begin - 9), "line 999\n");
+    // Short content is kept whole.
+    const PreviewCut whole = preview_cut("abc", 4096);
+    EXPECT_EQ(whole.head_end, 3u);
+    EXPECT_EQ(whole.tail_begin, 3u);
+}
+
+TEST(RuntimePreviewCut, OneLongLineIsCutAtCharacterBoundaries) {
+    std::string text;
+    while (text.size() < 500 * 1024) text += "\xC4\x8D\xE2\x82\xAC";  // č€, two- and three-byte characters, no line break
+    const PreviewCut cut = preview_cut(text, 4096);
+    const auto boundary = [&](size_t i) { return i == text.size() || (static_cast<unsigned char>(text[i]) & 0xC0) != 0x80; };
+    EXPECT_TRUE(boundary(cut.head_end));
+    EXPECT_TRUE(boundary(cut.tail_begin));
+    EXPECT_LE(cut.head_end + (text.size() - cut.tail_begin), 4096u);
+    EXPECT_GT(cut.head_end, 2000u);
+}
+
+TEST(RuntimeLargeResults, CommandOutputKeepsTheErrorAtTheEnd) {
+    Env env;
+    std::string out;
+    while (out.size() < 2 * 1024 * 1024) out += "progress " + std::to_string(out.size()) + "\n";
+    out += "error: build failed in step 7\nexit code 2\n";
+    ToolDef t = make_tool(env, "shell.run", Risk::read, "Run a command");
+    t.core = true;
+    t.run = [&out](ToolContext&, const json&) { return ToolOutput::success(out); };
+    env.add_tool(t);
+    env.start();
+    env.model.push_calls({{"c1", "shell.run", {}}});
+    env.model.push_text("it failed");
+    const auto id = env.run(env.thread(), "build it");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    const auto* m = tool_message(env.model.requests()[1], "c1");
+    ASSERT_NE(m, nullptr);
+    EXPECT_NE(m->content.find("progress 0\n"), std::string::npos);
+    EXPECT_NE(m->content.find("error: build failed in step 7\nexit code 2\n"), std::string::npos);
+    EXPECT_NE(m->content.find("bytes left out, from offset"), std::string::npos);
+    EXPECT_NE(m->content.find("read_attachment"), std::string::npos);
+}
+
+TEST(RuntimeLargeResults, ResultCutWithoutAttachmentKeepsStartAndEnd) {
+    Env env;
+    std::string out;
+    while (out.size() < 200 * 1024) out += "row " + std::to_string(out.size()) + "\n";
+    out += "TOTAL 42\n";
+    ToolDef t = make_tool(env, "t.report", Risk::read);
+    t.core = true;
+    t.run = [&out](ToolContext&, const json&) { return ToolOutput::success(out); };
+    env.add_tool(t);
+    env.start();
+    // The attachment cannot be stored.
+    ASSERT_TRUE(env.db->exec("DROP TABLE thread_attachments"));
+    env.model.push_calls({{"c1", "t.report", {}}});
+    env.model.push_text("ok");
+    const auto id = env.run(env.thread(), "report");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    const std::string content = env.tool_content(id, "c1");
+    EXPECT_NE(content.find("row 0\n"), std::string::npos);
+    EXPECT_NE(content.find("TOTAL 42\n"), std::string::npos);
+    EXPECT_NE(content.find("the rest could not be stored"), std::string::npos);
+    EXPECT_LE(content.size(), 64u * 1024 + 200u);
+}
+
+// ---- Large Tool Results by context window (cap-tool-results-by-context) ----
+
+namespace {
+std::string plain_text(size_t bytes) {
+    std::string s;
+    while (s.size() < bytes) s += "plain ascii text line\n";
+    s.resize(bytes);
+    return s;
+}
+bool attached(Env& env, const std::string& run, const std::string& call) {
+    for (const auto& e : env.rt->events(run))
+        if (e.kind == "tool_result" && jstr(e.payload, "call_id") == call) return e.payload.contains("attachment");
+    return false;
+}
+}  // namespace
+
+TEST(RuntimeLargeResults, SmallWindowOffloadsAResultAboveAQuarter) {
+    RuntimeConfig cfg;
+    cfg.default_context_window = 32768;
+    Env env(cfg);
+    ToolDef t = make_tool(env, "t.read40", Risk::read);
+    t.core = true;
+    t.run = [](ToolContext&, const json&) { return ToolOutput::success(plain_text(40 * 1024)); };
+    env.add_tool(t);
+    env.start();
+    env.model.push_calls({{"c1", "t.read40", {}}});
+    env.model.push_text("ok");
+    const auto id = env.run(env.thread(), "read");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    EXPECT_TRUE(attached(env, id, "c1"));
+}
+
+TEST(RuntimeLargeResults, LargeWindowKeepsTheResultBelowThePolicyCap) {
+    RuntimeConfig cfg;
+    cfg.default_context_window = 262144;
+    Env env(cfg);
+    ToolDef t = make_tool(env, "t.read60", Risk::read);
+    t.core = true;
+    t.run = [](ToolContext&, const json&) { return ToolOutput::success(plain_text(60 * 1024)); };
+    env.add_tool(t);
+    env.start();
+    env.model.push_calls({{"c1", "t.read60", {}}});
+    env.model.push_text("ok");
+    const auto id = env.run(env.thread(), "read");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    EXPECT_FALSE(attached(env, id, "c1"));
+    EXPECT_EQ(env.tool_content(id, "c1").size(), 60u * 1024);
+}
+
+TEST(RuntimeLargeResults, ParallelResultsStayWithinHalfTheWindow) {
+    RuntimeConfig cfg;
+    cfg.default_context_window = 32768;
+    Env env(cfg);
+    ToolDef t = make_tool(env, "t.read20", Risk::read);
+    t.core = true;
+    t.run = [](ToolContext&, const json&) { return ToolOutput::success(plain_text(20 * 1024)); };
+    env.add_tool(t);
+    env.start();
+    env.model.push_calls({{"a", "t.read20", {}}, {"b", "t.read20", {}}, {"c", "t.read20", {}}, {"d", "t.read20", {}}});
+    env.model.push_text("ok");
+    const auto id = env.run(env.thread(), "read four");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    int offloaded = 0;
+    for (const char* c : {"a", "b", "c", "d"}) offloaded += attached(env, id, c) ? 1 : 0;
+    EXPECT_EQ(offloaded, 2);
+    // Results are still given to the model in the order of the calls.
+    const auto& req = env.model.requests()[1];
+    std::vector<std::string> order;
+    for (const auto& m : req.messages)
+        if (m.role == "tool") order.push_back(m.tool_call_id);
+    EXPECT_EQ(order, (std::vector<std::string>{"a", "b", "c", "d"}));
 }
 
 namespace {
@@ -4069,6 +4259,36 @@ TEST(RuntimeSubagents, ParallelDelegationRunsChildRunsConcurrentlyAndReturnsThei
     // Each child has its own log; the Thread's conversation is the parent's.
     EXPECT_EQ(env.rt->conversation(thread).size(), 1u + 1u + 3u + 1u);
     EXPECT_EQ(env.events.of("subagent").size(), 3u);
+}
+
+// Child Run At A Limit (summarize-at-run-limit design D4).
+TEST(RuntimeSubagents, AChildAtItsLimitReturnsAPartialAnswerMarkedForTheParent) {
+    RuntimeConfig cfg;
+    cfg.attended.model_calls = 3;
+    Env env(cfg);
+    ToolDef t = make_tool(env, "t.x", Risk::read);
+    t.core = true;
+    env.add_tool(t);
+    std::atomic<int> child_calls{0};
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (!is_subagent(req)) return std::nullopt;
+        if (req.tools.empty()) return model::ModelResult<model::ChatResponse>(text_response("read two of five parts"));
+        const int n = child_calls++;
+        return model::ModelResult<model::ChatResponse>(calls_response({{"x" + std::to_string(n), "t.x", {}}}));
+    });
+    env.start();
+    env.model.push_calls({{"d1", "delegate", {{"task", "read five parts"}, {"tools", json::array({"t.x"})}}}});
+    env.model.push_text("parent done");
+    const auto thread = env.thread();
+    const auto id = env.run(thread, "delegate");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded)) << env.rec(id).reason;
+    const auto children = children_of(env, thread, id);
+    ASSERT_EQ(children.size(), 1u);
+    EXPECT_EQ(children[0].state, RunState::succeeded);
+    EXPECT_EQ(limit_of(env, children[0].id), "model call limit reached");
+    const std::string result = env.tool_content(id, "d1");
+    EXPECT_EQ(result.rfind("The subagent stopped at its model call limit", 0), 0u) << result;
+    EXPECT_NE(result.find("read two of five parts"), std::string::npos);
 }
 
 TEST(RuntimeProgress, ConcurrentChildModelProgressSurvivesCancellationAndRestart) {

@@ -34,10 +34,13 @@ context: |
     never committed, logged or shared, including as a CI secret; tests that need it run locally only.
   - Software is installed only inside the repository working tree or the temp folder. Development
     tooling never installs services, databases or runtimes elsewhere on the developer's machine.
-  - Email and calendar access uses Microsoft Graph only, through the organization's existing Entra app
-    registration with OAuth 2.0 delegated access. Development and tests use the Graph mock
-    (dev/graph-mock), which also mocks the OAuth endpoints. No real mailbox or tenant is ever used
-    in automated tests.
+  - Email and calendar access uses Microsoft Graph through the organization's existing Entra app
+    registration with OAuth 2.0 delegated access, or, where Graph is not configured, the user's local
+    classic Outlook through its object model on the same device (policy.mail.backend). Teams chats are
+    read only from the local new Teams client's cache, read-only. Development and tests use the Graph
+    mock (dev/graph-mock), which also mocks the OAuth endpoints, and fakes of Outlook and of the Teams
+    cache. No real mailbox, tenant or Teams account is ever used in automated tests.
+    (Local Outlook and Teams decided 2026-11-21; add-local-outlook-and-teams.)
   - All LLM traffic goes through the control-plane LLM gateway. The client never talks to the
     model servers directly and never holds model API keys.
   - Content from email, web pages, files, transcripts, MCP results and Remote task requests is
@@ -137,7 +140,8 @@ context: |
   - Policy bundle: a signed, versioned and expiring document issued by the control plane. It holds
     the effective policy for one user. Its top-level keys are:
     llm, identity, tools, filesystem, network, mcp, skills, knowledge, meeting_capture, scheduler,
-    unattended, telemetry, storage, mail, ui, messaging, apps, dictation, notifications, speech, agenda.
+    unattended, telemetry, storage, mail, ui, messaging, apps, dictation, notifications, speech, agenda,
+    teams, daily_report.
   - Policy key layout: decisions are written policy.tools.rules[<tool-id pattern>] = allow|approve|deny,
     with policy.tools.risk.<risk class> defaults. Unattended runs add policy.unattended.allowed_risk and
     policy.unattended.rules. Tool settings are written policy.tools.<group>.<setting> and are never decisions.
@@ -156,7 +160,11 @@ context: |
     meeting | session.
   - Occurrence: one firing of a Trigger, or one accepted Remote task, as executed by client/scheduler.
   - Remote task: work requested through the control plane by a person or a system. It is not a Trigger.
-  - Source: an origin of knowledge. Its kinds are threads | files | notes | mail | calendar | meetings.
+  - Source: an origin of knowledge. Its kinds are threads | files | notes | mail | calendar | meetings | teams.
+  - Teams chat: a Microsoft Teams conversation (one-to-one, group, meeting or channel) read from the local
+    Teams client (client/teams-chats). It is not a Chat and not an Inbox entry.
+  - Daily report: the Thread the client writes once each working day with today's meetings, what the user
+    should know and what they must act on (client/daily-report).
   - Category: a user-editable way to organize knowledge locally; membership does not itself grant access.
   - Publication: an explicitly shared, versioned snapshot of selected eligible knowledge for a Group.
   - Model role: the logical model a feature asks for. The roles are main | vision | small | embed | rerank | image.
@@ -225,6 +233,7 @@ context: |
   49 remove-ci-spec-validation        [Hardening]
   50 show-meeting-transcription-progress [Knowledge]
   51 improve-transcript-language      [Knowledge]
+  52 add-local-outlook-and-teams      [Productivity]
 
 rules:
   proposal:

@@ -83,6 +83,11 @@ struct FileFixture {
         ToolContext ctx;
         return tool(id).run(ctx, args);
     }
+    ToolOutput call_in(const std::string& thread, const std::string& id, const json& args) {
+        ToolContext ctx;
+        ctx.thread_id = thread;
+        return tool(id).run(ctx, args);
+    }
     bool junction(const std::filesystem::path& link, const std::filesystem::path& target) {
         auto final_target = policy::canonicalize(s(target));
         if (!final_target) return false;
@@ -324,4 +329,142 @@ TEST(FileTools, EditKeepsLineEndingsAndEncoding) {
     EXPECT_EQ(r.content, "h\xC3\xA9llo");
     ASSERT_TRUE(f.call("files.edit", {{"path", s(f.out / L"u16.txt")}, {"old_text", "llo"}, {"new_text", "y"}}).ok);
     EXPECT_EQ(get(f.out / L"u16.txt"), std::string("\xFF\xFEh\0\xE9\0y\0", 8));
+}
+
+// ---- client/core-tools Edit All Occurrences (add-edit-replace-all) ----
+
+TEST(FileTools, ReplaceAllReplacesEveryOccurrenceInOneWrite) {
+    FileFixture f;
+    put(f.out / L"app.js", "oldName();\nconst x = oldName;\noldName.y = 1;\n// oldName\nexport { oldName };\n");
+    auto r = f.call("files.edit", {{"path", s(f.out / L"app.js")}, {"old_text", "oldName"}, {"new_text", "newName"}, {"replace_all", true}});
+    ASSERT_TRUE(r.ok) << r.content;
+    EXPECT_NE(r.content.find("Replaced 5 occurrences"), std::string::npos) << r.content;
+    EXPECT_EQ(get(f.out / L"app.js"), "newName();\nconst x = newName;\nnewName.y = 1;\n// newName\nexport { newName };\n");
+    // Non-overlapping, left to right; the replacement is not searched again.
+    put(f.out / L"aaa.txt", "aaaa");
+    r = f.call("files.edit", {{"path", s(f.out / L"aaa.txt")}, {"old_text", "aa"}, {"new_text", "aab"}, {"replace_all", true}});
+    ASSERT_TRUE(r.ok) << r.content;
+    EXPECT_EQ(get(f.out / L"aaa.txt"), "aabaab");
+}
+
+TEST(FileTools, ReplaceAllWithoutAMatchFailsAndKeepsTheFile) {
+    FileFixture f;
+    put(f.out / L"app.js", "a();\n");
+    auto r = f.call("files.edit", {{"path", s(f.out / L"app.js")}, {"old_text", "zzz"}, {"new_text", "y"}, {"replace_all", true}});
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.content.find("not found"), std::string::npos) << r.content;
+    EXPECT_EQ(get(f.out / L"app.js"), "a();\n");
+}
+
+TEST(FileTools, ReplaceAllKeepsUtf16Encoding) {
+    FileFixture f;
+    const std::string utf16("\xFF\xFE" "a\0b\0a\0", 8);  // "aba"
+    put(f.out / L"u16.txt", utf16);
+    auto r = f.call("files.edit", {{"path", s(f.out / L"u16.txt")}, {"old_text", "a"}, {"new_text", "c"}, {"replace_all", true}});
+    ASSERT_TRUE(r.ok) << r.content;
+    EXPECT_EQ(get(f.out / L"u16.txt"), std::string("\xFF\xFE" "c\0b\0c\0", 8));
+}
+
+// ---- client/core-tools Overwrite Protection and Seen File Content (protect-unread-overwrites) ----
+
+TEST(FileTools, OverwriteWithoutAReadFailsAndKeepsTheFile) {
+    FileFixture f;
+    put(f.out / L"notes.txt", "the user's notes\n");
+    auto w = f.call_in("t1", "files.write", {{"path", s(f.out / L"notes.txt")}, {"content", "replaced"}});
+    EXPECT_FALSE(w.ok);
+    EXPECT_NE(w.content.find("has not been read in this Thread"), std::string::npos) << w.content;
+    EXPECT_EQ(get(f.out / L"notes.txt"), "the user's notes\n");
+}
+
+TEST(FileTools, OverwriteAfterAFullReadInTheSameThread) {
+    FileFixture f;
+    put(f.out / L"notes.txt", "the user's notes\n");
+    ASSERT_TRUE(f.call_in("t1", "files.read", {{"path", s(f.out / L"notes.txt")}}).ok);
+    // Another Thread has not seen it.
+    EXPECT_FALSE(f.call_in("t2", "files.write", {{"path", s(f.out / L"notes.txt")}, {"content", "other"}}).ok);
+    auto w = f.call_in("t1", "files.write", {{"path", s(f.out / L"notes.txt")}, {"content", "replaced"}});
+    ASSERT_TRUE(w.ok) << w.content;
+    EXPECT_EQ(get(f.out / L"notes.txt"), "replaced");
+    // The agent's own write counts as seen: a second write needs no read.
+    w = f.call_in("t1", "files.write", {{"path", s(f.out / L"notes.txt")}, {"content", "again"}});
+    ASSERT_TRUE(w.ok) << w.content;
+    EXPECT_EQ(get(f.out / L"notes.txt"), "again");
+}
+
+TEST(FileTools, OverwriteFailsWhenTheFileChangedAfterTheRead) {
+    FileFixture f;
+    put(f.out / L"notes.txt", "version one\n");
+    ASSERT_TRUE(f.call_in("t1", "files.read", {{"path", s(f.out / L"notes.txt")}}).ok);
+    put(f.out / L"notes.txt", "the user's version two\n");
+    auto w = f.call_in("t1", "files.write", {{"path", s(f.out / L"notes.txt")}, {"content", "replaced"}});
+    EXPECT_FALSE(w.ok);
+    EXPECT_NE(w.content.find("changed after it was last read"), std::string::npos) << w.content;
+    EXPECT_EQ(get(f.out / L"notes.txt"), "the user's version two\n");
+    // Same size and the same last-write time, different bytes: the hash still tells.
+    put(f.out / L"same.txt", "aaaa\n");
+    ASSERT_TRUE(f.call_in("t1", "files.read", {{"path", s(f.out / L"same.txt")}}).ok);
+    WIN32_FILE_ATTRIBUTE_DATA before{};
+    ASSERT_TRUE(::GetFileAttributesExW((f.out / L"same.txt").c_str(), GetFileExInfoStandard, &before));
+    put(f.out / L"same.txt", "bbbb\n");
+    {
+        HANDLE h = ::CreateFileW((f.out / L"same.txt").c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        ASSERT_NE(h, INVALID_HANDLE_VALUE);
+        ASSERT_TRUE(::SetFileTime(h, nullptr, nullptr, &before.ftLastWriteTime));
+        ::CloseHandle(h);
+    }
+    EXPECT_FALSE(f.call_in("t1", "files.write", {{"path", s(f.out / L"same.txt")}, {"content", "x"}}).ok);
+    EXPECT_EQ(get(f.out / L"same.txt"), "bbbb\n");
+}
+
+TEST(FileTools, RangedAndTruncatedReadsDoNotCountAsSeen) {
+    FileFixture f;
+    put(f.out / L"notes.txt", "one\ntwo\nthree\n");
+    ASSERT_TRUE(f.call_in("t1", "files.read", {{"path", s(f.out / L"notes.txt")}, {"offset", 1}, {"limit", 2}}).ok);
+    EXPECT_FALSE(f.call_in("t1", "files.write", {{"path", s(f.out / L"notes.txt")}, {"content", "x"}}).ok);
+    EXPECT_EQ(get(f.out / L"notes.txt"), "one\ntwo\nthree\n");
+    // Larger than the read limit: a full read is impossible, and the error says to use files.edit or a new file.
+    std::string big;
+    while (big.size() < 300 * 1024) big += "a line of a large log file\n";
+    put(f.out / L"big.log", big);
+    ASSERT_TRUE(f.call_in("t1", "files.read", {{"path", s(f.out / L"big.log")}}).ok);
+    auto w = f.call_in("t1", "files.write", {{"path", s(f.out / L"big.log")}, {"content", "x"}});
+    EXPECT_FALSE(w.ok);
+    EXPECT_NE(w.content.find("cannot be replaced with files.write"), std::string::npos) << w.content;
+    EXPECT_EQ(get(f.out / L"big.log").size(), big.size());
+}
+
+TEST(FileTools, DocumentsAreNeverReplacedWithFilesWrite) {
+    FileFixture f;
+    put(f.out / L"report.docx", std::string("PK\x03\x04 not really a document", 26));
+    auto w = f.call_in("t1", "files.write", {{"path", s(f.out / L"report.docx")}, {"content", "text"}});
+    EXPECT_FALSE(w.ok);
+    EXPECT_NE(w.content.find("cannot be replaced with files.write"), std::string::npos) << w.content;
+    EXPECT_EQ(get(f.out / L"report.docx").substr(0, 2), "PK");
+}
+
+TEST(FileTools, AnEditOfAnUnseenFileDoesNotMakeItSeen) {
+    FileFixture f;
+    put(f.out / L"notes.txt", "alpha\nbeta\n");
+    ASSERT_TRUE(f.call_in("t1", "files.edit", {{"path", s(f.out / L"notes.txt")}, {"old_text", "beta"}, {"new_text", "BETA"}}).ok);
+    EXPECT_FALSE(f.call_in("t1", "files.write", {{"path", s(f.out / L"notes.txt")}, {"content", "x"}}).ok);
+    // After a full read, edits keep the file seen.
+    ASSERT_TRUE(f.call_in("t1", "files.read", {{"path", s(f.out / L"notes.txt")}}).ok);
+    ASSERT_TRUE(f.call_in("t1", "files.edit", {{"path", s(f.out / L"notes.txt")}, {"old_text", "alpha"}, {"new_text", "ALPHA"}}).ok);
+    ASSERT_TRUE(f.call_in("t1", "files.write", {{"path", s(f.out / L"notes.txt")}, {"content", "x"}}).ok);
+    EXPECT_EQ(get(f.out / L"notes.txt"), "x");
+}
+
+TEST(FileTools, ACreatedFileRecordedForTheThreadCanBeReplaced) {
+    FileFixture f;
+    put(f.out / L"index.html", "<h1>Starter</h1>");
+    auto seen = memory_seen_files();
+    FileToolsEnv env;
+    env.rules = [&f] { return f.rules; };
+    env.workspace = f.rules.workspace;
+    env.seen = seen;
+    f.tools = file_tools(env);
+    record_seen_file(*seen, "t1", s(f.out / L"index.html"));  // as apps.create does for its scaffold
+    auto w = f.call_in("t1", "files.write", {{"path", s(f.out / L"index.html")}, {"content", "<h1>App</h1>"}});
+    ASSERT_TRUE(w.ok) << w.content;
+    EXPECT_EQ(get(f.out / L"index.html"), "<h1>App</h1>");
 }

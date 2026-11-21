@@ -1,5 +1,6 @@
 // client/agenda intake adapters and the preparation tool rule (add-agenda tasks 2.3, 2.4, 4.1).
 #include "app/agenda_intake.h"
+#include "app/agenda_reply.h"
 #include "base/time.h"
 
 #include <gtest/gtest.h>
@@ -125,4 +126,87 @@ TEST(AgendaIntake, PreparationRunsAndTheirChildRunsMayOnlyRead) {
         EXPECT_EQ(agenda_preparation_decision(call("child-1", "prep-1", risk), prep).kind, K::deny);
         EXPECT_EQ(agenda_preparation_decision(call("other", "", risk), prep).kind, K::allow);
     }
+}
+
+// ---- add-local-outlook-and-teams (tasks 4.2, 4.3) ----
+
+namespace {
+
+teams::StoredTeamsMessage teams_msg(const std::string& id, const std::string& who, const std::string& text, long long at, bool mine = false) {
+    teams::StoredTeamsMessage m;
+    m.conversation_id = "19:grp@thread.v2";
+    m.id = id;
+    m.sender_name = who;
+    m.sender_email = mine ? "jana@example.cz" : "petr@example.cz";
+    m.text = text;
+    m.at_ms = at;
+    m.mine = mine;
+    return m;
+}
+
+}  // namespace
+
+TEST(AgendaIntake, ATeamsMessageCarriesItsConversationAsContext) {
+    teams::StoredConversation c{"19:grp@thread.v2", "group", "Falcon", 0};
+    const auto m = teams_msg("m3", "Petr Svoboda", "Jana, can you send the test report by Thursday?", 3'000);
+    const std::vector<teams::StoredTeamsMessage> before = {teams_msg("m1", "Petr Svoboda", "The tests finished.", 1'000),
+                                                           teams_msg("m2", "Jana Novakova", "Great.", 2'000, true), m};
+    const auto s = agenda_teams_item(m, c, "Falcon", before, true);
+    EXPECT_EQ(s.kind, "teams");
+    EXPECT_EQ(s.id, "19:grp@thread.v2|m3");
+    EXPECT_EQ(s.conversation, "19:grp@thread.v2");
+    EXPECT_EQ(s.title, "Falcon");
+    EXPECT_EQ(s.text, "Earlier in this conversation:\nPetr Svoboda: The tests finished.\nJana Novakova: Great.\n\nNew message:\n"
+                      "Petr Svoboda: Jana, can you send the test report by Thursday?");
+    EXPECT_TRUE(s.user_addressed);
+    EXPECT_FALSE(s.author_is_user);
+    EXPECT_EQ(s.recipients, 8);
+    EXPECT_EQ(s.at_ms, 3'000);
+    EXPECT_EQ(s.link, "teams:19:grp@thread.v2");
+
+    c.type = "chat";
+    const auto own = agenda_teams_item(teams_msg("m4", "", "I'll do it", 4'000, true), c, "Petr", {}, false);
+    EXPECT_TRUE(own.author_is_user);
+    EXPECT_EQ(own.recipients, 1);
+    EXPECT_EQ(own.text, "Someone: I'll do it");
+    EXPECT_EQ(own.author, "jana@example.cz");  // no display name: the address
+}
+
+TEST(AgendaIntake, AReplyToAMailSourceIsPrefilledAsAReply) {
+    const json item = {{"id", "a1"}, {"title", "Send the Q4 slides"},
+                       {"sources", json::array({{{"kind", "meeting"}, {"id", "mt"}}, {{"kind", "mail"}, {"id", "M1"}}})}};
+    mail::StoredMessage m;
+    m.id = "M1";
+    m.subject = "Q4 slides";
+    m.from = {"Petr Svoboda", "petr@example.cz"};
+    const auto mail = [&](const std::string& id) -> std::optional<mail::StoredMessage> {
+        if (id == "M1") return m;
+        return std::nullopt;
+    };
+    json p = agenda_reply_prefill(item, "Hi Petr, attached.", mail, {});
+    EXPECT_EQ(p["to"], json::array({"petr@example.cz"}));
+    EXPECT_EQ(jstr(p, "subject"), "RE: Q4 slides");
+    EXPECT_EQ(jstr(p, "reply_to"), "M1");
+    EXPECT_EQ(jstr(p, "source"), "mail");
+    EXPECT_EQ(jstr(p, "body"), "Hi Petr, attached.");
+    m.subject = "Re: Q4 slides";
+    EXPECT_EQ(jstr(agenda_reply_prefill(item, "", mail, {}), "subject"), "Re: Q4 slides");  // no second prefix
+    m.withheld = true;
+    p = agenda_reply_prefill(item, "x", mail, {});
+    EXPECT_TRUE(p["to"].empty());  // a withheld source gives no recipient
+    EXPECT_EQ(jstr(p, "subject"), "Send the Q4 slides");
+    EXPECT_EQ(jstr(p, "source"), "");
+}
+
+TEST(AgendaIntake, AReplyToATeamsSourceGoesToTheSendersAddress) {
+    const json item = {{"id", "a2"}, {"title", "Send the test report"}, {"sources", json::array({{{"kind", "teams"}, {"id", "19:grp@thread.v2|m3"}}})}};
+    const auto teams = [](const std::string& id) -> std::optional<TeamsReplySource> {
+        if (id != "19:grp@thread.v2|m3") return std::nullopt;
+        return TeamsReplySource{teams_msg("m3", "Petr Svoboda", "...", 1), "Falcon"};
+    };
+    const json p = agenda_reply_prefill(item, "Report attached.", {}, teams);
+    EXPECT_EQ(p["to"], json::array({"petr@example.cz"}));
+    EXPECT_EQ(jstr(p, "subject"), "RE: Falcon");
+    EXPECT_EQ(jstr(p, "reply_to"), "");  // a new mail, not a mail reply
+    EXPECT_EQ(jstr(p, "source"), "teams");
 }

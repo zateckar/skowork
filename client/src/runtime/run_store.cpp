@@ -1177,4 +1177,24 @@ Result<std::string> RunStore::read_attachment(const std::string& id, long long o
     return std::string(bytes.begin(), bytes.end());
 }
 
+// ---- Seen file states --------------------------------------------------------------------------------------------------
+
+std::optional<RunStore::SeenFileRow> RunStore::seen_file(const std::string& thread_id, const std::string& path) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare("SELECT size,modified,sha256 FROM thread_file_states WHERE thread_id=?1 AND path=?2");
+    st.bind(1, thread_id).bind(2, path);
+    if (!st.step()) return std::nullopt;
+    return SeenFileRow{st.col_int(0), st.col_int(1), st.col_text(2)};
+}
+
+Status RunStore::set_seen_file(const std::string& thread_id, const std::string& path, const SeenFileRow& row) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare(
+        "INSERT INTO thread_file_states(thread_id,path,size,modified,sha256,updated_at) VALUES(?1,?2,?3,?4,?5,?6) "
+        "ON CONFLICT(thread_id,path) DO UPDATE SET size=excluded.size, modified=excluded.modified, sha256=excluded.sha256, "
+        "updated_at=excluded.updated_at");
+    st.bind(1, thread_id).bind(2, path).bind(3, row.size).bind(4, row.modified).bind(5, row.sha256).bind(6, now());
+    return st.run();
+}
+
 }  // namespace wb::runtime

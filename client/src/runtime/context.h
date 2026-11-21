@@ -35,6 +35,20 @@ inline constexpr size_t kImageTokenAllowance = 3'221;
 // Request estimate including message framing, tool calls, tool definitions and kImageTokenAllowance per image.
 size_t estimate_request_tokens(const std::vector<model::ChatMessage>& messages, const std::vector<model::ToolSpec>& tools);
 
+// client/agent-runtime Tool Result Previews (keep-result-preview-ends design D1, D2): a preview of at most `budget`
+// bytes keeps content[0, head_end) and content[tail_begin, end). Each part gets about half; a cut moves to a line break
+// within kPreviewLineSnap bytes, towards the omitted middle, and never splits a UTF-8 character.
+struct PreviewCut {
+    size_t head_end = 0;
+    size_t tail_begin = 0;
+};
+inline constexpr size_t kPreviewLineSnap = 256;
+PreviewCut preview_cut(std::string_view content, size_t budget);
+
+// client/agent-runtime Large Tool Results (cap-tool-results-by-context design D1, D2): a share of the context window.
+inline constexpr long long kResultShareDivisor = 4;    // one result: a quarter of the window
+inline constexpr long long kResponseShareDivisor = 2;  // the results of one response: half of the window
+
 // The summarizer's completion limit when the small role allows it: room for its reasoning and a summary of at most
 // 400 words (design D4, measured in task 1.3).
 inline constexpr int kSummaryOutputTokens = 8'192;

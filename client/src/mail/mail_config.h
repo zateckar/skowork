@@ -31,9 +31,12 @@ struct SyncWindow {
 };
 
 struct MailConfig {
-    // False while policy.mail.oauth is incomplete ("not_configured") or policy is not acceptable ("policy_error").
+    // False while no backend is possible ("not_configured", "outlook_missing") or policy is not acceptable ("policy_error").
     bool available = false;
-    std::string unavailable_code;    // not_configured | policy_error
+    std::string unavailable_code;    // not_configured | outlook_missing | policy_error
+    // The chosen backend (add-local-outlook-and-teams design D1): graph | outlook. policy.mail.backend is auto | graph | outlook.
+    std::string backend = "graph";
+    std::string backend_policy = "auto";
     std::string unavailable_reason;  // for the settings section and the policy error event
     std::string graph_base_url = kDefaultGraphBase;  // without a trailing slash
     std::string auth = "oauth";                      // oauth | mock (development builds only)
@@ -58,7 +61,9 @@ using PolicyLookup = std::function<std::optional<json>(const std::string& key)>;
 
 // Reads policy.mail.* (defaults as specified when a key is missing). `tool_permitted` says whether policy allows a tool at
 // all (scope selection). `dev_build`: SKOWORK_DEV_ENDPOINTS builds, which also accept loopback http hosts and mock auth.
-MailConfig read_config(const PolicyLookup& policy, const std::function<bool(const std::string& tool)>& tool_permitted, bool dev_build);
+// `outlook_installed`: whether classic Outlook is registered for the user (Mail Backend Selection); absent means no.
+MailConfig read_config(const PolicyLookup& policy, const std::function<bool(const std::string& tool)>& tool_permitted, bool dev_build,
+                       const std::function<bool()>& outlook_installed = {});
 
 [[nodiscard]] bool is_graph_host(std::string_view host);
 // True when the URL is on the Graph host set (https), or on a loopback host in development builds.

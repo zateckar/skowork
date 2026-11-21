@@ -9,6 +9,8 @@ The motivation is in proposal.md. The user decided to use Microsoft Graph only, 
 
 Decisions on each risk class come from client/policy-enforcement. Approval presentation is defined in client/work-inbox.
 
+Note (2026-11-21): add-local-outlook-and-teams adds a second backend, the local classic Outlook, which answers the same Graph calls in-process (its design D1 and D2). The Graph-only rule below is narrowed to the Graph backend.
+
 ## Goals / Non-Goals
 
 **Goals:**

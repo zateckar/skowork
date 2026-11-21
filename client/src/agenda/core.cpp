@@ -161,6 +161,75 @@ std::optional<std::string> unfence(const std::string& text) {
     return inner;
 }
 
+std::string extract_draft(const std::string& answer) {
+    std::vector<std::string> lines;
+    for (size_t pos = 0; pos <= answer.size();) {
+        size_t e = answer.find('\n', pos);
+        if (e == std::string::npos) e = answer.size();
+        std::string l = answer.substr(pos, e - pos);
+        if (!l.empty() && l.back() == '\r') l.pop_back();
+        lines.push_back(std::move(l));
+        pos = e + 1;
+    }
+    // The heading level of a line (1-6 for #, 7 for a bold line or "Name:" line), or 0 when it is not a heading.
+    const auto heading = [](const std::string& l, std::string* name) -> int {
+        std::string t = trim(l);
+        int level = 0;
+        while (level < static_cast<int>(t.size()) && t[static_cast<size_t>(level)] == '#') ++level;
+        if (level > 0 && level <= 6 && level < static_cast<int>(t.size()) && t[static_cast<size_t>(level)] == ' ') {
+            *name = trim(t.substr(static_cast<size_t>(level)));
+        } else if (t.size() > 4 && t.rfind("**", 0) == 0 && t.compare(t.size() - 2, 2, "**") == 0) {
+            *name = trim(t.substr(2, t.size() - 4));
+            level = 7;
+        } else {
+            return 0;
+        }
+        while (!name->empty() && (name->back() == ':' || name->back() == '*')) name->pop_back();
+        return level;
+    };
+    const auto is_draft = [](std::string n) {
+        n = to_lower(trim(n));
+        return n == "draft" || n.rfind("draft ", 0) == 0 || n.rfind("draft:", 0) == 0 || n == "návrh" || n == "entwurf" ||
+               n.rfind("návrh ", 0) == 0 || n.rfind("entwurf ", 0) == 0;
+    };
+    for (size_t i = 0; i < lines.size(); ++i) {
+        std::string name;
+        int level = heading(lines[i], &name);
+        std::string first_line;
+        if (level == 0) {
+            // "Draft: text on the same line" or a bare "Draft:" line.
+            const std::string t = trim(lines[i]);
+            const auto colon = t.find(':');
+            if (colon == std::string::npos || !is_draft(t.substr(0, colon))) continue;
+            first_line = trim(t.substr(colon + 1));
+            level = 7;
+        } else if (!is_draft(name)) {
+            continue;
+        }
+        std::string out = first_line.empty() ? std::string{} : first_line + "\n";
+        for (size_t k = i + 1; k < lines.size(); ++k) {
+            std::string n2;
+            const int l2 = heading(lines[k], &n2);
+            if (l2 > 0 && (l2 <= level || level == 7)) break;
+            out += lines[k] + "\n";
+        }
+        // Fences and quote markers the model may wrap the draft in.
+        std::string clean;
+        for (size_t pos = 0; pos < out.size();) {
+            size_t e = out.find('\n', pos);
+            if (e == std::string::npos) e = out.size();
+            std::string l = out.substr(pos, e - pos);
+            pos = e + 1;
+            if (trim(l).rfind("```", 0) == 0 || trim(l) == "---") continue;
+            if (l.rfind("> ", 0) == 0) l = l.substr(2);
+            else if (l == ">") l.clear();
+            clean += l + "\n";
+        }
+        return trim(clean);
+    }
+    return {};
+}
+
 std::optional<json> strict_json(const std::string& raw) {
     const auto unfenced = unfence(raw);
     if (!unfenced) return std::nullopt;

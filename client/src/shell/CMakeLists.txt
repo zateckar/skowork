@@ -7,7 +7,7 @@ target_link_libraries(wb_shell_core PUBLIC wb_ui_core wb_base nlohmann_json)
 skowork_warnings(wb_shell_core)
 
 if(WIN32)
-  add_library(wb_shell STATIC main_window.cpp shell.cpp views_frame.cpp views_list.cpp views_thread.cpp views_feed.cpp views_composer.cpp views_search.cpp views_pages.cpp views_connectors.cpp views_skill_editor.cpp views_automations.cpp views_mail.cpp views_knowledge.cpp views_knowledge_view.cpp views_meetings.cpp views_meeting_progress.cpp views_apps.cpp views_agenda.cpp views_triage.cpp views_chats.cpp views_dictation.cpp views_speech.cpp)
+  add_library(wb_shell STATIC main_window.cpp shell.cpp views_frame.cpp views_list.cpp views_thread.cpp views_feed.cpp views_composer.cpp views_search.cpp views_pages.cpp views_connectors.cpp views_skill_editor.cpp views_automations.cpp views_mail.cpp views_knowledge.cpp views_knowledge_view.cpp views_meetings.cpp views_meeting_progress.cpp views_apps.cpp views_agenda.cpp views_calendar.cpp views_triage.cpp views_chats.cpp views_dictation.cpp views_speech.cpp)
   target_link_libraries(wb_shell PUBLIC wb_shell_core wb_ui)
   skowork_warnings(wb_shell)
 endif()

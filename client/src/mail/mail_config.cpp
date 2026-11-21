@@ -66,8 +66,10 @@ std::string MailConfig::scope_parameter() const {
     return out + "offline_access";
 }
 
-MailConfig read_config(const PolicyLookup& p, const std::function<bool(const std::string&)>& tool_permitted, bool dev_build) {
+MailConfig read_config(const PolicyLookup& p, const std::function<bool(const std::string&)>& tool_permitted, bool dev_build,
+                       const std::function<bool()>& outlook_installed) {
     MailConfig c;
+    c.backend_policy = str(p, "mail.backend", "auto");
     c.graph_base_url = trim_slash(str(p, "mail.graph_base_url", kDefaultGraphBase));
     c.auth = str(p, "mail.auth", "oauth");
     c.authority = trim_slash(str(p, "mail.oauth.authority"));
@@ -110,6 +112,22 @@ MailConfig read_config(const PolicyLookup& p, const std::function<bool(const std
         c.unavailable_reason = why;
         return c;
     };
+    // Mail Backend Selection (add-local-outlook-and-teams design D1): auto takes Graph when policy.mail.oauth is complete,
+    // otherwise the local classic Outlook. The local backend needs none of the Graph settings below.
+    if (c.backend_policy != "auto" && c.backend_policy != "graph" && c.backend_policy != "outlook")
+        return refuse("policy_error", "mail.backend must be auto, graph or outlook");
+    const bool oauth_complete = !c.authority.empty() && !c.tenant_id.empty() && !c.client_id.empty();
+    const bool outlook = outlook_installed && outlook_installed();
+    if (c.backend_policy == "outlook" || (c.backend_policy == "auto" && !oauth_complete && outlook)) {
+        c.backend = "outlook";
+        c.scopes.clear();
+        c.directory_enabled = false;  // the Graph user directory is not reachable through Outlook
+        if (!outlook) return refuse("outlook_missing", "classic Outlook was not found on this computer");
+        c.available = true;
+        return c;
+    }
+    // auto without an app registration and without Outlook ends below as "not_configured", as before.
+    c.backend = "graph";
     // Release builds: Graph hosts only, and never the mock (Non-Graph Host In Release Build, Mock Auth In Release Build).
     if (c.auth != "oauth" && c.auth != "mock") return refuse("policy_error", "mail.auth must be oauth or mock");
     if (c.auth == "mock" && !dev_build) return refuse("policy_error", "mail.auth = mock is not available in release builds");

@@ -490,12 +490,14 @@ Status InboxStore::delete_thread(const std::string& thread_id) {
         busy.bind(1, thread_id);
         if (busy.step()) return make_error("thread_busy", "a Run of this Thread is still active; stop it first");
     }
-    // A schema from before the operation ledger (an older client's database) has no tool_operations table.
-    bool ledger = false;
-    {
-        auto t = db_.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_operations'");
-        ledger = t.step();
-    }
+    // A schema from before the operation ledger or the seen-file record (an older client's database) lacks their tables.
+    auto has_table = [&](const char* name) {
+        auto t = db_.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1");
+        t.bind(1, std::string(name));
+        return t.step();
+    };
+    const bool ledger = has_table("tool_operations");
+    const bool seen_files = has_table("thread_file_states");
     return db_.transaction([&]() -> Status {
         const char* statements[] = {
             "DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE thread_id=?1)",
@@ -504,6 +506,7 @@ Status InboxStore::delete_thread(const std::string& thread_id) {
             "DELETE FROM queued_messages WHERE thread_id=?1",
             "DELETE FROM thread_compactions WHERE thread_id=?1",
             "DELETE FROM thread_attachments WHERE thread_id=?1",
+            "DELETE FROM thread_file_states WHERE thread_id=?1",  // client/core-tools Seen File Content
             "DELETE FROM draft_attachments WHERE thread_key=?1",
             "DELETE FROM drafts WHERE thread_key=?1",
             "DELETE FROM runs WHERE thread_id=?1",
@@ -511,6 +514,7 @@ Status InboxStore::delete_thread(const std::string& thread_id) {
         };
         for (const char* sql : statements) {
             if (!ledger && std::string_view(sql).find("tool_operations") != std::string_view::npos) continue;
+            if (!seen_files && std::string_view(sql).find("thread_file_states") != std::string_view::npos) continue;
             auto st = db_.prepare(sql);
             st.bind(1, thread_id);
             if (auto s = st.run(); !s) return s;

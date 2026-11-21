@@ -147,6 +147,32 @@ TEST(ShellFeed, SurfaceEligibilityRequiresCompletedStoredAssistantMessage) {
     EXPECT_TRUE(eligible_generated_surfaces(item).empty());
 }
 
+// Run Limit Note (summarize-at-run-limit): the note follows the answer and names the limit and its value.
+TEST(ShellFeed, AnAnswerAtARunLimitIsFollowedByTheLimitNote) {
+    auto r = run("run_limit", "succeeded");
+    r.events = {{1, "", "message", {{"role", "user"}, {"content", "review every file"}}},
+                {2, "", "message", {{"role", "assistant"}, {"content", "I reviewed 12 of 30 files."}}},
+                {3, "", "run_limit", {{"limit", "tool call limit reached"}, {"limits", {{"model_calls", 60}, {"tool_calls", 200}, {"wall_minutes", 60}}}}}};
+    const auto items = build_feed(snapshot({r}));
+    std::vector<const FeedItem*> notes;
+    for (const auto& i : items)
+        if (i.type == ItemType::limit) notes.push_back(&i);
+    ASSERT_EQ(notes.size(), 1u);
+    EXPECT_EQ(notes[0]->reason, "tool call limit reached");
+    EXPECT_EQ(notes[0]->text, "200");
+    // It comes after the answer.
+    size_t answer = items.size(), note = items.size();
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (items[i].type == ItemType::assistant) answer = i;
+        if (items[i].type == ItemType::limit) note = i;
+    }
+    EXPECT_LT(answer, note);
+    // A Run that ended without a limit has no note.
+    auto plain = run("run_plain", "succeeded");
+    plain.events = {{1, "", "message", {{"role", "assistant"}, {"content", "done"}}}};
+    for (const auto& i : build_feed(snapshot({plain}))) EXPECT_NE(i.type, ItemType::limit);
+}
+
 TEST(ShellFeed, IncompleteStoredResponseRemainsReadableAndNeverActivates) {
     const std::string fenced = "```skowork-ui\n" + std::string(wb::ui::generated_surface_example()) + "\n```\n";
     auto r = run("run_incomplete", "cancelled");

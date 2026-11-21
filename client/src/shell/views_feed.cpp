@@ -83,6 +83,7 @@ std::string signature(const FeedItem& it) {
     case ItemType::action: return s + it.action.id + "|" + it.action.resolved_at + "|" + it.action.resolution.dump() + sources_signature(it.surface_sources);
     case ItemType::error: return s + it.error.code;
     case ItemType::stopped: return s + (it.by_user ? "u" : "") + it.reason;
+    case ItemType::limit: return s + it.reason + "|" + it.text;
     case ItemType::activity:
         if (it.usage)
             return s + "usage|" + std::to_string(it.usage->prompt) + "|" + std::to_string(it.usage->completion) + "|" +
@@ -1011,6 +1012,14 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
     case ItemType::stopped:
         return std::make_unique<ui::Label>(u, it.by_user ? shell_.t("feed.stopped_by_user") : shell_.t("feed.cancelled", {{"reason", ui::to_utf16(it.reason)}}),
                                            TextStyle::caption, Paint::text_secondary, true, id_of("stopped-", it.key));
+    case ItemType::limit: {  // Run Limit Note: shown whatever Work Details Visibility hides
+        const char* key = it.reason == "tool call limit reached"    ? "feed.limit_tool_calls"
+                          : it.reason == "model call limit reached" ? "feed.limit_model_calls"
+                          : it.reason == "wall time limit reached"  ? "feed.limit_minutes"
+                                                                    : "feed.limit_other";
+        return std::make_unique<ui::Label>(u, shell_.t(key, {{"count", ui::to_utf16(it.text)}}), TextStyle::caption, Paint::text_secondary, true,
+                                           id_of("limit-", it.key));
+    }
     case ItemType::working: {
         const auto bar = it.text.find('|');
         const std::string k = it.text.empty() ? "feed.working" : it.text.substr(0, bar);

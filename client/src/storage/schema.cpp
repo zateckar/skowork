@@ -632,6 +632,45 @@ CREATE TABLE triage_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ALTER TABLE meetings ADD COLUMN live_from_ms INTEGER NOT NULL DEFAULT 0;
 CREATE TABLE meeting_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 )sql"},
+        // client/core-tools Seen File Content (protect-unread-overwrites design D1, D2): the state of each file as the
+        // agent last saw it in a Thread. Removed with the Thread.
+        {2200, R"sql(
+CREATE TABLE thread_file_states(
+  thread_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  modified INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(thread_id, path));
+)sql"},
+        // client/teams-chats (add-local-outlook-and-teams design D5): the local Teams copy, its search index and state.
+        {2300, R"sql(
+CREATE TABLE teams_conversations(
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  topic TEXT NOT NULL DEFAULT '',
+  last_activity INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE teams_messages(
+  conversation_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  parent_id TEXT NOT NULL DEFAULT '',
+  sender_mri TEXT NOT NULL DEFAULT '',
+  sender_name TEXT NOT NULL DEFAULT '',
+  sender_email TEXT NOT NULL DEFAULT '',
+  at_ms INTEGER NOT NULL,
+  edited_ms INTEGER NOT NULL DEFAULT 0,
+  text TEXT NOT NULL DEFAULT '',
+  system INTEGER NOT NULL DEFAULT 0,
+  mine INTEGER NOT NULL DEFAULT 0,
+  mentions_me INTEGER NOT NULL DEFAULT 0,
+  version TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(conversation_id, id));
+CREATE INDEX teams_messages_at ON teams_messages(at_ms);
+CREATE VIRTUAL TABLE teams_search USING fts5(text, sender, conversation_id UNINDEXED, message_id UNINDEXED,
+  tokenize='unicode61 remove_diacritics 2');
+CREATE TABLE teams_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+)sql"},
     };
     return migrations;
 }

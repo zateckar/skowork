@@ -93,6 +93,7 @@ Service::Settings Service::settings() {
     s.calendar = jbool(*j, "calendar", true);
     s.meetings = jbool(*j, "meetings", true);
     s.chats = jbool(*j, "chats", true);
+    s.teams = jbool(*j, "teams", true);
     s.auto_prepare = jbool(*j, "auto_prepare");
     s.remind_day_before = jbool(*j, "remind_day_before", true);
     s.remind_hour_before = jbool(*j, "remind_hour_before", true);
@@ -101,7 +102,7 @@ Service::Settings Service::settings() {
 
 json Service::settings_json(const Settings& s) {
     return {{"enabled", s.enabled},       {"enabled_at", s.enabled_at},   {"mail", s.mail},
-            {"calendar", s.calendar},     {"meetings", s.meetings},       {"chats", s.chats},
+            {"calendar", s.calendar},     {"meetings", s.meetings},       {"chats", s.chats},       {"teams", s.teams},
             {"auto_prepare", s.auto_prepare}, {"remind_day_before", s.remind_day_before},
             {"remind_hour_before", s.remind_hour_before}};
 }
@@ -150,6 +151,7 @@ Result<json> Service::set(const json& patch) {
     flag("calendar", s.calendar);
     flag("meetings", s.meetings);
     flag("chats", s.chats);
+    flag("teams", s.teams);
     flag("auto_prepare", s.auto_prepare);
     flag("remind_day_before", s.remind_day_before);
     flag("remind_hour_before", s.remind_hour_before);
@@ -181,7 +183,8 @@ void Service::offer(const SourceItem& item) {
     if (!active() || item.id.empty()) return;
     const Settings s = settings();
     const bool selected = (item.kind == "mail" && s.mail) || (item.kind == "calendar" && s.calendar) ||
-                          (item.kind == "meeting" && s.meetings) || (item.kind == "chat" && s.chats);
+                          (item.kind == "meeting" && s.meetings) || (item.kind == "chat" && s.chats) ||
+                          (item.kind == "teams" && s.teams);
     if (!selected || item.at_ms < s.enabled_at) return;
     SourceItem bounded = item;
     bounded.text = utf8_truncate(item.text, kMaxItemText);

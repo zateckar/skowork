@@ -147,6 +147,19 @@ void PagePane::build_agenda() {
                 auto* open = button(*actions, "agenda-open-prep-" + id, shell_.t("agenda.open_preparation"),
                                     [this, thread] { shell_.navigate(thread_hash(thread)); }, ui::Button::Kind::primary);
                 open->name = shell_.t("agenda.open_preparation_named", {{"title", title}});
+                // Sending A Prepared Draft (add-local-outlook-and-teams design D9): a reply drafted from a mail or Teams source.
+                bool replyable = jstr(it, "draft_kind") == "reply";
+                if (replyable) {
+                    replyable = false;
+                    for (const auto& s : it.value("sources", json::array()))
+                        if (jstr(s, "kind") == "mail" || jstr(s, "kind") == "teams") replyable = true;
+                }
+                if (replyable) {
+                    auto* d = button(*actions, "agenda-draft-" + id, shell_.t(draft_item_ == id ? "agenda.draft.close" : "agenda.draft.open"),
+                                     [this, id] { open_draft(id); });
+                    d->name = shell_.t("agenda.draft.open_named", {{"title", title}});
+                    d->enabled = busy_.empty();
+                }
             } else {
                 auto* prep = button(*actions, "agenda-prepare-" + id, shell_.t("agenda.prepare"), [this, id] {
                     act("agenda", "agenda.prepare", {{"id", id}}, [this](const json& r) {
@@ -196,6 +209,7 @@ void PagePane::build_agenda() {
             }, ui::Button::Kind::subtle);
             rename->name = shell_.t("agenda.rename_named", {{"title", title}});
             rename->enabled = busy_.empty();
+            if (draft_item_ == id) build_draft(*item);
         }
     }
     error_line(*this, "agenda");
@@ -227,7 +241,7 @@ void PagePane::build_agenda_settings(Node& c) {
     setting_switch(c, "agenda-enabled", shell_.t("settings.agenda.enabled"), on, false, set("enabled"));
     if (on) {
         c.emplace<ui::Label>(shell_.ui(), shell_.t("settings.agenda.sources"), TextStyle::body_strong)->role = ui::Role::heading;
-        for (const char* k : {"mail", "calendar", "meetings", "chats"})
+        for (const char* k : {"mail", "calendar", "meetings", "chats", "teams"})
             setting_switch(c, std::string("agenda-source-") + k, shell_.t(std::string("settings.agenda.source.") + k), jbool(s, k, true), false, set(k));
         c.emplace<ui::Label>(shell_.ui(), shell_.t("settings.agenda.reminders"), TextStyle::body_strong)->role = ui::Role::heading;
         setting_switch(c, "agenda-remind-day", shell_.t("settings.agenda.remind_day_before"), jbool(s, "remind_day_before", true), false,

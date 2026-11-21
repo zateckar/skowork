@@ -53,7 +53,8 @@ struct RunError {
 
 // details: Show details / Hide details after a finished Run whose work is hidden (Work Details Visibility).
 // speed: the generation speed line under a top-level Run's answer (Generation Speed Under Answers).
-enum class ItemType { user, assistant, reasoning, tool, activity, action, error, stopped, working, details, speed };
+// limit: the note under an answer written at a Run limit (Run Limit Note); `reason` holds the limit, `text` its value.
+enum class ItemType { user, assistant, reasoning, tool, activity, action, error, stopped, working, details, speed, limit };
 
 // The generation speed of a Run (show-generation-speed design D1, D2): output tokens per second of model generation,
 // or, while a model call has produced no output yet, how long the Run has waited for it.

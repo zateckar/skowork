@@ -88,7 +88,7 @@ private:
     struct Settings {
         bool enabled = false;
         long long enabled_at = 0;
-        bool mail = true, calendar = true, meetings = true, chats = true;
+        bool mail = true, calendar = true, meetings = true, chats = true, teams = true;
         bool auto_prepare = false;
         bool remind_day_before = true, remind_hour_before = true;
     };

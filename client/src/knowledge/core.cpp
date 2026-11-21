@@ -694,7 +694,7 @@ std::optional<Extraction> parse_extraction(std::string_view text, int chunk_coun
 
 std::string addressing_breadth(const std::string& source, int recipients) {
     if (source == "threads" || source == "notes") return "direct";
-    if (source != "mail" && source != "calendar" && source != "meetings") return {};
+    if (source != "mail" && source != "calendar" && source != "meetings" && source != "teams") return {};
     if (recipients <= 0) return {};
     if (recipients == 1) return "direct";
     return recipients <= 10 ? "group" : "broadcast";

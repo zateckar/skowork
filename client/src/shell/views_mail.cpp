@@ -47,6 +47,7 @@ void PagePane::load_mail() {
 
 void PagePane::mail_changed() {
     if (shell_.route().name == RouteName::settings) load_mail();
+    else if (shell_.route().name == RouteName::calendar) load_calendar();  // a sync brought new events
 }
 
 void PagePane::build_mail(Node& c) {
@@ -59,11 +60,27 @@ void PagePane::build_mail(Node& c) {
     // OAuth Configuration Missing, and policy this build does not accept.
     if (!jbool(mail_, "available")) {
         const std::string code = jstr(mail_, "unavailable_code");
-        text(c, code == "not_configured" ? shell_.t("settings.mail.not_configured")
-                                         : shell_.t("settings.mail.policy_error", {{"reason", u16(jstr(mail_, "unavailable_reason"))}}),
+        text(c, code == "not_configured"    ? shell_.t("settings.mail.not_configured")
+                : code == "outlook_missing" ? shell_.t("settings.mail.outlook_missing")
+                                            : shell_.t("settings.mail.policy_error", {{"reason", u16(jstr(mail_, "unavailable_reason"))}}),
              Paint::warning, "settings-mail-unavailable");
         error_line(c, "mail");
         return;
+    }
+    // Mail Backend Selection and Outlook Availability (add-local-outlook-and-teams design D1, D3).
+    const bool outlook = jstr(mail_, "backend") == "outlook";
+    row(c, "settings-mail-backend", shell_.t("settings.mail.backend"),
+        shell_.t(outlook ? "settings.mail.backend_outlook" : "settings.mail.backend_graph"));
+    if (outlook) {
+        const std::string os = jstr(mail_, "outlook_state", "running");
+        if (os != "running") text(c, shell_.t("settings.mail.outlook_" + os), Paint::warning, "settings-mail-outlook-state");
+        setting_switch(c, "settings-mail-outlook-start", shell_.t("settings.mail.outlook_may_start"), jbool(mail_, "outlook_may_start"), false,
+                       [this](bool on) {
+                           act("mail", "mail.outlook_may_start", {{"on", on}}, [this](const json&) {
+                               shell_.announce(shell_.t("settings.mail.saved_outlook"));
+                               load_mail();
+                           });
+                       });
     }
     const std::string state = jstr(mail_, "state", "disconnected");
     std::u16string st = shell_.t("settings.mail.states." + state);

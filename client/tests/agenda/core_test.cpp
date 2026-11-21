@@ -271,3 +271,22 @@ TEST(AgendaAdmission, SelfCommitmentInAMeetingNeedsTheUserAsSpeaker) {
     c.source_id = mail_item.id;
     EXPECT_EQ(admit(c, mail_item, me(), kNow, kCet, 0.7, nullptr), Drop::responsibility);
 }
+
+// ---- Sending A Prepared Draft (add-local-outlook-and-teams task 4.3) ----
+
+TEST(AgendaDraft, MarkdownHeadingSection) {
+    const std::string answer =
+        "## Brief\nPetra asked for the slides [1].\n\n## Draft\nHi Petra,\n\nthe Q4 slides are attached.\n\nJan\n\n## Sources\n[1] mail";
+    EXPECT_EQ(extract_draft(answer), "Hi Petra,\n\nthe Q4 slides are attached.\n\nJan");
+}
+
+TEST(AgendaDraft, BoldHeadingFencesAndQuotes) {
+    EXPECT_EQ(extract_draft("Brief text\n\n**Draft reply:**\n```\nDear team,\nagreed.\n```\n**Notes**\nx"), "Dear team,\nagreed.");
+    EXPECT_EQ(extract_draft("### Návrh\n> Ahoj,\n> posílám.\n"), "Ahoj,\nposílám.");
+    EXPECT_EQ(extract_draft("Draft: Sounds good, see you Monday."), "Sounds good, see you Monday.");
+}
+
+TEST(AgendaDraft, NoDraft) {
+    EXPECT_EQ(extract_draft("## Brief\nNothing to send.\n## Drafting notes are not a draft"), "");
+    EXPECT_EQ(extract_draft(""), "");
+}

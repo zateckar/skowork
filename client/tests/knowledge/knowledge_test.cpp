@@ -9,6 +9,7 @@
 #include "knowledge/knowledge_service.h"
 #include "mail/mail_service.h"
 #include "storage/withdrawal_outbox.h"
+#include "teams/teams_service.h"
 #include "support/dev_endpoints.h"
 #include "support/graph_mock.h"
 #include "support/runtime_harness.h"
@@ -4725,6 +4726,79 @@ TEST(KnowledgeMail, MailAndCalendarFromTheLocalCopyWithoutExcludedLabels) {
     ms.stop();
 }
 
+// ==== add-local-outlook-and-teams (task 4.1) ==============================================================================
+
+// The Source teams: one knowledge item per conversation day, re-indexed when a message of that day changes, removed when
+// its conversation is excluded in client/teams-chats.
+TEST(KnowledgeTeams, ConversationDaysAreIndexedAndRemovedWithTheirConversation) {
+    MailDb tdb;
+    const long long now = unix_millis_now();
+    teams::Extraction cache;
+    cache.user_mri = "8:orgid:me";
+    cache.profiles = {{"8:orgid:petra", "Petra Malá", "petra@example.com"}};
+    cache.conversations = {{"19:falcon@thread.v2", "group", "Project Falcon", now}};
+    const auto say = [&](const std::string& id, const std::string& text, long long at) {
+        teams::TeamsMessage m;
+        m.id = id;
+        m.conversation_id = "19:falcon@thread.v2";
+        m.sender_mri = "8:orgid:petra";
+        m.sender_name = "Petra Malá";
+        m.text = text;
+        m.at_ms = at;
+        m.version = "1";
+        cache.messages.push_back(m);
+    };
+    say("1", "We go with supplier Brightline, the contract was signed today.", now - 60'000);
+    teams::TeamsEnv te;
+    te.db = &tdb.store->db();
+    te.clock = &system_clock();
+    te.background = false;
+    te.read = [&](const std::filesystem::path&) -> Result<teams::Extraction> { return cache; };
+    teams::TeamsService ts(std::move(te));
+    ASSERT_TRUE(ts.configure({{"enabled", true}}));
+    ASSERT_TRUE(ts.sync_now());
+    const std::string day = teams::TeamsService::day_id("19:falcon@thread.v2", now - 60'000);
+    ASSERT_EQ(ts.knowledge_ids(), std::vector<std::string>{day});
+
+    Kg kg({{"knowledge.extraction", "off"}});
+    KnowledgeEnv e;
+    kg.svc.reset();
+    {
+        MigrationOutcome o;
+        auto db = open_kg_database(kg.file, *kg.key, o);
+        ASSERT_TRUE(db);
+        e.clock = &system_clock();
+        e.policy = [](const std::string&) -> std::optional<json> { return std::nullopt; };
+        e.index = [](const std::string& m, const json& p) { return index_request(m, p); };
+        e.embed = [&kg](const std::vector<std::string>& t, const model::RequestContext& c) { return kg.gw.embed(t, c); };
+        e.mail_item = [&ts](const std::string& kind, const std::string& id) -> std::optional<json> {
+            return kind == "teams" ? ts.knowledge_item(id) : std::nullopt;
+        };
+        e.mail_ids = [&ts](const std::string& kind) { return kind == "teams" ? ts.knowledge_ids() : std::vector<std::string>{}; };
+        e.background = false;
+        kg.svc = std::make_unique<KnowledgeService>(std::move(e), std::make_unique<KgStore>(std::move(*db)));
+    }
+    kg.svc->sweep_now();  // the start-up scan finds every conversation day
+    kg.idle();
+    EXPECT_EQ(kg.svc->store().counts("teams").items, 1);
+    const auto item = kg.svc->store().item("teams", day);
+    ASSERT_TRUE(item);
+    EXPECT_NE(item->title.find("Project Falcon"), std::string::npos);
+    EXPECT_TRUE(kg.found(kg.svc->search("Brightline supplier", {}), item->title));
+
+    // A new message that day changes the item.
+    say("2", "Delivery starts in March.", now - 30'000);
+    ASSERT_TRUE(ts.sync_now());
+    kg.svc->teams_item(day, false);
+    kg.idle();
+    EXPECT_TRUE(kg.found(kg.svc->search("delivery March", {}), item->title));
+
+    // Excluding the conversation empties the day: the item leaves knowledge.
+    ASSERT_TRUE(ts.exclude("19:falcon@thread.v2", true));
+    kg.svc->teams_item(day, false);
+    kg.idle();
+    EXPECT_FALSE(kg.svc->store().item("teams", day));
+}
 // ==== add-knowledge-sharing ===============================================================================================
 
 // control-plane/team-knowledge in process, with the contract of control-plane/test/team-knowledge.test.ts: publication

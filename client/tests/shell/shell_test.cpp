@@ -1617,6 +1617,38 @@ TEST(ShellFeed, WorkDetailsAreHiddenByDefaultWithAStatusLineAndShowDetailsPerRun
     ASSERT_TRUE(w.until([&] { return work_items(w).empty(); }));
 }
 
+// Run Limit Note (summarize-at-run-limit): shown under the answer while work details are hidden, and readable by
+// a screen reader.
+TEST(ShellFeed, RunLimitNoteShowsUnderTheAnswerWithWorkDetailsHidden) {
+    Fixture f;
+    const auto t = f.in.env.thread();
+    for (int i = 0; i < 60; ++i) f.in.env.model.push_calls({{"c" + std::to_string(i), "find_tools", {{"query", "budget"}}}});
+    f.in.env.model.push_text("I searched 60 times and found the budget folder; the totals remain.");
+    const auto r = f.in.env.run(t, "find the budget totals");
+    ASSERT_TRUE(f.in.env.wait(r, RunState::succeeded)) << f.in.env.rec(r).reason;
+    f.in.svc->wait_idle();
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + t); });
+    std::string note_id;
+    std::u16string note_text;
+    ASSERT_TRUE(w.until([&] {
+        if (!w.shell().feed().has_value()) return false;
+        for (const auto& c : w.shell().thread().feed()->children())
+            if (auto* l = dynamic_cast<ui::Label*>(c.get()); l && c->automation_id().starts_with("limit-")) {
+                note_id = c->automation_id();
+                note_text = l->text();
+                return true;
+            }
+        return false;
+    }));
+    EXPECT_EQ(note_text, u"Stopped after 60 model calls. Reply to continue.");
+    EXPECT_TRUE(work_items(w).empty());  // work details stay hidden
+    Uia uia;
+    auto m = uia.by_id(w.hwnd());
+    EXPECT_EQ(m[wide(note_id)].name, L"Stopped after 60 model calls. Reply to continue.");
+}
+
 TEST(ShellFeed, ShowWorkDetailsSettingShowsEveryRunAndPersists) {
     Fixture f([](Inbox& in) { in.env.add_tool(mail_tool(in.env)); });
     const auto t = f.in.env.thread();
@@ -8205,4 +8237,250 @@ TEST(ShellRecovery, ShutdownFailedRunExplainsTheUnknownOutcomeAndContinues) {
     ASSERT_TRUE(w.until([&] { return !w.exists("recovery-banner"); }, 10000));
     EXPECT_EQ(f.in.env.calls.count("mail.send"), 0);  // nothing was made again
     EXPECT_FALSE(jstr(f.in.env.rt->recovery_status(failed), "continuation").empty());
+}
+
+// ==== add-local-outlook-and-teams (tasks 2.4, 3.5, 4.3, 5.1, 5.3) over scripted hosts ===================================
+
+namespace {
+
+void set_field(ShellThread& w, const std::string& id, const std::u16string& text) {
+    w.with(id, [&](ui::Node& n) {
+        auto& f = static_cast<ui::TextField&>(n);
+        f.set_text(text);
+        if (f.on_change) f.on_change();
+        return true;
+    });
+}
+
+bool set_switch(ShellThread& w, const std::string& id, bool on) {
+    return w.with(id, [on](ui::Node& n) {
+        auto* checkbox = dynamic_cast<ui::Checkbox*>(&n);
+        if (!checkbox) return false;
+        checkbox->set_checked(on);
+        return true;
+    });
+}
+
+json base_status(bool calendar) {
+    return json{{"version", {{"version", "0.1.0"}}},
+                {"auth", {{"state", "signed_in"}}},
+                {"control_plane", {{"configured", true}, {"connected", true}}},
+                {"background", {{"paused_until", 0}}},
+                {"storage", {{"read_only", false}, {"degraded", false}}},
+                {"agenda", {{"available", true}, {"enabled", true}}},
+                {"calendar", {{"available", calendar}}}};
+}
+
+}  // namespace
+
+// client/calendar-view: the Calendar page is in the navigation while mail and calendar are available; the work week shows
+// day columns with named events; a private event is only "Busy" and cannot be opened; an event's details offer Join, Ask
+// Skowork and Open in Outlook; the 14-day list asks the host for 14 days.
+TEST(ShellCalendar, WorkWeekPrivacyAndEventActions) {
+    std::mutex mx;
+    std::vector<std::pair<std::string, json>> calls;
+    Fixture f;
+    f.rpc.add("app.status", RpcExposure::ui, [](const json&) -> Result<json> { return base_status(true); });
+    f.rpc.add("calendar.view", RpcExposure::ui, [&](const json& p) -> Result<json> {
+        const std::lock_guard l(mx);
+        calls.emplace_back("calendar.view", p);
+        const long long from = jint(p, "from");
+        const auto at = [from](long long hours) { return from + hours * 3'600'000; };
+        json events = json::array();
+        events.push_back({{"id", "E1"}, {"subject", "Steering committee"}, {"location", "Room 4"}, {"start_ms", at(9)}, {"end_ms", at(10)},
+                          {"all_day", false}, {"organizer", {{"name", "Petra Malá"}, {"address", "petra@example.com"}}},
+                          {"attendees", json::array({{{"name", "Jan"}, {"address", "jan@example.com"}}})},
+                          {"online_meeting_url", "https://teams.microsoft.com/l/meetup-join/abc"}, {"body", "Agenda: budget"}});
+        events.push_back({{"id", "E2"}, {"private", true}, {"show_as", "busy"}, {"start_ms", at(11)}, {"end_ms", at(12)}});
+        return json{{"available", true}, {"backend", "outlook"}, {"last_sync", "2026-11-17T09:00:00Z"}, {"state", "connected"}, {"events", events}};
+    });
+    for (const char* m : {"calendar.ask", "calendar.open_in_outlook"}) {
+        const std::string method = m;
+        f.rpc.add(method, RpcExposure::ui, [&, method](const json& p) -> Result<json> {
+            const std::lock_guard l(mx);
+            calls.emplace_back(method, p);
+            return json::object();
+        });
+    }
+    const auto last = [&](const std::string& method) {
+        const std::lock_guard l(mx);
+        json out;
+        for (const auto& [m, p] : calls)
+            if (m == method) out = p;
+        return out;
+    };
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/calendar"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("calendar-event-E1") && w.exists("calendar-event-E2"); }));
+    ASSERT_TRUE(w.until([&] { return w.exists("nav-calendar"); }));
+    const json first = last("calendar.view");
+    EXPECT_NEAR(static_cast<double>(jint(first, "to") - jint(first, "from")), 5.0 * 86'400'000, 3'600'000.0);  // Monday to Friday
+    EXPECT_TRUE(w.exists("calendar-mode-week"));
+    Uia uia;
+    auto m = uia.by_id(w.hwnd());
+    EXPECT_EQ(m[L"nav-calendar"].name, L"Calendar");
+    EXPECT_NE(m[L"calendar-event-E1"].name.find(L"Steering committee"), std::wstring::npos);
+    EXPECT_NE(m[L"calendar-event-E2"].name.find(L"Busy"), std::wstring::npos);
+    EXPECT_EQ(m[L"calendar-event-E2"].name.find(L"Steering"), std::wstring::npos);
+    std::vector<std::string> problems;
+    w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
+    EXPECT_TRUE(problems.empty()) << problems.front();
+
+    ASSERT_TRUE(w.invoke("calendar-event-E1"));
+    ASSERT_TRUE(w.until([&] { return w.exists("calendar-details") && w.exists("calendar-join") && w.exists("calendar-open-outlook"); }));
+    ASSERT_TRUE(w.invoke("calendar-ask"));
+    ASSERT_TRUE(w.until([&] { return jstr(last("calendar.ask"), "id") == "E1"; }));
+    ASSERT_TRUE(w.invoke("calendar-open-outlook"));
+    ASSERT_TRUE(w.until([&] { return jstr(last("calendar.open_in_outlook"), "id") == "E1"; }));
+
+    ASSERT_TRUE(w.invoke("calendar-mode-list"));
+    ASSERT_TRUE(w.until([&] {
+        const json p = last("calendar.view");
+        return std::abs(static_cast<double>(jint(p, "to") - jint(p, "from")) - 14.0 * 86'400'000) <= 3'600'000.0;
+    }));
+    ASSERT_TRUE(w.until([&] { return w.exists("calendar-list") && w.exists("calendar-event-E1"); }));
+}
+
+// client/mail-calendar Outlook Availability, client/teams-chats and client/daily-report settings sections: the backend
+// and Outlook's state are shown and "Allow Skowork to start Outlook" calls the host; a Teams conversation is excluded with
+// its switch; the Daily report time and working days are saved.
+TEST(ShellSettings, OutlookTeamsAndDailyReportSections) {
+    std::mutex mx;
+    std::vector<std::pair<std::string, json>> calls;
+    Fixture f;
+    f.rpc.add("app.status", RpcExposure::ui, [](const json&) -> Result<json> { return base_status(true); });
+    f.rpc.add("mail.status", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"available", true}, {"backend", "outlook"}, {"backend_policy", "auto"}, {"outlook_state", "not_running"},
+                    {"outlook_may_start", false}, {"state", "disconnected"}, {"error", "Outlook is not running"}, {"account", ""},
+                    {"last_sync", ""}, {"messages", 0}, {"events", 0}, {"withheld", 0},
+                    {"policy_exclusions", {{"folders", json::array()}, {"categories", json::array()}, {"private_items", true}}},
+                    {"user_exclusions", {{"folders", json::array()}, {"categories", json::array()}}}};
+    });
+    f.rpc.add("teams.status", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"available", true}, {"enabled", true}, {"profiles", json::array({"C:\\x\\WV2Profile_tfw\\IndexedDB\\db"})},
+                    {"profile", "C:\\x\\WV2Profile_tfw\\IndexedDB\\db"}, {"conversations", 2}, {"messages", 40},
+                    {"last_read", "2026-11-17T09:00:00Z"}, {"excluded", json::array()}, {"error", ""}, {"counts", json::object()}};
+    });
+    f.rpc.add("teams.conversations", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"conversations", json::array({{{"id", "19:falcon@thread.v2"}, {"name", "Project Falcon"}, {"type", "group"}},
+                                                   {{"id", "19:a_b@unq.gbl.spaces"}, {"name", "Petra Malá"}, {"type", "chat"}}})}};
+    });
+    f.rpc.add("daily_report.status", RpcExposure::ui, [](const json&) -> Result<json> {
+        return json{{"available", true}, {"enabled", true}, {"time", "08:00"}, {"hour", 8}, {"minute", 0}, {"days", json::array({1, 2, 3, 4, 5})},
+                    {"last_day", "2026-11-16"}, {"last_thread", ""}};
+    });
+    for (const char* m : {"mail.outlook_may_start", "teams.exclude", "teams.configure", "daily_report.configure"}) {
+        const std::string method = m;
+        f.rpc.add(method, RpcExposure::ui, [&, method](const json& p) -> Result<json> {
+            const std::lock_guard l(mx);
+            calls.emplace_back(method, p);
+            return json::object();
+        });
+    }
+    const auto all = [&](const std::string& method) {
+        const std::lock_guard l(mx);
+        std::vector<json> out;
+        for (const auto& [m, p] : calls)
+            if (m == method) out.push_back(p);
+        return out;
+    };
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/settings"); });
+    ASSERT_TRUE(w.until([&] {
+        return w.exists("settings-mail-backend") && w.exists("settings-teams-counts") && w.exists("settings-report-time");
+    }, 10000));
+    Uia uia;
+    auto m = uia.by_id(w.hwnd());
+    EXPECT_NE(m[L"settings-mail-outlook-state"].name.find(L"Outlook is not running"), std::wstring::npos);
+    EXPECT_NE(m[L"settings-teams-counts"].name.find(L"2 conversations, 40 messages"), std::wstring::npos);
+
+    ASSERT_TRUE(set_switch(w, "settings-mail-outlook-start", true));
+    ASSERT_TRUE(w.until([&] { return !all("mail.outlook_may_start").empty(); }));
+    EXPECT_TRUE(jbool(all("mail.outlook_may_start").back(), "on"));
+
+    ASSERT_TRUE(set_switch(w, "settings-teams-conv-1", false));  // the first conversation: Project Falcon
+    ASSERT_TRUE(w.until([&] { return !all("teams.exclude").empty(); }));
+    EXPECT_EQ(jstr(all("teams.exclude").back(), "conversation_id"), "19:falcon@thread.v2");
+    EXPECT_TRUE(jbool(all("teams.exclude").back(), "excluded"));
+
+    // Saturday as well. The page runs one action at a time, so the switch is pressed again until the host has it.
+    ASSERT_TRUE(w.until([&] {
+        (void)set_switch(w, "settings-report-day-6", false);
+        (void)set_switch(w, "settings-report-day-6", true);
+        for (const auto& p : all("daily_report.configure"))
+            if (p.contains("days") && p["days"].size() == 6u) return true;
+        return false;
+    }));
+    // One action at a time: the time is saved once the day change has been answered and the section reloaded.
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-report-time"); }));
+    ASSERT_TRUE(w.until([&] {
+        set_field(w, "settings-report-time", u"07:30");
+        (void)w.invoke("settings-report-time-save");
+        for (const auto& p : all("daily_report.configure"))
+            if (jstr(p, "time") == "07:30") return true;
+        return false;
+    }));
+}
+
+// client/agenda Sending A Prepared Draft: a prepared item with a reply draft offers Reply…; the form is prefilled from
+// agenda.draft, the user's edits are what Send sends, and Open in Outlook hands the same message to the host.
+TEST(ShellAgenda, ReplyFormSendsTheEditedDraft) {
+    std::mutex mx;
+    std::vector<std::pair<std::string, json>> calls;
+    Fixture f;
+    const long long now = *parse_iso8601_ms("2026-11-17T10:00:00Z");
+    f.rpc.add("app.status", RpcExposure::ui, [](const json&) -> Result<json> { return base_status(true); });
+    const json item = {{"id", "a1"}, {"title", "Send the Q4 slides"}, {"action", "Send Petr the slides"}, {"due_at", *parse_iso8601_ms("2026-11-20T22:59:00Z")},
+                       {"has_time", false}, {"inferred", true}, {"state", "open"}, {"draft_kind", "reply"}, {"prep_thread_id", "t-prep"},
+                       {"notice", ""}, {"sources", json::array({{{"kind", "mail"}, {"id", "M1"}, {"title", "Q4 slides"}, {"quote", "send me the slides"},
+                                                                {"link", ""}, {"at", now}}})}};
+    f.rpc.add("agenda.list", RpcExposure::ui, [&](const json&) -> Result<json> {
+        return json{{"items", json::array({item})}, {"now", now}, {"tz_offset_min", 60}, {"status", {{"enabled", true}, {"pending", 0}}}};
+    });
+    f.rpc.add("agenda.draft", RpcExposure::ui, [](const json& p) -> Result<json> {
+        return json{{"id", jstr(p, "id")}, {"to", json::array({"petr@example.cz"})}, {"cc", json::array()}, {"subject", "RE: Q4 slides"},
+                    {"body", "Hi Petr,\n\nthe slides are attached.\n\nJana"}, {"reply_to", "M1"}, {"source", "mail"}, {"outlook", true}, {"can_send", true}};
+    });
+    for (const char* m : {"agenda.send_draft", "agenda.open_draft_in_outlook"}) {
+        const std::string method = m;
+        f.rpc.add(method, RpcExposure::ui, [&, method](const json& p) -> Result<json> {
+            const std::lock_guard l(mx);
+            calls.emplace_back(method, p);
+            return json{{"sent", true}};
+        });
+    }
+    const auto last = [&](const std::string& method) {
+        const std::lock_guard l(mx);
+        json out;
+        for (const auto& [m, p] : calls)
+            if (m == method) out = p;
+        return out;
+    };
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/agenda"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("agenda-draft-a1"); }));
+    Uia uia;
+    EXPECT_EQ(uia.by_id(w.hwnd())[L"agenda-draft-a1"].name, L"Reply to Send the Q4 slides");
+    ASSERT_TRUE(w.invoke("agenda-draft-a1"));
+    ASSERT_TRUE(w.until([&] { return w.exists("agenda-draft-form") && w.exists("agenda-draft-body"); }));
+    EXPECT_EQ(field_text(w, "agenda-draft-to"), u"petr@example.cz");
+    EXPECT_EQ(field_text(w, "agenda-draft-subject"), u"RE: Q4 slides");
+    EXPECT_NE(field_text(w, "agenda-draft-body").find(u"the slides are attached"), std::u16string::npos);
+
+    set_field(w, "agenda-draft-body", u"Hi Petr,\n\nthe slides are attached; the budget follows tomorrow.\n\nJana");
+    set_field(w, "agenda-draft-cc", u"eva@example.cz; martin@example.cz");
+    ASSERT_TRUE(w.invoke("agenda-draft-outlook"));
+    ASSERT_TRUE(w.until([&] { return jstr(last("agenda.open_draft_in_outlook"), "reply_to") == "M1"; }));
+    ASSERT_TRUE(w.invoke("agenda-draft-send"));
+    ASSERT_TRUE(w.until([&] { return !last("agenda.send_draft").is_null(); }));
+    const json sent = last("agenda.send_draft");
+    EXPECT_EQ(sent["to"], json::array({"petr@example.cz"}));
+    EXPECT_EQ(sent["cc"], json::array({"eva@example.cz", "martin@example.cz"}));
+    EXPECT_EQ(jstr(sent, "subject"), "RE: Q4 slides");
+    EXPECT_EQ(jstr(sent, "reply_to"), "M1");
+    EXPECT_NE(jstr(sent, "body").find("the budget follows tomorrow"), std::string::npos);
+    ASSERT_TRUE(w.until([&] { return !w.exists("agenda-draft-form"); }));
 }

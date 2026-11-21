@@ -104,6 +104,25 @@ if(WIN32)
 endif()
 add_test(NAME agenda_tests COMMAND agenda_tests)
 
+# Portable Teams cache decoder tests (client/teams-chats, add-local-outlook-and-teams 3.1, 3.2): generated LevelDB logs,
+# tables and MANIFESTs, IndexedDB keys, V8 values and Teams records, plus malformed inputs.
+add_executable(teams_tests teams/teams_decode_test.cpp)
+target_link_libraries(teams_tests PRIVATE wb_teams_core GTest::gtest_main)
+if(WIN32)
+  target_link_options(teams_tests PRIVATE -Wl,--subsystem,console)
+  set_target_properties(teams_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+add_test(NAME teams_tests COMMAND teams_tests)
+
+# Portable Daily report tests (client/daily-report, add-local-outlook-and-teams 5.2).
+add_executable(report_tests report/report_test.cpp)
+target_link_libraries(report_tests PRIVATE wb_report GTest::gtest_main)
+if(WIN32)
+  target_link_options(report_tests PRIVATE -Wl,--subsystem,console)
+  set_target_properties(report_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+add_test(NAME report_tests COMMAND report_tests)
+
 add_executable(triage_tests triage/classifier_test.cpp)
 target_link_libraries(triage_tests PRIVATE wb_triage_core GTest::gtest_main)
 if(WIN32)
@@ -197,6 +216,8 @@ if(WIN32)
     shell/shell_test.cpp
     scheduler/scheduler_test.cpp
     mail/mail_test.cpp
+    mail/outlook_test.cpp
+    teams/teams_service_test.cpp
     mail/triage_test.cpp
     knowledge/knowledge_test.cpp
     meeting/meeting_test.cpp
@@ -204,7 +225,7 @@ if(WIN32)
     messaging/messaging_test.cpp
     agenda/service_test.cpp
     app/agenda_intake_test.cpp)
-  target_link_libraries(win_tests PRIVATE wb_agenda wb_triage wb_api_connectors wb_messaging wb_apps wb_meeting wb_knowledge wb_mail wb_telemetry wb_shell wb_ui wb_app wb_scheduler wb_browser wb_inbox wb_mcp wb_tools wb_extract miniz wb_sandbox wb_model wb_runtime GTest::gtest_main bcrypt ws2_32 iphlpapi)
+  target_link_libraries(win_tests PRIVATE wb_teams wb_agenda wb_triage wb_api_connectors wb_messaging wb_apps wb_meeting wb_knowledge wb_mail wb_telemetry wb_shell wb_ui wb_app wb_scheduler wb_browser wb_inbox wb_mcp wb_tools wb_extract miniz wb_sandbox wb_model wb_runtime GTest::gtest_main bcrypt ws2_32 iphlpapi)
   # The stdio MCP server the client/mcp-client tests package; the official SDK server lives in dev/mcp-test-server.
   # The retrieval benchmark of client/knowledge-graph (add-knowledge-graph spike 1.1), run by hand.
   add_executable(kg_bench knowledge/kg_bench.cpp)

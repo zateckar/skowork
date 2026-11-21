@@ -1,9 +1,61 @@
 #include "app/agenda_intake.h"
+#include "app/agenda_reply.h"
 
 #include "base/strings.h"
 #include "base/time.h"
 
 namespace wb {
+
+agenda::SourceItem agenda_teams_item(const teams::StoredTeamsMessage& m, const teams::StoredConversation& c, const std::string& conversation_name,
+                                     const std::vector<teams::StoredTeamsMessage>& before, bool addressed) {
+    const auto who = [](const teams::StoredTeamsMessage& x) { return x.sender_name.empty() ? std::string("Someone") : x.sender_name; };
+    std::string context;
+    for (const auto& p : before)
+        if (p.id != m.id && p.at_ms <= m.at_ms) context += who(p) + ": " + p.text + "\n";
+    agenda::SourceItem s;
+    s.kind = "teams";
+    s.id = m.conversation_id + "|" + m.id;
+    s.conversation = m.conversation_id;
+    s.title = conversation_name;
+    s.text = utf8_truncate((context.empty() ? std::string{} : "Earlier in this conversation:\n" + context + "\nNew message:\n") + who(m) + ": " + m.text,
+                           agenda::kMaxItemText);
+    s.author = m.sender_name.empty() ? m.sender_email : m.sender_name;
+    s.author_is_user = m.mine;
+    s.user_addressed = addressed;
+    s.recipients = c.type == "chat" ? 1 : c.type == "channel" ? agenda::kBroadcastRecipients : 8;
+    s.at_ms = m.at_ms;
+    s.link = "teams:" + m.conversation_id;
+    return s;
+}
+
+json agenda_reply_prefill(const json& item, const std::string& draft,
+                          const std::function<std::optional<mail::StoredMessage>(const std::string& id)>& mail_message,
+                          const std::function<std::optional<TeamsReplySource>(const std::string& id)>& teams_message) {
+    json out = {{"id", jstr(item, "id")}, {"body", draft},  {"to", json::array()}, {"cc", json::array()},
+                {"subject", jstr(item, "title")}, {"reply_to", ""}, {"source", ""}};
+    for (const auto& s : item.value("sources", json::array())) {
+        const std::string kind = jstr(s, "kind"), sid = jstr(s, "id");
+        if (kind == "mail" && mail_message) {
+            const auto m = mail_message(sid);
+            if (!m || m->withheld || m->from.address.empty()) continue;
+            out["to"] = json::array({m->from.address});
+            const std::string subj = m->subject;
+            out["subject"] = to_lower(subj).rfind("re:", 0) == 0 ? subj : "RE: " + subj;
+            out["reply_to"] = m->id;
+            out["source"] = "mail";
+            return out;
+        }
+        if (kind == "teams" && teams_message) {
+            const auto t = teams_message(sid);
+            if (!t) continue;
+            if (!t->message.sender_email.empty()) out["to"] = json::array({t->message.sender_email});
+            out["subject"] = "RE: " + t->conversation_name;
+            out["source"] = "teams";
+            return out;
+        }
+    }
+    return out;
+}
 
 std::string agenda_bounded_transcript(const std::string& text) {
     if (text.size() <= agenda::kMaxItemText) return text;

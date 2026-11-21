@@ -167,6 +167,7 @@ std::optional<Route> parse_route(std::string_view input) {
         if (parts[0] == "knowledge") return simple(RouteName::knowledge, "#/knowledge");
         if (parts[0] == "apps") return simple(RouteName::apps, "#/apps");
         if (parts[0] == "agenda") return simple(RouteName::agenda, "#/agenda");
+        if (parts[0] == "calendar") return simple(RouteName::calendar, "#/calendar");
 
     }
     return std::nullopt;

@@ -449,10 +449,13 @@ TEST(AppsTools, LocalAppBuildNeedsNoToolDiscovery) {
     if (!node_present()) GTEST_SKIP() << "client/runtime/node is missing (dev/scripts/fetch-node-runtime.ps1)";
     Rig r;
     std::vector<std::string> opened;
+    // The scaffold apps.create writes counts as written by the agent (client/core-tools Seen File Content).
+    const auto seen = tools::memory_seen_files();
     AppToolsEnv te;
     te.apps = r.apps.get();
     te.server = r.server.get();
     te.open_url = [&](const std::string& u) { opened.push_back(u); };
+    te.created_file = [seen](const std::string& thread, const std::string& path) { tools::record_seen_file(*seen, thread, path); };
     const auto defs = app_tools(te);
 
     Env env;
@@ -470,6 +473,7 @@ TEST(AppsTools, LocalAppBuildNeedsNoToolDiscovery) {
     tools::FileToolsEnv fe;
     fe.rules = [enforcer] { return enforcer->path_rules_now(); };
     fe.workspace = ee.workspace;
+    fe.seen = seen;
     for (auto& d : tools::file_tools(fe)) env.add_tool(d);
     env.start();
 
@@ -519,10 +523,12 @@ TEST(AppsTools, CreateWriteOpenWithConfirmationUnderPolicyAndModeOff) {
     if (!node_present()) GTEST_SKIP() << "client/runtime/node is missing (dev/scripts/fetch-node-runtime.ps1)";
     Rig r;
     std::vector<std::string> opened;
+    const auto seen = tools::memory_seen_files();
     AppToolsEnv te;
     te.apps = r.apps.get();
     te.server = r.server.get();
     te.open_url = [&](const std::string& u) { opened.push_back(u); };
+    te.created_file = [seen](const std::string& thread, const std::string& path) { tools::record_seen_file(*seen, thread, path); };
     const auto defs = app_tools(te);
     ASSERT_EQ(defs.size(), 6u);
     std::map<std::string, runtime::Risk> risks;
@@ -550,6 +556,7 @@ TEST(AppsTools, CreateWriteOpenWithConfirmationUnderPolicyAndModeOff) {
     tools::FileToolsEnv fe;
     fe.rules = [enforcer] { return enforcer->path_rules_now(); };
     fe.workspace = ee.workspace;
+    fe.seen = seen;
     for (auto& d : tools::file_tools(fe)) env.add_tool(d);
     env.start();
 
@@ -701,7 +708,10 @@ TEST(AppsTools, WriteToAnAppFolderCompletesWhileAnotherAppStarts) {
     // The first model step waits until the test has granted the Run access to the target folder (the Run's id is known
     // only once it starts), then the write follows.
     Gate granted;
-    env.model.push_blocking(granted, calls_response({{"d1", "files.write", {{"path", target->folder + "\\public\\index.html"}, {"content", "<h1>Updated</h1>"}}}}));
+    // The page was written in another Thread, so the agent reads it before replacing it (client/core-tools Overwrite
+    // Protection).
+    env.model.push_blocking(granted, calls_response({{"d0", "files.read", {{"path", target->folder + "\\public\\index.html"}}}}));
+    env.model.push_calls({{"d1", "files.write", {{"path", target->folder + "\\public\\index.html"}, {"content", "<h1>Updated</h1>"}}}});
     env.model.push_text("Done.");
     const auto t = env.thread();
     const auto began = std::chrono::steady_clock::now();

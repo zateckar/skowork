@@ -39,9 +39,17 @@ struct GraphPage {
 // Error codes: offline (Graph unreachable), throttled (retries exhausted), not_connected, interaction_required,
 // not_found (404), sync_state_not_found (410), access_denied (403), bad_request (400), malformed (not JSON), cancelled,
 // graph_error (anything else, with Graph's error code in the message), policy_error (a host outside the Graph set).
+// An in-process answer to a Graph call (add-local-outlook-and-teams design D2): the Local Outlook backend answers the
+// same paths from Outlook's object model. Errors use the codes above.
+using LocalTransport = std::function<Result<json>(const GraphCall& c)>;
+
 class GraphClient {
 public:
     GraphClient(std::string base_url, GraphAuth& auth, bool dev_build);
+
+    // With a local transport, call() never touches the network, the token or the host check.
+    void set_local(LocalTransport t) { local_ = std::move(t); }
+    [[nodiscard]] bool local() const { return static_cast<bool>(local_); }
 
     // One request; the parsed body (null for 202 and 204).
     Result<json> call(const GraphCall& c);
@@ -66,6 +74,7 @@ private:
     GraphAuth& auth_;
     bool dev_build_;
     int max_attempts_ = 5;
+    LocalTransport local_;
     std::function<bool(std::chrono::milliseconds, const std::shared_ptr<CancelToken>&)> sleep_;
     std::atomic<long long> last_success_{0};
     std::atomic<long long> requests_{0};

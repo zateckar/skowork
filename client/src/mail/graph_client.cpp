@@ -69,6 +69,13 @@ Result<std::string> GraphClient::resolve(const std::string& path) const {
 }
 
 Result<json> GraphClient::call(const GraphCall& c) {
+    if (local_) {
+        if (c.cancel && c.cancel->cancelled()) return make_error("cancelled", "cancelled");
+        ++requests_;
+        auto r = local_(c);
+        if (r) last_success_ = unix_millis_now();
+        return r;
+    }
     auto url = resolve(c.path);
     if (!url) return url.error();
     auto token = auth_.access_token();

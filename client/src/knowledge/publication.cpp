@@ -81,6 +81,7 @@ std::string copied_notice(const std::string& source) {
     if (source == "mail") return "mail";
     if (source == "threads") return "thread";
     if (source == "meetings") return "transcript";
+    if (source == "teams") return "chat";
     return {};
 }
 

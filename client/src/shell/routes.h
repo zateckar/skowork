@@ -5,6 +5,7 @@
 //   #/skills/new[?thread=<id>] (the Skill editor, with a draft from a Thread), #/skills/edit/<name>,
 //   #/automations/<id> (a Trigger and its history), #/automations/new, #/automations/edit/<id>,
 //   #/knowledge (the Knowledge view, add-knowledge-sharing design D4), #/apps (the Apps view, add-local-apps),
+//   #/agenda, #/calendar (the Calendar page, add-local-outlook-and-teams),
 //   #/chats (the Inbox list of Chats, with the directory in the reading pane), #/chats/<id> (a Chat in the reading pane;
 //   add-chats-in-inbox design D3, D4)
 #pragma once
@@ -17,13 +18,13 @@
 
 namespace wb::shell {
 
-enum class RouteName { inbox, thread, new_thread, status, settings, telemetry, about, skill_editor, automation, automation_editor, knowledge, apps, chat, agenda };
+enum class RouteName { inbox, thread, new_thread, status, settings, telemetry, about, skill_editor, automation, automation_editor, knowledge, apps, chat, agenda, calendar };
 
 // The routes shown in the page pane rather than the Inbox.
 inline bool is_page(RouteName n) {
     return n == RouteName::status || n == RouteName::settings || n == RouteName::telemetry || n == RouteName::about ||
            n == RouteName::skill_editor || n == RouteName::automation || n == RouteName::automation_editor ||
-           n == RouteName::knowledge || n == RouteName::apps || n == RouteName::agenda;
+           n == RouteName::knowledge || n == RouteName::apps || n == RouteName::agenda || n == RouteName::calendar;
 }
 
 struct MessageRef {

@@ -587,3 +587,30 @@ TEST(AgendaService, ADueTimeAfterTheSwitchToSummerTimeKeepsItsLocalTime) {
     ASSERT_TRUE(edited) << edited.error().message;
     EXPECT_EQ(jint(*edited, "due_at"), ms("2027-03-30T12:00:00Z"));
 }
+
+// add-local-outlook-and-teams task 4.2: Teams messages are an Agenda source the user can switch off.
+TEST(AgendaService, TeamsMessagesAreASelectableSource) {
+    Rig r;
+    r.enable();
+    EXPECT_TRUE(jbool(r.svc->status(), "teams"));  // selected by default
+    auto teams = mail("19:grp@thread.v2|m3", "Petr Svoboda: Jana, could you send me the Q4 slides by Friday?", "19:grp@thread.v2");
+    teams.kind = "teams";
+    teams.link = "teams:19:grp@thread.v2";
+    r.svc->offer(teams);
+    EXPECT_EQ(jint(r.svc->status(), "pending"), 1);
+    r.model.text = answer("19:grp@thread.v2|m3", candidate("could you send me the Q4 slides by Friday"));
+    r.svc->detect_now();
+    const json list = r.svc->list();
+    ASSERT_EQ(list["items"].size(), 1u);
+    EXPECT_EQ(jstr(list["items"][0]["sources"][0], "kind"), "teams");
+    EXPECT_EQ(jstr(list["items"][0]["sources"][0], "id"), "19:grp@thread.v2|m3");
+
+    ASSERT_TRUE(r.svc->set({{"teams", false}}));
+    EXPECT_FALSE(jbool(r.svc->status(), "teams"));
+    teams.id = "19:grp@thread.v2|m4";
+    r.svc->offer(teams);
+    EXPECT_EQ(jint(r.svc->status(), "pending"), 0);
+    // A Teams message that is deleted withdraws the item it alone supported.
+    r.svc->withdraw("teams", "19:grp@thread.v2|m3");
+    EXPECT_TRUE(r.svc->list()["items"].empty());
+}

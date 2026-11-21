@@ -8,6 +8,7 @@
 #include "mail/mail_config.h"
 #include "mail/mail_store.h"
 #include "mail/mail_sync.h"
+#include "mail/outlook_graph.h"
 #include "runtime/tools.h"
 #include "tools/files.h"
 
@@ -41,13 +42,22 @@ struct MailEnv {
     // Status for the settings section changed.
     std::function<void()> changed;
     bool background_sync = true;  // tests drive sync_now() themselves
+    // Mail Backend Selection (add-local-outlook-and-teams design D1): whether classic Outlook is registered, and the
+    // Outlook session of the Local Outlook backend (tests supply a fake). `may_start`: the user's "Allow Skowork to start
+    // Outlook" setting.
+    std::function<bool()> outlook_installed;
+    std::function<std::unique_ptr<outlook::OutlookSession>(std::function<bool()> may_start)> outlook_factory;
 };
 
-// The Graph connection of the current configuration. Replaced when policy changes; tools hold the one they started with.
+// The connection of the current configuration. Replaced when policy changes; tools hold the one they started with.
+// On the Local Outlook backend `graph` answers through `outlook` in-process and `auth` is never started.
 struct Connection {
     MailConfig cfg;
     std::unique_ptr<GraphAuth> auth;
+    std::unique_ptr<outlook::OutlookSession> session;
+    std::unique_ptr<outlook::OutlookGraph> outlook;
     std::unique_ptr<GraphClient> graph;
+    [[nodiscard]] bool local() const { return outlook != nullptr; }
 };
 
 class MailService {
@@ -93,6 +103,12 @@ public:
     // Forget operations of client/local-storage: tokens and the local copy.
     Status forget_all();
 
+    // Local Outlook backend: "Allow Skowork to start Outlook" (Outlook Availability; default off).
+    [[nodiscard]] bool outlook_may_start();
+    Status set_outlook_may_start(bool on);
+    // Shows a message or event in an Outlook window (Calendar Event Actions, Sending A Prepared Draft).
+    Status open_in_outlook(const std::string& id);
+
     [[nodiscard]] const MailEnv& env() const { return env_; }
     [[nodiscard]] std::string account();  // the mailbox address (from /me), once connected
     // A colleague from the Graph user directory (client/knowledge-graph People Resolution; add-knowledge-graph design D5):
@@ -101,6 +117,8 @@ public:
 
 private:
     std::shared_ptr<Connection> make_connection(const MailConfig& cfg);
+    bool ready(const Connection& c);
+    void backend_in_use(const MailConfig& cfg);
     void loop();
     void auth_changed(GraphAuthState s);
 

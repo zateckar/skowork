@@ -1,6 +1,8 @@
 #include "tools/files.h"
 
+#include "base/encoding.h"
 #include "base/strings.h"
+#include "platform/crypto.h"
 #include "platform/win.h"
 #include "policy/paths.h"
 #include "tools/text.h"
@@ -106,6 +108,56 @@ bool is_directory(HANDLE h) {
     BY_HANDLE_FILE_INFORMATION info{};
     return ::GetFileInformationByHandle(h, &info) && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
 }
+
+// ---- Seen File Content (protect-unread-overwrites) ------------------------------------------------------------------
+
+std::string sha256_hex(std::string_view bytes) { return hex_encode(sha256(bytes)); }
+
+long long last_write_of(HANDLE h) {
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!::GetFileInformationByHandle(h, &info)) return 0;
+    return (static_cast<long long>(info.ftLastWriteTime.dwHighDateTime) << 32) | info.ftLastWriteTime.dwLowDateTime;
+}
+
+// Size and last-write time of an existing file, without opening it for reading; nothing when there is no such file.
+struct DiskStat {
+    long long size = 0, modified = 0;
+    bool directory = false;
+};
+std::optional<DiskStat> stat_path(const std::string& path) {
+    WIN32_FILE_ATTRIBUTE_DATA d{};
+    if (!::GetFileAttributesExW(widen(path).c_str(), GetFileExInfoStandard, &d)) return std::nullopt;
+    DiskStat s;
+    s.size = (static_cast<long long>(d.nFileSizeHigh) << 32) | d.nFileSizeLow;
+    s.modified = (static_cast<long long>(d.ftLastWriteTime.dwHighDateTime) << 32) | d.ftLastWriteTime.dwLowDateTime;
+    s.directory = (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    return s;
+}
+
+// The state of the file just written: its stat on disk and the hash of the bytes written.
+void record_written(SeenFiles& seen, const std::string& thread_id, const std::string& written, std::string_view bytes) {
+    const auto st = stat_path(written);
+    if (!st) return;
+    seen.put(thread_id, seen_key(written), FileState{st->size, st->modified, sha256_hex(bytes)});
+}
+
+class MemorySeenFiles final : public SeenFiles {
+public:
+    std::optional<FileState> get(const std::string& thread_id, const std::string& path) override {
+        const std::lock_guard g(mx_);
+        const auto it = states_.find(thread_id + '\n' + path);
+        if (it == states_.end()) return std::nullopt;
+        return it->second;
+    }
+    void put(const std::string& thread_id, const std::string& path, const FileState& state) override {
+        const std::lock_guard g(mx_);
+        states_[thread_id + '\n' + path] = state;
+    }
+
+private:
+    std::mutex mx_;
+    std::unordered_map<std::string, FileState> states_;
+};
 
 struct DirEntry {
     std::string name;
@@ -274,7 +326,15 @@ ToolOutput read_file(const FileToolsEnv& env, ToolContext& ctx, const json& args
     const size_t first = static_cast<size_t>(std::max<long long>(1, jint(args, "offset", 1)));
     const size_t limit = static_cast<size_t>(std::max<long long>(0, jint(args, "limit", 0)));
     const size_t lines = count_lines(text);
-    if (text.empty()) return with_provenance(ToolOutput::success("(empty file)"), shown);
+    // A full read of a text file counts as seen (Seen File Content); ranged, truncated and extracted reads do not.
+    auto mark_seen = [&] {
+        if (kind.empty() && !ranged && total <= kMaxFileBytes && env.seen)
+            env.seen->put(ctx.thread_id, seen_key(shown), FileState{total, last_write_of(h->get()), sha256_hex(*data)});
+    };
+    if (text.empty()) {
+        mark_seen();
+        return with_provenance(ToolOutput::success("(empty file)"), shown);
+    }
     if (first > lines) {
         return with_provenance(ToolOutput::failure("offset " + std::to_string(first) + " is beyond the end of " + shown + ", which has " +
                                                    std::to_string(lines) + " lines."),
@@ -289,6 +349,8 @@ ToolOutput read_file(const FileToolsEnv& env, ToolContext& ctx, const json& args
                (partial_file ? "+" : "") + " (the file has " + std::to_string(total) + " bytes; the read limit is " +
                std::to_string(max_bytes / 1024) + " KB). Call files.read with offset=" + std::to_string(s.last + 1) +
                " and a limit to read further ranges.]";
+    } else {
+        mark_seen();
     }
     return with_provenance(ToolOutput::success(std::move(out)), shown);
 }
@@ -447,18 +509,50 @@ ToolOutput grep_files(const FileToolsEnv& env, const json& args) {
 
 // ---- files.write and files.edit ------------------------------------------------------------------------------------
 
-ToolOutput write_file(const FileToolsEnv& env, const json& args) {
+// client/core-tools Overwrite Protection (protect-unread-overwrites design D3, D4): an existing file may be replaced only
+// when its current content is what the agent last saw of it in this Thread. Nothing when the write may go ahead.
+std::optional<std::string> overwrite_refusal(const FileToolsEnv& env, const ToolContext& ctx, const std::string& path,
+                                             const policy::PathRules& rules) {
+    // A path the policy does not let the agent write is refused by the write itself, without telling whether it exists.
+    const auto canonical = policy::canonicalize(path);
+    if (!canonical || !policy::check_path(*canonical, policy::Access::write, rules).allowed) return std::nullopt;
+    const auto st = stat_path(*canonical);
+    if (!st) return std::nullopt;  // a new file
+    if (st->directory) return path + " is a folder.";
+    const long long max_read = std::max<long long>(1, policy_int(env, "tools.files.max_read_kb", 256)) * 1024;
+    const std::string cannot = path + " is too large or not a text file, so it cannot be replaced with files.write. Use files.edit "
+                                      "or write to a new file. The file is unchanged.";
+    const auto seen = env.seen ? env.seen->get(ctx.thread_id, seen_key(path)) : std::nullopt;
+    if (!seen) {
+        if (!document_kind(path).empty() || st->size > max_read) return cannot;
+        return path + " exists and has not been read in this Thread. Read it in full with files.read before replacing it, or "
+                      "write to a new file. The file is unchanged.";
+    }
+    const std::string changed = path + " changed after it was last read in this Thread. Read it again before replacing it. "
+                                       "The file is unchanged.";
+    if (st->size != seen->size || st->modified != seen->modified) return changed;
+    auto h = policy::open_for_read(path, rules);
+    if (!h) return changed;
+    auto data = read_all(h->get(), kMaxFileBytes);
+    if (!data || sha256_hex(*data) != seen->sha256) return changed;
+    return std::nullopt;
+}
+
+ToolOutput write_file(const FileToolsEnv& env, ToolContext& ctx, const json& args) {
     if (jstr(args, "path").empty()) return ToolOutput::failure("path is required.");
     if (!args.contains("content") || !args["content"].is_string()) return ToolOutput::failure("content is required.");
     const std::string path = arg_path(args, "path", env.workspace);
     const std::string& content = args["content"].get_ref<const std::string&>();
+    const auto rules = env.rules();
     const PathLock locked = lock_path(path);
-    auto written = policy::write_file_atomic(path, content, env.rules());
+    if (auto refused = overwrite_refusal(env, ctx, path, rules)) return ToolOutput::failure(*refused);
+    auto written = policy::write_file_atomic(path, content, rules);
     if (!written) return path_failure(written.error(), path);
+    if (env.seen) record_written(*env.seen, ctx.thread_id, *written, content);
     return ToolOutput::success("Wrote " + std::to_string(content.size()) + " bytes to " + *written + ".");
 }
 
-ToolOutput edit_file(const FileToolsEnv& env, const json& args) {
+ToolOutput edit_file(const FileToolsEnv& env, ToolContext& ctx, const json& args) {
     if (jstr(args, "path").empty()) return ToolOutput::failure("path is required.");
     const std::string old_text = jstr(args, "old_text");
     if (old_text.empty()) return ToolOutput::failure("old_text is required and must not be empty.");
@@ -489,15 +583,38 @@ ToolOutput edit_file(const FileToolsEnv& env, const json& args) {
         new_text = lf_to_crlf(new_text);
         n = count_occurrences(text, needle);
     }
-    if (n == 0) return ToolOutput::failure("old_text was not found in " + path + "; the file is unchanged.");
-    if (n > 1) {
+    const bool all = jbool(args, "replace_all");
+    if (n == 0) return ToolOutput::failure("not found: old_text was not found in " + path + "; the file is unchanged.");
+    if (n > 1 && !all) {
         return ToolOutput::failure("ambiguous match: old_text occurs " + std::to_string(n) + " times in " + path +
-                                   "; include more surrounding text so that it occurs exactly once. The file is unchanged.");
+                                   "; include more surrounding text so that it occurs exactly once, or set replace_all to "
+                                   "replace every occurrence. The file is unchanged.");
     }
+    // Whether the agent had seen the whole file before this edit: only then is the edited file seen as a whole.
+    std::optional<FileState> before;
+    if (env.seen) before = env.seen->get(ctx.thread_id, seen_key(path));
+    const bool was_seen = before && before->size == static_cast<long long>(data.size()) && before->sha256 == sha256_hex(data);
     const size_t at = text.find(needle);
-    text.replace(at, needle.size(), new_text);
-    auto written = policy::write_file_atomic(path, encode_text(text, decoded->encoding), rules);
+    if (all) {
+        // Edit All Occurrences (add-edit-replace-all design D2): non-overlapping, left to right, one write.
+        std::string out;
+        out.reserve(text.size() + n * new_text.size());
+        size_t from = 0;
+        for (size_t pos = text.find(needle); pos != std::string::npos; pos = text.find(needle, from)) {
+            out.append(text, from, pos - from);
+            out += new_text;
+            from = pos + needle.size();
+        }
+        out.append(text, from, std::string::npos);
+        text = std::move(out);
+    } else {
+        text.replace(at, needle.size(), new_text);
+    }
+    const std::string bytes = encode_text(text, decoded->encoding);
+    auto written = policy::write_file_atomic(path, bytes, rules);
     if (!written) return path_failure(written.error(), path);
+    if (was_seen) record_written(*env.seen, ctx.thread_id, *written, bytes);
+    if (all) return ToolOutput::success("Replaced " + std::to_string(n) + (n == 1 ? " occurrence" : " occurrences") + " in " + *written + ".");
     const size_t line = 1 + static_cast<size_t>(std::count(text.begin(), text.begin() + static_cast<long>(at), '\n'));
     return ToolOutput::success("Edited " + *written + " at line " + std::to_string(line) + ".");
 }
@@ -511,7 +628,27 @@ std::string absolute_path(std::string_view path, const std::string& workspace) {
     return join_path(workspace, p);
 }
 
+std::shared_ptr<SeenFiles> memory_seen_files() { return std::make_shared<MemorySeenFiles>(); }
+
+std::string seen_key(std::string_view path) {
+    auto c = policy::canonicalize(path);
+    std::string key = to_lower(c ? *c : std::string(path));
+    std::replace(key.begin(), key.end(), '/', '\\');
+    return key;
+}
+
+void record_seen_file(SeenFiles& seen, const std::string& thread_id, const std::string& path) {
+    const unique_file h(::CreateFileW(widen(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!h) return;
+    long long total = 0;
+    auto data = read_all(h.get(), kMaxFileBytes, &total);
+    if (!data || total > kMaxFileBytes) return;
+    seen.put(thread_id, seen_key(path), FileState{total, last_write_of(h.get()), sha256_hex(*data)});
+}
+
 std::vector<ToolDef> file_tools(FileToolsEnv env) {
+    if (!env.seen) env.seen = memory_seen_files();
     auto e = std::make_shared<FileToolsEnv>(std::move(env));
     const std::string ws = e->workspace;
     std::vector<ToolDef> tools;
@@ -575,19 +712,25 @@ std::vector<ToolDef> file_tools(FileToolsEnv env) {
 
     ToolDef write;
     write.id = "files.write";
-    write.description = "Create a file or replace its whole content with `content` (UTF-8). The folder must exist. The write is atomic.";
+    write.description = "Create a file or replace its whole content with `content` (UTF-8). The folder must exist. The write is atomic. "
+                        "An existing file can be replaced only after you read it in full with files.read in this Thread, or wrote "
+                        "it yourself, and only if it has not changed since.";
     write.parameters = schema({{"path", path_prop}, {"content", {{"type", "string"}}}}, {"path", "content"});
     write.risk = Risk::write_local;
     write.core = true;
     write.resources_of = [ws](const json& a) { return std::vector<ToolResource>{{ToolResource::Kind::write_path, arg_path(a, "path", ws)}}; };
-    write.run = [e](ToolContext&, const json& a) { return write_file(*e, a); };
+    write.run = [e](ToolContext& ctx, const json& a) { return write_file(*e, ctx, a); };
     tools.push_back(std::move(write));
 
     ToolDef edit;
     edit.id = "files.edit";
     edit.description = "Replace one exact text span in a text file. old_text must occur exactly once; otherwise the call fails and "
-                       "the file is unchanged. Include enough surrounding text to make it unique.";
-    edit.parameters = schema({{"path", path_prop}, {"old_text", {{"type", "string"}}}, {"new_text", {{"type", "string"}}}},
+                       "the file is unchanged. Include enough surrounding text to make it unique. Set replace_all to replace every "
+                       "occurrence instead, for example to rename something; the result states how many were replaced.";
+    edit.parameters = schema({{"path", path_prop},
+                              {"old_text", {{"type", "string"}}},
+                              {"new_text", {{"type", "string"}}},
+                              {"replace_all", {{"type", "boolean"}, {"description", "Replace every occurrence (default false)."}}}},
                              {"path", "old_text", "new_text"});
     edit.risk = Risk::write_local;
     edit.core = true;
@@ -595,7 +738,7 @@ std::vector<ToolDef> file_tools(FileToolsEnv env) {
         const std::string p = arg_path(a, "path", ws);
         return std::vector<ToolResource>{{ToolResource::Kind::read_path, p}, {ToolResource::Kind::write_path, p}};
     };
-    edit.run = [e](ToolContext&, const json& a) { return edit_file(*e, a); };
+    edit.run = [e](ToolContext& ctx, const json& a) { return edit_file(*e, ctx, a); };
     tools.push_back(std::move(edit));
     return tools;
 }

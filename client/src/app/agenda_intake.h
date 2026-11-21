@@ -6,6 +6,7 @@
 #include "base/json.h"
 #include "meeting/meeting_store.h"
 #include "runtime/hooks.h"
+#include "teams/teams_service.h"
 
 #include <functional>
 #include <optional>
@@ -23,6 +24,11 @@ std::optional<agenda::SourceItem> agenda_meeting_item(const meeting::MeetingReco
 // `payload` is the chat-message push ({"chat", "message"}), `chat` the Chat it belongs to (or null when unknown) and
 // `me` the user's messaging id. Direct Chats address the user; in a team Chat the user must be named.
 std::optional<agenda::SourceItem> agenda_chat_item(const json& payload, const json& chat, const std::string& me, long long now_ms);
+
+// A Teams message (client/agenda Agenda Item Sources; add-local-outlook-and-teams design D6): the preceding messages of
+// its conversation as context, addressed when the Teams event says so, its id "<conversation>|<message>".
+agenda::SourceItem agenda_teams_item(const teams::StoredTeamsMessage& m, const teams::StoredConversation& c, const std::string& conversation_name,
+                                     const std::vector<teams::StoredTeamsMessage>& before, bool addressed);
 
 // Preparation Runs and their Child Runs get read-risk tools only (Preparation Has No Effects).
 runtime::ToolDecision agenda_preparation_decision(const runtime::ToolCallInfo& call,

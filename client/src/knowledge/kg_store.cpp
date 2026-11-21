@@ -724,7 +724,7 @@ CREATE TABLE dropped_candidates(
 }
 
 const std::vector<std::string>& source_kinds() {
-    static const std::vector<std::string> k = {"threads", "files", "mail", "calendar", "meetings", "notes"};
+    static const std::vector<std::string> k = {"threads", "files", "mail", "calendar", "meetings", "notes", "teams"};
     return k;
 }
 

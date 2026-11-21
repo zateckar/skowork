@@ -25,7 +25,7 @@ using ui::TextStyle;
 
 namespace {
 
-const char* const kTabs[] = {"files", "notes", "threads", "mail", "calendar", "meetings"};
+const char* const kTabs[] = {"files", "notes", "threads", "mail", "calendar", "meetings", "teams"};
 
 std::u16string u16(const std::string& s) { return ui::to_utf16(s); }
 
@@ -1231,6 +1231,8 @@ void KnowledgeView::rebuild_tabs() {
     tabs_->visible = section_ == "sources";
     for (const char* t : kTabs) {
         const std::string tab = t;
+        // Teams chats (add-local-outlook-and-teams) get a tab only once that Source has items, so the row stays short.
+        if (tab == "teams" && tab_ != tab && !(counts_.is_object() && jint(counts_, "teams") > 0)) continue;
         std::u16string label = shell_.t("knowledge.tab." + tab);
         if (counts_.is_object() && counts_.contains(tab))
             label = shell_.t("knowledge.tab_count", {{"name", label}, {"n", u16(std::to_string(jint(counts_, tab.c_str())))}});

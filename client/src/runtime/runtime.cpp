@@ -553,8 +553,9 @@ private:
                 case BatchOutcome::ended: return;
                 }
             }
-            if (const auto why = limit_hit()) {
-                end(RunState::failed, *why);
+            if (auto why = pending_limit_ ? pending_limit_ : limit_hit()) {
+                pending_limit_.reset();
+                final_answer_at_limit(*why);
                 return;
             }
             if (!is_child_) deliver_messages(deliver_queue);  // the user's messages go to the root Run only
@@ -587,6 +588,29 @@ private:
         add_message(assistant, payload);
         activity("The user invoked the Skill " + slash->first, {{"skill", slash->first}});
         return true;
+    }
+
+    // client/agent-runtime Final Answer At A Limit (summarize-at-run-limit design D1-D3): one more model call without
+    // tools asks for what was done, found and remains; the Run then ends succeeded with that answer and a run_limit
+    // event. The Child Run Time Limit (a subagent that waited too long) still ends the Run failed.
+    void final_answer_at_limit(const std::string& why) {
+        if (why == kChildLimitReason) {
+            end(RunState::failed, why);
+            return;
+        }
+        limit_mode_ = why;
+        activity("The Run reached its " + limit_words(why) + "; the model writes its final answer without tools", {{"limit", why}});
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            if (!model_turn() || finished_ || stopped()) return;  // the turn ended the Run (answer, failure or cancellation)
+        }
+        end(RunState::failed, why);
+    }
+
+    static std::string limit_words(const std::string& why) {
+        if (why == "tool call limit reached") return "tool call limit";
+        if (why == "model call limit reached") return "model call limit";
+        if (why == "wall time limit reached") return "time limit";
+        return "limit";
     }
 
     std::optional<std::string> limit_hit() {
@@ -677,7 +701,7 @@ private:
     bool model_turn() {
         model::ChatRequest req;
         req.role = rt_.cfg_.role;
-        req.tools = turn_tools();
+        if (limit_mode_.empty()) req.tools = turn_tools();  // Final Answer At A Limit: no tool definitions
         req.messages = conv_;
         {
             // Image Tool Results: images from the last tool calls ride along once, with the vision role.
@@ -702,6 +726,15 @@ private:
             note.role = "user";
             note.content = std::move(continuation_note_);
             continuation_note_.clear();
+            req.messages.push_back(std::move(note));
+        }
+        if (!limit_mode_.empty()) {
+            // Final Answer At A Limit (summarize-at-run-limit design D1): request-only, never stored or shown.
+            model::ChatMessage note;
+            note.role = "user";
+            note.content = "[The Run has reached its " + limit_words(limit_mode_) +
+                           " and cannot use tools any more. Answer the user now: what you did, what you found, and what "
+                           "remains to do. Do not say the task is finished unless it is.]";
             req.messages.push_back(std::move(note));
         }
         req.run_id = id_;
@@ -731,7 +764,7 @@ private:
             const json error = {{"code", "context_length"}, {"message", why}, {"reason", why}, {"partial_output", false}};
             auto seq = store_.append_event(id_, "error", error);
             emit("error", error, seq ? *seq : 0);
-            end(RunState::failed, why, {{"error", error}});
+            end(RunState::failed, limit_mode_.empty() ? why : limit_mode_, {{"error", error}});
             return false;
         }
         std::string incomplete_text;
@@ -798,11 +831,13 @@ private:
             keep_incomplete();
             auto seq = store_.append_event(id_, "error", failure_json(f));
             emit("error", failure_json(f), seq ? *seq : 0);
-            end(RunState::failed, failure_reason(f), {{"error", failure_json(f)}});
+            // A failed final call at a limit fails the Run with the limit as its reason (Final Answer At A Limit).
+            end(RunState::failed, limit_mode_.empty() ? failure_reason(f) : limit_mode_, {{"error", failure_json(f)}});
             return false;
         }
 
         model::ChatResponse& resp = result.value();
+        if (!limit_mode_.empty()) resp.tool_calls.clear();  // no tools were offered; a stray call is not run
         context_retry_ = false;
         rt_.observe_usage(req.role, sent_estimate, resp.usage.prompt);
         record_usage(resp.usage);
@@ -840,6 +875,21 @@ private:
 
         const bool cut = resp.finish_reason == "length";
         if (!cut) length_stops_ = 0;
+        if (!limit_mode_.empty()) {
+            if (trim(resp.text).empty()) {
+                end(RunState::failed, limit_mode_);
+                return false;
+            }
+            // The answer stands; the limit is recorded for the feed's note and the parent of a Child Run.
+            const json limit = {{"limit", limit_mode_}, {"limits", {{"model_calls", limits().model_calls},
+                                                                    {"tool_calls", limits().tool_calls},
+                                                                    {"wall_minutes", limits().wall_minutes}}}};
+            const auto seq = store_.append_event(id_, "run_limit", limit);
+            emit("run_limit", limit, seq ? *seq : 0);
+            end(RunState::succeeded, "");
+            finished_ = true;
+            return false;
+        }
         if (resp.tool_calls.empty()) {
             if (cut) return continue_after_output_limit(req.max_tokens.value_or(0), resp);
             end(RunState::succeeded, "");
@@ -1038,10 +1088,19 @@ private:
             const std::string id = jstr(*a, "id");
             const long long size = jint(*a, "size");
             const long long shown = jint(*a, "preview_bytes");
-            body = "[The result is " + std::to_string(size) + " bytes, more than the limit of " +
-                   std::to_string(rt_.cfg_.policy_limit("llm.max_tool_result_kb", rt_.cfg_.max_tool_result_kb)) + " KB. It is stored as attachment " + id + ". Its first " +
-                   std::to_string(shown) + " bytes follow; read further parts with read_attachment (attachment_id \"" + id +
-                   "\", offset " + std::to_string(shown) + ").]\n" + body;
+            if (a->contains("tail_from")) {
+                // Tool Result Previews: the start and the end, with the omitted middle readable from the attachment.
+                const long long tail = jint(*a, "tail_bytes");
+                body = "[The result is " + std::to_string(size) + " bytes, too large to include whole. It is stored as attachment " + id +
+                       ". Its first " + std::to_string(shown) + " and last " + std::to_string(tail) +
+                       " bytes follow; read the bytes in between with read_attachment (attachment_id \"" + id + "\", offset " +
+                       std::to_string(shown) + ").]\n" + body;
+            } else {
+                body = "[The result is " + std::to_string(size) + " bytes, more than the limit of " +
+                       std::to_string(rt_.cfg_.policy_limit("llm.max_tool_result_kb", rt_.cfg_.max_tool_result_kb)) + " KB. It is stored as attachment " + id + ". Its first " +
+                       std::to_string(shown) + " bytes follow; read further parts with read_attachment (attachment_id \"" + id +
+                       "\", offset " + std::to_string(shown) + ").]\n" + body;
+            }
         }
         return body;
     }
@@ -1103,8 +1162,8 @@ private:
                 if (!decide_call(i, call, work)) {
                     execute(work);  // the calls admitted before the limit still run
                     close_batch_unexecuted(batch, "tool call limit reached");
-                    end(RunState::failed, "tool call limit reached");
-                    return BatchOutcome::ended;
+                    pending_limit_ = "tool call limit reached";  // Final Answer At A Limit: the loop asks for the answer
+                    return BatchOutcome::complete;
                 }
             }
             execute(work);
@@ -1440,7 +1499,43 @@ private:
         worker();
         for (auto& t : pool) t.join();
 
-        for (auto& w : work) {
+        // Large Tool Results and Tool Results Per Response (cap-tool-results-by-context design D1-D3): a result above the
+        // smaller of policy.llm.max_tool_result_kb and a quarter of the context window is offloaded; then, while the
+        // results of this response together exceed half of the window, the largest are offloaded too.
+        const size_t policy_cap = static_cast<size_t>(std::max(1, rt_.cfg_.policy_limit("llm.max_tool_result_kb", rt_.cfg_.max_tool_result_kb))) * 1024;
+        long long window = rt_.context_window(rt_.cfg_.role);
+        for (const auto& w : work)
+            if (!w.out.images.empty()) window = std::min(window, rt_.context_window(model::Role::vision));
+        const long long result_cap_tokens = std::max<long long>(1, window / kResultShareDivisor);
+        const long long response_cap_tokens = std::max<long long>(1, window / kResponseShareDivisor);
+        const auto plain = [](const Work& w) { return !w.waiting && !w.out.outcome_unknown && !w.out.question; };
+        std::vector<long long> tokens(work.size(), 0);
+        std::vector<bool> offload(work.size(), false);
+        for (size_t i = 0; i < work.size(); ++i) {
+            if (!plain(work[i])) continue;
+            const std::string& c = work[i].out.content;
+            tokens[i] = static_cast<long long>(rt_.calibrated(rt_.cfg_.role, estimate_context_tokens(c)));
+            offload[i] = c.size() > policy_cap || tokens[i] > result_cap_tokens;
+        }
+        {
+            long long total = 0;
+            for (size_t i = 0; i < work.size(); ++i)
+                if (plain(work[i]) && !offload[i]) total += tokens[i];
+            while (total > response_cap_tokens) {
+                size_t largest = work.size();
+                for (size_t i = 0; i < work.size(); ++i)
+                    if (plain(work[i]) && !offload[i] && (largest == work.size() || tokens[i] > tokens[largest])) largest = i;
+                if (largest == work.size()) break;
+                offload[largest] = true;
+                total -= tokens[largest];
+            }
+        }
+        // Bytes kept when an offloaded result cannot be stored: within both caps, at one byte per token at worst.
+        const size_t inline_cap = std::min(policy_cap, static_cast<size_t>(result_cap_tokens));
+        const size_t preview_budget = std::min(inline_cap, static_cast<size_t>(std::max(256, rt_.cfg_.tool_result_preview_bytes)));
+
+        for (size_t wi = 0; wi < work.size(); ++wi) {
+            auto& w = work[wi];
             if (w.waiting) continue;  // the subagent waits for the user; the call gets its result when it resumes
             if (w.out.outcome_unknown) {
                 // The Run stops for the user before its next model call (Uncertain Tool Outcomes); the call stays open.
@@ -1465,20 +1560,34 @@ private:
             }
             Provenance prov = w.out.provenance.value_or(w.def->provenance);
             if (prov.source_kind.empty()) prov.source_kind = "tool";
-            // Large Tool Results (design D4a): above the cap the model gets a preview and an attachment reference.
+            // Large Tool Results (design D4a): an offloaded result is stored as an attachment, and the model gets its start
+            // and end around a marker (Tool Result Previews) plus the attachment reference.
             std::string content = std::move(w.out.content);
             json attachment = nullptr;
-            const size_t cap = static_cast<size_t>(std::max(1, rt_.cfg_.policy_limit("llm.max_tool_result_kb", rt_.cfg_.max_tool_result_kb))) * 1024;
-            if (content.size() > cap) {
-                const std::string_view preview = utf8_prefix(content, std::min(cap, static_cast<size_t>(std::max(256, rt_.cfg_.tool_result_preview_bytes))));
+            if (offload[wi]) {
                 auto id = store_.add_attachment(rec_.thread_id, id_, w.call_id, w.info.tool, content, provenance_json(prov));
+                const PreviewCut cut = preview_cut(content, id ? preview_budget : inline_cap);
+                const size_t omitted = cut.tail_begin - cut.head_end;
+                std::string marker;
                 if (id) {
-                    attachment = {{"id", *id}, {"size", content.size()}, {"preview_bytes", preview.size()}};
-                    content = std::string(preview);
+                    marker = "[... " + std::to_string(omitted) + " bytes left out, from offset " + std::to_string(cut.head_end) +
+                             ". Read them with read_attachment (attachment_id \"" + *id + "\"). ...]";
+                    attachment = {{"id", *id},
+                                  {"size", content.size()},
+                                  {"preview_bytes", cut.head_end},
+                                  {"tail_from", cut.tail_begin},
+                                  {"tail_bytes", content.size() - cut.tail_begin},
+                                  {"cap_bytes", inline_cap}};
                 } else {
-                    content = std::string(utf8_prefix(content, cap)) + "\n[The result was cut at " +
-                              std::to_string(cap / 1024) + " KB; the rest could not be stored.]";
+                    marker = "[... " + std::to_string(omitted) + " bytes left out; the rest could not be stored. ...]";
                 }
+                std::string shown = content.substr(0, cut.head_end);
+                if (omitted > 0) {
+                    if (!shown.empty() && shown.back() != '\n') shown += '\n';
+                    shown += marker + "\n";
+                }
+                shown.append(content, cut.tail_begin, std::string::npos);
+                content = std::move(shown);
             }
             // Image Tool Results: the images go to the next model request only; the stored result notes them.
             if (!w.out.images.empty()) {
@@ -1840,14 +1949,18 @@ private:
             return;
         }
         bool tainted = false;
-        std::string answer;
+        std::string answer, limit;
         for (const auto& e : store_.events(child_id)) {
             if (e.kind == "tool_result")
                 if (const json* p = jobj(e.payload, "provenance"); p && !provenance_from(*p).trusted) tainted = true;
             if (e.kind == "message" && jstr(e.payload, "role") == "assistant") answer = jstr(e.payload, "content");
+            if (e.kind == "run_limit") limit = jstr(e.payload, "limit");
         }
         const std::string who = w.def && w.def->id == kUseSkill ? "The Skill" : "The subagent";
-        if (r->state == RunState::succeeded)
+        if (r->state == RunState::succeeded && !limit.empty())
+            // Child Run At A Limit (summarize-at-run-limit design D4): the parent knows the answer is partial.
+            w.out = ToolOutput::success(who + " stopped at its " + limit_words(limit) + "; this is its account of the work so far:\n" + answer);
+        else if (r->state == RunState::succeeded)
             w.out = ToolOutput::success(trim(answer).empty() ? "(" + who + " gave no answer.)" : answer);
         else
             w.out = ToolOutput::failure(who + " " + to_string(r->state) + ": " + r->reason);
@@ -1870,6 +1983,10 @@ private:
     std::vector<PendingImage> pending_images_;  // held in memory until the next model request (never stored)
     std::string continuation_note_;  // Output Limit Continuation: the next request only
     int length_stops_ = 0;           // consecutive replies cut at the output limit
+    // Final Answer At A Limit: a limit found while processing a batch (tool calls), and the limit whose final answer
+    // the next model turn writes (empty: an ordinary turn).
+    std::optional<std::string> pending_limit_;
+    std::string limit_mode_;
     std::mutex images_mx_;
     std::mutex tool_activity_mx_;  // tools running in parallel report to the Activity log one at a time
     std::mutex progress_mx_;

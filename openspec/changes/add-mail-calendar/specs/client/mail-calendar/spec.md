@@ -7,7 +7,7 @@ Defines how the client reads, searches, drafts and sends the user's email and ma
 ## ADDED Requirements
 
 ### Requirement: Graph As Sole Mail And Calendar Backend
-The client SHALL access the user's mailbox and calendar only through the Microsoft Graph v1.0 API, at policy.mail.graph_base_url (default `https://graph.microsoft.com/v1.0`). It MUST NOT use EWS, MAPI, Outlook COM or any other mailbox protocol. Release builds MUST accept only Microsoft Graph service hosts. Any other host, including a dev/graph-mock instance, is accepted only by development builds.
+On the Graph backend (Mail Backend Selection), the client SHALL access mailbox and calendar only through Microsoft Graph v1.0 at policy.mail.graph_base_url (default `https://graph.microsoft.com/v1.0`). It MUST NOT use EWS, direct MAPI or any protocol other than Graph and, on the Local Outlook backend, Outlook's object model. Release builds MUST accept only Microsoft Graph service hosts. Any other host, including a dev/graph-mock instance, is accepted only by development builds.
 
 #### Scenario: Default endpoint
 - **WHEN** policy.mail.graph_base_url is not set

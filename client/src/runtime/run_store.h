@@ -209,6 +209,14 @@ public:
     // Bytes [offset, offset + length) of the attachment.
     Result<std::string> read_attachment(const std::string& id, long long offset, long long length);
 
+    // ---- Seen file states (client/core-tools Seen File Content) ----
+    struct SeenFileRow {
+        long long size = 0, modified = 0;
+        std::string sha256;
+    };
+    [[nodiscard]] std::optional<SeenFileRow> seen_file(const std::string& thread_id, const std::string& path);
+    Status set_seen_file(const std::string& thread_id, const std::string& path, const SeenFileRow& row);
+
     [[nodiscard]] Database& db() { return db_; }
 
 private:

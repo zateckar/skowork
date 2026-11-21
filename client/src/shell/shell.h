@@ -944,8 +944,20 @@ public:
     void speech_changed(const json& event);
     // The window's dictation moved on: the microphone check of the speech block follows it.
     void speech_check_changed();
+    // add-local-outlook-and-teams: Teams chats (teams.changed) and the Daily report (daily_report.changed) changed.
+    void teams_changed();
+    void daily_report_changed();
 
 private:
+    // add-local-outlook-and-teams: the Calendar page, the Teams chats and Daily report sections, the Agenda draft form.
+    void load_calendar();
+    void build_calendar();
+    void build_teams(ui::Node& card);
+    void load_teams();
+    void build_daily_report(ui::Node& card);
+    void load_daily_report();
+    void open_draft(const std::string& item_id);
+    void build_draft(ui::Node& parent);
     void load();
     void build_status();
     void build_settings();
@@ -1053,6 +1065,17 @@ private:
     std::string meetings_echo_open_;      // the meeting whose echo segments are listed
     std::u16string term_draft_;           // the vocabulary term being typed
     std::u16string knowledge_merge_name_;
+    json calendar_ = nullptr;             // calendar.view of the shown range
+    std::string calendar_mode_ = "week";  // day | week | list
+    long long calendar_offset_ = 0;       // days (day mode) or weeks (week mode) from today
+    std::string calendar_open_;           // the event whose details are shown
+    json teams_ = nullptr;                // teams.status
+    json teams_conversations_ = nullptr;  // teams.conversations, for exclusions
+    json report_ = nullptr;               // daily_report.status
+    std::u16string report_time_;          // the report time being typed
+    std::string draft_item_;              // the Agenda item whose draft form is open
+    json draft_ = nullptr;                // agenda.draft: to, cc, subject, body, reply_to, outlook, can_send
+    std::u16string draft_to_, draft_cc_, draft_subject_, draft_body_;
     std::shared_ptr<int> alive_ = std::make_shared<int>(0);
 };
 

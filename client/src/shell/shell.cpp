@@ -367,7 +367,8 @@ void Shell::load_status() {
     call("app.status", json::object(), [this](Result<json> r) {
         if (r && is_app_status(*r)) {
             // The navigation lists the Agenda view only while it is enabled.
-            const bool nav = status_.value("agenda", json()) != r->value("agenda", json());
+            const bool nav = status_.value("agenda", json()) != r->value("agenda", json()) ||
+                              status_.value("calendar", json()) != r->value("calendar", json());
             status_ = *r;
             refresh_status();
             if (nav) refresh_nav();
@@ -791,7 +792,8 @@ void Shell::emit(const std::string& event, const json& data) {
     if (event == "status") {
         if (is_app_status(data)) {
             const bool nav = status_.value("messaging", json()) != data.value("messaging", json()) ||
-                             status_.value("agenda", json()) != data.value("agenda", json());
+                             status_.value("agenda", json()) != data.value("agenda", json()) ||
+                             status_.value("calendar", json()) != data.value("calendar", json());
             const bool chats_on = jbool(status_.value("messaging", json::object()), "enabled");
             status_ = data;
             refresh_status();
@@ -817,6 +819,10 @@ void Shell::emit(const std::string& event, const json& data) {
         if (thread_) thread_->meetings_changed();
     } else if (event == "agenda.changed") {
         if (is_page(route_.name)) page_->agenda_changed();
+    } else if (event == "teams.changed") {
+        if (is_page(route_.name)) page_->teams_changed();
+    } else if (event == "daily_report.changed") {
+        if (is_page(route_.name)) page_->daily_report_changed();
     } else if (event == "triage.changed") {
         if (is_page(route_.name)) page_->triage_changed();
         if (thread_) thread_->triage_changed();

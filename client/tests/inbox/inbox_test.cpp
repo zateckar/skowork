@@ -611,8 +611,20 @@ TEST(InboxDelete, ForgetCascadeRemovesTheThreadItsAttachmentsAndIndexEntries) {
     in.svc->wait_idle();
     ASSERT_FALSE(in.svc->store().search("zebra").empty());
     ASSERT_TRUE(in.svc->store().save_draft_text(r->thread_id, "unsent"));
+    // client/core-tools Seen File Content: the record is kept with the Thread and survives reopening the store.
+    ASSERT_TRUE(in.env.rt->store().set_seen_file(r->thread_id, "c:\\out\\notes.txt", {12, 34, "ab"}));
+    {
+        runtime::RunStore reopened(*in.env.db, in.env.clock);
+        const auto row = reopened.seen_file(r->thread_id, "c:\\out\\notes.txt");
+        ASSERT_TRUE(row);
+        EXPECT_EQ(row->size, 12);
+        EXPECT_EQ(row->modified, 34);
+        EXPECT_EQ(row->sha256, "ab");
+        EXPECT_FALSE(reopened.seen_file("another-thread", "c:\\out\\notes.txt"));
+    }
 
     ASSERT_TRUE(forget.forget("thread", r->thread_id));
+    EXPECT_FALSE(in.env.rt->store().seen_file(r->thread_id, "c:\\out\\notes.txt"));
     EXPECT_FALSE(in.svc->store().entry(r->thread_id));
     EXPECT_TRUE(in.svc->store().search("zebra").empty());
     EXPECT_TRUE(in.env.rt->runs(r->thread_id).empty());

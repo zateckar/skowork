@@ -19,7 +19,7 @@ struct Identity {
 
 // One source item offered for detection. Metadata comes from the client, never from the item text.
 struct SourceItem {
-    std::string kind;          // mail | calendar | meeting | chat
+    std::string kind;          // mail | calendar | meeting | chat | teams
     std::string id;            // stable within its kind (Graph id, meeting id, chat message id)
     std::string conversation;  // mail conversation, meeting id, chat id: merges by source identity (design D3)
     std::string title;         // subject, event or meeting title, chat name
@@ -82,6 +82,11 @@ double title_similarity(const std::string& a, const std::string& b);
 // (design D3); the response is {"same": "<item id>"} or {"same": null}.
 std::string merge_instructions();
 Result<std::optional<std::string>> parse_merge(const std::string& text, const std::vector<std::string>& item_ids);
+
+// The text under the "Draft" heading of a preparation answer (Sending A Prepared Draft; add-local-outlook-and-teams
+// design D9): a Markdown heading, a bold line or a "Draft:" line, until the next heading of the same or a higher level.
+// Fences around the draft are removed. Empty when the answer has no draft.
+std::string extract_draft(const std::string& answer);
 
 // Strict JSON: at most 64 KiB, depth 32, no duplicate keys.
 std::optional<json> strict_json(const std::string& text);
