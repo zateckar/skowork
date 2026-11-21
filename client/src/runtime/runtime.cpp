@@ -511,6 +511,8 @@ private:
         if (!run_context_.empty()) system.content += "\n\n" + run_context_;
         system.content += "\n\n";
         system.content += kUntrustedDataInstructions;
+        system.content += "\n\n";
+        system.content += kToolCallSizeInstructions;
         // A child sees its own messages through its latest checkpoint (its own log); a Run sees the Thread's view.
         ThreadContext ctx = is_child_ ? store_.run_context(id_) : store_.context(rec_.thread_id, id_);
         if (!ctx.summary.empty()) {

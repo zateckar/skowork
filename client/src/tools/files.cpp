@@ -548,6 +548,45 @@ std::optional<std::string> overwrite_refusal(const FileToolsEnv& env, const Tool
     return std::nullopt;
 }
 
+// client/core-tools File Append (bound-tool-call-size design D2): the content goes to the end of the file, in the file's
+// own text encoding; a missing file is created. The whole file is written back atomically, under the caller's path lock.
+// Overwrite Protection does not apply: nothing already in the file is replaced.
+ToolOutput append_file(const FileToolsEnv& env, ToolContext& ctx, const std::string& path, const std::string& content,
+                       const policy::PathRules& rules) {
+    bool missing = false;
+    const auto canonical = policy::canonicalize(path);
+    if (canonical) (void)stat_path(*canonical, &missing);
+    if (!canonical || missing) {
+        auto written = policy::write_file_atomic(path, content, rules);
+        if (!written) return path_failure(written.error(), path);
+        if (env.seen) record_written(*env.seen, ctx.thread_id, *written, content);
+        return ToolOutput::success("Created " + *written + " with " + std::to_string(content.size()) + " bytes.");
+    }
+    std::string data;
+    {
+        auto h = policy::open_for_read(path, rules);
+        if (!h) return path_failure(h.error(), path);
+        if (is_directory(h->get())) return ToolOutput::failure(path + " is a folder.");
+        long long total = 0;
+        auto d = read_all(h->get(), kMaxFileBytes, &total);
+        if (!d) return ToolOutput::failure(d.error().message);
+        if (total > kMaxFileBytes) return ToolOutput::failure("The file is too large to append to; write the rest to a new file.");
+        data = std::move(*d);
+    }
+    auto decoded = decode_text(data);
+    if (!decoded) return ToolOutput::failure("binary file not supported: " + path + " is not a text file.");
+    // Seen as a whole after the append only when it was seen as a whole before (as for files.edit).
+    std::optional<FileState> before;
+    if (env.seen) before = env.seen->get(ctx.thread_id, seen_key(path));
+    const bool was_seen = before && before->size == static_cast<long long>(data.size()) && before->sha256 == sha256_hex(data);
+    const std::string bytes = encode_text(decoded->text + content, decoded->encoding);
+    auto written = policy::write_file_atomic(path, bytes, rules);
+    if (!written) return path_failure(written.error(), path);
+    if (was_seen) record_written(*env.seen, ctx.thread_id, *written, bytes);
+    return ToolOutput::success("Appended " + std::to_string(content.size()) + " bytes to " + *written + " (now " + std::to_string(bytes.size()) +
+                               " bytes).");
+}
+
 ToolOutput write_file(const FileToolsEnv& env, ToolContext& ctx, const json& args) {
     if (jstr(args, "path").empty()) return ToolOutput::failure("path is required.");
     if (!args.contains("content") || !args["content"].is_string()) return ToolOutput::failure("content is required.");
@@ -555,6 +594,7 @@ ToolOutput write_file(const FileToolsEnv& env, ToolContext& ctx, const json& arg
     const std::string& content = args["content"].get_ref<const std::string&>();
     const auto rules = env.rules();
     const PathLock locked = lock_path(path);
+    if (jbool(args, "append")) return append_file(env, ctx, path, content, rules);
     if (auto refused = overwrite_refusal(env, ctx, path, rules)) return ToolOutput::failure(*refused);
     auto written = policy::write_file_atomic(path, content, rules);
     if (!written) return path_failure(written.error(), path);
@@ -724,8 +764,12 @@ std::vector<ToolDef> file_tools(FileToolsEnv env) {
     write.id = "files.write";
     write.description = "Create a file or replace its whole content with `content` (UTF-8). The folder must exist. The write is atomic. "
                         "An existing file can be replaced only after you read it in full with files.read in this Thread, or wrote "
-                        "it yourself, and only if it has not changed since.";
-    write.parameters = schema({{"path", path_prop}, {"content", {{"type", "string"}}}}, {"path", "content"});
+                        "it yourself, and only if it has not changed since. With append set to true, `content` is added to the end "
+                        "of the file instead (a missing file is created): write a large file in parts this way.";
+    write.parameters = schema({{"path", path_prop},
+                               {"content", {{"type", "string"}}},
+                               {"append", {{"type", "boolean"}, {"description", "Add content to the end of the file instead of replacing it."}}}},
+                              {"path", "content"});
     write.risk = Risk::write_local;
     write.core = true;
     write.resources_of = [ws](const json& a) { return std::vector<ToolResource>{{ToolResource::Kind::write_path, arg_path(a, "path", ws)}}; };

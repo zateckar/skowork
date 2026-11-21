@@ -4227,6 +4227,38 @@ TEST(RuntimeCompaction, ChildRunOverBudgetCompactsItsOwnHistoryAndLeavesTheParen
     EXPECT_LT(last_child->messages.size(), 2u + 2u * 8u);
 }
 
+// client/agent-runtime Tool Call Size Instructions (bound-tool-call-size 1.1): every Run and subagent Run, the same text.
+TEST(RuntimeSubagents, TopLevelAndSubagentPromptsBoundToolCallSize) {
+    Env env;
+    std::mutex mx;
+    std::string child_system;
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (!is_subagent(req)) return std::nullopt;
+        {
+            const std::lock_guard l(mx);
+            child_system = req.messages.empty() ? std::string{} : req.messages[0].content;
+        }
+        return model::ModelResult<model::ChatResponse>(text_response("child answer"));
+    });
+    env.start();
+    env.model.push_calls({{"c1", "delegate", {{"task", "write the page"}}}});
+    env.model.push_text("done");
+    const auto thread = env.thread();
+    const auto id = env.run(thread, "build the app");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded));
+    env.model.push_text("again");
+    const auto second = env.run(thread, "and once more");
+    ASSERT_TRUE(env.wait(second, RunState::succeeded));
+    const auto reqs = env.model.requests();
+    ASSERT_GE(reqs.size(), 3u);
+    const std::string sentence = kToolCallSizeInstructions;
+    EXPECT_NE(sentence.find("append set to true"), std::string::npos);
+    EXPECT_NE(reqs[0].messages[0].content.find(sentence), std::string::npos);
+    EXPECT_NE(reqs.back().messages[0].content.find(sentence), std::string::npos);  // a later Run, the same bytes
+    const std::lock_guard l(mx);
+    EXPECT_NE(child_system.find(sentence), std::string::npos) << child_system;
+}
+
 TEST(RuntimeSubagents, ParallelDelegationRunsChildRunsConcurrentlyAndReturnsTheirAnswers) {
     Env env;
     std::atomic<int> inflight{0}, peak{0};

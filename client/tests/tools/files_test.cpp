@@ -365,6 +365,42 @@ TEST(FileTools, ReplaceAllKeepsUtf16Encoding) {
     EXPECT_EQ(get(f.out / L"u16.txt"), std::string("\xFF\xFE" "c\0b\0c\0", 8));
 }
 
+// ---- client/core-tools File Append (bound-tool-call-size) ----
+
+TEST(FileTools, AppendWritesAFileInParts) {
+    FileFixture f;
+    ASSERT_TRUE(f.call_in("t1", "files.write", {{"path", s(f.out / L"big.html")}, {"content", "A"}}).ok);
+    auto w = f.call_in("t1", "files.write", {{"path", s(f.out / L"big.html")}, {"content", "B"}, {"append", true}});
+    ASSERT_TRUE(w.ok) << w.content;
+    EXPECT_EQ(get(f.out / L"big.html"), "AB");
+    // The file stays the agent's own: a later replace needs no read first.
+    w = f.call_in("t1", "files.write", {{"path", s(f.out / L"big.html")}, {"content", "C"}});
+    ASSERT_TRUE(w.ok) << w.content;
+    EXPECT_EQ(get(f.out / L"big.html"), "C");
+}
+
+TEST(FileTools, AppendCreatesAMissingFile) {
+    FileFixture f;
+    auto w = f.call("files.write", {{"path", s(f.out / L"new.txt")}, {"content", "first part"}, {"append", true}});
+    ASSERT_TRUE(w.ok) << w.content;
+    EXPECT_EQ(get(f.out / L"new.txt"), "first part");
+}
+
+TEST(FileTools, AppendKeepsEncodingNeedsNoReadAndRespectsPolicy) {
+    FileFixture f;
+    // An unread file of the user's is appended to (nothing in it is replaced), in its own encoding.
+    put(f.out / L"u16.txt", std::string("\xFF\xFE" "a\0", 4));
+    auto w = f.call_in("t1", "files.write", {{"path", s(f.out / L"u16.txt")}, {"content", "b"}, {"append", true}});
+    ASSERT_TRUE(w.ok) << w.content;
+    EXPECT_EQ(get(f.out / L"u16.txt"), std::string("\xFF\xFE" "a\0b\0", 6));
+    // Without append the same call still replaces only after a read.
+    EXPECT_FALSE(f.call_in("t1", "files.write", {{"path", s(f.out / L"u16.txt")}, {"content", "x"}}).ok);
+    // Outside the writable folders nothing is appended.
+    w = f.call("files.write", {{"path", s(f.outside / L"private.txt")}, {"content", "more"}, {"append", true}});
+    EXPECT_FALSE(w.ok);
+    EXPECT_EQ(get(f.outside / L"private.txt"), "private data\n");
+}
+
 // ---- client/core-tools Overwrite Protection and Seen File Content (protect-unread-overwrites) ----
 
 TEST(FileTools, OverwriteWithoutAReadFailsAndKeepsTheFile) {

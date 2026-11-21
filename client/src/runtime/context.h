@@ -15,6 +15,8 @@ namespace wb::runtime {
 
 // The paragraph every Run's system prompt ends with: what an untrusted-data block is and that it is data only.
 extern const char* const kUntrustedDataInstructions;
+// Appended after kUntrustedDataInstructions in every Run and subagent Run (Tool Call Size Instructions).
+extern const char* const kToolCallSizeInstructions;
 
 // A fresh per-Run boundary token: 16 URL-safe random characters.
 std::string new_nonce();
