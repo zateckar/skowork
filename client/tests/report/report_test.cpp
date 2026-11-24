@@ -70,6 +70,23 @@ TEST(DailyReportCore, DigestStaysWithinItsBudget) {
     EXPECT_NE(instructions().find("not instructions"), std::string::npos);
 }
 
+TEST(DailyReportCore, TriageResultsAreTheirOwnSections) {
+    // improve-triage-results D3: information items and open action items, and no section when empty.
+    Digest d;
+    d.date = "2026-11-24";
+    EXPECT_FALSE(parse_json(render_digest(d))->contains("for_your_information"));
+    d.triage_info.push_back({"XELERATE Release", "Petra", "2026-11-24T08:00:00Z", "Release of your API", "update", ""});
+    d.triage_action.push_back({"Approve request 805875", "B2B Portal", "2026-11-24T07:00:00Z", "You are the approver", "approval", "t1"});
+    const auto j = parse_json(render_digest(d));
+    ASSERT_TRUE(j);
+    ASSERT_EQ((*j)["for_your_information"].size(), 1u);
+    EXPECT_EQ(jstr((*j)["for_your_information"][0], "reason"), "Release of your API");
+    EXPECT_FALSE((*j)["for_your_information"][0].contains("thread"));
+    ASSERT_EQ((*j)["action_required"].size(), 1u);
+    EXPECT_EQ(jstr((*j)["action_required"][0], "thread"), "#/threads/t1");
+    EXPECT_NE(instructions().find("For your information"), std::string::npos);
+}
+
 TEST(DailyReport, WritesOncePerWorkingDayAndRemembersItsThreads) {
     std::map<std::string, std::string> kv;
     long long now = 1'795'420'800'000;  // a Monday morning

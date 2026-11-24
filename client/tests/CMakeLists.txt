@@ -168,6 +168,27 @@ if(WIN32)
   skowork_warnings(machine_config_tests)
   add_test(NAME machine_config_tests COMMAND machine_config_tests)
 
+  add_executable(control_channel_tests channel/control_channel_test.cpp)
+  target_link_libraries(control_channel_tests PRIVATE wb_channel GTest::gtest_main)
+  target_link_options(control_channel_tests PRIVATE -Wl,--subsystem,console)
+  set_target_properties(control_channel_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  skowork_warnings(control_channel_tests)
+  add_test(NAME control_channel_tests COMMAND control_channel_tests)
+
+  # Read-only probe of the real Outlook and Teams on a laptop (add-local-outlook-and-teams 1.1, 1.3). Run by hand; not a test.
+  add_executable(local_apps_probe manual/local_apps_probe.cpp)
+  target_link_libraries(local_apps_probe PRIVATE wb_mail wb_teams_core psapi)
+  target_include_directories(local_apps_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+  target_link_options(local_apps_probe PRIVATE -Wl,--subsystem,console)
+  set_target_properties(local_apps_probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+  # The remote-track capture of a live Teams call (fix-teams-remote-audio acceptance). Run by hand; not a test.
+  add_executable(capture_probe manual/capture_probe.cpp)
+  target_link_libraries(capture_probe PRIVATE wb_meeting wb_platform wb_base)
+  target_include_directories(capture_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+  target_link_options(capture_probe PRIVATE -Wl,--subsystem,console)
+  set_target_properties(capture_probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
   # client/speech-models (tasks 5.2 and 5.3): archive and manifest safety, digest, activation, selection and removal.
   add_executable(speech_tests meeting/speech_package_test.cpp)
   target_link_libraries(speech_tests PRIVATE wb_meeting wb_platform wb_base miniz GTest::gtest_main)

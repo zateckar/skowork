@@ -256,6 +256,7 @@ struct App {
     // The Agenda (client/agenda; add-agenda): its own intake from mail, calendar, meetings and Chats, the detection
     // queue, reminders and read-only preparation.
     std::unique_ptr<triage::TriageService> triage_svc;  // event triage (improve-proactive-durable-work D1)
+    std::atomic<triage::TriageService*> triage_live{nullptr};  // for Teams events from the pool (add-teams-triage)
     void start_triage();
     std::unique_ptr<agenda::Service> agenda_svc;
     std::atomic<agenda::Service*> agenda_live{nullptr};  // read by mail, meeting, channel and Run threads
@@ -276,6 +277,8 @@ struct App {
     void register_local_sources_rpc();
     void teams_event(const teams::TeamsEvent& e);
     report::Digest collect_digest(long long since, long long now);
+    std::mutex report_info_mx;
+    std::vector<triage::TriageService::DigestItem> report_info;  // collected for the report being written
     // Local apps (client/local-apps): the manager is created before the policy handler (its app folders), the listener
     // and the apps.* tools with the agent. The MCP bridge calls the catalog's tool definitions kept here.
     std::unique_ptr<apps::AppManager> local_apps;
@@ -1698,6 +1701,9 @@ void App::teams_event(const teams::TeamsEvent& e) {
     auto* t = teams_live.load();
     if (!t) return;
     if (auto* k = knowledge_live.load()) k->teams_item(teams::TeamsService::day_id(e.conversation_id, e.at_ms), false);
+    // Event triage (add-teams-triage): messages addressed to the user can become suggestion Threads in the Inbox.
+    if (auto* tr = triage_live.load())
+        if (Status s = tr->take_in_teams(e.kind, e.conversation_id, e.message_id); !s) log::warn("triage", "teams intake: " + s.error().message);
     auto* a = agenda_live.load();
     if (!a) return;
     const std::string source_id = e.conversation_id + "|" + e.message_id;
@@ -1805,9 +1811,12 @@ report::Digest App::collect_digest(long long since, long long now) {
         }
     }
     if (triage_svc) {
-        const json s = triage_svc->status();
-        for (const auto& x : s.value("open_suggestions", json::array()))
-            if (x.is_string()) d.suggestions.push_back(x.get<std::string>());
+        // improve-triage-results D3: information items since the last report and the open action items.
+        auto t = triage_svc->digest();
+        for (const auto& x : t.info) d.triage_info.push_back({x.title, x.from, x.at, x.reason, x.category, ""});
+        for (const auto& x : t.action) d.triage_action.push_back({x.title, x.from, x.at, x.reason, x.category, x.thread_id});
+        const std::lock_guard lock(report_info_mx);
+        report_info = std::move(t.info);
     }
     return d;
 }
@@ -1860,6 +1869,12 @@ void App::start_report() {
         o.preamble = preamble;
         auto run = agent->runtime().start_run(*t, message + "\n\n" + digest, o);
         if (!run) return run.error();
+        if (triage_svc) {
+            // The information items in this report are not listed again (improve-triage-results D3).
+            const std::lock_guard lock(report_info_mx);
+            triage_svc->reported(report_info);
+            report_info.clear();
+        }
         return *t;
     };
     re.notify = [this](const std::string& title, const std::string& route) {
@@ -2235,6 +2250,22 @@ void App::start_triage() {
     te.db = &store->db();
     te.clock = &system_clock();
     te.mail = &mail_svc->store();
+    te.teams = [this](const std::string& conversation_id, const std::string& message_id) -> std::optional<triage::TriageChat> {
+        auto* t = teams_live.load();
+        if (!t || !t->enabled()) return std::nullopt;
+        const auto m = t->message(conversation_id, message_id);
+        const auto c = t->conversation(conversation_id);
+        if (!m || !c) return std::nullopt;
+        triage::TriageChat out;
+        out.conversation = t->display_name(*c);
+        out.sender = m->sender_name.empty() ? m->sender_email : m->sender_name;
+        out.text = m->text;
+        out.at_ms = m->at_ms;
+        out.addressed = c->type == "chat" || m->mentions_me;
+        out.mine = m->mine;
+        out.system = m->system;
+        return out;
+    };
     te.model = model.get();
     te.background_paused = [this] { return gate.paused(); };
     te.create_thread = [this](const std::string& title, const json& ref) -> Result<std::string> {
@@ -2254,8 +2285,25 @@ void App::start_triage() {
     te.start_run = [this](const std::string& id, const std::string& text, const runtime::StartOptions& o) {
         return agent->runtime().start_run(id, text, o);
     };
+    te.cancel_runs = [this](const std::string& id) {
+        if (const auto run = agent->runtime().store().active_run(id))
+            (void)agent->runtime().cancel(run->id, "no action needed");
+    };
+    te.archive_thread = [this](const std::string& id) { return inbox->store().set_archived(id, true); };
     te.changed = [this] { MainThread::post([this] { if (ui && ui->is_open()) ui->emit("triage.changed", json::object()); }); };
+    te.unattended_may_read = [this] {
+        // As for Agenda preparation: an Unattended run that may not even read would only fail.
+        const auto p = policy ? policy->current() : nullptr;
+        if (!p || !p->is_set("unattended.allowed_risk")) return true;
+        const json* v = p->find("unattended.allowed_risk");
+        return v && v->is_array() && std::find(v->begin(), v->end(), json("read")) != v->end();
+    };
+    te.local_day = [](long long ms) {
+        const long long local = ms + static_cast<long long>(local_offset_at(ms)) * 60'000;
+        return iso8601_utc(sys_clock::time_point(std::chrono::milliseconds(local))).substr(0, 10);
+    };
     triage_svc = std::make_unique<triage::TriageService>(std::move(te));
+    triage_live = triage_svc.get();
     mail_svc->set_page_sink([this](const std::vector<mail::PageChange>& c) { return triage_svc->take_in(c); });
     mail_svc->on_cycle([this] { triage_svc->cycle_completed(); });
     register_triage_rpc(rpc, [this] { return triage_svc.get(); });
@@ -3454,6 +3502,7 @@ void App::shutdown() {
     // A report being written on the pool uses the inbox, which goes before the pool does.
     while (report_ticking.load()) std::this_thread::sleep_for(std::chrono::milliseconds(20));
     teams_live = nullptr;
+    triage_live = nullptr;
     if (teams_svc) teams_svc->stop();  // its sync thread uses the store, the mail account and the pool
     if (dictation_svc) (void)dictation_svc->cancel();  // the audio of a recording goes with it (Dictation Privacy)
     if (meeting_svc) meeting_svc->stop();

@@ -50,13 +50,17 @@ struct DigestAgenda {
     std::string id, title, due;
     bool overdue = false, is_new = false, prepared = false;
 };
+// A triage result (improve-triage-results D3): an information item since the last report, or an open action item.
+struct DigestTriage {
+    std::string title, from, at, reason, category, thread_id;
+};
 struct Digest {
     std::string date, since;  // the report's local date, and the previous report's time (ISO) or empty
     std::vector<DigestEvent> events;
     std::vector<DigestMail> mail;
     std::vector<DigestChat> chats;
     std::vector<DigestAgenda> agenda;
-    std::vector<std::string> suggestions;  // open triage suggestion titles
+    std::vector<DigestTriage> triage_info, triage_action;
 };
 
 // The digest as JSON text, at most kMaxDigestChars: lists keep their first kMaxItemsPerList entries (callers pass newest

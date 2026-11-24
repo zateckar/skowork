@@ -138,10 +138,12 @@ public:
                 x += 14;
             }
             if (entry_.unread_count > 0) pill(ui::to_utf16(std::to_string(entry_.unread_count)), Paint::accent, Paint::accent_text);
+        } else if (const auto tb = triage_badges(entry_)) {
+            if (!tb->category.empty()) pill(shell_.t(tb->category), Paint::accent_surface, ink);
         } else if (entry_.origin_kind != "user") {
             pill(shell_.t(origin_badge_key(entry_)), Paint::accent_surface, ink);
         }
-        if (entry_.has_action) pill(shell_.t("list.needs_action"), Paint::warning_background, Paint::text);
+        if (needs_action(entry_)) pill(shell_.t("list.needs_action"), Paint::warning_background, Paint::text);
         if (entry_.running) pill(running_label(shell_, entry_), Paint::info_background, Paint::text);
         else if (entry_.last_run_state == "failed") pill(shell_.t("list.failed"), Paint::error_background, Paint::text);
         if (!entry_.preview.empty() && right > x + 8)
@@ -244,9 +246,13 @@ void ThreadListPane::build_row(size_t i, ui::ListRow& row) {
             if (e.chat_kind == "direct") n += u", " + shell_.t("chats.presence." + (e.presence.empty() ? std::string("offline") : e.presence));
             if (e.unread_count > 0) n += u", " + shell_.count("chats.unread", e.unread_count);
         } else {
-            if (e.origin_kind != "user") n += u", " + shell_.t(origin_badge_key(e));
+            if (const auto tb = triage_badges(e)) {
+                if (!tb->category.empty()) n += u", " + shell_.t(tb->category);
+            } else if (e.origin_kind != "user") {
+                n += u", " + shell_.t(origin_badge_key(e));
+            }
             if (e.unread) n += u", " + shell_.t("list.unread");
-            if (e.has_action) n += u", " + shell_.t("list.needs_action");
+            if (needs_action(e)) n += u", " + shell_.t("list.needs_action");
             if (e.running) n += u", " + running_label(shell_, e);
             else if (e.last_run_state == "failed") n += u", " + shell_.t("list.failed");
         }

@@ -124,7 +124,19 @@ json build(const Digest& d, size_t preview, size_t keep) {
     }
     json out = {{"date", d.date}, {"events_today", events}, {"mail", mail}, {"teams", chats}, {"agenda", agenda}};
     if (!d.since.empty()) out["since"] = d.since;
-    if (!d.suggestions.empty()) out["triage_suggestions"] = d.suggestions;
+    const auto triage = [&](const std::vector<DigestTriage>& v) {
+        json a = json::array();
+        for (size_t i = 0; i < v.size() && i < keep; ++i) {
+            const auto& t = v[i];
+            json j = {{"title", t.title}, {"from", t.from}, {"at", t.at}, {"reason", cut(t.reason, preview)}};
+            if (!t.category.empty()) j["category"] = t.category;
+            if (!t.thread_id.empty()) j["thread"] = "#/threads/" + t.thread_id;
+            a.push_back(std::move(j));
+        }
+        return a;
+    };
+    if (!d.triage_info.empty()) out["for_your_information"] = triage(d.triage_info);
+    if (!d.triage_action.empty()) out["action_required"] = triage(d.triage_action);
     return out;
 }
 
@@ -155,6 +167,10 @@ std::string instructions() {
            "first. Leave out newsletters, automated notifications and chatter. One line each, and cite every source.\n"
            "3. To act on: the Agenda items from the data (overdue first, then by due date). Do not invent new tasks; if a "
            "message seems to need action but has no Agenda item, mention it under Worth knowing.\n"
+           "4. For your information: when the data has for_your_information, one line per entry with its reason. Leave the "
+           "section out when there is none.\n"
+           "5. Action required: when the data has action_required, one line per entry with a link to its thread. Leave the "
+           "section out when there is none.\n"
            "You may use read-only tools (knowledge.search, mail.read, teams.read, calendar.get) to check context. You cannot "
            "and must not send, reply, draft, change or mark anything.";
 }

@@ -1,0 +1,5 @@
+## 1. Output-device fallback for the remote track (client/meeting-capture)
+
+- [x] 1.1 Write unit tests in `client/tests/meeting/meeting_test.cpp` for `LoopbackFallback`: it switches after 3 s of device sound while process loopback is digitally silent, never switches once process loopback delivered sound, and ignores a device at its noise floor. Verify: `win_tests --gtest_filter=MeetingCore.LoopbackFallback*` passes.
+- [x] 1.2 Implement the shadow device measurement, the switch, and following the app's output device in `client/src/meeting/capture.cpp` (`AudioCapture::run`, `app_render_device`, `open_device_loopback`). Verify: the client builds and the existing meeting tests pass.
+- [x] 1.3 Acceptance during a live Teams call with remote speech: `capture_probe.exe <file> 20` (from `client/tests/manual/capture_probe.cpp`) records a remote track. Verify: the track's level is speech (above -50 dBFS) after the first seconds, and the log says the remote track records the output device. Result 2026-11-24 (Teams test call, Jabra Link 370): seconds 0-7 digital silence (process loopback, then the 3 s decision), from second 8 the remote voice at -19 to -25 dBFS.

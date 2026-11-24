@@ -1291,3 +1291,56 @@ TEST(ShellFeed, AnUnknownOutcomeIsNeitherSentNorFailed) {
     };
     EXPECT_EQ(summary(build_feed(snap)), (V{"user:Send it", "tool:mail.send:unknown", "tool:mail.send:err"}));
 }
+
+TEST(ShellModel, TriageThreadsShowStatusAndCategoryInsteadOfTheOriginBadge) {
+    // client/work-inbox Triage Thread Badges (improve-triage-results D4, D8): the category, and one status badge.
+    ThreadEntry e;
+    e.origin_kind = "system";
+    e.origin_ref = {{"kind", "triage"}, {"scope", "mail"}, {"item_id", "m1"}, {"action", "required"}, {"category", "approval"}};
+    auto b = triage_badges(e);
+    ASSERT_TRUE(b);
+    EXPECT_EQ(b->category, "list.triage.category.approval");
+    EXPECT_TRUE(needs_action(e));  // no Run yet: waits for Start work
+    e.running = true;  // being prepared
+    EXPECT_FALSE(needs_action(e));
+    e.running = false;
+    e.last_run_state = "interrupted";
+    e.has_action = true;  // waits on its Question card
+    EXPECT_TRUE(needs_action(e));
+    e.has_action = false;
+    e.last_run_state = "succeeded";  // the reply was sent
+    EXPECT_FALSE(needs_action(e));
+    e.origin_ref.erase("category");  // a Thread from before the change: status only
+    b = triage_badges(e);
+    ASSERT_TRUE(b);
+    EXPECT_TRUE(b->category.empty());
+    e.origin_ref = {{"skill_test", "x"}};
+    EXPECT_FALSE(triage_badges(e));
+    e.origin_kind = "user";
+    EXPECT_FALSE(triage_badges(e));
+}
+
+TEST(ShellFeed, ARunFromASourceShowsOnlyTheSourceCollapsed) {
+    // client/work-inbox Collapsed Source Message (improve-triage-results D9).
+    Recorder ev{"run_3"};
+    FeedSnapshot snap = snapshot({run("run_3", "running")});
+    LiveText live;
+    const std::string content = "Prepare this item for the user.\n\n<<<untrusted-data id=n1 source=mail:m1>>>\nMail message\nSubject: Budget\n\n"
+                                "Please approve.\n<<<end-untrusted-data id=n1>>>";
+    replay(snap, live,
+           {ev("message", {{"role", "user"}, {"content", content},
+                           {"provenance", {{"source_kind", "mail"}, {"source_id", "m1"}, {"trusted", false}}}}),
+            ev("message", {{"role", "assistant"}, {"content", "Summary"}})});
+    const auto items = build_feed(snap);
+    ASSERT_GE(items.size(), 2u);
+    EXPECT_EQ(items[0].source_kind, "mail");
+    EXPECT_EQ(items[0].text, "Mail message\nSubject: Budget\n\nPlease approve.");  // without the client's instructions
+    // A trusted start (a Trigger) and the user's own message stay as they are.
+    Recorder ev2{"run_4"};
+    FeedSnapshot plain = snapshot({run("run_4", "running")});
+    replay(plain, live, {ev2("message", {{"role", "user"}, {"content", "Send it"}, {"provenance", {{"source_kind", "trigger"}, {"trusted", true}}}})});
+    const auto p = build_feed(plain);
+    ASSERT_FALSE(p.empty());
+    EXPECT_TRUE(p[0].source_kind.empty());
+    EXPECT_EQ(p[0].text, "Send it");
+}

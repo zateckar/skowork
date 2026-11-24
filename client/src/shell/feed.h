@@ -71,6 +71,9 @@ struct FeedItem {
     long long seq = 0;
     std::string at;
     std::string text;  // user, assistant, reasoning, activity
+    // user: the Run started from untrusted content of this kind (mail, calendar, teams, remote ...); text is then only
+    // that content, without the client's instructions, and the feed shows it collapsed (Collapsed Source Message).
+    std::string source_kind;
     std::optional<RunUsage> usage;  // activity: the Run's token totals, after it ended
     std::optional<RunSpeed> speed;  // speed
     bool streaming = false;

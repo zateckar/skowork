@@ -1,6 +1,7 @@
 #include "meeting/capture.h"
 
 #include "platform/com.h"
+#include "platform/log.h"
 #include "platform/win.h"
 
 #include <windows.h>
@@ -16,7 +17,9 @@
 #include <cstring>
 #include <cwchar>
 #include <future>
+#include <map>
 #include <mutex>
+#include <set>
 
 namespace wb::meeting {
 namespace {
@@ -145,6 +148,26 @@ Result<com_ptr<IAudioClient>> open_client(const CaptureSource& s, DWORD& flags) 
     return client;
 }
 
+// Endpoint loopback of one output device, by endpoint id (fix-teams-remote-audio).
+Result<com_ptr<IAudioClient>> open_device_loopback(const std::wstring& id, DWORD& flags) {
+    flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY |
+            AUDCLNT_STREAMFLAGS_LOOPBACK;
+    com_ptr<IMMDeviceEnumerator> en;
+    HRESULT hr = ::CoCreateInstance(kMMDeviceEnumerator, nullptr, CLSCTX_INPROC_SERVER, kIMMDeviceEnumerator, en.put_void());
+    if (FAILED(hr)) return make_error("audio", hr_text("no audio devices", hr));
+    com_ptr<IMMDevice> dev;
+    hr = en->GetDevice(id.c_str(), dev.put());
+    if (FAILED(hr)) return make_error("audio", hr_text("the output device is gone", hr));
+    com_ptr<IAudioClient> client;
+    hr = dev->Activate(kIAudioClient, CLSCTX_INPROC_SERVER, nullptr, client.put_void());
+    if (FAILED(hr)) return make_error("audio", hr_text("the audio device cannot be opened", hr));
+    return client;
+}
+
+// The endpoint id of an output device on which a process of the tree under `root` has an active session; empty when
+// none (defined with the detector probe below).
+std::wstring app_render_device(unsigned root);
+
 long long steady_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -217,10 +240,33 @@ void AudioCapture::run(CaptureSource source, std::shared_ptr<TrackWriter> writer
         cap.reset();
         client.reset();
     };
+    // Process loopback that stays deaf while the app's output device carries the call (fix-teams-remote-audio): a
+    // shadow loopback of that device is measured, never written, until LoopbackFallback decides. After a switch the
+    // track records the device the app plays to.
+    LoopbackFallback fallback;
+    bool on_device = false;          // switched: the stream is the loopback of the app's output device
+    std::wstring app_device;         // that device's endpoint id
+    com_ptr<IAudioClient> shadow;
+    com_ptr<IAudioCaptureClient> shadow_cap;
+    std::wstring shadow_device;
+    long long next_shadow_ms = 0;
+    bool decided = source.kind != CaptureSource::Kind::process;
+    const auto close_shadow = [&] {
+        if (shadow) shadow->Stop();
+        shadow_cap.reset();
+        shadow.reset();
+    };
     const auto open = [&]() -> Status {
         close();
         DWORD flags = 0;
-        auto c = open_client(source, flags);
+        Result<com_ptr<IAudioClient>> c = make_error("audio", "not opened");
+        if (on_device) {
+            // Follow the app if it moved to another device; else keep the last one it used.
+            if (std::wstring now = app_render_device(source.pid); !now.empty()) app_device = std::move(now);
+            c = open_device_loopback(app_device, flags);
+        } else {
+            c = open_client(source, flags);
+        }
         if (!c) return c.error();
         WAVEFORMATEX fmt{};
         fmt.wFormatTag = WAVE_FORMAT_PCM;
@@ -256,8 +302,10 @@ void AudioCapture::run(CaptureSource source, std::shared_ptr<TrackWriter> writer
             UINT32 frames = 0;
             DWORD bflags = 0;
             if (FAILED(hr = cap->GetBuffer(&data, &frames, &bflags, nullptr, nullptr))) break;
-            Status w = (bflags & AUDCLNT_BUFFERFLAGS_SILENT) ? writer->append_silence(frames)
-                                                             : writer->append(reinterpret_cast<const std::int16_t*>(data), frames);
+            const bool silent = (bflags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+            if (!decided && !silent) fallback.process_packet(pcm_peak(reinterpret_cast<const std::int16_t*>(data), frames));
+            Status w = silent ? writer->append_silence(frames)
+                              : writer->append(reinterpret_cast<const std::int16_t*>(data), frames);
             cap->ReleaseBuffer(frames);
             if (!w) {
                 const std::lock_guard lock(mx_);
@@ -267,9 +315,68 @@ void AudioCapture::run(CaptureSource source, std::shared_ptr<TrackWriter> writer
             }
         }
         if (FAILED(hr)) return make_error("audio", hr_text("the audio stream failed", hr));
+        if (decided) return {};
+        if (fallback.process_works()) {
+            decided = true;
+            close_shadow();
+            return {};
+        }
+        // Measure the app's output device beside the process stream.
+        if (!shadow && steady_ms() >= next_shadow_ms) {
+            next_shadow_ms = steady_ms() + 2000;
+            shadow_device = app_render_device(source.pid);
+            DWORD sflags = 0;
+            if (!shadow_device.empty())
+                if (auto sc = open_device_loopback(shadow_device, sflags)) {
+                    WAVEFORMATEX f{};
+                    f.wFormatTag = WAVE_FORMAT_PCM;
+                    f.nChannels = 1;
+                    f.nSamplesPerSec = kRate;
+                    f.wBitsPerSample = 16;
+                    f.nBlockAlign = 2;
+                    f.nAvgBytesPerSec = kRate * 2;
+                    com_ptr<IAudioCaptureClient> k;
+                    // Polled from the process stream's wake-ups, so without an event.
+                    sflags &= ~static_cast<DWORD>(AUDCLNT_STREAMFLAGS_EVENTCALLBACK);
+                    if (SUCCEEDED((*sc)->Initialize(AUDCLNT_SHAREMODE_SHARED, sflags, 2'000'000, 0, &f, nullptr)) &&
+                        SUCCEEDED((*sc)->GetService(kIAudioCaptureClient, k.put_void())) && SUCCEEDED((*sc)->Start())) {
+                        shadow = std::move(*sc);
+                        shadow_cap = std::move(k);
+                    }
+                }
+        }
+        if (shadow_cap) {
+            UINT32 sp = 0;
+            HRESULT shr = S_OK;
+            while (SUCCEEDED(shr = shadow_cap->GetNextPacketSize(&sp)) && sp > 0) {
+                BYTE* d = nullptr;
+                UINT32 fr = 0;
+                DWORD fl = 0;
+                if (FAILED(shr = shadow_cap->GetBuffer(&d, &fr, &fl, nullptr, nullptr))) break;
+                if (!(fl & AUDCLNT_BUFFERFLAGS_SILENT)) fallback.device_packet(pcm_peak(reinterpret_cast<const std::int16_t*>(d), fr), fr, kRate);
+                shadow_cap->ReleaseBuffer(fr);
+            }
+            if (FAILED(shr)) close_shadow();  // the device went away; looked up again in 2 s
+        }
+        if (fallback.should_switch()) {
+            decided = true;
+            on_device = true;
+            app_device = shadow_device;
+            close_shadow();
+            log::info("meeting", "process loopback hears nothing while the app's output device carries sound; "
+                                 "recording the remote track from that device");
+            return open();
+        }
         return {};
     };
     s.device_changed = [&] {
+        if (on_device) {
+            // After the switch: follow the app when it plays to another device (headset unplugged, speakers chosen).
+            if (steady_ms() - checked < 2000) return false;
+            checked = steady_ms();
+            const std::wstring now = app_render_device(source.pid);
+            return !now.empty() && now != app_device;
+        }
         if (source.kind == CaptureSource::Kind::process || steady_ms() - checked < 1000) return false;
         checked = steady_ms();
         const std::wstring now = default_id();
@@ -293,6 +400,7 @@ void AudioCapture::run(CaptureSource source, std::shared_ptr<TrackWriter> writer
         error_ = t ? "the audio device is not available" : "";
     };
     supervise(s);
+    close_shadow();
     close();
     (void)writer->close();
 }
@@ -342,6 +450,55 @@ std::vector<unsigned> active_session_pids() {
         }
     }
     return out;
+}
+
+std::wstring app_render_device(unsigned root) {
+    std::map<unsigned, unsigned> parent;
+    for (const auto& p : process_table()) parent[p.pid] = p.parent;
+    const auto in_tree = [&](unsigned pid) {
+        std::set<unsigned> seen;
+        for (unsigned cur = pid; cur && !seen.count(cur);) {
+            if (cur == root) return true;
+            seen.insert(cur);
+            const auto it = parent.find(cur);
+            if (it == parent.end()) return false;
+            cur = it->second;
+        }
+        return false;
+    };
+    com_ptr<IMMDeviceEnumerator> en;
+    if (FAILED(::CoCreateInstance(kMMDeviceEnumerator, nullptr, CLSCTX_INPROC_SERVER, kIMMDeviceEnumerator, en.put_void()))) return {};
+    com_ptr<IMMDeviceCollection> devices;
+    if (FAILED(en->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, devices.put()))) return {};
+    UINT count = 0;
+    devices->GetCount(&count);
+    for (UINT i = 0; i < count; ++i) {
+        com_ptr<IMMDevice> dev;
+        com_ptr<IAudioSessionManager2> mgr;
+        com_ptr<IAudioSessionEnumerator> sessions;
+        if (FAILED(devices->Item(i, dev.put())) ||
+            FAILED(dev->Activate(kIAudioSessionManager2, CLSCTX_INPROC_SERVER, nullptr, mgr.put_void())) ||
+            FAILED(mgr->GetSessionEnumerator(sessions.put())))
+            continue;
+        int n = 0;
+        sessions->GetCount(&n);
+        for (int k = 0; k < n; ++k) {
+            com_ptr<IAudioSessionControl> ctl;
+            com_ptr<IAudioSessionControl2> ctl2;
+            AudioSessionState state = AudioSessionStateInactive;
+            DWORD pid = 0;
+            if (FAILED(sessions->GetSession(k, ctl.put())) || FAILED(ctl.as(ctl2, kIAudioSessionControl2)) ||
+                FAILED(ctl2->GetState(&state)) || state != AudioSessionStateActive || FAILED(ctl2->GetProcessId(&pid)) || !pid ||
+                !in_tree(pid))
+                continue;
+            LPWSTR id = nullptr;
+            if (FAILED(dev->GetId(&id)) || !id) continue;
+            std::wstring out = id;
+            ::CoTaskMemFree(id);
+            return out;
+        }
+    }
+    return {};
 }
 
 // CapabilityAccessManager (design D3): an app is using the microphone while its LastUsedTimeStop is 0. Read only.

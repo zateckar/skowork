@@ -5,6 +5,8 @@
 
 #include "mail/mail_service.h"
 #include "mail/outlook_graph.h"
+#include "base/time.h"
+#include "base/url.h"
 
 #include <algorithm>
 #include <map>
@@ -63,6 +65,7 @@ public:
     Result<std::vector<OlFolder>> folders() override { return folders_; }
     Result<std::vector<OlRow>> rows(const std::string& folder_id, long long since) override {
         if (down) return make_error("offline", "Outlook is not running");
+        ++row_reads;
         std::vector<OlRow> out;
         for (const auto& [id, m] : messages_)
             if (m.folder_id == folder_id && m.received >= since) out.push_back({id, m.modified, m.received});
@@ -71,6 +74,7 @@ public:
     Result<OlMessage> message(const std::string& id) override {
         if (down) return make_error("offline", "Outlook is not running");
         ++opened;
+        if (unreadable_.count(id)) return make_error("bad_request", "Your Digital ID name cannot be found by the underlying security system.");
         const auto it = messages_.find(id);
         if (it == messages_.end()) return make_error("not_found", "no such item");
         return it->second;
@@ -138,10 +142,29 @@ public:
     }
     Result<std::vector<OlEvent>> events(long long from, long long to, size_t) override {
         if (down) return make_error("offline", "Outlook is not running");
+        ++event_reads;
         std::vector<OlEvent> out;
         for (const auto& [id, e] : events_)
             if (e.end > from && e.start < to) out.push_back(e);
         return out;
+    }
+    Result<std::string> folder_stamp(const std::string& folder_id) override {
+        if (down) return make_error("offline", "Outlook is not running");
+        if (!stamps) return std::string();
+        long long n = 0, newest = 0;
+        for (const auto& [id, m] : messages_)
+            if (m.folder_id == folder_id) {
+                ++n;
+                newest = std::max(newest, m.modified);
+            }
+        return std::to_string(n) + "/" + std::to_string(newest);
+    }
+    Result<std::string> calendar_stamp() override {
+        if (down) return make_error("offline", "Outlook is not running");
+        if (!stamps) return std::string();
+        long long newest = 0;
+        for (const auto& [id, e] : events_) newest = std::max(newest, e.modified);
+        return std::to_string(events_.size()) + "/" + std::to_string(newest);
     }
     Result<OlEvent> event(const std::string& id) override {
         const auto it = events_.find(id);
@@ -182,7 +205,9 @@ public:
     std::vector<std::string> writes;
     std::vector<OlMessage> sent;
     std::optional<MessageQuery> last_query;
-    int opened = 0, saved_events = 0, drafts_ = 0;
+    std::set<std::string> unreadable_;
+    int opened = 0, saved_events = 0, drafts_ = 0, event_reads = 0, row_reads = 0;
+    bool stamps = true;
     long long now_ms = 0;
     bool down = false;
 };
@@ -226,6 +251,8 @@ struct OutlookFixture {
                 Result<OlMessage> move(const std::string& a, const std::string& b) override { return f->move(a, b); }
                 Status remove(const std::string& a) override { return f->remove(a); }
                 Result<std::vector<OlEvent>> events(long long a, long long b, size_t c) override { return f->events(a, b, c); }
+                Result<std::string> calendar_stamp() override { return f->calendar_stamp(); }
+                Result<std::string> folder_stamp(const std::string& a) override { return f->folder_stamp(a); }
                 Result<OlEvent> event(const std::string& a) override { return f->event(a); }
                 Result<OlEvent> save_event(const std::string& a, const EventPatch& p) override { return f->save_event(a, p); }
                 Status respond(const std::string& a, const std::string& b, const std::string& c) override { return f->respond(a, b, c); }
@@ -360,6 +387,95 @@ TEST(OutlookGraph, DeltaPagesAndReportsRemovals) {
     for (const auto& x : (*changed)["value"]) (x.contains("@removed") ? removed : ids).insert(jstr(x, "id"));
     EXPECT_EQ(ids, std::set<std::string>{"M1"});
     EXPECT_EQ(removed, std::set<std::string>{"M2"});
+}
+
+TEST(OutlookGraph, AnUnreadableItemIsTriedAgainOnlyOnceItChanges) {
+    FakeOutlook f;
+    const long long now = unix_millis_now();
+    f.add("M1", now - kHour, "Readable");
+    f.add("M2", now - 2 * kHour, "Encrypted");
+    f.unreadable_.insert("M2");
+    OutlookGraph g(f, system_clock());
+    auto first = g.handle("GET", "/me/mailFolders/F-INBOX/messages/delta", std::nullopt);
+    ASSERT_TRUE(first);
+    EXPECT_EQ((*first)["value"].size(), 1u);
+    const int opened = f.opened;
+    auto again = g.handle("GET", jstr(*first, "@odata.deltaLink"), std::nullopt);
+    ASSERT_TRUE(again);
+    EXPECT_TRUE((*again)["value"].empty());
+    EXPECT_EQ(f.opened, opened);  // not opened again: Outlook is not asked to decrypt it every cycle
+    f.messages_["M2"].modified = now + 1000;  // Outlook stamps any change with the current time
+    f.unreadable_.clear();
+    auto changed = g.handle("GET", jstr(*again, "@odata.deltaLink"), std::nullopt);
+    ASSERT_TRUE(changed);
+    ASSERT_EQ((*changed)["value"].size(), 1u);
+    EXPECT_EQ(jstr((*changed)["value"][0], "id"), "M2");
+    f.messages_.erase("M2");
+    auto gone = g.handle("GET", jstr(*changed, "@odata.deltaLink"), std::nullopt);
+    ASSERT_TRUE(gone);
+    ASSERT_EQ((*gone)["value"].size(), 1u);
+    EXPECT_TRUE((*gone)["value"][0].contains("@removed"));
+}
+
+TEST(OutlookGraph, AnUnchangedFolderIsNotListedAgain) {
+    FakeOutlook f;
+    const long long now = unix_millis_now();
+    f.add("M1", now - kHour, "One");
+    f.add("M2", now - 2 * kHour, "Two");
+    OutlookGraph g(f, system_clock());
+    auto first = g.handle("GET", "/me/mailFolders/F-INBOX/messages/delta", std::nullopt);
+    ASSERT_TRUE(first);
+    EXPECT_EQ((*first)["value"].size(), 2u);
+    const int reads = f.row_reads;
+    auto same = g.handle("GET", jstr(*first, "@odata.deltaLink"), std::nullopt);
+    ASSERT_TRUE(same);
+    EXPECT_TRUE((*same)["value"].empty());
+    EXPECT_EQ(f.row_reads, reads);  // only the fingerprint was read
+    f.add("M3", now, "Three");
+    f.messages_.erase("M2");
+    auto changed = g.handle("GET", jstr(*same, "@odata.deltaLink"), std::nullopt);
+    ASSERT_TRUE(changed);
+    EXPECT_GT(f.row_reads, reads);
+    std::set<std::string> ids, removed;
+    for (const auto& x : (*changed)["value"]) (x.contains("@removed") ? removed : ids).insert(jstr(x, "id"));
+    EXPECT_EQ(ids, std::set<std::string>{"M3"});
+    EXPECT_EQ(removed, std::set<std::string>{"M2"});
+}
+
+TEST(OutlookGraph, AnUnchangedCalendarIsNotReadAgain) {
+    FakeOutlook f;
+    const long long now = unix_millis_now();
+    f.add_event("E1", now + kDay, now + kDay + kHour, "Steering committee");
+    f.add_event("E2", now + 2 * kDay, now + 2 * kDay + kHour, "Offsite");
+    OutlookGraph g(f, system_clock());
+    const auto iso = [](long long ms) { return iso8601_utc(sys_clock::time_point(std::chrono::milliseconds(ms))); };
+    const std::string view = "/me/calendarView/delta?startDateTime=" + url_encode(iso(now - 30 * kDay)) +
+                             "&endDateTime=" + url_encode(iso(now + 60 * kDay));
+    auto first = g.handle("GET", view, std::nullopt);
+    ASSERT_TRUE(first) << first.error().message;
+    EXPECT_EQ((*first)["value"].size(), 2u);
+    const int reads = f.event_reads;
+    auto same = g.handle("GET", jstr(*first, "@odata.deltaLink"), std::nullopt);
+    ASSERT_TRUE(same);
+    EXPECT_TRUE((*same)["value"].empty());
+    EXPECT_EQ(f.event_reads, reads);  // only the fingerprint was read
+    f.events_["E1"].modified = now + 5000;
+    f.events_["E1"].subject = "Steering committee (moved)";
+    f.events_.erase("E2");
+    auto changed = g.handle("GET", jstr(*same, "@odata.deltaLink"), std::nullopt);
+    ASSERT_TRUE(changed);
+    EXPECT_GT(f.event_reads, reads);
+    std::set<std::string> ids, removed;
+    for (const auto& x : (*changed)["value"]) (x.contains("@removed") ? removed : ids).insert(jstr(x, "id"));
+    EXPECT_EQ(ids, std::set<std::string>{"E1"});
+    EXPECT_EQ(removed, std::set<std::string>{"E2"});
+    // A session without a fingerprint reads the calendar every time, as before.
+    f.stamps = false;
+    const int before = f.event_reads;
+    auto plain = g.handle("GET", jstr(*changed, "@odata.deltaLink"), std::nullopt);
+    ASSERT_TRUE(plain);
+    EXPECT_TRUE((*plain)["value"].empty());
+    EXPECT_GT(f.event_reads, before);
 }
 
 // ---- the whole mail stack on the Local Outlook backend ----

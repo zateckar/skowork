@@ -27,6 +27,7 @@ constexpr char kLog[] = "outlook";
 constexpr auto kCallLimit = std::chrono::seconds(60);
 constexpr size_t kMaxBody = 1 << 20;
 constexpr int kMaxFolders = 300;
+constexpr long kRowBatch = 250;  // rows per Table.GetArray call: each call is short, so Outlook stays responsive
 
 // Outlook object model constants (OlDefaultFolders, OlItemType, OlMeetingResponse, OlObjectClass).
 enum : int {
@@ -256,13 +257,27 @@ double utc_ms_to_local(long long ms) {
     return l;
 }
 
-// A local date for Jet Restrict filters, in the user's locale (design D2: Outlook parses filter dates in that locale).
-std::string jet_date(double local) {
-    BSTR b = nullptr;
-    if (FAILED(VarBstrFromDate(local, LOCALE_USER_DEFAULT, 0, &b)) || !b) return {};
-    std::string s = narrow(b);
-    SysFreeString(b);
-    return s;
+// A local date for Jet Restrict filters, in the user's locale (design D2: Outlook parses filter dates in that locale),
+// to the minute: Outlook does not parse a time with seconds in every locale (in cs-CZ "10.11.2026 10:51:16" matches
+// nothing, "10.11.2026 10:51" works). `round_up` rounds to the next minute, for upper bounds.
+std::string jet_date(double local, bool round_up = false) {
+    SYSTEMTIME t{};
+    if (!VariantTimeToSystemTime(local, &t)) return {};
+    const bool partial = t.wSecond != 0 || t.wMilliseconds != 0;
+    t.wSecond = 0;
+    t.wMilliseconds = 0;
+    if (round_up && partial) {
+        double v = 0;
+        SystemTimeToVariantTime(&t, &v);
+        VariantTimeToSystemTime(v + 1.0 / 1440.0 + 1e-9, &t);
+        t.wSecond = 0;
+        t.wMilliseconds = 0;
+    }
+    wchar_t d[80], h[80];
+    if (!GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &t, nullptr, d, 80, nullptr) ||
+        !GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &t, nullptr, h, 80))
+        return {};
+    return narrow(std::wstring(d) + L" " + h);
 }
 
 std::string local_stamp(double local) {
@@ -416,6 +431,12 @@ struct ComOutlookSession::Impl {
     // sends, moves or deletes is never re-run: a dialog after Send would otherwise send twice.
     enum CallState : int { kQueued = 0, kRunning = 1, kAbandoned = 2 };
 
+    // What state() answers while the worker is busy: the worker is in a call, and whether the last call reached
+    // Outlook. Probing then would wait behind the running call (a full calendar read takes tens of seconds), and the
+    // Calendar page and Settings asked on the UI thread, which froze the window during a sync.
+    std::atomic<int> working{0};
+    std::atomic<bool> last_ok{false};
+
     template <typename T>
     Result<T> run(std::function<T()> fn, bool repeatable = true) {
         auto promise = std::make_shared<std::promise<Result<T>>>();
@@ -430,16 +451,23 @@ struct ComOutlookSession::Impl {
             queue.push_back([this, fn = std::move(fn), promise = std::move(promise), state, repeatable]() mutable {
                 int expected = kQueued;
                 if (!state->compare_exchange_strong(expected, kRunning)) return;
+                ++working;
+                struct Done {
+                    std::atomic<int>& w;
+                    ~Done() { --w; }
+                } done{working};
                 long long delay = 1000;
                 for (int attempt = 1;; ++attempt) {
                     try {
                         attach();
+                        last_ok = true;
                         promise->set_value(Result<T>(fn()));
                         return;
                     } catch (const ComError& e) {
                         if (gone(e.hr)) {
                             ns = Disp();
                             app = Disp();
+                            last_ok = false;
                         }
                         if (busy(e.hr) && repeatable && attempt < 5) {
                             log::info(kLog, "Outlook is busy; retrying in " + std::to_string(delay) + " ms");
@@ -509,9 +537,47 @@ struct ComOutlookSession::Impl {
         }
     }
 
+    // The SMTP address of a recipient. The recipient's own PR_SMTP_ADDRESS is read first (about 2 ms); resolving the
+    // Exchange address entry through the directory costs about 30 ms per person, which made a calendar with large
+    // meetings (2,000 attendees over two weeks) exceed the 60 s call limit. Directory results are cached per Exchange
+    // address for the session.
+    std::string smtp_of_recipient(const Disp& r) {
+        try {
+            Disp pa = r.obj(L"PropertyAccessor");
+            const std::string a = Disp::as_str(pa.call(L"GetProperty", {vstr(narrow(kSmtpSchema))}));
+            if (!a.empty()) return a;
+        } catch (const ComError& e) {
+            if (gone(e.hr) || busy(e.hr)) throw;
+        }
+        const std::string key = r.try_str(L"Address");
+        if (!key.empty())
+            if (const auto it = smtp_cache.find(key); it != smtp_cache.end()) return it->second;
+        std::string a;
+        try {
+            a = smtp_of_entry(r.obj(L"AddressEntry"));
+        } catch (const ComError& e) {
+            if (gone(e.hr) || busy(e.hr)) throw;
+        }
+        if (!key.empty() && smtp_cache.size() < 20'000) smtp_cache[key] = a;
+        return a;
+    }
+    std::map<std::string, std::string> smtp_cache;  // Exchange address -> SMTP, from the directory
+
     std::string smtp_of_entry(const Disp& entry) {
         if (!entry) return {};
         if (to_upper_ascii(entry.try_str(L"Type")) == "EX") {
+            const std::string key = entry.try_str(L"Address");
+            if (!key.empty())
+                if (const auto it = smtp_cache.find(key); it != smtp_cache.end() && !it->second.empty()) return it->second;
+            std::string found = smtp_of_exchange_entry(entry);
+            if (!key.empty() && !found.empty() && smtp_cache.size() < 20'000) smtp_cache[key] = found;
+            if (!found.empty()) return found;
+        }
+        return entry.try_str(L"Address");
+    }
+
+    std::string smtp_of_exchange_entry(const Disp& entry) {
+        {
             try {
                 if (Disp u = entry.obj(L"GetExchangeUser")) {
                     const std::string a = u.str(L"PrimarySmtpAddress");
@@ -528,7 +594,7 @@ struct ComOutlookSession::Impl {
                 if (gone(e.hr) || busy(e.hr)) throw;
             }
         }
-        return entry.try_str(L"Address");
+        return {};
     }
 
     static std::string to_upper_ascii(std::string s) {
@@ -578,11 +644,7 @@ struct ComOutlookSession::Impl {
             Disp r = rs.obj(L"Item", {vint(i)});
             OlRecipient x;
             x.who.name = r.try_str(L"Name");
-            try {
-                x.who.address = smtp_of_entry(r.obj(L"AddressEntry"));
-            } catch (const ComError& e) {
-                if (gone(e.hr) || busy(e.hr)) throw;
-            }
+            x.who.address = smtp_of_recipient(r);
             if (x.who.address.empty()) x.who.address = r.try_str(L"Address");
             const long t = r.num(L"Type");
             if (meeting) {
@@ -647,6 +709,10 @@ struct ComOutlookSession::Impl {
         return m;
     }
 
+    // Attendees of a series' plain occurrences, by series EntryID, while one events() call runs: every occurrence of a
+    // series has the master's attendees, and reading them for each of hundreds of occurrences exceeded the call limit.
+    std::map<std::string, std::vector<OlRecipient>>* series_attendees = nullptr;
+
     OlEvent to_event(const Disp& it) {
         OlEvent e;
         const std::string entry = it.str(L"EntryID");
@@ -677,7 +743,15 @@ struct ComOutlookSession::Impl {
         } catch (const ComError& err) {
             if (gone(err.hr) || busy(err.hr)) throw;
         }
-        if (e.is_meeting) e.attendees = recipients_of(it, true);
+        if (e.is_meeting) {
+            if (series_attendees && recurrence_state == 2) {  // an occurrence, not an exception
+                auto [pos, fresh] = series_attendees->try_emplace(entry);
+                if (fresh) pos->second = recipients_of(it, true);
+                e.attendees = pos->second;
+            } else {
+                e.attendees = recipients_of(it, true);
+            }
+        }
         switch (it.num(L"ResponseStatus")) {
             case 1: e.response = "organizer"; break;
             case 2: e.response = "tentativelyAccepted"; break;
@@ -779,6 +853,14 @@ ComOutlookSession::~ComOutlookSession() {
 }
 
 std::string ComOutlookSession::state() {
+    {
+        bool queued = false;
+        {
+            const std::lock_guard lock(impl_->mx);
+            queued = !impl_->queue.empty();
+        }
+        if (impl_->working.load() > 0 || queued) return impl_->last_ok.load() ? "running" : "busy";
+    }
     auto r = impl_->run<bool>([] { return true; });
     if (r) return "running";
     return r.error().code == "throttled" ? "busy" : "not_running";
@@ -826,19 +908,49 @@ Result<std::vector<OlRow>> ComOutlookSession::rows(const std::string& folder_id,
         cols.call(L"Add", {vstr("EntryID")});
         cols.call(L"Add", {vstr("LastModificationTime")});
         cols.call(L"Add", {vstr("ReceivedTime")});
+        // Rows in batches with GetArray (fix: a row at a time took five calls into Outlook per message, about 100,000
+        // calls and 37 s for 21,000 rows in a quiet cycle, and Outlook, which answers on its window thread, froze).
         std::vector<OlRow> out;
         while (!table.flag(L"EndOfTable")) {
-            Disp row = table.obj(L"GetNextRow");
-            if (!row) break;
-            OlRow r;
-            r.id = Disp::as_str(row.call(L"Item", {vint(1)}));
-            r.modified = local_to_utc_ms(Disp::as_date(row.call(L"Item", {vint(2)})));
-            r.received = local_to_utc_ms(Disp::as_date(row.call(L"Item", {vint(3)})));
-            if (r.id.empty()) continue;
-            if (received_since > 0 && r.received > 0 && r.received < received_since) continue;  // the locale filter, checked in UTC
-            out.push_back(std::move(r));
+            Var batch = table.call(L"GetArray", {vint(kRowBatch)});
+            SAFEARRAY* sa = (batch.v.vt & VT_ARRAY) ? ((batch.v.vt & VT_BYREF) ? *batch.v.pparray : batch.v.parray) : nullptr;
+            if (!sa || SafeArrayGetDim(sa) != 2) break;
+            LONG r0 = 0, r1 = -1, c0 = 0, c1 = -1;
+            SafeArrayGetLBound(sa, 1, &r0);
+            SafeArrayGetUBound(sa, 1, &r1);
+            SafeArrayGetLBound(sa, 2, &c0);
+            SafeArrayGetUBound(sa, 2, &c1);
+            if (r1 < r0 || c1 - c0 < 2) break;
+            const auto cell = [&](LONG row, LONG col) {
+                Var v;
+                LONG at[2] = {row, c0 + col};  // (row, column), measured on Outlook 16
+                SafeArrayGetElement(sa, at, &v.v);
+                return v;
+            };
+            for (LONG i = r0; i <= r1; ++i) {
+                OlRow r;
+                r.id = Disp::as_str(cell(i, 0));
+                r.modified = local_to_utc_ms(Disp::as_date(cell(i, 1)));
+                r.received = local_to_utc_ms(Disp::as_date(cell(i, 2)));
+                if (r.id.empty()) continue;
+                if (received_since > 0 && r.received > 0 && r.received < received_since) continue;  // the locale filter, checked in UTC
+                out.push_back(std::move(r));
+            }
         }
         return out;
+    });
+}
+
+Result<std::string> ComOutlookSession::folder_stamp(const std::string& folder_id) {
+    return impl_->run<std::string>([s = impl_.get(), folder_id] {
+        Disp items = s->ns.obj(L"GetFolderFromID", {vstr(folder_id)}).obj(L"Items");
+        const long n = items.num(L"Count");
+        long long newest = 0;
+        if (n > 0) {
+            items.call(L"Sort", {vstr("[LastModificationTime]"), vbool(true)});
+            if (Disp first = items.obj(L"GetFirst")) newest = local_to_utc_ms(first.date(L"LastModificationTime"));
+        }
+        return std::to_string(n) + "/" + std::to_string(newest);
     });
 }
 
@@ -862,7 +974,7 @@ Result<std::vector<OlMessage>> ComOutlookSession::find(const MessageQuery& q) {
         }
         std::vector<std::string> clauses;
         if (q.since) clauses.push_back("\"urn:schemas:httpmail:datereceived\" >= '" + jet_date(utc_ms_to_local(q.since)) + "'");
-        if (q.until) clauses.push_back("\"urn:schemas:httpmail:datereceived\" < '" + jet_date(utc_ms_to_local(q.until)) + "'");
+        if (q.until) clauses.push_back("\"urn:schemas:httpmail:datereceived\" < '" + jet_date(utc_ms_to_local(q.until), true) + "'");
         if (q.attachments_only) clauses.push_back("\"urn:schemas:httpmail:hasattachment\" = 1");
         if (!q.text.empty()) {
             const std::string t = quote_dasl(q.text);
@@ -1031,9 +1143,15 @@ Result<std::vector<OlEvent>> ComOutlookSession::events(long long from, long long
         // Recurrences are expanded only on a sorted collection with IncludeRecurrences set before Restrict.
         items.call(L"Sort", {vstr("[Start]")});
         items.put(L"IncludeRecurrences", vbool(true));
-        const std::string filter = "[Start] < '" + jet_date(utc_ms_to_local(to)) + "' AND [End] > '" + jet_date(utc_ms_to_local(from)) + "'";
+        const std::string filter = "[Start] < '" + jet_date(utc_ms_to_local(to), true) + "' AND [End] > '" + jet_date(utc_ms_to_local(from)) + "'";
         Disp found = items.obj(L"Restrict", {vstr(filter)});
         std::vector<OlEvent> out;
+        std::map<std::string, std::vector<OlRecipient>> attendees;
+        I.series_attendees = &attendees;
+        struct Reset {
+            Impl& i;
+            ~Reset() { i.series_attendees = nullptr; }
+        } reset{I};
         Disp it = found.obj(L"GetFirst");
         while (it && out.size() < limit) {
             if (it.num(L"Class") == olAppointmentClass) {
@@ -1043,6 +1161,22 @@ Result<std::vector<OlEvent>> ComOutlookSession::events(long long from, long long
             it = found.obj(L"GetNext");
         }
         return out;
+    });
+}
+
+// Two cheap calls instead of reading a year of occurrences (fix: re-reading the whole calendar window every sync cycle
+// kept Outlook's UI thread busy for a minute and a half every few minutes, and Outlook froze). Editing an occurrence
+// changes its series master, and a removal changes the count.
+Result<std::string> ComOutlookSession::calendar_stamp() {
+    return impl_->run<std::string>([s = impl_.get()] {
+        Disp items = s->default_folder(olFolderCalendar).obj(L"Items");
+        const long n = items.num(L"Count");
+        long long newest = 0;
+        if (n > 0) {
+            items.call(L"Sort", {vstr("[LastModificationTime]"), vbool(true)});
+            if (Disp first = items.obj(L"GetFirst")) newest = local_to_utc_ms(first.date(L"LastModificationTime"));
+        }
+        return std::to_string(n) + "/" + std::to_string(newest);
     });
 }
 

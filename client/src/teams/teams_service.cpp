@@ -90,6 +90,22 @@ std::string hhmm(long long ms) {
     return buf;
 }
 
+// The full-text rows of messages are found through teams_search_keys: conversation_id and message_id are UNINDEXED in
+// the FTS5 table, so deleting by them scanned the whole index for every message.
+Status drop_teams_fts(Database& db, const std::string& where, const std::function<void(Statement&)>& bind) {
+    std::vector<long long> rows;
+    {
+        auto k = db.prepare("SELECT fts FROM teams_search_keys WHERE " + where);
+        bind(k);
+        while (k.step()) rows.push_back(k.col_int(0));
+    }
+    for (const long long r : rows)
+        if (Status s = db.prepare("DELETE FROM teams_search WHERE rowid=?1").bind(1, r).run(); !s) return s;
+    auto d = db.prepare("DELETE FROM teams_search_keys WHERE " + where);
+    bind(d);
+    return d.run();
+}
+
 }  // namespace
 
 std::string conversation_label(const StoredConversation& c) {
@@ -277,7 +293,7 @@ Status TeamsService::exclude(const std::string& conversation_id, bool excluded) 
             q.bind(1, conversation_id);
             while (q.step()) gone.push_back({"teams.deleted", conversation_id, q.col_text(0), false, false, q.col_int(1)});
             if (Status r = env_.db->prepare("DELETE FROM teams_messages WHERE conversation_id=?1").bind(1, conversation_id).run(); !r) return r;
-            if (Status r = env_.db->prepare("DELETE FROM teams_search WHERE conversation_id=?1").bind(1, conversation_id).run(); !r) return r;
+            if (Status r = drop_teams_fts(*env_.db, "conversation_id=?1", [&](Statement& st) { st.bind(1, conversation_id); }); !r) return r;
             return env_.db->prepare("DELETE FROM teams_conversations WHERE id=?1").bind(1, conversation_id).run();
         });
         if (!s) return s;
@@ -297,7 +313,7 @@ Status TeamsService::forget() {
         auto q = env_.db->prepare("SELECT conversation_id, id, at_ms FROM teams_messages");
         while (q.step()) gone.push_back({"teams.deleted", q.col_text(0), q.col_text(1), false, false, q.col_int(2)});
         Status s = env_.db->transaction([&]() -> Status {
-            for (const char* sql : {"DELETE FROM teams_messages", "DELETE FROM teams_search", "DELETE FROM teams_conversations", "DELETE FROM teams_state"})
+            for (const char* sql : {"DELETE FROM teams_messages", "DELETE FROM teams_search", "DELETE FROM teams_search_keys", "DELETE FROM teams_conversations", "DELETE FROM teams_state"})
                 if (Status r = env_.db->exec(sql); !r) return r;
             return {};
         });
@@ -346,8 +362,11 @@ Status TeamsService::purge_excluded_types() {
                     "SELECT m.conversation_id, m.id, m.at_ms FROM teams_messages m JOIN teams_conversations c ON c.id=m.conversation_id WHERE c.type=?1");
                 q.bind(1, type);
                 while (q.step()) gone.push_back({"teams.deleted", q.col_text(0), q.col_text(1), false, false, q.col_int(2)});
+                if (Status r = drop_teams_fts(*env_.db, "conversation_id IN (SELECT id FROM teams_conversations WHERE type=?1)",
+                                              [&](Statement& st) { st.bind(1, type); });
+                    !r)
+                    return r;
                 const char* purge[] = {
-                    "DELETE FROM teams_search WHERE conversation_id IN (SELECT id FROM teams_conversations WHERE type=?1)",
                     "DELETE FROM teams_messages WHERE conversation_id IN (SELECT id FROM teams_conversations WHERE type=?1)",
                     "DELETE FROM teams_conversations WHERE type=?1"};
                 for (const char* sql : purge)
@@ -452,7 +471,7 @@ Result<TeamsReport> TeamsService::sync_now() {
                 auto d = env_.db->prepare("DELETE FROM teams_messages WHERE conversation_id=?1 AND id=?2");
                 d.bind(1, m.conversation_id).bind(2, m.id);
                 if (Status s = d.run(); !s) return s;
-                (void)env_.db->prepare("DELETE FROM teams_search WHERE conversation_id=?1 AND message_id=?2").bind(1, m.conversation_id).bind(2, m.id).run();
+                (void)drop_teams_fts(*env_.db, "conversation_id=?1 AND message_id=?2", [&](Statement& q) { q.bind(1, m.conversation_id).bind(2, m.id); });
                 events.push_back({"teams.deleted", m.conversation_id, m.id, false, false, m.at_ms});
                 ++r.removed;
                 continue;
@@ -483,10 +502,14 @@ Result<TeamsReport> TeamsService::sync_now() {
             u.bind(7, m.at_ms).bind(8, m.edited_ms).bind(9, m.system ? std::string{} : text).bind(10, m.system ? 1 : 0);
             u.bind(11, mine ? 1 : 0).bind(12, mentions_me ? 1 : 0).bind(13, m.version);
             if (Status s = u.run(); !s) return s;
-            (void)env_.db->prepare("DELETE FROM teams_search WHERE conversation_id=?1 AND message_id=?2").bind(1, m.conversation_id).bind(2, m.id).run();
+            if (Status s = drop_teams_fts(*env_.db, "conversation_id=?1 AND message_id=?2", [&](Statement& q) { q.bind(1, m.conversation_id).bind(2, m.id); });
+                !s)
+                return s;
             if (!m.system) {
                 auto f = env_.db->prepare("INSERT INTO teams_search(text, sender, conversation_id, message_id) VALUES(?1,?2,?3,?4)");
                 if (Status s = f.bind(1, text).bind(2, name).bind(3, m.conversation_id).bind(4, m.id).run(); !s) return s;
+                auto k = env_.db->prepare("INSERT OR REPLACE INTO teams_search_keys(conversation_id, message_id, fts) VALUES(?1,?2,?3)");
+                if (Status s = k.bind(1, m.conversation_id).bind(2, m.id).bind(3, env_.db->last_insert_id()).run(); !s) return s;
             }
             touched.insert(m.conversation_id);
             ++r.messages;
@@ -507,7 +530,10 @@ Result<TeamsReport> TeamsService::sync_now() {
             if (Status s = u.bind(1, id).bind(2, conversation_type(json::object(), id)).run(); !s) return s;
         }
         // The sync window: older messages leave the copy, without events.
-        if (Status s = env_.db->prepare("DELETE FROM teams_search WHERE message_id IN (SELECT id FROM teams_messages WHERE at_ms < ?1)").bind(1, cutoff).run(); !s) return s;
+        if (Status s = drop_teams_fts(*env_.db, "(conversation_id, message_id) IN (SELECT conversation_id, id FROM teams_messages WHERE at_ms < ?1)",
+                                      [&](Statement& q) { q.bind(1, cutoff); });
+            !s)
+            return s;
         if (Status s = env_.db->prepare("DELETE FROM teams_messages WHERE at_ms < ?1").bind(1, cutoff).run(); !s) return s;
         if (Status s = env_.db->prepare("INSERT OR REPLACE INTO teams_state(key, value) VALUES('last_read', ?1)").bind(1, std::to_string(now)).run(); !s) return s;
         // The baseline is set by the first read that found messages: an empty or not yet filled cache is no baseline.

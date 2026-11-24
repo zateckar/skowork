@@ -671,6 +671,76 @@ CREATE VIRTUAL TABLE teams_search USING fts5(text, sender, conversation_id UNIND
   tokenize='unicode61 remove_diacritics 2');
 CREATE TABLE teams_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 )sql"},
+        // client/event-triage (add-teams-triage): Teams messages are a triage scope. SQLite cannot change a CHECK, so the
+        // table is rebuilt with its rows.
+        {2400, R"sql(
+CREATE TABLE triage_items_new(
+  scope TEXT NOT NULL CHECK(scope IN ('mail','calendar','teams')),
+  item_id TEXT NOT NULL,
+  revision TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('pending','evaluated','expired','removed')),
+  outcome TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  thread_id TEXT NOT NULL DEFAULT '',
+  suggestion TEXT NOT NULL DEFAULT '' CHECK(suggestion IN ('','open','started','dismissed','withdrawn')),
+  dismissed_revision TEXT NOT NULL DEFAULT '',
+  queued_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(scope, item_id));
+INSERT INTO triage_items_new SELECT scope, item_id, revision, state, outcome, reason, thread_id, suggestion, dismissed_revision,
+  queued_at, updated_at FROM triage_items;
+DROP TABLE triage_items;
+ALTER TABLE triage_items_new RENAME TO triage_items;
+CREATE INDEX triage_items_pending ON triage_items(state, queued_at);
+CREATE INDEX triage_items_thread ON triage_items(thread_id);
+)sql"},
+        // Full-text rows by key (fix: the FTS5 key columns are UNINDEXED, so each per-message DELETE scanned the whole index;
+        // a first mail sync held the database lock for minutes and froze the window). Orphaned full-text rows are dropped.
+        {2500, R"sql(
+CREATE TABLE mail_search_keys(message_id TEXT PRIMARY KEY, fts INTEGER NOT NULL);
+INSERT OR REPLACE INTO mail_search_keys(message_id, fts) SELECT message_id, max(rowid) FROM mail_search GROUP BY message_id;
+DELETE FROM mail_search WHERE rowid NOT IN (SELECT fts FROM mail_search_keys);
+CREATE TABLE teams_search_keys(conversation_id TEXT NOT NULL, message_id TEXT NOT NULL, fts INTEGER NOT NULL,
+  PRIMARY KEY(conversation_id, message_id));
+INSERT OR REPLACE INTO teams_search_keys(conversation_id, message_id, fts)
+  SELECT conversation_id, message_id, max(rowid) FROM teams_search GROUP BY conversation_id, message_id;
+DELETE FROM teams_search WHERE rowid NOT IN (SELECT fts FROM teams_search_keys);
+)sql"},
+        // Triage results (improve-triage-results D1, D3): action required or for information, a category, and when an
+        // information item was included in a Daily report.
+        {2600, R"sql(
+ALTER TABLE triage_items ADD COLUMN action TEXT NOT NULL DEFAULT '';
+ALTER TABLE triage_items ADD COLUMN category TEXT NOT NULL DEFAULT '';
+ALTER TABLE triage_items ADD COLUMN reported_at INTEGER NOT NULL DEFAULT 0;
+UPDATE threads SET title=substr(title, 13) WHERE origin_kind='system' AND title LIKE 'Suggestion: %'
+  AND json_extract(origin_ref, '$.kind')='triage';
+)sql"},
+        // No action needed (improve-triage-results D7): a decided item. SQLite cannot change a CHECK, so the table is
+        // rebuilt with its rows, as in 2400.
+        {2700, R"sql(
+CREATE TABLE triage_items_new(
+  scope TEXT NOT NULL CHECK(scope IN ('mail','calendar','teams')),
+  item_id TEXT NOT NULL,
+  revision TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('pending','evaluated','expired','removed')),
+  outcome TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  thread_id TEXT NOT NULL DEFAULT '',
+  suggestion TEXT NOT NULL DEFAULT '' CHECK(suggestion IN ('','open','started','dismissed','withdrawn','no_action')),
+  dismissed_revision TEXT NOT NULL DEFAULT '',
+  queued_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  action TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT '',
+  reported_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(scope, item_id));
+INSERT INTO triage_items_new SELECT scope, item_id, revision, state, outcome, reason, thread_id, suggestion, dismissed_revision,
+  queued_at, updated_at, action, category, reported_at FROM triage_items;
+DROP TABLE triage_items;
+ALTER TABLE triage_items_new RENAME TO triage_items;
+CREATE INDEX triage_items_pending ON triage_items(state, queued_at);
+CREATE INDEX triage_items_thread ON triage_items(thread_id);
+)sql"},
     };
     return migrations;
 }

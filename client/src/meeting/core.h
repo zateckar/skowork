@@ -51,6 +51,34 @@ struct CaptureSource {
     unsigned pid = 0;  // process: the root of the tree
 };
 
+// Process loopback delivers only digital silence for some meeting apps (the current Teams client plays call audio that
+// process loopback never receives, measured 2026-11-24), while the output device the app plays to carries the voices.
+// This decides when the remote track switches from process loopback to loopback of that device: once the device has
+// carried kSwitchAfterMs of sound while process loopback has delivered nothing but digital silence since the start.
+// Any real sound from process loopback settles it for the capture: process loopback works and no switch happens.
+class LoopbackFallback {
+public:
+    static constexpr int kSilencePeak = 8;          // |sample| at or below: digital silence (process loopback idles at 0..1)
+    static constexpr int kSoundPeak = 300;          // a device packet with a larger peak carries sound (about -40 dBFS)
+    static constexpr long long kSwitchAfterMs = 3000;
+
+    void process_packet(int peak) {
+        if (peak > kSilencePeak) process_heard_ = true;
+    }
+    void device_packet(int peak, unsigned frames, unsigned rate) {
+        if (peak > kSoundPeak && rate) device_sound_ms_ += static_cast<long long>(frames) * 1000 / rate;
+    }
+    [[nodiscard]] bool process_works() const { return process_heard_; }
+    [[nodiscard]] bool should_switch() const { return !process_heard_ && device_sound_ms_ >= kSwitchAfterMs; }
+
+private:
+    bool process_heard_ = false;
+    long long device_sound_ms_ = 0;
+};
+
+// The largest |sample| of a 16-bit PCM buffer.
+int pcm_peak(const std::int16_t* pcm, size_t n);
+
 // ---- detection ----
 
 struct Process {

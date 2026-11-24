@@ -3083,6 +3083,94 @@ TEST(RuntimeCompaction, LongRunIsCompactedBeforeTheRequestWouldExceedTheThreshol
     }
 }
 
+// Text whose estimate is at least `tokens` (fix-idle-thread-compaction tests).
+std::string text_of_tokens(size_t tokens) {
+    std::string s;
+    for (int i = 0; estimate_context_tokens(s) < tokens; ++i) s += "word" + std::to_string(i % 97) + " ";
+    return s;
+}
+
+// Four Runs in one Thread: the fourth Run's request is below the trigger, and its final answer carries the Thread
+// over it (Compaction After The Final Answer). Returns the fourth Run's id.
+std::string run_until_answer_crosses_trigger(Env& env, const std::string& thread) {
+    env.model.push_text("short answer");
+    const auto first = env.run(thread, "q1");
+    EXPECT_TRUE(env.wait(first, RunState::succeeded));
+    const auto reqs = env.model.requests();
+    const long long overhead = static_cast<long long>(estimate_request_tokens(reqs.back().messages, reqs.back().tools));
+    const long long trigger = env.rt->context_usage(thread).trigger;
+    EXPECT_GT(trigger, overhead);
+    const size_t part = static_cast<size_t>((trigger - overhead) * 2 / 5);
+    for (int i = 2; i <= 3; ++i) {
+        env.model.push_text(text_of_tokens(part));
+        const auto id = env.run(thread, "q" + std::to_string(i));
+        EXPECT_TRUE(env.wait(id, RunState::succeeded));
+    }
+    env.model.push_text(text_of_tokens(part));
+    const auto fourth = env.run(thread, "q4");
+    EXPECT_TRUE(env.wait(fourth, RunState::succeeded));
+    // Precondition: the fourth Run's request itself was below the trigger, so only the answer crossed it.
+    const auto all = env.model.requests();
+    for (auto it = all.rbegin(); it != all.rend(); ++it)
+        if (it->feature == "agent") {
+            EXPECT_LT(static_cast<long long>(estimate_request_tokens(it->messages, it->tools)), trigger);
+            break;
+        }
+    return fourth;
+}
+
+TEST(RuntimeCompaction, FinalAnswerOverTheTriggerIsCompactedBeforeTheRunEnds) {
+    RuntimeConfig cfg;
+    cfg.default_context_window = 16000;
+    cfg.compaction_keep_messages = 2;
+    Env env(cfg);
+    std::atomic<int> summaries{0};
+    env.model.set_responder([&](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (req.feature != "compaction") return std::nullopt;
+        ++summaries;
+        return summary_response("SUMMARY: questions 1 to 3 were answered");
+    });
+    env.start();
+    const auto thread = env.thread();
+    const auto fourth = run_until_answer_crosses_trigger(env, thread);
+
+    // The idle Thread rests below the trigger without "Compact now".
+    const auto usage = env.rt->context_usage(thread);
+    EXPECT_LT(usage.tokens, usage.trigger);
+    const auto records = env.rt->store().compactions(thread);
+    ASSERT_EQ(records.size(), 1u);
+    EXPECT_EQ(records[0].kind, "automatic");
+    EXPECT_EQ(records[0].run_id, fourth);
+    EXPECT_GE(summaries.load(), 1);
+    bool activity = false;
+    for (const auto& e : env.rt->events(fourth))
+        if (e.kind == "activity" && jstr(e.payload, "text").rfind("Compacted the conversation", 0) == 0) activity = true;
+    EXPECT_TRUE(activity);
+    // The answer stands and the full history is kept.
+    EXPECT_EQ(env.rt->conversation(thread).size(), 8u);
+}
+
+TEST(RuntimeCompaction, FailedCompactionAfterTheFinalAnswerKeepsTheRunsSuccess) {
+    RuntimeConfig cfg;
+    cfg.default_context_window = 16000;
+    cfg.compaction_keep_messages = 2;
+    Env env(cfg);
+    env.model.set_responder([](const model::ChatRequest& req) -> std::optional<model::ModelResult<model::ChatResponse>> {
+        if (req.feature != "compaction") return std::nullopt;
+        return model::ModelResult<model::ChatResponse>(failure(model::code::model_unavailable, "unavailable"));
+    });
+    env.start();
+    const auto thread = env.thread();
+    const auto fourth = run_until_answer_crosses_trigger(env, thread);
+
+    EXPECT_TRUE(env.rt->store().compactions(thread).empty());
+    bool failed = false;
+    for (const auto& e : env.rt->events(fourth))
+        if (e.kind == "activity" && jstr(e.payload, "text").rfind("Compaction failed", 0) == 0) failed = true;
+    EXPECT_TRUE(failed);
+    EXPECT_EQ(env.rt->conversation(thread).size(), 8u);
+}
+
 TEST(RuntimeCompaction, ManualCompactThreadSummarisesOlderTurnsAndIsRefusedWhileARunIsRunning) {
     Env env;
     auto hook = std::make_shared<CompactionHook>();
@@ -3953,8 +4041,17 @@ TEST(RuntimeCompaction, ProviderUsageAboveTheEstimateTriggersCompactionAndRefusa
 
         // The first large request is sent uncalibrated and teaches the runtime the provider's count.
         answer("measured");
-        ASSERT_TRUE(env.wait(env.run(thread, "measure"), RunState::succeeded));
-        EXPECT_TRUE(env.rt->store().compactions(thread).empty());
+        const auto measure = env.run(thread, "measure");
+        ASSERT_TRUE(env.wait(measure, RunState::succeeded));
+        // Its request was not compacted. With the learned ratio the idle Thread is at or above the trigger, so it is
+        // compacted after the answer, before the Run ends (Compaction After The Final Answer).
+        const auto after_measure = env.rt->store().compactions(thread);
+        if (ratio > 1) {
+            ASSERT_EQ(after_measure.size(), 1u);
+            EXPECT_EQ(after_measure[0].run_id, measure);
+        } else {
+            EXPECT_TRUE(after_measure.empty());
+        }
         const auto usage = env.rt->context_usage(thread);
         EXPECT_NEAR(usage.calibration, ratio > 1 ? ratio : 1.0, 1e-4);  // the provider count is a rounded integer
 
@@ -3964,7 +4061,8 @@ TEST(RuntimeCompaction, ProviderUsageAboveTheEstimateTriggersCompactionAndRefusa
         const auto sent = env.model.requests().back();
         const auto raw = static_cast<long long>(estimate_request_tokens(sent.messages, sent.tools));
         if (ratio > 1) {
-            // 1.5 x 130,000 reaches the 180,000 trigger: compaction ran and the calibrated request is at most the target.
+            // 1.5 x 130,000 reaches the 180,000 trigger: compaction ran once, after "measure", and the calibrated request
+            // is at most the target.
             EXPECT_EQ(env.rt->store().compactions(thread).size(), 1u);
             EXPECT_LE(static_cast<long long>(std::ceil(static_cast<double>(raw) * ratio)), budget->target);
         } else {

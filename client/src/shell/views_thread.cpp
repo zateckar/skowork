@@ -32,7 +32,12 @@ void ThreadPane::rebuild() {
     if (composer_) kept_composer_.reset(static_cast<ComposerView*>(remove(composer_).release()));
     feed_ = nullptr;
     composer_ = nullptr;
+    // Children go now: no pointer into them may outlive this, because the early returns below (new Thread, none open,
+    // load error) do not create them again, and a later triage.changed or meeting poll would rebuild a freed node
+    // (crash 2026-11-24 in rebuild_suggestion).
     banner_ = nullptr;
+    progress_ = nullptr;
+    suggestion_ = nullptr;
     clear_children();
     auto add_composer = [&](const std::string& key) {
         std::unique_ptr<ComposerView> c = std::move(kept_composer_);
@@ -176,7 +181,11 @@ void ThreadPane::rebuild() {
         origin->axis = ui::Axis::row;
         origin->gap = 8;
         origin->padding = {20, 0, 12, 6};
-        origin->emplace<ui::Badge>(shell_.ui(), shell_.t(origin_badge_key(*e)), Paint::surface_alt, Paint::text_secondary);
+        if (const auto tb = triage_badges(*e)) {
+            if (!tb->category.empty()) origin->emplace<ui::Badge>(shell_.ui(), shell_.t(tb->category), Paint::surface_alt, Paint::text_secondary);
+        } else {
+            origin->emplace<ui::Badge>(shell_.ui(), shell_.t(origin_badge_key(*e)), Paint::surface_alt, Paint::text_secondary);
+        }
         auto* l = origin->emplace<ui::Label>(shell_.ui(), text, TextStyle::caption, Paint::text_secondary, false, "thread-origin-text");
         l->padding.top = 1;
         if (!link.empty()) {

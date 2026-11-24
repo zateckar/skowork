@@ -275,6 +275,9 @@ Result<SyncReport> MailService::sync_now() {
         last_error_ = r ? std::string{} : r.error().code + ": " + r.error().message;
     }
     if (!r) log::warn(kLog, "sync: " + r.error().message);
+    else if (r->messages || r->events || r->resyncs)
+        log::info(kLog, "sync: " + std::to_string(r->messages) + " messages and " + std::to_string(r->events) + " calendar items updated in " +
+                            std::to_string(r->folders) + " folders");
     if (env_.changed) env_.changed();
     return r;
 }

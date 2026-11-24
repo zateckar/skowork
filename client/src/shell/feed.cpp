@@ -34,6 +34,20 @@ std::string trim(const std::string& s) {
     return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
 }
 
+// The content between the untrusted-data markers of a Run's first message (runtime wrap_untrusted), or nullopt when
+// the message has none. The content cannot contain "<<<", so the first end marker after the start closes it.
+std::optional<std::string> untrusted_body(const std::string& text) {
+    const auto start = text.find("<<<untrusted-data ");
+    if (start == std::string::npos) return std::nullopt;
+    const auto open_end = text.find(">>>", start);
+    if (open_end == std::string::npos) return std::nullopt;
+    size_t b = open_end + 3;
+    if (b < text.size() && text[b] == '\n') ++b;
+    const auto end = text.find("<<<end-untrusted-data", b);
+    if (end == std::string::npos) return std::nullopt;
+    return trim(text.substr(b, end - b));
+}
+
 void fold_event(std::vector<FeedItem>& items, std::map<std::string, size_t>& tools,
                 const std::map<std::string, const ActionItem*>& actions, const RunInfo& run, const StoredEvent& e) {
     const json& p = e.payload;
@@ -49,6 +63,13 @@ void fold_event(std::vector<FeedItem>& items, std::map<std::string, size_t>& too
         if (e.kind == "incomplete_message" && jbool(p, "truncated")) it.text += "\n\n[...]";
         if (role == "user") {
             it.type = ItemType::user;
+            if (const json* prov = p.is_object() ? jobj(p, "provenance") : nullptr; prov && !jbool(*prov, "trusted", true)) {
+                if (const auto body = untrusted_body(it.text)) {
+                    it.source_kind = str(*prov, "source_kind");
+                    if (it.source_kind.empty()) it.source_kind = "tool";
+                    it.text = *body;
+                }
+            }
             items.push_back(std::move(it));
         } else if (role == "assistant" && !trim(it.text).empty()) {
             it.type = ItemType::assistant;

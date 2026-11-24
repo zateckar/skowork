@@ -35,7 +35,7 @@ public:
 TEST(TriageClassifier, SendsOneToolFreeSmallRoleRequestAndMatchesResults) {
     FakeModel fake;
     fake.response.finish_reason = "stop";
-    fake.response.text = R"({"results":[{"id":"event-2","revision":"rev-b","outcome":"uncertain","reason":""},{"id":"event-1","revision":"rev-a","outcome":"relevant","reason":"Budget review"}]})";
+    fake.response.text = R"({"results":[{"id":"event-2","revision":"rev-b","outcome":"uncertain","reason":""},{"id":"event-1","revision":"rev-a","outcome":"relevant","reason":"Budget review","action":"required","category":"approval"}]})";
     auto result = classify(fake, "Review budgets", {{"event-1", "rev-a", "Review the budget"}, {"event-2", "rev-b", "No context"}});
     ASSERT_TRUE(result);
     ASSERT_EQ(result->size(), 2u);
@@ -47,7 +47,10 @@ TEST(TriageClassifier, SendsOneToolFreeSmallRoleRequestAndMatchesResults) {
     EXPECT_FALSE(fake.request.validate_tool_calls);
     EXPECT_EQ((*result)[0].id, "event-1");
     EXPECT_EQ((*result)[0].outcome, "relevant");
+    EXPECT_EQ((*result)[0].action, "required");
+    EXPECT_EQ((*result)[0].category, "approval");
     EXPECT_EQ((*result)[1].outcome, "uncertain");
+    EXPECT_TRUE((*result)[1].action.empty());
     ASSERT_EQ(fake.request.messages.size(), 2u);
     EXPECT_EQ(fake.request.messages[0].role, "system");
     EXPECT_EQ(fake.request.messages[1].role, "user");
@@ -98,6 +101,12 @@ TEST(TriageClassifier, RejectsIncompleteOrAmbiguousResponsesAsAWholeBatch) {
         R"({"results":[{"id":"a","revision":"r","outcome":"maybe","reason":"ok"}]})",
         R"({"results":[{"id":"a","revision":"r","outcome":"relevant","reason":""}]})",
         R"({"results":[{"id":"a","revision":"r","outcome":"relevant","reason":"ok","extra":true}]})",
+        // improve-triage-results D1: a relevant result needs a valid action and category.
+        R"({"results":[{"id":"a","revision":"r","outcome":"relevant","reason":"ok","category":"request"}]})",
+        R"({"results":[{"id":"a","revision":"r","outcome":"relevant","reason":"ok","action":"later","category":"request"}]})",
+        R"({"results":[{"id":"a","revision":"r","outcome":"relevant","reason":"ok","action":"info"}]})",
+        R"({"results":[{"id":"a","revision":"r","outcome":"relevant","reason":"ok","action":"info","category":"gossip"}]})",
+        R"({"results":[{"id":"a","revision":"r","outcome":"relevant","reason":"ok","action":1,"category":"request"}]})",
         R"({"results":[{"id":"a","id":"a","revision":"r","outcome":"relevant","reason":"ok"}]})",
         R"({"results":[{"id":"a","revision":"r","outcome":"relevant","reason":4}]})",
         R"({"results":[{"id":"a","revision":"r","outcome":"relevant","reason":"ok"}],"extra":1})",
@@ -151,6 +160,30 @@ TEST(TriageClassifier, RejectsAnOversizedReasonAndDeeplyNestedResponse) {
     EXPECT_FALSE(classify(fake, "work", {{"a", "r", "text"}}));
     fake.response.text = std::string(33, '[') + "0" + std::string(33, ']');
     EXPECT_FALSE(classify(fake, "work", {{"a", "r", "text"}}));
+}
+
+// improve-triage-results D10: null counts as left out; the error names the failed check, never a value from the response.
+TEST(TriageClassifier, AcceptsNullActionAndCategoryAndNamesTheFailedCheck) {
+    FakeModel fake;
+    fake.response.finish_reason = "stop";
+    fake.response.text =
+        R"({"results":[{"id":"a","revision":"r","outcome":"not_relevant","reason":"","action":null,"category":null}]})";
+    auto ok = classify(fake, "work", {{"a", "r", "text"}});
+    ASSERT_TRUE(ok);
+    EXPECT_TRUE((*ok)[0].action.empty());
+    fake.response.text = R"({"results":[{"id":"a","revision":"r","outcome":"relevant","reason":"ok","action":null,"category":"request"}]})";
+    EXPECT_FALSE(classify(fake, "work", {{"a", "r", "text"}}));  // still needs an action when relevant
+    fake.response.text =
+        R"({"results":[{"id":"a","revision":"r","outcome":"relevant","reason":"ok","action":"required","category":"secret-gossip"}]})";
+    auto bad = classify(fake, "work", {{"a", "r", "text"}});
+    ASSERT_FALSE(bad);
+    EXPECT_EQ(bad.error().code, "invalid_response");
+    EXPECT_NE(bad.error().message.find("category"), std::string::npos);
+    EXPECT_EQ(bad.error().message.find("secret"), std::string::npos);
+    fake.response.finish_reason = "length";
+    auto cut = classify(fake, "work", {{"a", "r", "text"}});
+    ASSERT_FALSE(cut);
+    EXPECT_NE(cut.error().message.find("cut off"), std::string::npos);
 }
 
 TEST(TriageClassifier, AcceptsOneJsonCodeFenceAndRejectsOtherWrapping) {

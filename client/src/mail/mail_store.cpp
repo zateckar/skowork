@@ -112,6 +112,21 @@ StoredEvent read_event(const Statement& s) {
     return e;
 }
 
+// The full-text row of a message is found through mail_search_keys: message_id is UNINDEXED in the FTS5 table, so a
+// DELETE ... WHERE message_id scanned the whole index for every stored message (quadratic on a first sync, holding the
+// database lock, which froze the window).
+Status drop_mail_fts(Database& db, const std::string& id) {
+    std::vector<long long> rows;
+    {
+        auto k = db.prepare("SELECT fts FROM mail_search_keys WHERE message_id=?1");
+        k.bind(1, id);
+        while (k.step()) rows.push_back(k.col_int(0));
+    }
+    for (const long long r : rows)
+        if (Status s = db.prepare("DELETE FROM mail_search WHERE rowid=?1").bind(1, r).run(); !s) return s;
+    return db.prepare("DELETE FROM mail_search_keys WHERE message_id=?1").bind(1, id).run();
+}
+
 }  // namespace
 
 MailStore::Change MailStore::upsert_message(const StoredMessage& m, Status* status) {
@@ -133,16 +148,15 @@ MailStore::Change MailStore::upsert_message(const StoredMessage& m, Status* stat
         s.bind(11, m.body).bind(12, m.preview).bind(13, m.has_attachments ? 1 : 0).bind(14, m.is_read ? 1 : 0).bind(15, m.is_draft ? 1 : 0);
         s.bind(16, strings_json(m.categories).dump()).bind(17, m.label).bind(18, m.withheld ? 1 : 0).bind(19, m.web_link);
         if (Status st = s.run(); !st) return st;
-        auto d = db_.prepare("DELETE FROM mail_search WHERE message_id=?1");
-        d.bind(1, m.id);
-        if (Status st = d.run(); !st) return st;
+        if (Status st = drop_mail_fts(db_, m.id); !st) return st;
         if (m.withheld) return {};  // never indexed
         std::string people = m.from.name + " " + m.from.address;
         for (const auto& p : m.to) people += " " + p.name + " " + p.address;
         for (const auto& p : m.cc) people += " " + p.name + " " + p.address;
         auto i = db_.prepare("INSERT INTO mail_search(subject, body, people, message_id) VALUES(?1,?2,?3,?4)");
         i.bind(1, m.subject).bind(2, m.body).bind(3, people).bind(4, m.id);
-        return i.run();
+        if (Status st = i.run(); !st) return st;
+        return db_.prepare("INSERT OR REPLACE INTO mail_search_keys(message_id, fts) VALUES(?1, ?2)").bind(1, m.id).bind(2, db_.last_insert_id()).run();
     });
     if (!written) {
         if (status) *status = written;
@@ -159,9 +173,7 @@ std::optional<StoredMessage> MailStore::remove_message(const std::string& id, St
         auto s = db_.prepare("DELETE FROM mail_messages WHERE id=?1");
         s.bind(1, id);
         if (Status st = s.run(); !st) return st;
-        auto d = db_.prepare("DELETE FROM mail_search WHERE message_id=?1");
-        d.bind(1, id);
-        return d.run();
+        return drop_mail_fts(db_, id);
     });
     if (!removed) {
         if (status) *status = removed;
@@ -360,9 +372,14 @@ int MailStore::prune(long long mail_before, long long events_before, long long e
     const std::lock_guard lock(db_.mutex());
     int n = 0;
     (void)db_.transaction([&]() -> Status {
-        auto a = db_.prepare("DELETE FROM mail_search WHERE message_id IN (SELECT id FROM mail_messages WHERE received_at<?1)");
-        a.bind(1, mail_before);
-        if (Status st = a.run(); !st) return st;
+        std::vector<std::string> old;
+        {
+            auto a = db_.prepare("SELECT id FROM mail_messages WHERE received_at<?1");
+            a.bind(1, mail_before);
+            while (a.step()) old.push_back(a.col_text(0));
+        }
+        for (const auto& id : old)
+            if (Status st = drop_mail_fts(db_, id); !st) return st;
         auto b = db_.prepare("DELETE FROM mail_messages WHERE received_at<?1");
         b.bind(1, mail_before);
         if (Status st = b.run(); !st) return st;
@@ -403,7 +420,7 @@ Status MailStore::remove_user_exclusion(const std::string& kind, const std::stri
 
 void MailStore::clear(bool all) {
     const std::lock_guard lock(db_.mutex());
-    (void)db_.exec("DELETE FROM mail_messages; DELETE FROM mail_search; DELETE FROM cal_events; DELETE FROM mail_sync_state; DELETE FROM mail_folders;");
+    (void)db_.exec("DELETE FROM mail_messages; DELETE FROM mail_search; DELETE FROM mail_search_keys; DELETE FROM cal_events; DELETE FROM mail_sync_state; DELETE FROM mail_folders;");
     if (all) (void)db_.exec("DELETE FROM mail_user_exclusions;");
 }
 

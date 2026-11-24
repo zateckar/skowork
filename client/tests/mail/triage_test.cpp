@@ -8,6 +8,7 @@
 #include "mail/mail_service.h"
 #include "triage/triage.h"
 
+#include <algorithm>
 #include <map>
 #include <set>
 
@@ -47,13 +48,25 @@ public:
         json results = json::array();
         last_batch = 0;
         for (const auto& e : (*data)["events"]) {
+            (void)e;
             ++last_batch;
+        }
+        batches.push_back(last_batch);
+        for (const auto& e : (*data)["events"]) {
             const std::string text = jstr(e, "text");
             const std::string outcome = text.find("[not]") != std::string::npos     ? "not_relevant"
                                         : text.find("[unsure]") != std::string::npos ? "uncertain"
                                                                                      : "relevant";
-            results.push_back({{"id", jstr(e, "id")}, {"revision", jstr(e, "revision")}, {"outcome", outcome},
-                               {"reason", outcome == "relevant" ? "Matches your budget work" : ""}});
+            json r = {{"id", jstr(e, "id")}, {"revision", jstr(e, "revision")}, {"outcome", outcome},
+                      {"reason", outcome == "relevant" ? "Matches your budget work" : ""}};
+            if (outcome == "relevant") {
+                // "[info]" for information, else action required; "[approval]" picks that category.
+                r["action"] = text.find("[info]") != std::string::npos ? "info" : "required";
+                r["category"] = text.find("[approval]") != std::string::npos ? "approval" : "request";
+                // "[bad]": a category outside the list, which makes the whole batch invalid.
+                if (text.find("[bad]") != std::string::npos) r["category"] = "other";
+            }
+            results.push_back(std::move(r));
         }
         model::ChatResponse out;
         out.finish_reason = "stop";
@@ -62,6 +75,7 @@ public:
     }
     int requests = 0;
     size_t last_batch = 0;
+    std::vector<size_t> batches;
     bool fail = false;
     std::function<void()> during;
 };
@@ -75,6 +89,11 @@ struct Harness {
         e.clock = &clock;
         e.mail = mail.get();
         e.model = &model;
+        e.teams = [this](const std::string& conversation, const std::string& id) -> std::optional<triage::TriageChat> {
+            const auto it = chats.find(conversation + "|" + id);
+            if (it == chats.end()) return std::nullopt;
+            return it->second;
+        };
         e.background_paused = [this] { return paused; };
         e.create_thread = [this](const std::string& title, const json& ref) -> Result<std::string> {
             const std::string id = "t" + std::to_string(threads.size() + 1);
@@ -97,6 +116,12 @@ struct Harness {
         };
         e.set_origin_ref = [this](const std::string& id, const json& ref) {
             refs[id] = ref;
+            return Status{};
+        };
+        e.unattended_may_read = [this] { return may_read; };
+        e.cancel_runs = [this](const std::string& id) { cancelled.insert(id); };
+        e.archive_thread = [this](const std::string& id) {
+            archived.insert(id);
             return Status{};
         };
         e.start_run = [this](const std::string& id, const std::string& text, const runtime::StartOptions& o) -> Result<std::string> {
@@ -129,8 +154,10 @@ struct Harness {
     Status take(const std::vector<PageChange>& changes) {
         return db.store->db().transaction([&] { return svc->take_in(changes); });
     }
+    // Automatic preparation is off unless a test asks for it: most tests follow the suggestion itself.
     void enable(json extra = json::object()) {
         extra["enabled"] = true;
+        if (!extra.contains("auto_prepare")) extra["auto_prepare"] = false;
         ASSERT_TRUE(svc->configure(extra));
         svc->cycle_completed();  // the baseline: what is there now is not suggested
     }
@@ -150,11 +177,12 @@ struct Harness {
     TriageModel model;
     std::unique_ptr<MailStore> mail;
     std::unique_ptr<triage::TriageService> svc;
-    bool paused = false, fail_start = false;
+    bool paused = false, fail_start = false, may_read = true;
     int keys = 0;
+    std::map<std::string, triage::TriageChat> chats;  // "<conversation>|<message>"
     std::map<std::string, std::string> threads;
     std::map<std::string, json> refs;
-    std::set<std::string> unread, deleted;
+    std::set<std::string> unread, deleted, cancelled, archived;
     struct Start {
         std::string thread, text;
         runtime::StartOptions options;
@@ -195,7 +223,9 @@ TEST(EventTriage, RelevantItemBecomesAnUnreadSuggestionThreadThatNeverStartsItse
     ASSERT_EQ(h.threads.size(), 1u);
     const std::string t = h.thread_of("m1");
     ASSERT_FALSE(t.empty());
-    EXPECT_EQ(h.threads[t], "Suggestion: Budget Q4");
+    EXPECT_EQ(h.threads[t], "Budget Q4");  // no prefix (improve-triage-results D5)
+    EXPECT_EQ(jstr(h.refs[t], "action"), "required");
+    EXPECT_EQ(jstr(h.refs[t], "category"), "request");
     EXPECT_EQ(jstr(h.refs[t], "kind"), "triage");
     EXPECT_EQ(jstr(h.refs[t], "scope"), "mail");
     EXPECT_TRUE(h.starts.empty());
@@ -231,7 +261,7 @@ TEST(EventTriage, ChangedContentIsANewRevisionThatCanWithdrawOrReopen) {
     ASSERT_TRUE(h.classify());
     EXPECT_EQ(h.threads.size(), 1u);
     EXPECT_EQ(jstr(h.svc->suggestion(t), "status"), "open");
-    EXPECT_EQ(h.threads[t], "Suggestion: Budget Q4 again");
+    EXPECT_EQ(h.threads[t], "Budget Q4 again");
     EXPECT_TRUE(h.unread.contains(t));
 }
 
@@ -429,6 +459,50 @@ TEST(EventTriage, DeleteTriageDataKeepsStartedWorkAndThreadDeletionDismisses) {
     EXPECT_EQ(jint(h.svc->status(), "pending"), 0);
 }
 
+// add-teams-triage: Teams messages addressed to the user become suggestion Threads like mail.
+TEST(EventTriage, TeamsMessagesAddressedToTheUserBecomeSuggestions) {
+    Harness h;
+    h.chats["19:a@unq.gbl.spaces|1"] = {"Petra Malá", "Petra Malá", "Please review the budget by Friday", 1, true, false, false};
+    h.chats["19:g@thread.v2|2"] = {"Projekt X", "Jan Novák", "Please review the budget too", 2, false, false, false};
+    h.chats["19:a@unq.gbl.spaces|3"] = {"Petra Malá", "Me", "Please review the budget, I said", 3, true, true, false};
+    h.enable();
+    // Teams off in triage: nothing is taken in.
+    ASSERT_TRUE(h.svc->take_in_teams("teams.message", "19:a@unq.gbl.spaces", "1"));
+    EXPECT_EQ(jint(h.svc->status(), "pending"), 0);
+
+    ASSERT_TRUE(h.svc->configure({{"teams", true}}));
+    EXPECT_TRUE(jbool(h.svc->status(), "teams"));
+    h.svc->cycle_completed();
+    ASSERT_TRUE(h.svc->take_in_teams("teams.message", "19:a@unq.gbl.spaces", "1"));  // one-to-one: addressed
+    ASSERT_TRUE(h.svc->take_in_teams("teams.message", "19:g@thread.v2", "2"));        // group chat without a mention
+    ASSERT_TRUE(h.svc->take_in_teams("teams.message", "19:a@unq.gbl.spaces", "3"));  // the user's own message
+    EXPECT_EQ(jint(h.svc->status(), "pending"), 1);
+
+    EXPECT_FALSE(h.svc->step());
+    EXPECT_TRUE(h.classify());
+    const std::string t = h.thread_of("19:a@unq.gbl.spaces|1");
+    ASSERT_FALSE(t.empty());
+    EXPECT_EQ(h.threads[t], "Petra Malá: Please review the budget by Friday");
+    EXPECT_EQ(jstr(h.refs[t], "scope"), "teams");
+    const json s = h.svc->suggestion(t);
+    EXPECT_EQ(jstr(s, "status"), "open");
+    EXPECT_EQ(jstr(s["source"], "from"), "Petra Malá");
+
+    auto run = h.svc->start_work(t);
+    ASSERT_TRUE(run);
+    ASSERT_EQ(h.starts.size(), 1u);
+    EXPECT_NE(h.starts[0].text.find("Teams message\nFrom: Petra Malá"), std::string::npos);
+    EXPECT_EQ(h.starts[0].options.untrusted->source_kind, "teams");
+
+    // A message Teams deletes is withdrawn.
+    h.chats["19:g@thread.v2|4"] = {"Projekt X", "Jan Novák", "@Me please send the figures", 4, true, false, false};
+    ASSERT_TRUE(h.svc->take_in_teams("teams.message", "19:g@thread.v2", "4"));
+    EXPECT_EQ(jint(h.svc->status(), "pending"), 1);
+    h.chats.erase("19:g@thread.v2|4");
+    ASSERT_TRUE(h.svc->take_in_teams("teams.deleted", "19:g@thread.v2", "4"));
+    EXPECT_EQ(jint(h.svc->status(), "pending"), 0);
+}
+
 TEST(EventTriage, SettingsAreValidated) {
     Harness h;
     EXPECT_FALSE(h.svc->configure({{"enabled", "yes"}}));
@@ -495,4 +569,174 @@ TEST(EventTriage, GraphPagesFeedTriageInTheirTransaction) {
     EXPECT_EQ(jint(triage.status(), "pending"), 0);
     EXPECT_EQ(jint(triage.status(), "suggestions"), 0);
     svc.stop();
+}
+
+// ---- improve-triage-results ----
+
+TEST(EventTriage, AnActionItemIsPreparedAutomaticallyAsAReadOnlyUnattendedRun) {
+    Harness h;
+    h.enable({{"auto_prepare", true}});
+    EXPECT_TRUE(jbool(h.svc->status(), "auto_prepare"));
+    ASSERT_TRUE(h.take({h.message("m1", "B2B Portal: Schválení žádosti 805875", "[approval] Please approve request 805875")}));
+    ASSERT_TRUE(h.classify());
+    const std::string t = h.thread_of("m1");
+    ASSERT_FALSE(t.empty());
+    EXPECT_EQ(h.threads[t], "B2B Portal: Schválení žádosti 805875");
+    EXPECT_EQ(jstr(h.refs[t], "category"), "approval");
+    ASSERT_EQ(h.starts.size(), 1u);
+    EXPECT_EQ(h.starts[0].thread, t);
+    EXPECT_TRUE(h.starts[0].options.unattended);
+    ASSERT_TRUE(h.starts[0].options.untrusted.has_value());
+    EXPECT_EQ(h.starts[0].options.untrusted->source_kind, "mail");
+    // D6: options on a Question card, then the reply through an approved mail.send to the source.
+    EXPECT_NE(h.starts[0].options.preamble.find("ask_user"), std::string::npos);
+    EXPECT_NE(h.starts[0].options.preamble.find("mail.send, with reply_to set to m1"), std::string::npos);
+    EXPECT_NE(h.starts[0].text.find("805875"), std::string::npos);
+    EXPECT_EQ(jstr(h.svc->suggestion(t), "status"), "started");
+    EXPECT_EQ(jint(h.svc->status(), "prepared_today"), 1);
+    // A prepared item is started: a new revision is not evaluated again and is not prepared twice.
+    ASSERT_TRUE(h.take({h.message("m1", "B2B Portal: Schválení žádosti 805875", "[approval] Reminder: please approve request 805875")}));
+    EXPECT_FALSE(h.classify());
+    EXPECT_EQ(h.starts.size(), 1u);
+}
+
+TEST(EventTriage, PreparationWaitsForStartWorkWhenOffForbiddenOrCapped) {
+    Harness h;
+    h.enable({{"auto_prepare", true}});
+    h.may_read = false;  // policy.unattended.allowed_risk without read
+    ASSERT_TRUE(h.take({h.message("m1", "Budget Q4", "Please review the budget")}));
+    ASSERT_TRUE(h.classify());
+    EXPECT_TRUE(h.starts.empty());
+    EXPECT_EQ(jstr(h.svc->suggestion(h.thread_of("m1")), "status"), "open");
+    h.may_read = true;
+    // A failed start keeps the suggestion and does not count against the cap.
+    h.fail_start = true;
+    ASSERT_TRUE(h.take({h.message("m2", "Budget Q1", "Please review the budget")}));
+    ASSERT_TRUE(h.classify());
+    EXPECT_EQ(jstr(h.svc->suggestion(h.thread_of("m2")), "status"), "open");
+    EXPECT_EQ(jint(h.svc->status(), "prepared_today"), 0);
+    h.fail_start = false;
+    // The daily cap: 30 prepared, the next ones wait.
+    for (int batch = 0; batch < 2; ++batch) {
+        std::vector<PageChange> changes;
+        for (int i = 0; i < 16; ++i) {
+            const std::string id = "c" + std::to_string(batch * 16 + i);
+            changes.push_back(h.message(id, "Request " + id, "Please handle " + id));
+        }
+        ASSERT_TRUE(h.take(changes));
+        ASSERT_TRUE(h.classify());
+    }
+    EXPECT_EQ(h.starts.size(), 30u);
+    EXPECT_EQ(jint(h.svc->status(), "prepared_today"), 30);
+    EXPECT_EQ(jint(h.svc->status(), "suggestions"), 4);  // m1, m2 and two above the cap keep Start work
+    // Turned off: nothing is prepared.
+    ASSERT_TRUE(h.svc->configure({{"auto_prepare", false}}));
+    EXPECT_FALSE(jbool(h.svc->status(), "auto_prepare"));
+}
+
+TEST(EventTriage, InformationItemsGetNoThreadAndAreReportedOnce) {
+    Harness h;
+    h.enable({{"auto_prepare", true}});
+    ASSERT_TRUE(h.take({h.message("m1", "XELERATE Release", "[info] The release went out today"),
+                        h.message("m2", "Budget Q4", "Please review the budget")}));
+    ASSERT_TRUE(h.classify());
+    EXPECT_TRUE(h.thread_of("m1").empty());
+    EXPECT_EQ(h.starts.size(), 1u);
+    EXPECT_EQ(jint(h.svc->status(), "info_waiting"), 1);
+    auto d = h.svc->digest();
+    ASSERT_EQ(d.info.size(), 1u);
+    EXPECT_EQ(d.info[0].title, "XELERATE Release");
+    EXPECT_EQ(d.info[0].reason, "Matches your budget work");
+    EXPECT_EQ(d.info[0].from, "Petra Malá <petra.mala@dodavatel-test.example>");
+    ASSERT_EQ(d.action.size(), 1u);
+    EXPECT_EQ(d.action[0].thread_id, h.thread_of("m2"));
+    h.svc->reported(d.info);
+    d = h.svc->digest();
+    EXPECT_TRUE(d.info.empty());
+    EXPECT_EQ(d.action.size(), 1u);  // open action items stay until they are done
+    EXPECT_EQ(jint(h.svc->status(), "info_waiting"), 0);
+}
+
+TEST(EventTriage, ThePreparationOfATeamsItemNeverSendsMail) {
+    const std::string p = triage::prepare_preamble("teams", "conv|msg");
+    EXPECT_NE(p.find("ask_user"), std::string::npos);
+    EXPECT_NE(p.find("cannot send"), std::string::npos);
+    EXPECT_EQ(p.find("mail.send"), std::string::npos);
+    EXPECT_EQ(triage::prepare_preamble("calendar", "e1").find("mail.send"), std::string::npos);
+}
+
+TEST(EventTriage, NoActionNeededIsRecordedCancelsTheRunAndArchives) {
+    Harness h;
+    h.enable({{"auto_prepare", true}});
+    ASSERT_TRUE(h.take({h.message("m1", "Budget Q4", "Please review the budget"), h.message("m2", "Budget Q1", "Please review it")}));
+    ASSERT_TRUE(h.classify());
+    const std::string t = h.thread_of("m1");
+    ASSERT_EQ(jstr(h.svc->suggestion(t), "status"), "started");  // prepared, waiting on its Question card
+    const Status decided = h.svc->no_action(t);
+    ASSERT_TRUE(decided) << decided.error().code << ": " << decided.error().message;
+    EXPECT_EQ(jstr(h.svc->suggestion(t), "status"), "no_action");
+    EXPECT_TRUE(h.cancelled.contains(t));
+    EXPECT_TRUE(h.archived.contains(t));
+    EXPECT_EQ(h.svc->no_action(t).error().code, "not_open");  // once
+    // The Daily report no longer lists it; the other item is still open work.
+    auto d = h.svc->digest();
+    ASSERT_EQ(d.action.size(), 1u);
+    EXPECT_EQ(d.action[0].thread_id, h.thread_of("m2"));
+    // A new revision keeps the decision and starts nothing.
+    const size_t starts = h.starts.size();
+    ASSERT_TRUE(h.take({h.message("m1", "Budget Q4", "Reminder: please review the budget")}));
+    (void)h.classify();
+    EXPECT_EQ(jstr(h.svc->suggestion(t), "status"), "no_action");
+    EXPECT_EQ(h.starts.size(), starts);
+}
+
+// improve-triage-results D10: one event that always gets an invalid response no longer blocks the queue.
+TEST(EventTriage, AnInvalidResponseShrinksTheBatchUntilTheBadEventIsSetAside) {
+    Harness h;
+    h.enable();
+    std::vector<PageChange> changes;
+    for (int i = 0; i < 20; ++i)
+        changes.push_back(h.message("m" + std::to_string(i), "Budget " + std::to_string(i),
+                                    i == 7 ? "Please review the budget [bad]" : "Please review the budget"));
+    ASSERT_TRUE(h.take(changes));
+    for (int attempt = 0; attempt < 20 && h.svc->status()["pending"].get<long long>() > 0; ++attempt) (void)h.classify();
+    EXPECT_EQ(h.svc->status()["pending"].get<long long>(), 0);
+    ASSERT_GE(h.model.batches.size(), 2u);
+    EXPECT_EQ(h.model.batches[0], 20u);
+    EXPECT_EQ(h.model.batches[1], 10u);  // halved after the invalid response, with no doubling wait
+    EXPECT_LE(h.model.requests, 12);
+    EXPECT_NE(std::find(h.model.batches.begin(), h.model.batches.end(), 1u), h.model.batches.end());
+    // The 19 good events have their Threads; the bad one is set aside as uncertain without one.
+    for (int i = 0; i < 20; ++i) EXPECT_EQ(h.thread_of("m" + std::to_string(i)).empty(), i == 7) << i;
+    EXPECT_EQ(h.svc->status()["uncertain"].get<long long>(), 1);
+    // Successful batches double the size again, up to the full batch.
+    const size_t before = h.model.batches.size();
+    std::vector<PageChange> more;
+    for (int i = 20; i < 80; ++i) more.push_back(h.message("m" + std::to_string(i), "Budget " + std::to_string(i), "Please review [not]"));
+    ASSERT_TRUE(h.take(more));
+    for (int attempt = 0; attempt < 12 && h.svc->status()["pending"].get<long long>() > 0; ++attempt) ASSERT_TRUE(h.classify());
+    EXPECT_EQ(h.svc->status()["pending"].get<long long>(), 0);
+    const std::vector<size_t> later(h.model.batches.begin() + static_cast<long>(before), h.model.batches.end());
+    for (size_t i = 1; i < later.size(); ++i)
+        if (later[i - 1] < 20u && later[i] != std::min<size_t>(20u, later[i - 1] * 2)) {
+            // Only the last batch may be smaller: it takes what is left.
+            EXPECT_EQ(i, later.size() - 1) << i;
+        }
+    EXPECT_NE(std::find(later.begin(), later.end(), 20u), later.end());
+}
+
+// An unavailable gateway keeps the batch size and the doubling wait.
+TEST(EventTriage, AnUnavailableGatewayKeepsTheBatchAndBacksOff) {
+    Harness h;
+    h.enable();
+    std::vector<PageChange> changes;
+    for (int i = 0; i < 20; ++i) changes.push_back(h.message("m" + std::to_string(i), "Budget", "Please review"));
+    ASSERT_TRUE(h.take(changes));
+    h.model.fail = true;
+    ASSERT_TRUE(h.classify());
+    ASSERT_TRUE(h.classify());  // 61 s later: the first wait was one minute
+    EXPECT_FALSE(h.classify());  // the second wait is two minutes
+    h.model.fail = false;
+    ASSERT_TRUE(h.classify());
+    EXPECT_EQ(h.model.last_batch, 20u);
 }

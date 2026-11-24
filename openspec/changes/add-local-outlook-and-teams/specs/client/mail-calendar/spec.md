@@ -18,7 +18,19 @@ The client SHALL reach the user's mailbox and calendar through exactly one backe
 - **THEN** mail and calendar tools, Sources and Triggers are unavailable, and the settings section says that classic Outlook was not found
 
 ### Requirement: Local Outlook Backend
-With the Local Outlook backend, the client SHALL access the mailbox and calendar of the user's default classic Outlook profile on the same device, through Outlook's object model, and SHALL provide every behaviour of this capability with it. That includes the mail and calendar tools and their risk classes, the send approval floor, sensitivity labels, exclusions, the sync window, sync, the event feed and offline behaviour. It SHALL NOT open a network connection of its own for mail or calendar.
+With the Local Outlook backend, the client SHALL access the mailbox and calendar of the user's default classic Outlook profile on the same device, through Outlook's object model, and SHALL provide every behaviour of this capability with it. That includes the mail and calendar tools and their risk classes, the send approval floor, sensitivity labels, exclusions, the sync window, sync, the event feed and offline behaviour. It SHALL NOT open a network connection of its own for mail or calendar. Because Outlook answers on its own window thread, a sync cycle SHALL NOT read items that have not changed since the last cycle. It SHALL NOT list a mail folder, or read the calendar again, while that folder's item count and newest modification are unchanged, and it SHALL list folder contents in batches rather than one call per item. It SHALL try again an item that Outlook could not read only after that item changes.
+
+#### Scenario: Quiet sync cycle
+- **WHEN** a sync cycle runs and no message has arrived, changed or been removed in any synced folder since the last cycle
+- **THEN** the cycle lists no folder contents and opens no message
+
+#### Scenario: Unchanged calendar
+- **WHEN** a sync cycle runs and no item in the Outlook calendar has been added, changed or removed since the last cycle
+- **THEN** the cycle reads no calendar items, and the calendar copy stays as it is
+
+#### Scenario: Item Outlook cannot read
+- **WHEN** Outlook cannot read a message, such as an encrypted message whose certificate is not available
+- **THEN** the message is skipped and logged once, it is not read again until it changes, and its later deletion is still reported
 
 #### Scenario: Same tool behaviour
 - **WHEN** the agent calls mail.search, mail.read or calendar.list on the Local Outlook backend

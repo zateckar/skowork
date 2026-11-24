@@ -130,6 +130,25 @@ std::string to_hex_key(const std::map<std::string, std::string>& m) {
     return j.dump();
 }
 
+// The snapshot entry for Outlook's fingerprint of a folder or the calendar; never an item id.
+constexpr const char* kStampKey = "\x01stamp";
+
+// The calendar view in slices of 30 days (fix: one call over the default window of 455 days, with about a thousand
+// occurrences of large meetings, exceeded the 60-second Outlook call limit). Occurrences are listed once, by id.
+Result<std::vector<OlEvent>> events_in_slices(OutlookSession& s, long long from, long long to, size_t limit) {
+    constexpr long long kSlice = 30LL * 86'400'000;
+    std::vector<OlEvent> out;
+    std::set<std::string> seen;
+    for (long long a = from; a < to && out.size() < limit; a += kSlice) {
+        const long long b = std::min(to, a + kSlice);
+        auto part = s.events(a, b, limit - out.size());
+        if (!part) return part.error();
+        for (auto& e : *part)
+            if (seen.insert(e.id).second) out.push_back(std::move(e));
+    }
+    return out;
+}
+
 }  // namespace
 
 std::string occurrence_id(const std::string& series_id, const std::string& local_stamp) { return series_id + "." + local_stamp; }
@@ -300,12 +319,25 @@ Result<json> OutlookGraph::folders() {
 
 Result<json> OutlookGraph::folder_delta(const std::string& folder_id, long long since, bool initial, int page_size) {
     const std::string key = "folder:" + folder_id;
-    auto rows = s_.rows(folder_id, since);
-    if (!rows) return rows.error();
+    // As for the calendar: an unchanged folder is not listed at all (fix: listing every folder every cycle kept Outlook
+    // busy for half a minute). A message that only ages out of the window is reported once the folder next changes.
+    std::string stamp;
+    if (auto st = s_.folder_stamp(folder_id); st) stamp = *st;
     const auto old = initial ? std::map<std::string, std::string>{} : load_snapshot(key);
     Sequence seq;
     seq.key = key;
     seq.folder_id = folder_id;
+    seq.delta_link = delta_link("folder", folder_id, std::to_string(since));
+    if (!initial && !stamp.empty())
+        if (const auto it = old.find(kStampKey); it != old.end() && it->second == stamp) {
+            seq.snapshot = old;
+            const std::string seq_id = std::to_string(next_seq_++);
+            sequences_[seq_id] = std::move(seq);
+            return next_page(seq_id, page_size);
+        }
+    auto rows = s_.rows(folder_id, since);
+    if (!rows) return rows.error();
+    if (!stamp.empty()) seq.snapshot[kStampKey] = stamp;
     for (const auto& r : *rows) {
         const std::string ck = std::to_string(r.modified);
         seq.snapshot[r.id] = ck;
@@ -318,8 +350,7 @@ Result<json> OutlookGraph::folder_delta(const std::string& folder_id, long long 
     }
     if (!initial)
         for (const auto& [id, ck] : old)
-            if (!seq.snapshot.count(id)) seq.ready.push_back({{"id", id}, {"@removed", {{"reason", "deleted"}}}});
-    seq.delta_link = delta_link("folder", folder_id, std::to_string(since));
+            if (id != kStampKey && !seq.snapshot.count(id)) seq.ready.push_back({{"id", id}, {"@removed", {{"reason", "deleted"}}}});
     const std::string seq_id = std::to_string(next_seq_++);
     sequences_[seq_id] = std::move(seq);
     return next_page(seq_id, page_size);
@@ -327,11 +358,24 @@ Result<json> OutlookGraph::folder_delta(const std::string& folder_id, long long 
 
 Result<json> OutlookGraph::calendar_delta(long long from, long long to, bool initial, int page_size) {
     const std::string key = "calendar";
-    auto events = s_.events(from, to, kMaxCalendarItems);
-    if (!events) return events.error();
+    // The fingerprint is read before the events, so a change made while they are read shows as a new stamp next time.
+    // Without one (an older session or a failed call) the calendar is read as before.
+    std::string stamp;
+    if (auto st = s_.calendar_stamp(); st) stamp = *st;
     const auto old = initial ? std::map<std::string, std::string>{} : load_snapshot(key);
     Sequence seq;
     seq.key = key;
+    seq.delta_link = delta_link("calendar", std::to_string(from), std::to_string(to));
+    if (!initial && !stamp.empty())
+        if (const auto it = old.find(kStampKey); it != old.end() && it->second == stamp) {
+            seq.snapshot = old;  // nothing changed in Outlook: an empty delta, and no event is read
+            const std::string seq_id = std::to_string(next_seq_++);
+            sequences_[seq_id] = std::move(seq);
+            return next_page(seq_id, page_size);
+        }
+    auto events = events_in_slices(s_, from, to, kMaxCalendarItems);
+    if (!events) return events.error();
+    if (!stamp.empty()) seq.snapshot[kStampKey] = stamp;
     for (const auto& e : *events) {
         // The Jet restriction parses dates in the user's locale; anything outside the window in UTC is dropped here.
         if (e.end <= from || e.start >= to) continue;
@@ -343,8 +387,7 @@ Result<json> OutlookGraph::calendar_delta(long long from, long long to, bool ini
     }
     if (!initial)
         for (const auto& [id, ck] : old)
-            if (!seq.snapshot.count(id)) seq.ready.push_back({{"id", id}, {"@removed", {{"reason", "deleted"}}}});
-    seq.delta_link = delta_link("calendar", std::to_string(from), std::to_string(to));
+            if (id != kStampKey && !seq.snapshot.count(id)) seq.ready.push_back({{"id", id}, {"@removed", {{"reason", "deleted"}}}});
     const std::string seq_id = std::to_string(next_seq_++);
     sequences_[seq_id] = std::move(seq);
     return next_page(seq_id, page_size);
@@ -372,11 +415,12 @@ Result<json> OutlookGraph::next_page(const std::string& seq_id, int page_size) {
                 continue;
             }
             if (m.error().code == "bad_request") {
-                // An item Outlook cannot read now: skipped instead of stalling the folder's sync for good. Its snapshot
-                // key no longer matches any change key, so the next cycle fetches it again, and a later deletion is
+                // An item Outlook cannot read (an encrypted message without the user's certificate, for one): skipped
+                // instead of stalling the folder's sync for good. Its snapshot keeps the item's change key, so it is
+                // tried again only once it changes (fix: retrying every unreadable item every cycle made Outlook run
+                // its security checks on its UI thread every few minutes, and Outlook froze), and a later deletion is
                 // still reported.
                 log::warn("outlook", "skipped an item that could not be read: " + m.error().message);
-                seq.snapshot[id] = "\x01unreadable";
                 continue;
             }
             seq.to_fetch.push_back(id);  // retried by the next attempt of this page
@@ -577,7 +621,7 @@ Result<json> OutlookGraph::route(const std::string& method, const std::string& p
         if (!from || !to || *to <= *from) return bad("calendarView needs startDateTime and endDateTime");
         if (n == 3 && seg[2] == "delta") return calendar_delta(*from, *to, true, page_size);
         if (n == 2) {
-            auto events = s_.events(*from, *to, kMaxCalendarItems);
+            auto events = events_in_slices(s_, *from, *to, kMaxCalendarItems);
             if (!events) return events.error();
             json v = json::array();
             for (const auto& e : *events)

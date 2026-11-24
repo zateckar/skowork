@@ -103,6 +103,12 @@ public:
     virtual Result<std::vector<OlFolder>> folders() = 0;
     // Messages of a folder received at or after `received_since`, from the folder table (no item is opened).
     virtual Result<std::vector<OlRow>> rows(const std::string& folder_id, long long received_since) = 0;
+    // A cheap fingerprint of a folder (item count and newest modification) that changes whenever a message in it is
+    // added, changed or removed; empty when unknown, meaning "list the folder".
+    virtual Result<std::string> folder_stamp(const std::string& folder_id) {
+        (void)folder_id;
+        return std::string();
+    }
     virtual Result<OlMessage> message(const std::string& id) = 0;
     virtual Result<std::vector<OlMessage>> find(const MessageQuery& q) = 0;
     virtual Result<std::vector<OlAttachment>> attachments(const std::string& message_id) = 0;
@@ -120,6 +126,9 @@ public:
 
     // Events overlapping [from, to), recurring series expanded into occurrences, by start; at most `limit`.
     virtual Result<std::vector<OlEvent>> events(long long from, long long to, size_t limit) = 0;
+    // A cheap fingerprint of the calendar folder (item count and newest modification) that changes whenever any item,
+    // series or exception in it is added, changed or removed; empty when unknown, meaning "read the calendar".
+    virtual Result<std::string> calendar_stamp() { return std::string(); }
     virtual Result<OlEvent> event(const std::string& id) = 0;
     // Creates (empty id) or changes an event; with attendees it becomes a meeting and invitations or updates are sent.
     virtual Result<OlEvent> save_event(const std::string& id, const EventPatch& p) = 0;

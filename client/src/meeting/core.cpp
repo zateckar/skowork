@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <set>
 
 namespace wb::meeting {
@@ -279,6 +280,12 @@ std::optional<TrackKind> track_kind(std::string_view s) {
     if (s == "system") return TrackKind::system;
     if (s == "mic") return TrackKind::mic;
     return std::nullopt;
+}
+
+int pcm_peak(const std::int16_t* pcm, size_t n) {
+    int peak = 0;
+    for (size_t i = 0; i < n; ++i) peak = std::max(peak, std::abs(static_cast<int>(pcm[i])));
+    return peak;
 }
 
 std::vector<std::uint8_t> encode_header(const ContainerHeader& h) {

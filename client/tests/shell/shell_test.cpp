@@ -8114,7 +8114,7 @@ TEST(ShellTriage, SettingsSectionAndSuggestionCard) {
             json results = json::array();
             const json data = parse_json(r.messages.at(1).content).value_or(json::object());
             for (const auto& e : data.value("events", json::array()))
-                results.push_back({{"id", jstr(e, "id")}, {"revision", jstr(e, "revision")}, {"outcome", "relevant"}, {"reason", "Budget owner"}});
+                results.push_back({{"id", jstr(e, "id")}, {"revision", jstr(e, "revision")}, {"outcome", "relevant"}, {"reason", "Budget owner"}, {"action", "required"}, {"category", "request"}});
             model::ChatResponse out;
             out.finish_reason = "stop";
             out.text = json{{"results", results}}.dump();
@@ -8158,6 +8158,9 @@ TEST(ShellTriage, SettingsSectionAndSuggestionCard) {
     ASSERT_TRUE(w.until([&] { return w.exists("triage-folder-inbox") && w.exists("triage-baseline"); }));
     EXPECT_TRUE(w.exists("triage-calendar"));
     EXPECT_TRUE(w.exists("triage-delete"));
+    // Automatic preparation is on by default (improve-triage-results); this test follows Start work, so it turns it off.
+    ASSERT_TRUE(w.with("triage-auto-prepare", [](ui::Node& n) { return n.focusable && n.enabled; }));
+    ASSERT_TRUE(w.with("triage-auto-prepare", [](ui::Node& n) { n.toggle(); return true; }));
     // Responsibilities: typed and saved, kept by the host.
     ASSERT_TRUE(w.with("triage-responsibilities", [](ui::Node& n) {
         auto& field = static_cast<ui::TextField&>(n);
@@ -8195,6 +8198,13 @@ TEST(ShellTriage, SettingsSectionAndSuggestionCard) {
     ASSERT_TRUE(w.until([&] { return w.exists("thread-suggestion-status"); }));
     EXPECT_EQ(started, std::vector<std::string>{thread});
     EXPECT_FALSE(w.exists("thread-suggestion-start"));
+    // Regression (crash 2026-11-24): a triage change after leaving the Thread for a view without one must not rebuild
+    // the card of the pane's previous children. Then the card comes back when the Thread opens again.
+    w.run([&] { w.main().open("#/inbox"); });
+    ASSERT_TRUE(w.until([&] { return !w.exists("thread-suggestion"); }));
+    for (int i = 0; i < 3; ++i) w.run([&] { w.main().emit("triage.changed", json::object()); });
+    w.run([&] { w.main().open(shell::thread_hash(thread)); });
+    ASSERT_TRUE(w.until([&] { return w.exists("thread-suggestion-status"); }));
     window = nullptr;
 }
 

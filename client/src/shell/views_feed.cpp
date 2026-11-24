@@ -760,8 +760,11 @@ void FeedView::add_citations(Node& wrap, const std::vector<Citation>& citations,
                 if (up->open_link) up->open_link(ui::to_utf16(ref));  // asks first, shows the URL
             } else {
                 // A file of the files Source: the host opens it only if it is an indexed item.
-                shell_.call("knowledge.open", {{"ref", ref}}, [this](Result<json> r) {
-                    if (!r) shell_.announce(shell_.t("feed.citation_unavailable", {{"reason", ui::to_utf16(r.error().message)}}));
+                // The view may be gone when the answer comes (another Thread opened): check before touching it.
+                std::weak_ptr<int> alive = alive_;
+                shell_.call("knowledge.open", {{"ref", ref}}, [this, alive](Result<json> r) {
+                    if (alive.lock() && !r)
+                        shell_.announce(shell_.t("feed.citation_unavailable", {{"reason", ui::to_utf16(r.error().message)}}));
                 });
             }
         };
@@ -800,6 +803,19 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
     ui::Ui& u = shell_.ui();
     switch (it.type) {
     case ItemType::user: {
+        if (!it.source_kind.empty()) {
+            // Collapsed Source Message: the mail, event or message the Run started from, shown on demand.
+            const std::string key = it.key;
+            const std::string sk = "feed.source." + it.source_kind;
+            const std::u16string title = shell_.ui().strings.has(sk) ? shell_.t(sk) : shell_.t("feed.source.other");
+            auto card = std::make_unique<ui::Card>(u, id_of("source-", it.key), title, true, expanded_.contains(key));
+            card->on_expand = [this, key](bool on) {
+                if (on) expanded_.insert(key);
+                else expanded_.erase(key);
+            };
+            card->body().emplace<ui::MarkdownView>(u, title, id_of("source-text-", it.key))->set_plain(ui::to_utf16(it.text));
+            return card;
+        }
         auto row = std::make_unique<Node>(id_of("msg-", it.key));
         row->padding.left = 48;
         auto* msg = row->emplace<ui::Box>(std::string(), Paint::accent_surface, 8, Paint::border);  // the user's own, tinted

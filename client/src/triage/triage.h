@@ -1,7 +1,8 @@
 // client/event-triage (improve-proactive-durable-work design D1, D2): opt-in triage of eligible mail and calendar
-// changes into reviewable suggestion Threads. The mail sync's page transaction takes changes in (take_in); one
-// background worker classifies pending events in bounded batches through the gateway's small role; a relevant item gets
-// a system-origin Thread the user can dismiss or start work from. A suggestion never starts a Run by itself.
+// changes into results. The mail sync's page transaction takes changes in (take_in); one background worker classifies
+// pending events in bounded batches through the gateway's small role. A relevant item that needs action gets a
+// system-origin Thread, prepared automatically by a read-only Unattended run (improve-triage-results D2); one for
+// information waits for the Daily report (D3).
 #pragma once
 
 #include "base/json.h"
@@ -17,6 +18,7 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -29,13 +31,27 @@ inline constexpr size_t kBatch = 20;
 inline constexpr long long kGatherMs = 30'000;
 inline constexpr long long kIntervalMs = 60'000;
 inline constexpr long long kMaxBackoffMs = 3'600'000;
+// improve-triage-results D10: the reason stored for an event set aside after an invalid response on its own.
+inline constexpr const char* kSetAsideReason = "Triage could not classify this item.";
 inline constexpr size_t kMaxResponsibilities = 4096;
 inline constexpr size_t kMaxEventText = 8192;
+inline constexpr long long kDailyPreparations = 30;
+inline constexpr long long kInfoKeepMs = 7LL * 86'400'000;
+
+// A Teams message as triage sees it (add-teams-triage): read live from the local Teams copy (client/teams-chats).
+struct TriageChat {
+    std::string conversation, sender, text;
+    long long at_ms = 0;
+    bool addressed = false;  // a one-to-one chat, or a mention of the user
+    bool mine = false, system = false;
+};
 
 struct TriageEnv {
     Database* db = nullptr;
     const Clock* clock = nullptr;
     mail::MailStore* mail = nullptr;
+    // Teams scope item ids are "<conversation id>|<message id>". Empty when Teams chats are off, excluded or gone.
+    std::function<std::optional<TriageChat>(const std::string& conversation_id, const std::string& message_id)> teams;
     model::IChatModel* model = nullptr;
     std::function<bool()> background_paused;  // Pause background work (client/desktop-host)
     // A Thread with origin system and this origin ref, unread.
@@ -45,9 +61,19 @@ struct TriageEnv {
     std::function<Status(const std::string& thread_id)> delete_thread;
     std::function<Status(const std::string& thread_id, const json& ref)> set_origin_ref;
     std::function<Result<std::string>(const std::string& thread_id, const std::string& text, const runtime::StartOptions& options)> start_run;
+    // policy.unattended.allowed_risk includes read: automatic preparation may run (improve-triage-results D2).
+    std::function<bool()> unattended_may_read;
+    // The local day of a moment, "YYYY-MM-DD", for the daily preparation cap; UTC when unset.
+    std::function<std::string(long long ms)> local_day;
+    // No action needed (improve-triage-results D7): cancel the Thread's active Run, if any, and archive the Thread.
+    std::function<void(const std::string& thread_id)> cancel_runs;
+    std::function<Status(const std::string& thread_id)> archive_thread;
     // Settings, status or a suggestion changed (the UI reloads).
     std::function<void()> changed;
 };
+
+// The instruction of an automatic preparation Run for an item of this scope (improve-triage-results D2, D6).
+std::string prepare_preamble(const std::string& scope, const std::string& item_id);
 
 class TriageService {
 public:
@@ -74,6 +100,8 @@ public:
     // ---- intake ----
     // The mail sync's page sink: runs inside the page transaction.
     Status take_in(const std::vector<mail::PageChange>& changes);
+    // A Teams message event (client/teams-chats Teams Event Feed): kind teams.message | teams.updated | teams.deleted.
+    Status take_in_teams(const std::string& kind, const std::string& conversation_id, const std::string& message_id);
     // After a complete sync cycle: the baseline completes, items no longer eligible are withdrawn, old events expire.
     void cycle_completed();
     // Withdraws everything that is no longer eligible (after a settings change, disconnect or exclusion).
@@ -85,8 +113,23 @@ public:
     // Claims the open suggestion and starts an ordinary Run with the source as untrusted content. Fails "not_open".
     Result<std::string> start_work(const std::string& thread_id);
     Status dismiss(const std::string& thread_id);
+    // No action needed: records the decision on an open or started item, cancels the Thread's Run and archives the
+    // Thread. Later revisions keep the decision. Fails "not_open" for any other item.
+    Status no_action(const std::string& thread_id);
     // The user deleted a suggestion Thread: the item counts as dismissed for its current revision and loses the link.
     Status thread_deleted(const std::string& thread_id);
+
+    // ---- the Daily report (improve-triage-results D3) ----
+    struct DigestItem {
+        std::string thread_id, title, from, at, reason, category, scope, item_id;
+    };
+    struct Digest {
+        std::vector<DigestItem> info, action;
+    };
+    // Unreported information items of the last 7 days and the open action items.
+    Digest digest();
+    // The report included these information items.
+    void reported(const std::vector<DigestItem>& info);
 
     // One worker step: true when a classification request was made (tests drive it directly).
     bool step();
@@ -96,7 +139,7 @@ public:
 
 private:
     struct Settings {
-        bool enabled = false, calendar = false;
+        bool enabled = false, calendar = false, teams = false, auto_prepare = true;
         std::vector<std::string> folders;
         std::string responsibilities;
     };
@@ -109,9 +152,14 @@ private:
     bool eligible(const Settings& s, const std::string& scope, const std::string& item_id);
     std::string source_text(const std::string& scope, const std::string& item_id);
     std::string source_title(const std::string& scope, const std::string& item_id);
+    std::optional<TriageChat> chat(const std::string& item_id);
+    bool exists(const std::string& scope, const std::string& item_id);
     // Withdraws the item's suggestion (or forgets the row when it has none).
     Status withdraw(const std::string& scope, const std::string& item_id);
     Status expire(long long now);
+    // Starts the read-only preparation of an action item's Thread when allowed (D2); false when it stays a suggestion.
+    bool prepare(const std::string& thread_id, const std::string& scope, const std::string& item_id);
+    std::string day_of(long long ms);
     void notify();
     void run();
 

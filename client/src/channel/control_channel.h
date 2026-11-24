@@ -37,6 +37,11 @@ struct PushEnvelope {
 // Validates and normalises an envelope (timestamps given in seconds or milliseconds). Exposed for tests.
 std::optional<PushEnvelope> parse_envelope(const std::string& text);
 
+// Whether an error from the control plane is its own revocation (client/control-channel Remote Session Revocation):
+// the codes "revoked" and "denied". A bare "http_403" is a refusal by the network in front of the control plane (a proxy,
+// firewall or gateway) and only a connection failure. Exposed for tests.
+bool locks_installation(const std::string& error_code);
+
 class ControlChannel {
 public:
     struct Hooks {

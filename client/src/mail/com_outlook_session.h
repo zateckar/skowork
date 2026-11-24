@@ -41,6 +41,8 @@ public:
     Result<OlMessage> move(const std::string& id, const std::string& folder_id) override;
     Status remove(const std::string& id) override;
     Result<std::vector<OlEvent>> events(long long from, long long to, size_t limit) override;
+    Result<std::string> calendar_stamp() override;
+    Result<std::string> folder_stamp(const std::string& folder_id) override;
     Result<OlEvent> event(const std::string& id) override;
     Result<OlEvent> save_event(const std::string& id, const EventPatch& p) override;
     Status respond(const std::string& id, const std::string& response, const std::string& comment) override;

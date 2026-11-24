@@ -107,6 +107,10 @@ void PagePane::build_triage(Node& c) {
         })->enabled = busy_.empty();
         setting_switch(c, "triage-calendar", shell_.t("settings.triage.calendar"), jbool(s, "calendar"), false,
                        [configure](bool v) { configure({{"calendar", v}}, "settings.triage.saved"); });
+        setting_switch(c, "triage-teams", shell_.t("settings.triage.teams"), jbool(s, "teams"), false,
+                       [configure](bool v) { configure({{"teams", v}}, "settings.triage.saved"); });
+        setting_switch(c, "triage-auto-prepare", shell_.t("settings.triage.auto_prepare"), jbool(s, "auto_prepare", true), false,
+                       [configure](bool v) { configure({{"auto_prepare", v}}, "settings.triage.saved"); });
 
         // Responsibilities: what the model classifies against.
         c.emplace<ui::Label>(shell_.ui(), shell_.t("settings.triage.responsibilities"), TextStyle::body_strong)->role = ui::Role::heading;
@@ -212,7 +216,7 @@ void ThreadPane::rebuild_suggestion() {
     const std::string scope = jstr(s, "scope");
     suggestion_->emplace<ui::Label>(
         shell_.ui(),
-        shell_.t(scope == "calendar" ? "thread.suggestion.event" : "thread.suggestion.message",
+        shell_.t(scope == "calendar" ? "thread.suggestion.event" : scope == "teams" ? "thread.suggestion.teams" : "thread.suggestion.message",
                  {{"subject", u16(jstr(*src, "subject"))}, {"from", u16(jstr(*src, "from"))}, {"at", when(jstr(*src, "at"))}}),
         TextStyle::body, Paint::text, true, "thread-suggestion-source");
     if (const std::string reason = jstr(s, "reason"); !reason.empty())
@@ -221,31 +225,38 @@ void ThreadPane::rebuild_suggestion() {
     auto* actions = suggestion_->emplace<Node>("thread-suggestion-actions");
     actions->axis = ui::Axis::row;
     actions->gap = 8;
+    const std::string thread = suggestion_thread_;
+    const auto run = [this, thread](const char* method, const char* said) {
+        suggestion_busy_ = true;
+        rebuild_suggestion();
+        std::weak_ptr<int> alive = alive_;
+        shell_.call(method, {{"thread_id", thread}}, [this, alive, said](Result<json> res) {
+            if (!alive.lock()) return;
+            suggestion_busy_ = false;
+            if (res) shell_.announce(shell_.t(said));
+            else shell_.announce(shell_.t("thread.suggestion.failed", {{"reason", u16(res.error().message)}}));
+            load_suggestion();
+        });
+    };
     if (status == "open") {
-        const std::string thread = suggestion_thread_;
         auto* start = actions->emplace<ui::Button>(shell_.ui(), "thread-suggestion-start", shell_.t("thread.suggestion.start"), ui::Button::Kind::primary);
         start->width = ui::Sizing::fit;
         start->enabled = !suggestion_busy_;
         auto* dismiss = actions->emplace<ui::Button>(shell_.ui(), "thread-suggestion-dismiss", shell_.t("thread.suggestion.dismiss"));
         dismiss->width = ui::Sizing::fit;
         dismiss->enabled = !suggestion_busy_;
-        const auto run = [this, thread](const char* method, const char* said) {
-            suggestion_busy_ = true;
-            rebuild_suggestion();
-            std::weak_ptr<int> alive = alive_;
-            shell_.call(method, {{"thread_id", thread}}, [this, alive, said](Result<json> res) {
-                if (!alive.lock()) return;
-                suggestion_busy_ = false;
-                if (res) shell_.announce(shell_.t(said));
-                else shell_.announce(shell_.t("thread.suggestion.failed", {{"reason", u16(res.error().message)}}));
-                load_suggestion();
-            });
-        };
         start->on_click = [run] { run("triage.start", "thread.suggestion.started"); };
         dismiss->on_click = [run] { run("triage.dismiss", "thread.suggestion.dismissed"); };
     } else {
         actions->emplace<ui::Label>(shell_.ui(), shell_.t("thread.suggestion.status_" + status), TextStyle::caption, Paint::text_secondary, false,
                                     "thread-suggestion-status");
+    }
+    if (status == "open" || status == "started") {
+        // No action needed (improve-triage-results D7): recorded, the Run cancelled and the Thread archived.
+        auto* none = actions->emplace<ui::Button>(shell_.ui(), "thread-suggestion-no-action", shell_.t("thread.suggestion.no_action"));
+        none->width = ui::Sizing::fit;
+        none->enabled = !suggestion_busy_;
+        none->on_click = [run] { run("triage.no_action", "thread.suggestion.no_action_done"); };
     }
     if (const std::string link = jstr(*src, "link"); !link.empty()) {
         auto* open = actions->emplace<ui::Button>(shell_.ui(), "thread-suggestion-open", shell_.t("thread.suggestion.open_source"),

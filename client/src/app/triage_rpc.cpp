@@ -42,6 +42,11 @@ void register_triage_rpc(RpcRegistry& rpc, std::function<triage::TriageService*(
         if (!t) return t.error();
         return done((*t)->dismiss(jstr(p, "thread_id")));
     });
+    rpc.add("triage.no_action", RpcExposure::ui, [get, done](const json& p) -> Result<json> {
+        auto t = get();
+        if (!t) return t.error();
+        return done((*t)->no_action(jstr(p, "thread_id")));
+    });
     rpc.add("triage.start", RpcExposure::ui, [get](const json& p) -> Result<json> {
         auto t = get();
         if (!t) return t.error();

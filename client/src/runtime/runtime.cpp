@@ -888,12 +888,16 @@ private:
                                                                     {"wall_minutes", limits().wall_minutes}}}};
             const auto seq = store_.append_event(id_, "run_limit", limit);
             emit("run_limit", limit, seq ? *seq : 0);
+            compact_after_answer();
+            if (stopped()) return false;
             end(RunState::succeeded, "");
             finished_ = true;
             return false;
         }
         if (resp.tool_calls.empty()) {
             if (cut) return continue_after_output_limit(req.max_tokens.value_or(0), resp);
+            compact_after_answer();
+            if (stopped()) return false;
             end(RunState::succeeded, "");
             finished_ = true;
             return false;
@@ -953,6 +957,20 @@ private:
         // Restore the image messages if compaction failed before rebuilding the request.
         req.messages = conv_;
         req.messages.insert(req.messages.end(), extra.begin(), extra.end());
+    }
+
+    // Compaction After The Final Answer (fix-idle-thread-compaction D1-D3): the trigger is otherwise checked only before a
+    // request, so a final answer could leave the idle Thread at or above it until the next message. The next request's
+    // view (main role, the conversation with the answer, the current tools) goes through the same check. A failure is
+    // recorded by compact_now and does not change the Run's outcome; the answer is complete.
+    void compact_after_answer() {
+        if (is_child_ || stopped()) return;
+        model::ChatRequest next;
+        next.role = rt_.cfg_.role;
+        next.tools = turn_tools();
+        next.messages = conv_;
+        next.max_tokens = rt_.output_limit(next.role);
+        maybe_compact(next);
     }
 
     // Returns true when the conversation was compacted.

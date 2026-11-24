@@ -23,6 +23,10 @@ json services_json(const Services& s) {
 
 }  // namespace
 
+bool locks_installation(const std::string& error_code) {
+    return iequals(error_code, "revoked") || iequals(error_code, "denied");
+}
+
 const std::set<std::string>& registered_push_types() {
     static const std::set<std::string> types = {"revocation",    "minimum-version", "policy-changed",
                                                 "skills-changed", "skill-revoked",   "remote-task",
@@ -167,9 +171,13 @@ Status ControlChannel::ensure_registered() {
     if (const auto upn = tokens_.user_principal(); !upn.empty()) info.user_principal = upn;
     auto r = cp_.register_installation(info);
     if (!r) {
-        if (iequals(r.error().code, "http_403") || iequals(r.error().code, "revoked") || iequals(r.error().code, "denied"))
+        if (locks_installation(r.error().code)) {
             set_locked(true);
-        if (iequals(r.error().code, "revoked") || iequals(r.error().code, "denied")) tokens_.end_offline_session_revoked();
+            tokens_.end_offline_session_revoked();
+        } else if (iequals(r.error().code, "http_403")) {
+            log::warn(kLog, "the network refused the connection to the control plane (HTTP 403 without a Skowork error); "
+                            "not a revocation, retrying");
+        }
         return r.error();
     }
     if (r->revoked) {
@@ -229,12 +237,13 @@ void ControlChannel::push_loop() {
             const auto& code = ws.error().code;
             if (code == "http_401") tokens_.refresh_after_unauthorized(*token);
             if (code == "http_403") {
-                // Revoked or denied: re-register to learn which, then stay locked.
+                // Revoked, or refused by the network in front of the control plane: re-register to learn which.
+                // ensure_registered locks only on the control plane's own revocation.
                 {
                     const std::lock_guard lock(mx_);
                     registered_ = false;
                 }
-                if (Status s = ensure_registered(); !s && !iequals(s.error().code, "revoked")) set_locked(true);
+                (void)ensure_registered();
             }
             const auto d = backoff.next();
             log::info(kLog, "push connect failed (" + code + "); retry in " + std::to_string(d.count()) + " ms");
@@ -470,7 +479,7 @@ void ControlChannel::tick_loop() {
                 if (!hb->min_version.empty() && hb->min_version != min_version()) apply_min_version(hb->min_version);
             } else {
                 log::warn(kLog, "heartbeat failed: " + hb.error().message);
-                if (iequals(hb.error().code, "http_403") || iequals(hb.error().code, "denied")) set_locked(true);
+                if (locks_installation(hb.error().code)) set_locked(true);
             }
         }
     }

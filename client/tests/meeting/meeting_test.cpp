@@ -71,6 +71,39 @@ std::vector<Process> teams_tree() {
 
 // ---- core ----------------------------------------------------------------------------------------------------------------
 
+// fix-teams-remote-audio: the remote track leaves a deaf process loopback for the app's output device.
+TEST(MeetingCore, LoopbackFallbackSwitchesWhenOnlyTheDeviceHearsTheCall) {
+    LoopbackFallback f;
+    for (int i = 0; i < 290; ++i) {  // 2.9 s of 10 ms packets: process loopback idles at peak 1, the device carries speech
+        f.process_packet(1);
+        f.device_packet(20'000, 160, 16000);
+    }
+    EXPECT_FALSE(f.should_switch());
+    f.process_packet(0);
+    f.device_packet(20'000, 1600, 16000);
+    EXPECT_TRUE(f.should_switch());
+    EXPECT_FALSE(f.process_works());
+}
+
+TEST(MeetingCore, LoopbackFallbackStaysWhenProcessLoopbackWorks) {
+    LoopbackFallback f;
+    f.process_packet(5'000);
+    for (int i = 0; i < 1000; ++i) f.device_packet(20'000, 160, 16000);
+    EXPECT_TRUE(f.process_works());
+    EXPECT_FALSE(f.should_switch());
+}
+
+TEST(MeetingCore, LoopbackFallbackIgnoresAQuietDevice) {
+    LoopbackFallback f;
+    for (int i = 0; i < 10'000; ++i) {  // 100 s of a quiet meeting: device noise floor only
+        f.process_packet(0);
+        f.device_packet(120, 160, 16000);
+    }
+    EXPECT_FALSE(f.should_switch());
+    const std::int16_t pcm[] = {3, -7, 250, -31000, 12};
+    EXPECT_EQ(pcm_peak(pcm, 5), 31000);
+}
+
 TEST(MeetingCore, PolicyDefaultsAndMalformedValues) {
     auto c = parse_config(lookup(json::object()));
     ASSERT_TRUE(c);

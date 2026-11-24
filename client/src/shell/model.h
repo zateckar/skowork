@@ -43,6 +43,32 @@ inline std::string origin_badge_key(const ThreadEntry& e) {
     return "list.origin." + e.origin_kind;
 }
 
+// A triage Thread (client/work-inbox Triage Thread Badges): the string key of its category badge instead of the system
+// origin badge; nullopt for any other Thread. Threads from before improve-triage-results have no category. The status is
+// the one "Needs your action" badge (design D8): needs_action also covers an action Thread that has not had a Run yet,
+// which has no Action item.
+struct TriageBadges {
+    std::string category;
+    bool needs_action = false;
+};
+inline std::optional<TriageBadges> triage_badges(const ThreadEntry& e) {
+    if (e.origin_kind != "system" || !e.origin_ref.is_object() || !e.origin_ref.contains("kind") || e.origin_ref["kind"] != "triage")
+        return std::nullopt;
+    TriageBadges b;
+    if (const auto it = e.origin_ref.find("category"); it != e.origin_ref.end() && it->is_string() && !it->get<std::string>().empty())
+        b.category = "list.triage.category." + it->get<std::string>();
+    const auto action = e.origin_ref.find("action");
+    const bool required = action != e.origin_ref.end() && action->is_string() && action->get<std::string>() == "required";
+    b.needs_action = e.has_action || (required && !e.running && e.last_run_state.empty());
+    return b;
+}
+
+// Whether the entry shows "Needs your action": an open Action item, or a triage action Thread waiting for work.
+inline bool needs_action(const ThreadEntry& e) {
+    if (const auto tb = triage_badges(e)) return tb->needs_action;
+    return e.has_action;
+}
+
 struct Counts {
     long long unread = 0, action = 0, running = 0;
 };
