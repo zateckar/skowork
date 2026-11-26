@@ -760,6 +760,25 @@ CREATE INDEX decision_log_at ON decision_log(at);
         {2801, R"sql(
 ALTER TABLE meetings ADD COLUMN speaker_meta TEXT NOT NULL DEFAULT '{}';
 )sql"},
+        // The instructions that produced a triage result or an Agenda item (add-evaluation-export design D3); rows
+        // written before this read unknown.
+        {2802, R"sql(
+ALTER TABLE triage_items ADD COLUMN instruction_id TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE agenda_items ADD COLUMN instruction_id TEXT NOT NULL DEFAULT 'unknown';
+)sql"},
+        // Daily quality counters until telemetry takes them, and the items already counted once (design D9).
+        {2803, R"sql(
+CREATE TABLE quality_counts(
+  day TEXT NOT NULL,
+  step TEXT NOT NULL,
+  counter TEXT NOT NULL,
+  category TEXT NOT NULL,
+  action TEXT NOT NULL,
+  instruction_id TEXT NOT NULL,
+  value INTEGER NOT NULL,
+  PRIMARY KEY(day, step, counter, category, action, instruction_id));
+CREATE TABLE quality_marks(kind TEXT NOT NULL, ref TEXT NOT NULL, PRIMARY KEY(kind, ref));
+)sql"},
     };
     return migrations;
 }

@@ -3,6 +3,7 @@
 // and deletion, on a real encrypted app.db.
 #include "agenda/service.h"
 #include "eval/decision_log.h"
+#include "eval/registry.h"
 #include "app/agenda_intake.h"
 #include "base/time.h"
 #include "platform/crypto.h"
@@ -641,4 +642,18 @@ TEST(AgendaService, DecisionsAreLogged) {
     EXPECT_EQ(log[2].kind, "agenda_dismiss");
     EXPECT_EQ(log[2].result_ref, "agenda:" + id);
     EXPECT_EQ(log[2].step, "agenda");
+}
+
+// add-evaluation-export task 3.3: a new Agenda item records the detection instructions that produced it.
+TEST(InstructionId, StoredOnNewAgendaItems) {
+    Rig r;
+    r.enable();
+    r.svc->offer(mail("m1", kAsk));
+    r.model.text = answer("m1", candidate("send me the Q4 slides"));
+    r.svc->detect_now();
+    const std::string id = jstr(r.svc->list()["items"][0], "id");
+    auto q = r.db->prepare("SELECT instruction_id FROM agenda_items WHERE id=?1");
+    q.bind(1, id);
+    ASSERT_TRUE(q.step());
+    EXPECT_EQ(q.col_text(0), eval::Variant::defaults(eval::Step::agenda).instruction_id());
 }

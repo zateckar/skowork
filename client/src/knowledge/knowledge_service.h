@@ -103,6 +103,8 @@ struct KnowledgeEnv {
     long long sweep_interval_ms = 60'000;  // files rescan and reconciliation
     // The user decision log (client/evaluation); null: fact decisions are not logged.
     eval::DecisionLog* decisions = nullptr;
+    // A quality counter of knowledge went up (client/telemetry Quality Counters); empty: not counted.
+    std::function<void(const std::string& counter, long long n)> quality;
 };
 
 // The category and history filter the knowledge tools and the Knowledge view share (client/knowledge-graph Retrieval

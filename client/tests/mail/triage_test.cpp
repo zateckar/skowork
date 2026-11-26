@@ -90,6 +90,7 @@ struct Harness {
         triage::TriageEnv e;
         e.db = &db.store->db();
         e.decisions = log.get();
+        e.quality = [this](const std::string& c) { quality.push_back(c); };
         e.clock = &clock;
         e.mail = mail.get();
         e.model = &model;
@@ -181,6 +182,7 @@ struct Harness {
     TriageModel model;
     std::unique_ptr<MailStore> mail;
     std::unique_ptr<eval::DecisionLog> log;
+    std::vector<std::string> quality;  // quality counters raised
     std::unique_ptr<triage::TriageService> svc;
     bool paused = false, fail_start = false, may_read = true;
     int keys = 0;
@@ -777,4 +779,35 @@ TEST(EventTriage, DecisionsAreLogged) {
     ASSERT_EQ(second.size(), 1u);
     EXPECT_EQ(second[0].kind, "no_action");
     EXPECT_EQ(second[0].after["suggestion"], "no_action");
+}
+
+// add-evaluation-export task 3.3: a new triage result records the instructions that produced it; older rows read unknown.
+TEST(InstructionId, StoredOnNewTriageResults) {
+    Harness h;
+    h.enable();
+    ASSERT_TRUE(h.take({h.message("m1", "Budget Q4", "Please review the budget")}));
+    ASSERT_TRUE(h.classify());
+    auto q = h.db.store->db().prepare("SELECT instruction_id FROM triage_items WHERE item_id='m1'");
+    ASSERT_TRUE(q.step());
+    EXPECT_EQ(q.col_text(0), eval::Variant::defaults(eval::Step::triage).instruction_id());
+}
+
+TEST(InstructionId, OldTriageRowsReadUnknown) {
+    Harness h;
+    ASSERT_TRUE(h.db.store->db().exec("INSERT INTO triage_items(scope, item_id, revision, state, queued_at, updated_at) "
+                                      "VALUES('mail', 'old', 'r1', 'evaluated', 1, 1)"));
+    auto q = h.db.store->db().prepare("SELECT instruction_id FROM triage_items WHERE item_id='old'");
+    ASSERT_TRUE(q.step());
+    EXPECT_EQ(q.col_text(0), "unknown");
+}
+
+// client/telemetry Quality Counters: a failed batch raises batch_failed_<kind>.
+TEST(EventTriage, FailedBatchesAreCounted) {
+    Harness h;
+    h.enable();
+    ASSERT_TRUE(h.take({h.message("m1", "Budget Q4", "Please review the budget")}));
+    h.model.fail = true;
+    EXPECT_TRUE(h.classify());
+    ASSERT_EQ(h.quality.size(), 1u);
+    EXPECT_EQ(h.quality[0], "batch_failed_unavailable");
 }

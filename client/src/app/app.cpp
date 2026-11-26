@@ -55,6 +55,8 @@
 #include "app/eval_rpc.h"
 #include "eval/decision_log.h"
 #include "eval/eval_service.h"
+#include "eval/quality.h"
+#include "eval/registry.h"
 #include "eval/setting.h"
 #include "triage/triage.h"
 #include "messaging/messaging.h"
@@ -263,6 +265,7 @@ struct App {
     std::atomic<triage::TriageService*> triage_live{nullptr};  // for Teams events from the pool (add-teams-triage)
     std::unique_ptr<eval::EvalService> eval_svc;  // client/evaluation (add-evaluation-export)
     std::unique_ptr<eval::DecisionLog> user_decisions;  // client/evaluation User Decision Log
+    std::unique_ptr<eval::QualityCounters> quality;     // client/telemetry Quality Counters
     void start_triage();
     std::unique_ptr<agenda::Service> agenda_svc;
     std::atomic<agenda::Service*> agenda_live{nullptr};  // read by mail, meeting, channel and Run threads
@@ -556,6 +559,13 @@ void App::tick() {
     }
     // client/evaluation: decision log entries older than 365 days go (hourly; cheap when there is nothing to prune).
     if (user_decisions && ticks % 3600 == 900) (void)user_decisions->prune(system_clock().unix_millis());
+    // Quality counters (client/telemetry Quality Counters): finished days are collected and sent hourly; each day once.
+    if (quality && telemetry && ticks % 3600 == 1200) {
+        const long long now = system_clock().unix_millis();
+        quality->collect(now);
+        (void)quality->flush([this](const std::vector<telemetry::Field>& f) { telemetry->emit(telemetry::Event::quality_daily, f); },
+                             now, telemetry->level() != telemetry::Level::off);
+    }
     if (telemetry && ticks % 3600 == 600) {
         PROCESS_MEMORY_COUNTERS pmc{};
         pmc.cb = sizeof pmc;
@@ -1118,6 +1128,7 @@ void App::start_identity_and_channel() {
     policy = std::make_unique<policy::PolicyManager>(*store, system_clock(), pd);
     decisions = std::make_unique<policy::DecisionLog>(store->db());
     user_decisions = std::make_unique<eval::DecisionLog>(store->db());
+    quality = std::make_unique<eval::QualityCounters>(store->db());
     // A forgotten Source takes its decision log entries with it (client/evaluation User Decision Log).
     forget.on_forget("source", "decision-log", [this](const std::string& id) {
         if (id == "mail" || id == "calendar" || id == "teams") return user_decisions->forget_source(id);
@@ -2268,6 +2279,11 @@ void App::start_triage() {
     if (!mail_svc || !store || !agent || !inbox) return;
     triage::TriageEnv te;
     te.decisions = user_decisions.get();
+    te.quality = [this](const std::string& counter) {
+        if (quality)
+            quality->add(eval::utc_day(system_clock().unix_millis()), "triage", counter,
+                         eval::Variant::defaults(eval::Step::triage).instruction_id());
+    };
     te.db = &store->db();
     te.clock = &system_clock();
     te.mail = &mail_svc->store();
@@ -2362,6 +2378,11 @@ void App::start_knowledge() {
     if (outcome.degraded) log::error(kLog, "kg.db migration failed; running read-only: " + outcome.failure);
     knowledge::KnowledgeEnv ke;
     ke.decisions = user_decisions.get();
+    ke.quality = [this](const std::string& counter, long long n) {
+        if (quality)
+            quality->add(eval::utc_day(system_clock().unix_millis()), "knowledge", counter,
+                         eval::Variant::defaults(eval::Step::knowledge).instruction_id(), n);
+    };
     ke.clock = &system_clock();
     ke.policy = [this](const std::string& name) -> std::optional<json> {
         const auto p = policy ? policy->current() : nullptr;

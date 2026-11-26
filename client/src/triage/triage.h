@@ -73,6 +73,8 @@ struct TriageEnv {
     std::function<void()> changed;
     // The user decision log (client/evaluation); null: decisions are not logged.
     eval::DecisionLog* decisions = nullptr;
+    // A quality counter of triage went up by one (client/telemetry Quality Counters); empty: not counted.
+    std::function<void(const std::string& counter)> quality;
 };
 
 // The instruction of an automatic preparation Run for an item of this scope (improve-triage-results D2, D6).
@@ -164,6 +166,7 @@ private:
     bool prepare(const std::string& thread_id, const std::string& scope, const std::string& item_id);
     std::string day_of(long long ms);
     void notify();
+    void count_failure(const Error& e);  // quality counter batch_failed_<kind>
     // Logs a decision on the item of a Thread (add-evaluation-export design D8); call with the database lock held.
     void log_decision(const std::string& thread_id, const std::string& kind, const std::string& before_suggestion);
     void run();

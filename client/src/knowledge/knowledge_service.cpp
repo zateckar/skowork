@@ -1297,6 +1297,7 @@ std::vector<long long> KnowledgeService::store_extraction(const std::vector<Chun
         if (rating.durability == "temporary" && valid_to.empty())
             valid_to = iso_day((passage_ms ? passage_ms : now) + static_cast<long long>(kTemporaryDays) * 86'400'000LL);
         store_->add_relation(s->second, r.predicate, o->second, r.confidence, from, valid_to, chunk.id, rating);
+        if (env_.quality) env_.quality("facts_stored", 1);
         store_->add_mention(chunk.id, s->second, r.subject);
         store_->add_mention(chunk.id, o->second, r.object);
     }

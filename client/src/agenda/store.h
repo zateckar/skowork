@@ -32,6 +32,7 @@ struct Item {
     std::string notice;                  // a later source revision the user should see ("date changed")
     long long created_at = 0, updated_at = 0, state_at = 0;
     std::vector<ItemSource> sources;
+    std::string instruction_id = "unknown";  // the detection instructions (add-evaluation-export design D3)
 };
 
 struct Pending {

@@ -588,6 +588,7 @@ bool TriageService::step() {
     if (invalid && events.size() == 1) {
         // D10: an event that is invalid on its own is set aside as uncertain, through the same path as a model result.
         log::warn(kLog, "classification failed: invalid_response (" + result.error().message + "); the event is set aside as uncertain");
+        count_failure(result.error());
         result = std::vector<Classification>{{events[0].id, events[0].revision, "uncertain", kSetAsideReason, "", ""}};
     } else if (!result) {
         // The events stay pending; nothing is inferred from a failed request. After an invalid response the next
@@ -604,6 +605,7 @@ bool TriageService::step() {
             return put_int("next_request_at", now + std::min(wait, kMaxBackoffMs));
         });
         log::warn(kLog, "classification failed: " + result.error().code + (invalid ? " (" + result.error().message + ")" : std::string{}));
+        count_failure(result.error());
         notify();
         return true;
     }
@@ -666,11 +668,13 @@ bool TriageService::step() {
                 (void)env_.rename_thread(thread, kNeutralTitle);
             }
             auto u = env_.db->prepare("UPDATE triage_items SET state='evaluated', outcome=?4, reason=?5, thread_id=?6, suggestion=?7, "
-                                      "updated_at=?8, action=?9, category=?10, reported_at=0 WHERE scope=?1 AND item_id=?2 AND revision=?3");
+                                      "updated_at=?8, action=?9, category=?10, reported_at=0, instruction_id=?11 "
+                                      "WHERE scope=?1 AND item_id=?2 AND revision=?3");
             const bool keep_reason = next == "open" || next == "dismissed" || next == "started" || info || c.reason == kSetAsideReason;
             u.bind(1, r.scope).bind(2, r.id).bind(3, r.revision).bind(4, c.outcome)
                 .bind(5, keep_reason ? c.reason : std::string{}).bind(6, thread).bind(7, next).bind(8, done)
-                .bind(9, c.action).bind(10, c.category);
+                .bind(9, c.action).bind(10, c.category)
+                .bind(11, eval::Variant::defaults(eval::Step::triage).instruction_id());
             if (Status st = u.run(); !st) return st;
         }
         return {};
@@ -893,6 +897,14 @@ Result<std::string> TriageService::start_work(const std::string& thread_id) {
     }
     notify();
     return *run;
+}
+
+void TriageService::count_failure(const Error& e) {
+    if (!env_.quality) return;
+    if (e.code == "unavailable") return env_.quality("batch_failed_unavailable");
+    if (e.message.find("cut off") != std::string::npos) return env_.quality("batch_failed_cut_off");
+    if (e.message.find("match") != std::string::npos) return env_.quality("batch_failed_mismatch");
+    env_.quality("batch_failed_other");
 }
 
 void TriageService::log_decision(const std::string& thread_id, const std::string& kind, const std::string& before_suggestion) {

@@ -390,6 +390,7 @@ void Service::accept(const Candidate& c, const SourceItem& item, const Due& due)
     it.inferred = due.inferred;
     it.draft_kind = c.draft_kind;
     it.created_at = it.updated_at = it.state_at = now;
+    it.instruction_id = eval::Variant::defaults(eval::Step::agenda).instruction_id();
     it.sources.push_back(src);
     (void)store_.put(it);
 }

@@ -53,6 +53,12 @@ enum class Attr : std::uint8_t {
     crash_exception_code,
     crash_module,
     crash_dump_bytes,
+    quality_step,
+    quality_counter,
+    quality_value,
+    quality_instruction_id,
+    quality_category,
+    quality_action,
     content_prompt,
     content_response,
     tool_arguments,
@@ -87,6 +93,12 @@ inline constexpr FieldDef kAttrs[] = {
     {"crash.exception_code", Type::string, Level::metadata},
     {"crash.module", Type::string, Level::metadata},
     {"crash.dump_bytes", Type::integer, Level::metadata},
+    {"quality.step", Type::string, Level::metadata},
+    {"quality.counter", Type::string, Level::metadata},
+    {"quality.value", Type::integer, Level::metadata},
+    {"quality.instruction_id", Type::string, Level::metadata},
+    {"quality.category", Type::string, Level::metadata},
+    {"quality.action", Type::string, Level::metadata},
     {"content.prompt", Type::string, Level::content},
     {"content.response", Type::string, Level::content},
     {"tool.arguments", Type::string, Level::content},
@@ -105,6 +117,7 @@ enum class Event : std::uint8_t {
     sandbox_enforcement,
     telemetry_buffer,
     crash_report,
+    quality_daily,
 };
 namespace detail {
 inline constexpr Attr k_run_finished[] = {Attr::run_id, Attr::run_outcome, Attr::run_origin, Attr::run_duration_ms, Attr::run_tool_calls, Attr::error_code, Attr::content_prompt, Attr::content_response};
@@ -118,6 +131,7 @@ inline constexpr Attr k_client_footprint[] = {Attr::process_working_set_mb};
 inline constexpr Attr k_sandbox_enforcement[] = {Attr::network_enforcement};
 inline constexpr Attr k_telemetry_buffer[] = {Attr::telemetry_discarded};
 inline constexpr Attr k_crash_report[] = {Attr::crash_id, Attr::crash_process, Attr::crash_exception_code, Attr::crash_module, Attr::crash_dump_bytes};
+inline constexpr Attr k_quality_daily[] = {Attr::quality_step, Attr::quality_counter, Attr::quality_value, Attr::quality_instruction_id, Attr::quality_category, Attr::quality_action};
 }  // namespace detail
 struct EventDef {
     const char* name;
@@ -135,6 +149,7 @@ inline constexpr EventDef kEvents[] = {
     {"sandbox.enforcement", detail::k_sandbox_enforcement},
     {"telemetry.buffer", detail::k_telemetry_buffer},
     {"crash.report", detail::k_crash_report},
+    {"quality.daily", detail::k_quality_daily},
 };
 
 constexpr const FieldDef& def(Attr a) { return kAttrs[static_cast<int>(a)]; }

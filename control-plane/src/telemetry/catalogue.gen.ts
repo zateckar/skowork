@@ -45,6 +45,12 @@ export const ATTRIBUTES = {
   'crash.exception_code': { type: 'string', level: 'metadata' },
   'crash.module': { type: 'string', level: 'metadata' },
   'crash.dump_bytes': { type: 'integer', level: 'metadata' },
+  'quality.step': { type: 'string', level: 'metadata' },
+  'quality.counter': { type: 'string', level: 'metadata' },
+  'quality.value': { type: 'integer', level: 'metadata' },
+  'quality.instruction_id': { type: 'string', level: 'metadata' },
+  'quality.category': { type: 'string', level: 'metadata' },
+  'quality.action': { type: 'string', level: 'metadata' },
   'content.prompt': { type: 'string', level: 'content' },
   'content.response': { type: 'string', level: 'content' },
   'tool.arguments': { type: 'string', level: 'content' },
@@ -64,5 +70,6 @@ export const EVENTS = {
   'sandbox.enforcement': ['network.enforcement'],
   'telemetry.buffer': ['telemetry.discarded'],
   'crash.report': ['crash.id', 'crash.process', 'crash.exception_code', 'crash.module', 'crash.dump_bytes'],
+  'quality.daily': ['quality.step', 'quality.counter', 'quality.value', 'quality.instruction_id', 'quality.category', 'quality.action'],
 } as const satisfies Record<string, readonly AttrName[]>;
 export type EventName = keyof typeof EVENTS;

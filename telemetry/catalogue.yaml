@@ -148,6 +148,30 @@ attributes:
     type: integer
     level: metadata
     purpose: Size of the filtered minidump.
+  - name: quality.step
+    type: string
+    level: metadata
+    purpose: The step a quality counter belongs to (triage, agenda, knowledge or meeting); a fixed value.
+  - name: quality.counter
+    type: string
+    level: metadata
+    purpose: Which quality counter this is, from a fixed list (for example dismissed or speakers_unnamed_7d).
+  - name: quality.value
+    type: integer
+    level: metadata
+    purpose: The count of the quality counter for one day, to see how quality changes across releases.
+  - name: quality.instruction_id
+    type: string
+    level: metadata
+    purpose: The version of the instructions and settings in effect (12 hex characters), to compare prompt versions.
+  - name: quality.category
+    type: string
+    level: metadata
+    purpose: The triage category of the counted items, from the fixed category list, or none.
+  - name: quality.action
+    type: string
+    level: metadata
+    purpose: Whether the counted triage items needed action (required, info) or none.
   - name: content.prompt
     type: string
     level: content
@@ -199,3 +223,6 @@ events:
   - name: crash.report
     purpose: One per crash report, sent with its filtered dump.
     attributes: [crash.id, crash.process, crash.exception_code, crash.module, crash.dump_bytes]
+  - name: quality.daily
+    purpose: One per quality counter and day, with no content (client/telemetry Quality Counters).
+    attributes: [quality.step, quality.counter, quality.value, quality.instruction_id, quality.category, quality.action]

@@ -8,7 +8,7 @@ namespace {
 
 constexpr const char* kColumns =
     "id,title,action,due_at,has_time,inferred,state,draft_kind,user_edited,prep_thread_id,prep_run_id,prepared_at,"
-    "refreshed,reminders,notice,created_at,updated_at,state_at";
+    "refreshed,reminders,notice,created_at,updated_at,state_at,instruction_id";
 
 Item read(const Statement& s) {
     Item it;
@@ -32,6 +32,7 @@ Item read(const Statement& s) {
     it.created_at = s.col_int(15);
     it.updated_at = s.col_int(16);
     it.state_at = s.col_int(17);
+    it.instruction_id = s.col_text(18);
     return it;
 }
 
@@ -98,11 +99,11 @@ Status Store::put(const Item& it) {
         json reminders = json::array();
         for (const auto& r : it.reminders) reminders.push_back(r);
         auto s = db_.prepare(std::string("INSERT OR REPLACE INTO agenda_items(") + kColumns +
-                             ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)");
+                             ") VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)");
         s.bind(1, it.id).bind(2, it.title).bind(3, it.action).bind(4, it.due_at).bind(5, it.has_time ? 1 : 0);
         s.bind(6, it.inferred ? 1 : 0).bind(7, it.state).bind(8, it.draft_kind).bind(9, it.user_edited ? 1 : 0);
         s.bind(10, it.prep_thread_id).bind(11, it.prep_run_id).bind(12, it.prepared_at).bind(13, it.refreshed ? 1 : 0);
-        s.bind(14, reminders.dump()).bind(15, it.notice).bind(16, it.created_at).bind(17, it.updated_at).bind(18, it.state_at);
+        s.bind(14, reminders.dump()).bind(15, it.notice).bind(16, it.created_at).bind(17, it.updated_at).bind(18, it.state_at).bind(19, it.instruction_id);
         if (auto r = s.run(); !r) return r;
         auto del = db_.prepare("DELETE FROM agenda_sources WHERE item_id=?1");
         del.bind(1, it.id);
