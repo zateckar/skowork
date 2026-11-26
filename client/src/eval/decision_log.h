@@ -35,6 +35,9 @@ public:
     Status forget_item(const std::string& item_ref);
     int prune(long long now_ms);  // removes entries older than kDecisionKeepMs, returns how many
     Status forget_source(const std::string& kind);  // every entry whose item is of this kind ("mail", "teams", ...)
+    Status forget_step(const std::string& step);    // every entry of a step ("knowledge" when all knowledge is forgotten)
+    // Every knowledge entry whose fact names this entity as subject or object (a forgotten entity).
+    Status forget_name(const std::string& name);
 
 private:
     Database& db_;

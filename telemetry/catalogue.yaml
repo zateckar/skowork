@@ -172,6 +172,10 @@ attributes:
     type: string
     level: metadata
     purpose: Whether the counted triage items needed action (required, info) or none.
+  - name: quality.day
+    type: string
+    level: metadata
+    purpose: The UTC day (YYYY-MM-DD) a quality count belongs to; counts are sent on a later day.
   - name: content.prompt
     type: string
     level: content
@@ -225,4 +229,4 @@ events:
     attributes: [crash.id, crash.process, crash.exception_code, crash.module, crash.dump_bytes]
   - name: quality.daily
     purpose: One per quality counter and day, with no content (client/telemetry Quality Counters).
-    attributes: [quality.step, quality.counter, quality.value, quality.instruction_id, quality.category, quality.action]
+    attributes: [quality.step, quality.counter, quality.value, quality.instruction_id, quality.category, quality.action, quality.day]

@@ -2994,7 +2994,10 @@ Status KnowledgeService::forget_item(long long item_id) {
 
 Status KnowledgeService::forget_entity(long long entity_id) {
     if (auto s = store_->purge_recovery_copy(); !s) return s;
+    const auto entity = store_->entity(entity_id);
     Status s = store_->forget_entity(entity_id);
+    // client/evaluation User Decision Log: fact decisions that name the entity go with it.
+    if (s && entity && env_.decisions) (void)env_.decisions->forget_name(entity->name);
     notify();
     return s;
 }
@@ -4096,6 +4099,8 @@ Status KnowledgeService::prepare_delete_all() {
 
 Status KnowledgeService::forget_all() {
     if (auto s = prepare_delete_all(); !s) return s;
+    // client/evaluation User Decision Log: every fact decision goes with the knowledge.
+    if (env_.decisions) (void)env_.decisions->forget_step("knowledge");
     if (auto s = store_->purge_recovery_copy(); !s) {
         deleting_all_ = false;
         return s;

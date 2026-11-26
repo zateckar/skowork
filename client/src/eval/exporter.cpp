@@ -38,6 +38,10 @@ std::string folder_stamp(long long ms) {
 
 Error cancelled() { return make_error("cancelled", "The export was cancelled."); }
 
+Error unavailable(const std::string& source) {
+    return make_error("unavailable", "The " + source + " Source is not running, so it cannot be exported.");
+}
+
 }  // namespace
 
 Status check_request(const ExportRequest& r) {
@@ -99,21 +103,22 @@ json Exporter::decisions_of(const std::string& item_ref) const {
 
 Result<ExportCounts> Exporter::export_mail(const std::filesystem::path& folder, const ExportRequest& r, const CancelToken& cancel) {
     ExportCounts counts;
-    if (!env_.mail) return counts;
+    mail::MailStore* store = env_.mail ? env_.mail() : nullptr;
+    if (!store) return unavailable("mail");
     auto out = JsonlWriter::open(folder / "mail.jsonl");
     if (!out) return out.error();
     // Own folders (sent, drafts, outbox): their mail is the user's; a later one in the conversation is a reply.
     std::set<std::string> own;
     std::map<std::string, std::string> names;
-    for (const auto& f : env_.mail->folders()) {
+    for (const auto& f : store->folders()) {
         names[f.id] = f.well_known.empty() ? f.name : f.well_known;
         if (mail::own_mail_folder(f)) own.insert(f.id);
     }
     std::map<std::string, std::vector<long long>> sent_at;  // conversation -> times the user sent in it
-    for (const auto& id : env_.mail->all_message_ids())
-        if (const auto m = env_.mail->message(id); m && own.count(m->folder_id) && !m->is_draft && !m->conversation_id.empty())
+    for (const auto& id : store->all_message_ids())
+        if (const auto m = store->message(id); m && own.count(m->folder_id) && !m->is_draft && !m->conversation_id.empty())
             sent_at[m->conversation_id].push_back(m->received_at);
-    for (const auto& m : env_.mail->messages_between(r.from_ms, r.to_ms)) {
+    for (const auto& m : store->messages_between(r.from_ms, r.to_ms)) {
         if (cancel.cancelled()) return cancelled();
         if (m.withheld) {
             ++counts.withheld;
@@ -146,13 +151,14 @@ Result<ExportCounts> Exporter::export_mail(const std::filesystem::path& folder, 
 
 Result<ExportCounts> Exporter::export_teams(const std::filesystem::path& folder, const ExportRequest& r, const CancelToken& cancel) {
     ExportCounts counts;
-    if (!env_.teams) return counts;
+    teams::TeamsService* teams = env_.teams ? env_.teams() : nullptr;
+    if (!teams) return unavailable("teams");
     auto out = JsonlWriter::open(folder / "teams.jsonl");
     if (!out) return out.error();
-    for (const auto& cid : env_.teams->conversation_ids()) {
+    for (const auto& cid : teams->conversation_ids()) {
         if (cancel.cancelled()) return cancelled();
-        const auto conv = env_.teams->conversation(cid);
-        for (const auto& m : env_.teams->messages(cid, r.from_ms, r.to_ms, 1'000'000)) {
+        const auto conv = teams->conversation(cid);
+        for (const auto& m : teams->messages(cid, r.from_ms, r.to_ms, 1'000'000)) {
             if (m.system) continue;
             const std::string ref = item_ref_teams(cid, m.id);
             const std::string triage_id = cid + "|" + m.id;
@@ -178,10 +184,11 @@ Result<ExportCounts> Exporter::export_teams(const std::filesystem::path& folder,
 
 Result<ExportCounts> Exporter::export_calendar(const std::filesystem::path& folder, const ExportRequest& r, const CancelToken& cancel) {
     ExportCounts counts;
-    if (!env_.mail) return counts;
+    mail::MailStore* store = env_.mail ? env_.mail() : nullptr;
+    if (!store) return unavailable("calendar");
     auto out = JsonlWriter::open(folder / "calendar.jsonl");
     if (!out) return out.error();
-    for (const auto& e : env_.mail->events_between(r.from_ms, r.to_ms)) {
+    for (const auto& e : store->events_between(r.from_ms, r.to_ms)) {
         if (cancel.cancelled()) return cancelled();
         if (e.withheld) {
             ++counts.withheld;
@@ -227,10 +234,11 @@ std::vector<std::filesystem::path> tracks_of(const meeting::MeetingRecord& m) {
 }  // namespace
 
 long long Exporter::audio_size(const ExportRequest& r) const {
-    if (!r.audio || !env_.meetings || !r.sources.count("meetings")) return 0;
+    meeting::MeetingStore* meetings = env_.meetings ? env_.meetings() : nullptr;
+    if (!r.audio || !meetings || !r.sources.count("meetings")) return 0;
     long long total = 0;
     std::error_code ec;
-    for (const auto& m : meetings_in(*env_.meetings, r))
+    for (const auto& m : meetings_in(*meetings, r))
         for (const auto& t : tracks_of(m)) {
             const auto size = std::filesystem::file_size(t, ec);
             if (!ec) total += static_cast<long long>(size) + 44;  // 16-bit PCM in either container, plus the WAV header
@@ -240,10 +248,12 @@ long long Exporter::audio_size(const ExportRequest& r) const {
 
 Result<ExportCounts> Exporter::export_meetings(const std::filesystem::path& folder, const ExportRequest& r, const CancelToken& cancel) {
     ExportCounts counts;
-    if (!env_.meetings) return counts;
+    meeting::MeetingStore* meetings = env_.meetings ? env_.meetings() : nullptr;
+    if (!meetings) return unavailable("meetings");
+    mail::MailStore* store = env_.mail ? env_.mail() : nullptr;
     auto out = JsonlWriter::open(folder / "meetings.jsonl");
     if (!out) return out.error();
-    for (const auto& m : meetings_in(*env_.meetings, r)) {
+    for (const auto& m : meetings_in(*meetings, r)) {
         if (cancel.cancelled()) return cancelled();
         json speakers = json::object(), meta = json::object();
         for (const auto& [k, v] : m.speakers) {
@@ -253,8 +263,8 @@ Result<ExportCounts> Exporter::export_meetings(const std::filesystem::path& fold
             meta[k] = {{"by", sm.by}, {"at", sm.at_ms}};
         }
         json event = nullptr;
-        if (env_.mail && !m.event_id.empty())
-            if (const auto e = env_.mail->event(m.event_id); e && !e->withheld && !e->masked)
+        if (store && !m.event_id.empty())
+            if (const auto e = store->event(m.event_id); e && !e->withheld && !e->masked)
                 event = {{"id", e->id}, {"subject", e->subject}, {"body", e->body}, {"organizer", person(e->organizer)},
                          {"attendees", e->attendees}, {"start_at", e->start_at}, {"end_at", e->end_at}};
         json audio = "unavailable";

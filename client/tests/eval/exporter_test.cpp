@@ -75,8 +75,8 @@ struct Rig {
     }
     eval::Exporter exporter() {
         eval::ExportEnv e;
-        e.mail = mail.get();
-        e.meetings = meetings.get();
+        e.mail = [this] { return mail.get(); };
+        e.meetings = [this] { return meetings.get(); };
         e.app_db = &db.store->db();
         e.decisions = log.get();
         e.facts_of = [](const std::string&, const std::string&) { return json::array({{{"statement", "Petra owns the budget"}}}); };
@@ -296,4 +296,28 @@ TEST(Wav, RoundTrip) {
     EXPECT_EQ(*back, pcm);
     EXPECT_EQ(rate, 16000);
     std::filesystem::remove(file);
+}
+
+// Review fix: services are looked up when an export runs (a Source that starts after the first eval call is exported),
+// and a chosen Source whose service is not running fails instead of writing nothing.
+TEST(Exporter, ServicesResolvedWhenTheExportRuns) {
+    Rig r;
+    r.message("m1", kT0 + kHour);
+    mail::MailStore* available = nullptr;
+    eval::ExportEnv e;
+    e.mail = [&] { return available; };
+    e.app_db = &r.db.store->db();
+    e.now = [&r] { return r.now; };
+    eval::Exporter ex(std::move(e));
+    const auto req = r.request({"mail"});
+    auto folder = ex.begin(req);
+    ASSERT_TRUE(folder);
+    CancelToken cancel;
+    auto missing = ex.export_mail(*folder, req, cancel);
+    ASSERT_FALSE(missing);
+    EXPECT_EQ(missing.error().code, "unavailable");
+    available = r.mail.get();
+    auto n = ex.export_mail(*folder, req, cancel);
+    ASSERT_TRUE(n);
+    EXPECT_EQ(n->written, 1);
 }

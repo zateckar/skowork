@@ -301,8 +301,9 @@ void Replayer::run(ReplayRequest r, Variant v, std::string id) {
             if (cancel_) break;
             set([](json& s) { s["state"] = "running"; });
             json tracks = json::array();
+            // One part per track kind: later parts of a continued capture (remote.2) have no start time in a WAV.
             for (const auto& [k, p] : audio.items())
-                if (p.is_string()) tracks.push_back(meeting::path_to_utf8(r.folder / meeting::path_from_utf8(p.get<std::string>())));
+                if (p.is_string() && k.find('.') == std::string::npos) tracks.push_back(meeting::path_to_utf8(r.folder / meeting::path_from_utf8(p.get<std::string>())));
             std::vector<std::string> attendees;
             for (const auto& a : it.value("attendees", json::array()))
                 if (a.is_string()) attendees.push_back(a.get<std::string>());

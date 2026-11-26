@@ -226,6 +226,7 @@ Alternatives considered:
 - [Risk] The refactor in D3 changes live prompts by accident. -> Mitigation: before the move, golden tests capture each instruction text exactly. After it, the same tests must pass byte for byte.
 - [Risk] Exporting audio on a laptop with little free space. -> Mitigation: audio is only exported on request, and the call reports the expected size before writing. The four meetings need about 370 MB as WAV.
 - [Risk] Replaying transcription competes with a live capture for CPU. -> Mitigation: it runs at background priority and pauses while capture or live transcription runs. Measuring this is in spike 1.3.
+- [Risk] A speech replay holds the stt worker for a whole meeting: a capture that starts during that call waits for it before its own live transcription, and a cancel takes effect only when the call returns. -> Mitigation: the replay checks for a capture or a transcription before each meeting and pauses, and spike 1.3 measures the worst case. If it is too long, the replay will transcribe in slices (from_ms with an end) or use its own stt worker instance; this is not done in this change.
 - [Risk] Older triage, Agenda and fact rows do not record which instructions produced them. -> Mitigation: they are marked `"unknown"`, and the baseline uses fresh replays, not stored results.
 - [Risk] Drafted labels carry the drafter's bias. -> Mitigation: every drafted label is marked as drafted, the user reviews disagreements, and the report gives metrics separately for user-confirmed labels.
 

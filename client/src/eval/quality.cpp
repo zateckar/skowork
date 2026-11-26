@@ -80,7 +80,8 @@ std::vector<telemetry::Field> quality_fields(const QualityRow& r) {
             {telemetry::Attr::quality_value, r.value},
             {telemetry::Attr::quality_instruction_id, r.instruction_id},
             {telemetry::Attr::quality_category, r.category},
-            {telemetry::Attr::quality_action, r.action}};
+            {telemetry::Attr::quality_action, r.action},
+            {telemetry::Attr::quality_day, r.day}};
 }
 
 void QualityCounters::add(const std::string& day, std::string_view step, std::string_view counter, std::string_view instruction_id,

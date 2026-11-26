@@ -190,7 +190,9 @@ Result<json> stt_request(const std::string& method, const json& params) {
             int rate = 16000;
             auto pcm = read_wav(file, &rate);
             if (!pcm) return pcm.error();
-            const std::string kind = file.stem().string();
+            // A continued capture's later parts are "<kind>.<n>.wav".
+            const std::string stem = file.stem().string();
+            const std::string kind = stem.substr(0, stem.find('.'));
             if (kind != "local" && kind != "remote" && kind != "system" && kind != "mic")
                 return make_error("invalid_params", "A WAV track is named local.wav, remote.wav, system.wav or mic.wav.");
             parts.push_back({kind, 0, std::move(*pcm), static_cast<std::uint32_t>(rate)});

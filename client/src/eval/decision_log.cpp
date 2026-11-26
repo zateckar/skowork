@@ -79,6 +79,19 @@ Status DecisionLog::forget_source(const std::string& kind) {
     return st.bind(1, kind).run();
 }
 
+Status DecisionLog::forget_step(const std::string& step) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare("DELETE FROM decision_log WHERE step=?1");
+    return st.bind(1, step).run();
+}
+
+Status DecisionLog::forget_name(const std::string& name) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare("DELETE FROM decision_log WHERE step='knowledge' AND json_valid(before_json) AND "
+                          "(json_extract(before_json, '$.subject')=?1 OR json_extract(before_json, '$.object')=?1)");
+    return st.bind(1, name).run();
+}
+
 int DecisionLog::prune(long long now_ms) {
     const std::lock_guard lock(db_.mutex());
     auto st = db_.prepare("DELETE FROM decision_log WHERE at < ?1");

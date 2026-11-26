@@ -289,7 +289,7 @@ TEST(EvalRpc, ExportJobLifecycle) {
         store.upsert_message(m);
     }
     eval::ExportEnv xe;
-    xe.mail = &store;
+    xe.mail = [&] { return &store; };
     xe.app_db = &db.store->db();
     xe.now = [] { return 1'790'000'000'000LL; };
     ReplayModel model;
@@ -316,4 +316,29 @@ TEST(EvalRpc, ExportJobLifecycle) {
     std::getline(in, line);
     EXPECT_TRUE((*parse_json(line))["complete"].get<bool>());
     EXPECT_FALSE((*rpc.find("eval.status", true))({{"job", "nope"}}));
+}
+
+// Review fix: a continued capture's later parts (remote.2.wav) are named by their kind, and a replay sends each
+// kind's first part only, so such a meeting replays instead of failing.
+TEST(Replay, ContinuedPartsDoNotFailTheMeeting) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    Folder f;
+    std::vector<std::int16_t> pcm(16000);
+    ASSERT_TRUE(eval::write_wav(f.dir / "remote.2.wav", pcm, 16000));
+    EXPECT_TRUE(meeting::stt_request("stt.transcribe", {{"tracks", {meeting::path_to_utf8(f.dir / "remote.2.wav")}}, {"engine", "test"}}));
+    f.meetings({{"remote", "audio/mtg1/remote.wav"}, {"remote.2", "audio/mtg1/remote.2.wav"}});
+    ReplayModel model;
+    auto e = env_with(model);
+    size_t tracks = 0;
+    e.speech = [&](const json& req) -> Result<json> {
+        tracks = req["tracks"].size();
+        return json{{"language", "en"}, {"segments", json::array()}};
+    };
+    eval::Replayer rep(e);
+    eval::ReplayRequest r;
+    r.folder = f.dir;
+    r.step = eval::Step::asr;
+    ASSERT_TRUE(rep.start(r));
+    rep.wait();
+    EXPECT_EQ(tracks, 1u);
 }

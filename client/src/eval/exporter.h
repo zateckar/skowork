@@ -41,9 +41,11 @@ struct ExportCounts {
 };
 
 struct ExportEnv {
-    mail::MailStore* mail = nullptr;
-    teams::TeamsService* teams = nullptr;
-    meeting::MeetingStore* meetings = nullptr;
+    // The services are looked up when an export runs: one that starts later is still exported, and a chosen Source
+    // whose service is not running fails the export with "unavailable" instead of writing nothing.
+    std::function<mail::MailStore*()> mail;
+    std::function<teams::TeamsService*()> teams;
+    std::function<meeting::MeetingStore*()> meetings;
     Database* app_db = nullptr;  // triage_items, agenda_items and agenda_sources
     DecisionLog* decisions = nullptr;
     // The knowledge facts of a Source item, by Source kind and item id: [{statement, status, relations: [...]}].

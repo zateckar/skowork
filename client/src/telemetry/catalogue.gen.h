@@ -59,6 +59,7 @@ enum class Attr : std::uint8_t {
     quality_instruction_id,
     quality_category,
     quality_action,
+    quality_day,
     content_prompt,
     content_response,
     tool_arguments,
@@ -99,6 +100,7 @@ inline constexpr FieldDef kAttrs[] = {
     {"quality.instruction_id", Type::string, Level::metadata},
     {"quality.category", Type::string, Level::metadata},
     {"quality.action", Type::string, Level::metadata},
+    {"quality.day", Type::string, Level::metadata},
     {"content.prompt", Type::string, Level::content},
     {"content.response", Type::string, Level::content},
     {"tool.arguments", Type::string, Level::content},
@@ -131,7 +133,7 @@ inline constexpr Attr k_client_footprint[] = {Attr::process_working_set_mb};
 inline constexpr Attr k_sandbox_enforcement[] = {Attr::network_enforcement};
 inline constexpr Attr k_telemetry_buffer[] = {Attr::telemetry_discarded};
 inline constexpr Attr k_crash_report[] = {Attr::crash_id, Attr::crash_process, Attr::crash_exception_code, Attr::crash_module, Attr::crash_dump_bytes};
-inline constexpr Attr k_quality_daily[] = {Attr::quality_step, Attr::quality_counter, Attr::quality_value, Attr::quality_instruction_id, Attr::quality_category, Attr::quality_action};
+inline constexpr Attr k_quality_daily[] = {Attr::quality_step, Attr::quality_counter, Attr::quality_value, Attr::quality_instruction_id, Attr::quality_category, Attr::quality_action, Attr::quality_day};
 }  // namespace detail
 struct EventDef {
     const char* name;

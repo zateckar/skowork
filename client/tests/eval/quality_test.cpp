@@ -52,6 +52,7 @@ TEST(Quality, FlushEmitsPreviousDaysOnly) {
     ASSERT_EQ(out.size(), 1u);
     EXPECT_EQ(value_of(out[0], telemetry::Attr::quality_value), 6);
     EXPECT_EQ(text_of(out[0], telemetry::Attr::quality_counter), "dismissed");
+    EXPECT_EQ(text_of(out[0], telemetry::Attr::quality_day), eval::utc_day(kNow - kDay));  // the day counted, not the day sent
     const auto left = q.rows();
     ASSERT_EQ(left.size(), 1u);
     EXPECT_EQ(left[0].day, eval::utc_day(kNow));

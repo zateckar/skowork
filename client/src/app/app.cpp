@@ -620,8 +620,59 @@ void App::quit(bool force) {
 
 // The speech package folder of the active version (defined with the meeting wiring below).
 std::filesystem::path active_speech_path(const std::filesystem::path& data_root);
+// The local offset from UTC at a moment, in minutes (defined with the Agenda wiring below, in this unnamed namespace).
+namespace {
+int local_offset_at(long long ms);
+}
 
 void App::register_rpc() {
+    // client/evaluation: pipe-only export and replay, refused while policy.evaluation.export is off.
+    register_eval_rpc(rpc, [this]() -> eval::EvalService* {
+        const std::lock_guard lock(eval_mx);
+        if (eval_svc) return eval_svc.get();
+        if (!store) return nullptr;
+        eval::ExportEnv xe;
+        // Looked up when each export runs: a Source that starts after the first eval call is still exported.
+        xe.mail = [this]() -> mail::MailStore* { return mail_svc ? &mail_svc->store() : nullptr; };
+        xe.teams = [this] { return teams_svc.get(); };
+        xe.meetings = [this]() -> meeting::MeetingStore* { return meeting_svc ? &meeting_svc->store() : nullptr; };
+        xe.app_db = &store->db();
+        xe.decisions = user_decisions.get();
+        xe.facts_of = [this](const std::string& source, const std::string& ext_id) -> json {
+            if (!knowledge_svc) return json::array();
+            const auto item = knowledge_svc->store().item(source, ext_id);
+            if (!item) return json::array();
+            const json detail = knowledge_svc->item_detail(item->id);
+            return detail.contains("facts") ? detail["facts"] : json::array();
+        };
+        xe.now = [] { return system_clock().unix_millis(); };
+        xe.client_version = kVersion;
+        eval::ReplayEnv re;
+        re.model = model.get();
+        re.responsibilities = [this] { return triage_svc ? jstr(triage_svc->status(), "responsibilities") : std::string{}; };
+        re.identity = [this] { return agenda_identity(); };
+        re.tz_offset_min = [](long long ms) { return local_offset_at(ms); };
+        re.user_name = [this] { return agenda_identity().name; };
+        re.now = [] { return system_clock().unix_millis(); };
+        re.speech = [this](const json& request) -> Result<json> {
+            if (!workers || !root) return make_error("unavailable", "no worker host");
+            json p = {{"tracks", request.value("tracks", json::array())},
+                      {"language", jstr(request, "language")},
+                      {"vocabulary", request.value("vocabulary", json::array())},
+                      {"settings", request.value("settings", json::object())},
+                      {"diarize", true}};
+            p["speech_dir"] = narrow(active_speech_path(root->root()).wstring());
+            return workers->call(WorkerRole::stt, "stt.transcribe", p);
+        };
+        re.speech_busy = [this] {
+            return meeting_svc && (meeting_svc->capturing() || !meeting_svc->store().in_states({"transcribing"}).empty());
+        };
+        eval_svc = std::make_unique<eval::EvalJobs>(std::move(xe), std::move(re));
+        return eval_svc.get();
+    }, [this] {
+        const auto cur = policy ? policy->current() : nullptr;
+        return cur && eval::export_enabled(*cur);
+    });
     // The Telemetry viewer (client/telemetry Telemetry Viewer): the level, its source and the last 30 days of records.
     rpc.add("telemetry.view", RpcExposure::ui_and_pipe, [this](const json&) -> Result<json> {
         if (!telemetry) return make_error("unavailable", "telemetry is not available");
@@ -2349,52 +2400,6 @@ void App::start_triage() {
     mail_svc->set_page_sink([this](const std::vector<mail::PageChange>& c) { return triage_svc->take_in(c); });
     mail_svc->on_cycle([this] { triage_svc->cycle_completed(); });
     register_triage_rpc(rpc, [this] { return triage_svc.get(); });
-    // client/evaluation: pipe-only export and replay, refused while policy.evaluation.export is off.
-    register_eval_rpc(rpc, [this]() -> eval::EvalService* {
-        const std::lock_guard lock(eval_mx);
-        if (eval_svc) return eval_svc.get();
-        if (!store) return nullptr;
-        eval::ExportEnv xe;
-        xe.mail = mail_svc ? &mail_svc->store() : nullptr;
-        xe.teams = teams_svc.get();
-        xe.meetings = meeting_svc ? &meeting_svc->store() : nullptr;
-        xe.app_db = &store->db();
-        xe.decisions = user_decisions.get();
-        xe.facts_of = [this](const std::string& source, const std::string& ext_id) -> json {
-            if (!knowledge_svc) return json::array();
-            const auto item = knowledge_svc->store().item(source, ext_id);
-            if (!item) return json::array();
-            const json detail = knowledge_svc->item_detail(item->id);
-            return detail.contains("facts") ? detail["facts"] : json::array();
-        };
-        xe.now = [] { return system_clock().unix_millis(); };
-        xe.client_version = kVersion;
-        eval::ReplayEnv re;
-        re.model = model.get();
-        re.responsibilities = [this] { return triage_svc ? jstr(triage_svc->status(), "responsibilities") : std::string{}; };
-        re.identity = [this] { return agenda_identity(); };
-        re.tz_offset_min = [](long long ms) { return local_offset_at(ms); };
-        re.user_name = [this] { return agenda_identity().name; };
-        re.now = [] { return system_clock().unix_millis(); };
-        re.speech = [this](const json& request) -> Result<json> {
-            if (!workers || !root) return make_error("unavailable", "no worker host");
-            json p = {{"tracks", request.value("tracks", json::array())},
-                      {"language", jstr(request, "language")},
-                      {"vocabulary", request.value("vocabulary", json::array())},
-                      {"settings", request.value("settings", json::object())},
-                      {"diarize", true}};
-            p["speech_dir"] = narrow(active_speech_path(root->root()).wstring());
-            return workers->call(WorkerRole::stt, "stt.transcribe", p);
-        };
-        re.speech_busy = [this] {
-            return meeting_svc && (meeting_svc->capturing() || !meeting_svc->store().in_states({"transcribing"}).empty());
-        };
-        eval_svc = std::make_unique<eval::EvalJobs>(std::move(xe), std::move(re));
-        return eval_svc.get();
-    }, [this] {
-        const auto cur = policy ? policy->current() : nullptr;
-        return cur && eval::export_enabled(*cur);
-    });
     forget.on_forget("source", "event-triage", [this](const std::string& id) {
         if (id == "triage") return triage_svc->delete_data();
         return Status{};
@@ -3588,6 +3593,11 @@ Result<json> App::app_mcp_call(const std::string& app_id, const std::string& too
 }
 
 void App::shutdown() {
+    // An export or replay reads the stores, the model and the stt worker: it stops (and its threads join) first.
+    {
+        const std::lock_guard lock(eval_mx);
+        eval_svc.reset();
+    }
     // Runs stop first; a Run that was running is recovered as failed at the next start (client/agent-runtime).
     if (agent) agent->shutdown();
     knowledge_live = nullptr;

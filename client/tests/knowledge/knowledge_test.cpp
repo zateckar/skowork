@@ -6433,3 +6433,39 @@ TEST(KnowledgeCuration, FactDecisionsAreLogged) {
     ASSERT_TRUE(kg.svc->forget_item(item));
     EXPECT_TRUE(log.for_item(ref).empty());
 }
+
+// Review fix (client/evaluation User Decision Log): forgetting an entity or all knowledge removes the fact decisions
+// that name it, so no fact text stays behind in the log.
+TEST(KnowledgeCuration, ForgetsRemoveFactDecisions) {
+    MailDb app;
+    eval::DecisionLog log(app.store->db());
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    kg.decisions = &log;
+    kg.make(false);
+    write_file(kg.folder / "phoenix.txt", "Od pondělí vede projekt Phoenix Jana Nováková.");
+    ASSERT_TRUE(kg.svc->add_document(kg.file_path("phoenix.txt")));
+    kg.idle();
+    auto& store = kg.svc->store();
+    const long long jana = store.find_entities("Jana Nováková", 1)[0].id;
+    eval::Decision d;
+    d.step = "knowledge";
+    d.kind = "fact_delete";
+    d.item_ref = "files:x";
+    d.result_ref = "fact:relation:1";
+    d.before = {{"subject", "Jana Nováková"}, {"predicate", "leads"}, {"object", "Phoenix"}};
+    ASSERT_TRUE(log.record(d));
+    d.before = {{"subject", "Petr"}, {"predicate", "owns"}, {"object", "Falcon"}};
+    d.item_ref = "files:y";
+    ASSERT_TRUE(log.record(d));
+    eval::Decision other = d;
+    other.step = "triage";
+    other.kind = "dismiss";
+    other.item_ref = "mail:m1";
+    ASSERT_TRUE(log.record(other));
+    ASSERT_TRUE(kg.svc->forget_entity(jana));
+    EXPECT_TRUE(log.for_item("files:x").empty());
+    EXPECT_EQ(log.for_item("files:y").size(), 1u);
+    ASSERT_TRUE(kg.svc->forget_all());
+    EXPECT_TRUE(log.for_item("files:y").empty());
+    EXPECT_EQ(log.for_item("mail:m1").size(), 1u);
+}
