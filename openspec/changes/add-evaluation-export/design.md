@@ -84,7 +84,7 @@ Field derivations decided after the builder check:
   - importance marks and tombstones: none.
 
   From this change on, the decision log (D8) is the source, and these fallbacks apply only to decisions made before it existed.
-- **Speaker names.** Today an automatic attendee name and a user rename are stored the same way (`meeting/core.cpp` `name_speakers` and `rename_speaker`). This change adds `named_by` (`auto` | `user`) and `named_at` to each speaker entry. Entries from before the change read as `unknown`. Implicit naming labels use only `user` entries. For the four existing meetings, the user names the speakers during labelling (task 7.1).
+- **Speaker names.** Today an automatic attendee name and a user rename are stored the same way (`meeting/core.cpp` `name_speakers` and `rename_speaker`). This change adds a `speaker_meta` column to `meetings` (migration 2801) holding, for each speaker, `by` (`auto` | `user`) and `at`. Speakers without an entry, written before the change, read as `unknown`. Implicit naming labels use only `user` entries. For the four existing meetings, the user names the speakers during labelling (task 7.1).
 
 `dev/scripts/eval.ps1` defaults `out_dir` to `<repo>/dev/eval-data/`, which `dev/.gitignore` ignores. The client accepts any absolute path the user can write to.
 
@@ -102,7 +102,7 @@ Initial names:
 - diarization: `diarize.threshold`, `diarize.clusters`, which is `auto` or `attendees`. With `attendees`, the remote track is clustered into exactly as many speakers as there are attendees other than the user, when that number is at least 2. Otherwise it falls back to `auto`. The speech engine takes a fixed cluster count or a threshold, not an upper bound.
 - transcription: `asr.hotword_score`, `asr.beam_paths`, `asr.vad_threshold`
 
-The instruction id is the first 12 hex characters of the SHA-256 of the canonical JSON of all a step's entries. Triage, Agenda and knowledge rows written after this change store that id.
+The instruction id is the first 12 hex characters of the SHA-256 of the canonical JSON of all a step's entries. Triage results and Agenda items written after this change store that id (migration 2802). Facts do not: the knowledge id in effect is named in the export manifest and on each logged decision.
 
 `diarize.clusters` and its value `attendees` exist so the speaker-naming follow-up can be measured. The live default stays `auto`, so behaviour does not change.
 
@@ -190,12 +190,12 @@ Alternatives considered:
 - Logging decisions to telemetry. Rejected: that carries content, and it is not local.
 
 ### D9. Quality counters
-The client's telemetry has only an OTLP logs encoder, and its events and attributes are generated from `telemetry/catalogue.yaml`. Counters are therefore emitted as one catalogue event, `quality_daily`, per step per day. Its attributes are:
-- `step`;
-- `counter`, a fixed enumeration;
-- `value`;
-- `instruction_id`;
-- for triage only, `category` and `action`, from their fixed enumerations.
+The client's telemetry has only an OTLP logs encoder, and its events and attributes are generated from `telemetry/catalogue.yaml`. Counters are therefore emitted as one catalogue event, `quality.daily`, per counter per day. Its attributes are:
+- `quality.step`;
+- `quality.counter`, a fixed enumeration;
+- `quality.value`;
+- `quality.instruction_id`;
+- `quality.category` and `quality.action`, from their fixed enumerations (`none` outside triage).
 
 The client version is already part of every event. Counts accumulate in a small `app.db` table, `quality_counts(day, step, counter, category, action, instruction_id, value)`, so a restart loses nothing. `App::tick` sends the previous days' rows and deletes them once the telemetry buffer has accepted them.
 

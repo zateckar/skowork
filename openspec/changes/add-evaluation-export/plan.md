@@ -294,7 +294,7 @@ Covers tasks.md 3b.3 and design D9, plus the telemetry delta.
 
 **Files:**
 - Modify:
-  - `telemetry/catalogue.yaml`: add the event `quality_daily` with these attributes:
+  - `telemetry/catalogue.yaml`: add the event `quality.daily` (catalogue names are dotted) with these attributes:
     - `step`, an enum: triage, agenda, knowledge, meeting;
     - `counter`, an enum (the list below);
     - `value`, an int;
