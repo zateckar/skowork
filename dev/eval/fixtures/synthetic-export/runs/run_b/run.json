@@ -1,0 +1,1 @@
+{"run":"run_b","step":"triage","variant":{"triage.batch_size":2},"instruction_id":"bbbbbbbbbbbb","items":4,"failures_by_kind":{"cut_off":1},"tokens_in":900,"tokens_out":300,"state":"done"}

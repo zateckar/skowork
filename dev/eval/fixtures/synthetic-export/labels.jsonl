@@ -1,0 +1,4 @@
+{"step":"triage","id":"mail:a","source":"user_decision","action":"required","relevant":true}
+{"step":"triage","id":"mail:b","source":"user","action":"none","relevant":false,"urgency":"stale","category":"update"}
+{"step":"triage","id":"mail:c","source":"drafted","action":"info","relevant":true,"category":"decision"}
+{"step":"triage","id":"mail:d","source":"drafted","action":"none","relevant":false}

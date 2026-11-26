@@ -1,0 +1,4 @@
+{"id":"mail:a","result":{"outcome":"relevant","action":"required","category":"approval"}}
+{"id":"mail:b","result":{"outcome":"not_relevant","action":"","category":""}}
+{"id":"mail:c","result":{"outcome":"relevant","action":"info","category":"decision"}}
+{"id":"mail:d","error":{"kind":"cut_off","detail":""}}

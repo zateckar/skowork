@@ -1,0 +1,4 @@
+{"id":"mail:a","result":{"outcome":"relevant","action":"required","category":"approval"}}
+{"id":"mail:b","result":{"outcome":"relevant","action":"required","category":"update"}}
+{"id":"mail:c","result":{"outcome":"relevant","action":"info","category":"decision"}}
+{"id":"mail:d","result":{"outcome":"not_relevant","action":"","category":""}}

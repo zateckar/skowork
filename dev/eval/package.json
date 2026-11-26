@@ -1,0 +1,18 @@
+{
+  "name": "skowork-eval",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only scoring of Skowork evaluation exports and replays (add-evaluation-export design D5, D6). Reads exports written by the client's eval.export; never shipped, never committed with real data.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --test-concurrency=1 \"test/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.0",
+    "typescript": "~5.9.3"
+  }
+}
