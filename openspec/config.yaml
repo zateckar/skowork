@@ -141,7 +141,7 @@ context: |
     the effective policy for one user. Its top-level keys are:
     llm, identity, tools, filesystem, network, mcp, skills, knowledge, meeting_capture, scheduler,
     unattended, telemetry, storage, mail, ui, messaging, apps, dictation, notifications, speech, agenda,
-    teams, daily_report.
+    teams, daily_report, evaluation.
   - Policy key layout: decisions are written policy.tools.rules[<tool-id pattern>] = allow|approve|deny,
     with policy.tools.risk.<risk class> defaults. Unattended runs add policy.unattended.allowed_risk and
     policy.unattended.rules. Tool settings are written policy.tools.<group>.<setting> and are never decisions.
@@ -234,6 +234,7 @@ context: |
   50 show-meeting-transcription-progress [Knowledge]
   51 improve-transcript-language      [Knowledge]
   52 add-local-outlook-and-teams      [Productivity]
+  53 add-evaluation-export            [Hardening, Knowledge]
 
 rules:
   proposal:
