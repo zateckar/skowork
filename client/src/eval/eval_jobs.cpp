@@ -63,7 +63,7 @@ void EvalJobs::export_job(ExportRequest r, std::filesystem::path folder) {
         const std::lock_guard lock(mx_);
         cancel = export_cancel_;
     }
-    (void)exporter_.write_manifest(folder, r, counts, false);
+    if (Status s = exporter_.write_manifest(folder, r, counts, false); !s) error = s.error().message;
     long long done = 0;
     for (const std::string source : {"mail", "teams", "calendar", "meetings"}) {
         if (!r.sources.count(source) || !error.empty() || cancel->cancelled()) continue;
@@ -81,7 +81,9 @@ void EvalJobs::export_job(ExportRequest r, std::filesystem::path folder) {
         export_status_["done"] = done;
     }
     const bool complete = error.empty() && !cancel->cancelled();
-    (void)exporter_.write_manifest(folder, r, counts, complete);
+    // The status never says done when the manifest does not say complete (review minor 8).
+    if (Status s = exporter_.write_manifest(folder, r, counts, complete); !s && error.empty())
+        error = "The manifest could not be written: " + s.error().message;
     const std::lock_guard lock(mx_);
     export_status_["state"] = !error.empty() ? "failed" : cancel->cancelled() ? "cancelled" : "done";
     if (!error.empty()) export_status_["error"] = error;
@@ -94,13 +96,11 @@ void EvalJobs::export_job(ExportRequest r, std::filesystem::path folder) {
 Result<json> EvalJobs::start_run(const json& params) {
     auto r = replay_request_from_json(params);
     if (!r) return r.error();
-    {
-        const std::lock_guard lock(mx_);
-        if (exporting_) return make_error("busy", "An export is running.");
-    }
+    // One lock over the check and the start: an export cannot start between them (review minor 7).
+    const std::lock_guard lock(mx_);
+    if (exporting_) return make_error("busy", "An export is running.");
     auto id = replayer_.start(*r);
     if (!id) return id.error();
-    const std::lock_guard lock(mx_);
     run_id_ = *id;
     return json{{"job", *id}};
 }
@@ -128,6 +128,14 @@ Status EvalJobs::cancel(const std::string& job) {
         return {};
     }
     return make_error("not_found", "No such evaluation job.");
+}
+
+void EvalJobs::cancel_all() {
+    {
+        const std::lock_guard lock(mx_);
+        if (export_cancel_) export_cancel_->cancel();
+    }
+    replayer_.cancel();
 }
 
 void EvalJobs::wait() {

@@ -42,7 +42,7 @@ public:
     // open for 7 days and speakers still unnamed 7 days after their meeting.
     void collect(long long now_ms);
     // Emits the rows of days before today and deletes them. With send false (telemetry off) nothing is emitted and
-    // rows older than 7 days are dropped. Returns the number of rows emitted.
+    // every row is dropped, so nothing counted while telemetry is off is sent later. Returns the number emitted.
     int flush(const std::function<void(const std::vector<telemetry::Field>&)>& emit, long long now_ms, bool send);
 
     [[nodiscard]] std::vector<QualityRow> rows() const;  // for tests and the viewer

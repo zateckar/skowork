@@ -127,7 +127,7 @@ TEST(Quality, OffLevelSendsNothing) {
     Emitted out;
     EXPECT_EQ(q.flush(into(out), kNow, false), 0);
     EXPECT_TRUE(out.empty());
-    ASSERT_EQ(q.rows().size(), 1u);  // the week-old row is dropped, the recent one waits
+    EXPECT_TRUE(q.rows().empty());  // review minor 11: counts made while telemetry is off are never sent later
 }
 
 TEST(Quality, AttributesAllowList) {
@@ -145,4 +145,17 @@ TEST(Quality, AttributesAllowList) {
             EXPECT_LE(s->size(), 24u);
         }
     }
+}
+
+// Review minor 12: marks of finished days, gone items and gone meetings are pruned.
+TEST(Quality, MarksArePruned) {
+    MailDb db;
+    auto& d = db.store->db();
+    ASSERT_TRUE(d.exec("INSERT INTO quality_marks(kind, ref) VALUES('collected', '2026-01-01'), ('untouched', 'mail|gone'), "
+                       "('unnamed', 'mtg_gone/s1')"));
+    QualityCounters q(d);
+    q.collect(kNow);
+    auto c = d.prepare("SELECT count(*) FROM quality_marks WHERE ref IN ('2026-01-01', 'mail|gone', 'mtg_gone/s1')");
+    ASSERT_TRUE(c.step());
+    EXPECT_EQ(c.col_int(0), 0);
 }

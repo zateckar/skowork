@@ -321,3 +321,70 @@ TEST(Exporter, ServicesResolvedWhenTheExportRuns) {
     ASSERT_TRUE(n);
     EXPECT_EQ(n->written, 1);
 }
+
+// Review minor 15: an out_dir that cannot be created fails, and so does an export whose folder vanishes part-way.
+TEST(Exporter, UnwritableAndVanishedFoldersFail) {
+    Rig r;
+    r.message("m1", kT0 + kHour);
+    std::filesystem::create_directories(r.out);
+    std::ofstream(r.out / "a-file") << "x";
+    auto ex = r.exporter();
+    ExportRequest bad = r.request({"mail"});
+    bad.out_dir = r.out / "a-file" / "below";
+    auto denied = ex.begin(bad);
+    ASSERT_FALSE(denied);
+    EXPECT_EQ(denied.error().code, "write_failed");
+    const auto req = r.request({"mail"});
+    auto folder = ex.begin(req);
+    ASSERT_TRUE(folder);
+    std::filesystem::remove_all(*folder);
+    CancelToken cancel;
+    auto n = ex.export_mail(*folder, req, cancel);
+    ASSERT_FALSE(n);
+    EXPECT_EQ(n.error().code, "write_failed");
+}
+
+// Review minor 9: the WAV keeps the track's own sample rate.
+TEST(Exporter, KeepsTheTrackSampleRate) {
+    Rig r;
+    const auto dir = r.out / "capture-src" / "mtg8";
+    std::filesystem::create_directories(dir);
+    std::vector<std::int16_t> pcm(8000, 100);
+    {
+        auto w = meeting::TrackWriter::create(dir / "remote.skau", meeting::TrackKind::remote, 8000, 0);
+        ASSERT_TRUE(w);
+        ASSERT_TRUE((*w)->append(pcm.data(), pcm.size()));
+        ASSERT_TRUE((*w)->close());
+    }
+    meeting::MeetingRecord m;
+    m.id = "mtg8";
+    m.state = "done";
+    m.started_at = kT0 + kHour;
+    m.audio_dir = meeting::path_to_utf8(dir);
+    ASSERT_TRUE(r.meetings->put(m));
+    auto ex = r.exporter();
+    const auto req = r.request({"meetings"}, true);
+    auto folder = ex.begin(req);
+    ASSERT_TRUE(folder);
+    CancelToken cancel;
+    ASSERT_TRUE(ex.export_meetings(*folder, req, cancel));
+    int rate = 0;
+    ASSERT_TRUE(eval::read_wav(*folder / "audio" / "mtg8" / "remote.wav", &rate));
+    EXPECT_EQ(rate, 8000);
+}
+
+// Review minor 9: a WAV header that claims more data than the file holds is refused before anything is allocated.
+TEST(Wav, RejectsAHeaderLargerThanTheFile) {
+    const auto file = std::filesystem::temp_directory_path() / "skowork-wav-huge.wav";
+    ASSERT_TRUE(eval::write_wav(file, {1, 2, 3}, 16000));
+    {
+        std::fstream io(file, std::ios::in | std::ios::out | std::ios::binary);
+        io.seekp(40);
+        const unsigned char huge[4] = {0xF0, 0xFF, 0xFF, 0xFF};
+        io.write(reinterpret_cast<const char*>(huge), 4);
+    }
+    auto back = eval::read_wav(file);
+    ASSERT_FALSE(back);
+    EXPECT_EQ(back.error().code, "corrupt");
+    std::filesystem::remove(file);
+}

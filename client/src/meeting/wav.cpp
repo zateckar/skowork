@@ -1,6 +1,7 @@
 #include "meeting/wav.h"
 
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 
 namespace wb::meeting {
@@ -59,6 +60,10 @@ Result<std::vector<std::int16_t>> read_wav(const std::filesystem::path& file, in
         return make_error("corrupt", "Not a 16-bit mono PCM WAV file.");
     if (sample_rate) *sample_rate = static_cast<int>(get32(h + 24));
     const std::uint32_t n = get32(h + 40) / 2;
+    // The header is checked against the file before anything is allocated (review minor 9).
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(file, ec);
+    if (ec || size < 44 || static_cast<std::uint64_t>(n) * 2 > size - 44) return make_error("corrupt", "The WAV file is shorter than its header says.");
     std::vector<std::int16_t> pcm(n);
     for (std::uint32_t i = 0; i < n; ++i) {
         unsigned char b[2];

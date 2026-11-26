@@ -171,11 +171,24 @@ void Replayer::run(ReplayRequest r, Variant v, std::string id) {
                 std::vector<triage::Event> events;
                 for (size_t k = i; k < end; ++k)
                     events.push_back({jstr(items[k], "id"), "r1", event_text(items[k], static_cast<size_t>(v.number("triage.body_limit")))});
+                // Replay usage is attributed to evaluation, not to live triage (review minor 14).
+                triage::ClassifyOptions options;
+                options.instructions = v.text("triage.instructions");
+                options.feature = "eval.triage";
+                model::Usage used;
+                options.usage = &used;
                 auto res = triage::classify(*env_.model, env_.responsibilities ? env_.responsibilities() : std::string{}, events,
-                                            v.text("triage.instructions"));
+                                            options);
+                tokens_in += used.prompt;
+                tokens_out += used.completion;
                 if (!res) {
                     for (const auto& e : events) fail_item(e.id, failure_kind(res.error()), res.error().message);
                 } else {
+                    // An item the answer leaves out is a failure, never silently missing (review minor 14).
+                    std::set<std::string> answered;
+                    for (const auto& c : *res) answered.insert(c.id);
+                    for (const auto& e : events)
+                        if (!answered.count(e.id)) fail_item(e.id, "mismatch", "the answer left this item out");
                     for (const auto& c : *res)
                         (void)out->write({{"id", c.id},
                                           {"result", {{"outcome", c.outcome}, {"reason", c.reason}, {"action", c.action}, {"category", c.category}}}});
@@ -210,7 +223,7 @@ void Replayer::run(ReplayRequest r, Variant v, std::string id) {
                 req.validate_tool_calls = false;
                 req.temperature = 0.0;
                 req.max_tokens = 4096;
-                req.feature = "agenda.detect";
+                req.feature = "eval.agenda";
                 req.messages = {{"system", v.text("agenda.instructions"), {}, {}, {}},
                                 {"user", agenda::detection_data(src, me, now, env_.tz_offset_min ? env_.tz_offset_min(now) : 0).dump(), {}, {}, {}}};
                 auto resp = env_.model->chat(req, {});
@@ -253,7 +266,7 @@ void Replayer::run(ReplayRequest r, Variant v, std::string id) {
                     req.role = model::Role::small;
                     req.temperature = 0.0;
                     req.max_tokens = knowledge::kKnowledgeOutputTokens;
-                    req.feature = "knowledge.extract";
+                    req.feature = "eval.knowledge";
                     req.validate_tool_calls = false;
                     req.messages = {{"system", v.text("knowledge.extraction"), {}, {}, {}}, {"user", user, {}, {}, {}}};
                     auto resp = env_.model->chat(req, {});
@@ -314,6 +327,7 @@ void Replayer::run(ReplayRequest r, Variant v, std::string id) {
                              {"threshold", v.number("diarize.threshold")},
                              {"num_clusters", cluster_count(v.choice("diarize.clusters"), attendees, user)}};
             json req = {{"kind", r.step == Step::asr ? "transcribe" : "diarize"},
+                        {"diarize", r.step == Step::diarize},  // a transcription replay does not diarize (review minor 14)
                         {"tracks", tracks},
                         {"language", jstr(it, "language")},
                         {"vocabulary", it.value("vocabulary", json::array())},

@@ -635,6 +635,7 @@ TEST(AgendaService, DecisionsAreLogged) {
     const auto log = r.log->for_item("mail:m1");
     ASSERT_EQ(log.size(), 3u);
     EXPECT_EQ(log[0].kind, "agenda_edit");
+    EXPECT_EQ(log[0].before["sources"][0], "mail:m1");  // every source, for forgetting
     EXPECT_EQ(log[0].after["title"], "Send the Q4 slides to Petr");
     EXPECT_EQ(log[1].kind, "agenda_done");
     EXPECT_EQ(log[1].before["state"], "open");

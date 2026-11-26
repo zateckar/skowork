@@ -69,7 +69,9 @@ std::vector<Decision> DecisionLog::between(long long from_ms, long long to_ms) c
 
 Status DecisionLog::forget_item(const std::string& item_ref) {
     const std::lock_guard lock(db_.mutex());
-    auto st = db_.prepare("DELETE FROM decision_log WHERE item_ref=?1 OR substr(result_ref, 1, length(?1) + 1)=?1 || '/'");
+    auto st = db_.prepare("DELETE FROM decision_log WHERE item_ref=?1 OR substr(result_ref, 1, length(?1) + 1)=?1 || '/' OR "
+                          "(step='agenda' AND json_valid(before_json) AND "
+                          "EXISTS (SELECT 1 FROM json_each(before_json, '$.sources') WHERE value=?1))");
     return st.bind(1, item_ref).run();
 }
 

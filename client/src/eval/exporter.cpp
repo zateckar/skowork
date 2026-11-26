@@ -279,7 +279,7 @@ Result<ExportCounts> Exporter::export_meetings(const std::filesystem::path& fold
                 auto decoded = meeting::read_track(t);
                 if (!decoded) continue;
                 const std::string name = t.stem().string() + ".wav";
-                if (Status s = write_wav(dir / name, decoded->pcm, 16000); !s) return s.error();
+                if (Status s = write_wav(dir / name, decoded->pcm, static_cast<int>(decoded->header.sample_rate)); !s) return s.error();
                 audio[t.stem().string()] = "audio/" + m.id + "/" + name;
             }
         } else if (!tracks.empty()) {

@@ -78,11 +78,13 @@ std::string classification_instructions() {
 
 Result<std::vector<Classification>> classify(model::IChatModel& model, const std::string& responsibilities,
                                               const std::vector<Event>& events, const std::shared_ptr<CancelToken>& cancel) {
-    return classify(model, responsibilities, events, classification_instructions(), cancel);
+    ClassifyOptions options;
+    options.instructions = classification_instructions();
+    return classify(model, responsibilities, events, options, cancel);
 }
 
 Result<std::vector<Classification>> classify(model::IChatModel& model, const std::string& responsibilities,
-                                              const std::vector<Event>& events, const std::string& instructions,
+                                              const std::vector<Event>& events, const ClassifyOptions& options,
                                               const std::shared_ptr<CancelToken>& cancel) {
     if (events.empty() || events.size() > 20 || responsibilities.size() > 4096) return invalid_input();
     std::set<std::string> ids;
@@ -100,11 +102,11 @@ Result<std::vector<Classification>> classify(model::IChatModel& model, const std
     request.validate_tool_calls = false;  // Unexpected Tool calls are rejected, never repaired with another request.
     request.max_tokens = role->max_output_tokens > 0 && role->max_output_tokens < 8192
                              ? static_cast<int>(role->max_output_tokens) : 8192;
-    request.feature = "event-triage";
+    request.feature = options.feature;
     request.cancel = cancel;
     model::ChatMessage system;
     system.role = "system";
-    system.content = instructions;
+    system.content = options.instructions;
     model::ChatMessage user;
     user.role = "user";
     try {
@@ -115,6 +117,7 @@ Result<std::vector<Classification>> classify(model::IChatModel& model, const std
     request.messages = {std::move(system), std::move(user)};
     auto response = model.chat(request, {});
     if (!response) return make_error("unavailable", "Triage is unavailable.");
+    if (options.usage) *options.usage += response->usage;
     if (response->finish_reason == "length") return invalid_response("the answer was cut off");
     if (response->finish_reason != "stop") return invalid_response("the answer did not finish");
     if (!response->tool_calls.empty()) return invalid_response("the answer called a tool");

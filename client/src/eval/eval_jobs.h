@@ -25,6 +25,8 @@ public:
     Result<json> status(const std::string& job) const override;
     Status cancel(const std::string& job) override;
     void wait();  // for tests: the running export finishes
+    // Cancels whatever runs (policy.evaluation.export was turned off).
+    void cancel_all() override;
 
 private:
     void export_job(ExportRequest r, std::filesystem::path folder);

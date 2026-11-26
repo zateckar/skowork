@@ -564,9 +564,17 @@ void App::tick() {
     // Quality counters (client/telemetry Quality Counters): finished days are collected and sent hourly; each day once.
     if (quality && telemetry && ticks % 3600 == 1200) {
         const long long now = system_clock().unix_millis();
-        quality->collect(now);
+        const bool on = telemetry->level() != telemetry::Level::off;
+        // Nothing is counted while telemetry is off, and nothing counted then is sent later (review minor 11).
+        if (on) quality->collect(now);
         (void)quality->flush([this](const std::vector<telemetry::Field>& f) { telemetry->emit(telemetry::Event::quality_daily, f); },
-                             now, telemetry->level() != telemetry::Level::off);
+                             now, on);
+    }
+    // A running export or replay stops when policy.evaluation.export is turned off (review minor 13).
+    if (ticks % 10 == 7) {
+        const std::lock_guard lock(eval_mx);
+        const auto cur = policy ? policy->current() : nullptr;
+        if (eval_svc && !(cur && eval::export_enabled(*cur))) eval_svc->cancel_all();
     }
     if (telemetry && ticks % 3600 == 600) {
         PROCESS_MEMORY_COUNTERS pmc{};
@@ -660,7 +668,7 @@ void App::register_rpc() {
                       {"language", jstr(request, "language")},
                       {"vocabulary", request.value("vocabulary", json::array())},
                       {"settings", request.value("settings", json::object())},
-                      {"diarize", true}};
+                      {"diarize", !request.contains("diarize") || jbool(request, "diarize")}};
             p["speech_dir"] = narrow(active_speech_path(root->root()).wstring());
             return workers->call(WorkerRole::stt, "stt.transcribe", p);
         };

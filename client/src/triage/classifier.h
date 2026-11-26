@@ -24,9 +24,15 @@ std::string classification_instructions();
 Result<std::vector<Classification>> classify(model::IChatModel& model, const std::string& responsibilities,
                                               const std::vector<Event>& events,
                                               const std::shared_ptr<CancelToken>& cancel = {});
-// The same with other system instructions (an evaluation replay variant, add-evaluation-export design D3).
+// The same with other system instructions, a feature name for usage attribution and the usage reported back (an
+// evaluation replay, add-evaluation-export design D3, D4).
+struct ClassifyOptions {
+    std::string instructions;
+    std::string feature = "event-triage";
+    model::Usage* usage = nullptr;  // added to when the model answered
+};
 Result<std::vector<Classification>> classify(model::IChatModel& model, const std::string& responsibilities,
-                                              const std::vector<Event>& events, const std::string& instructions,
+                                              const std::vector<Event>& events, const ClassifyOptions& options,
                                               const std::shared_ptr<CancelToken>& cancel = {});
 
 }  // namespace wb::triage

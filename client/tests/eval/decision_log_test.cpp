@@ -121,3 +121,16 @@ TEST(DecisionLog, ItemRefs) {
     EXPECT_EQ(eval::item_ref_calendar("e1"), "calendar:e1");
     EXPECT_EQ(eval::item_ref_meeting("mtg"), "meeting:mtg");
 }
+
+// Review minor 10: an Agenda decision is forgotten with any of its item's sources, not only the first.
+TEST(DecisionLog, AgendaEntriesGoWithAnyOfTheirSources) {
+    MailDb db;
+    DecisionLog log(db.store->db());
+    Decision d = decision("agenda_done", "mail:a", kNow);
+    d.step = "agenda";
+    d.result_ref = "agenda:item1";
+    d.before = {{"state", "open"}, {"sources", {"mail:a", "teams:c/m"}}};
+    ASSERT_TRUE(log.record(d));
+    ASSERT_TRUE(log.forget_item("teams:c/m"));
+    EXPECT_TRUE(log.for_item("mail:a").empty());
+}

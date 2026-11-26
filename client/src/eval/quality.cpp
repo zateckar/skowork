@@ -106,6 +106,15 @@ bool QualityCounters::mark(const std::string& kind, const std::string& ref) {
 }
 
 void QualityCounters::collect(long long now_ms) {
+    // Marks that can no longer matter go (review minor 12): days older than the collection window, and items or
+    // meetings that no longer exist.
+    {
+        const std::lock_guard lock(db_.mutex());
+        auto old = db_.prepare("DELETE FROM quality_marks WHERE kind='collected' AND ref < ?1");
+        (void)old.bind(1, utc_day(now_ms - 8 * kDayMs)).run();
+        (void)db_.exec("DELETE FROM quality_marks WHERE kind='untouched' AND ref NOT IN (SELECT scope || '|' || item_id FROM triage_items)");
+        (void)db_.exec("DELETE FROM quality_marks WHERE kind='unnamed' AND substr(ref, 1, instr(ref, '/') - 1) NOT IN (SELECT id FROM meetings)");
+    }
     // Finished days within the last week that were not collected yet.
     const long long today = day_start(now_ms);
     for (long long d = today - 7 * kDayMs; d < today; d += kDayMs) {
@@ -209,9 +218,9 @@ void QualityCounters::sweep(long long now_ms) {
 int QualityCounters::flush(const std::function<void(const std::vector<telemetry::Field>&)>& emit, long long now_ms, bool send) {
     const std::string today = utc_day(now_ms);
     if (!send) {
+        // Counts made while telemetry is off are never sent later (review minor 11).
         const std::lock_guard lock(db_.mutex());
-        auto d = db_.prepare("DELETE FROM quality_counts WHERE day < ?1");
-        (void)d.bind(1, utc_day(now_ms - kWeekMs)).run();
+        (void)db_.exec("DELETE FROM quality_counts");
         return 0;
     }
     std::vector<QualityRow> due;

@@ -35,6 +35,7 @@ public:
     model::ModelResult<model::ChatResponse> chat(const model::ChatRequest& r, const model::ChatSink&) override {
         ++requests;
         last_system = r.messages.at(0).content;
+        last_feature = r.feature;
         while (hold) std::this_thread::sleep_for(5ms);
         if (fail) return model::ModelFailure{"TIMEOUT", "timed out", "", 0, "", 0, true, false};
         const auto data = parse_json(r.messages.at(1).content);
@@ -45,12 +46,16 @@ public:
                                    {"reason", "Asks you"}, {"action", "required"}, {"category", "request"}});
         model::ChatResponse out;
         out.finish_reason = "stop";
+        if (drop_one && !results.empty()) results.erase(results.end() - 1);
         out.text = json{{"results", results}}.dump();
+        out.usage.prompt = 100;
+        out.usage.completion = 20;
         return out;
     }
     std::atomic<int> requests{0};
     std::atomic<bool> hold{false}, fail{false};
-    std::string last_system;
+    std::string last_system, last_feature;
+    std::atomic<bool> drop_one{false};
 };
 
 struct Folder {
@@ -341,4 +346,146 @@ TEST(Replay, ContinuedPartsDoNotFailTheMeeting) {
     ASSERT_TRUE(rep.start(r));
     rep.wait();
     EXPECT_EQ(tracks, 1u);
+}
+
+// Review minor 14: replay usage is measured and attributed to evaluation, a result the model leaves out is a failure,
+// and a transcription replay does not ask for diarization.
+TEST(Replay, RecordsTokensAndUsesTheEvaluationFeature) {
+    Folder f;
+    f.mail(3);
+    ReplayModel model;
+    eval::Replayer rep(env_with(model));
+    auto id = rep.start(triage_request(f));
+    ASSERT_TRUE(id);
+    rep.wait();
+    const json run = f.run_json(*id);
+    EXPECT_EQ(run["tokens_in"], 100);
+    EXPECT_EQ(run["tokens_out"], 20);
+    EXPECT_EQ(model.last_feature, "eval.triage");
+}
+
+TEST(Replay, ItemsTheModelLeavesOutAreFailures) {
+    Folder f;
+    f.mail(3);
+    ReplayModel model;
+    model.drop_one = true;
+    eval::Replayer rep(env_with(model));
+    auto id = rep.start(triage_request(f));
+    ASSERT_TRUE(id);
+    rep.wait();
+    EXPECT_EQ(f.run_json(*id)["failures_by_kind"]["mismatch"], 3);
+    EXPECT_EQ(f.results(*id).size(), 3u);
+}
+
+TEST(Replay, TranscriptionDoesNotDiarize) {
+    Folder f;
+    f.meetings({{"remote", "audio/mtg1/remote.wav"}});
+    ReplayModel model;
+    auto e = env_with(model);
+    std::vector<bool> diarize;
+    e.speech = [&](const json& req) -> Result<json> {
+        diarize.push_back(jbool(req, "diarize"));
+        return json{{"language", "en"}, {"segments", json::array()}};
+    };
+    for (const auto step : {eval::Step::asr, eval::Step::diarize}) {
+        eval::Replayer rep(e);
+        eval::ReplayRequest r;
+        r.folder = f.dir;
+        r.step = step;
+        ASSERT_TRUE(rep.start(r));
+        rep.wait();
+    }
+    ASSERT_EQ(diarize.size(), 2u);
+    EXPECT_FALSE(diarize[0]);
+    EXPECT_TRUE(diarize[1]);
+}
+
+namespace {
+
+struct Jobs {
+    MailDb db;
+    mail::MailStore store{db.store->db()};
+    ReplayModel model;
+    std::atomic<bool> hold{false};
+    std::function<void()> on_mail;
+    std::unique_ptr<eval::EvalJobs> jobs;
+    Folder f;
+    Jobs() {
+        EXPECT_TRUE(store.set_folders({{"f-inbox", "Inbox", "inbox"}}));
+        mail::StoredMessage m;
+        m.id = "m1";
+        m.folder_id = "f-inbox";
+        m.change_key = "k";
+        m.received_at = 1'790'000'000'000LL;
+        store.upsert_message(m);
+        eval::ExportEnv xe;
+        xe.mail = [this] {
+            while (hold) std::this_thread::sleep_for(5ms);
+            if (on_mail) on_mail();
+            return &store;
+        };
+        xe.app_db = &db.store->db();
+        xe.now = [] { return 1'790'000'000'000LL; };
+        jobs = std::make_unique<eval::EvalJobs>(xe, env_with(model));
+    }
+    json export_params() const {
+        return {{"out_dir", meeting::path_to_utf8(f.dir / "exports")}, {"from", "2026-09-01"}, {"to", "2026-10-01"}, {"sources", {"mail"}}};
+    }
+};
+
+}  // namespace
+
+// Review minor 7: an export and a replay never run at once, whichever starts first.
+TEST(EvalJobs, OneJobAtATimeBothWays) {
+    Jobs j;
+    j.f.mail(5);
+    j.hold = true;
+    auto exp = j.jobs->start_export(j.export_params());
+    ASSERT_TRUE(exp) << exp.error().message;
+    auto run = j.jobs->start_run({{"folder", meeting::path_to_utf8(j.f.dir)}, {"step", "triage"}});
+    ASSERT_FALSE(run);
+    EXPECT_EQ(run.error().code, "busy");
+    j.hold = false;
+    j.jobs->wait();
+    j.model.hold = true;
+    auto run2 = j.jobs->start_run({{"folder", meeting::path_to_utf8(j.f.dir)}, {"step", "triage"}});
+    ASSERT_TRUE(run2) << run2.error().message;
+    for (int i = 0; i < 400 && j.model.requests.load() == 0; ++i) std::this_thread::sleep_for(5ms);
+    auto exp2 = j.jobs->start_export(j.export_params());
+    ASSERT_FALSE(exp2);
+    EXPECT_EQ(exp2.error().code, "busy");
+    j.model.hold = false;
+    j.jobs->wait();
+}
+
+// Review minor 8: when the final manifest cannot be written, the job fails instead of reporting done.
+TEST(EvalJobs, AManifestThatCannotBeWrittenFailsTheJob) {
+    Jobs j;
+    std::filesystem::path folder;
+    j.on_mail = [&] {
+        // The manifest's place is taken by a folder, so it cannot be rewritten at the end.
+        std::filesystem::remove(folder / "manifest.json");
+        std::filesystem::create_directory(folder / "manifest.json");
+    };
+    auto exp = j.jobs->start_export(j.export_params());
+    ASSERT_TRUE(exp);
+    folder = meeting::path_from_utf8(jstr(*exp, "folder"));
+    j.jobs->wait();
+    auto st = j.jobs->status(jstr(*exp, "job"));
+    ASSERT_TRUE(st);
+    EXPECT_EQ((*st)["state"], "failed");
+}
+
+// Review minor 13: turning the setting off stops a running job.
+TEST(EvalJobs, CancelAllStopsARunningJob) {
+    Jobs j;
+    j.f.mail(40);
+    auto run = j.jobs->start_run({{"folder", meeting::path_to_utf8(j.f.dir)}, {"step", "triage"}, {"variant", {{"triage.batch_size", 1}}}});
+    ASSERT_TRUE(run);
+    for (int i = 0; i < 400 && j.model.requests.load() < 2; ++i) std::this_thread::sleep_for(5ms);
+    j.jobs->cancel_all();
+    j.jobs->wait();
+    auto st = j.jobs->status(jstr(*run, "job"));
+    ASSERT_TRUE(st);
+    EXPECT_EQ((*st)["state"], "cancelled");
 }

@@ -19,6 +19,7 @@ public:
     // {state: running|paused|done|failed|cancelled, kind, step?, done, total, error?, folder?}
     virtual Result<json> status(const std::string& job) const = 0;
     virtual Status cancel(const std::string& job) = 0;
+    virtual void cancel_all() = 0;  // the setting was turned off
 };
 
 }  // namespace wb::eval

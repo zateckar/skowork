@@ -18,19 +18,23 @@ void log_agenda_decision(const Env& env, const std::string& kind, const Item& be
     d.at_ms = env.now ? env.now() : 0;
     d.step = "agenda";
     d.kind = kind;
-    if (!before.sources.empty()) {
-        const ItemSource& s = before.sources.front();
-        if (s.kind == "mail") d.item_ref = eval::item_ref_mail(s.source_id);
-        else if (s.kind == "calendar") d.item_ref = eval::item_ref_calendar(s.source_id);
-        else if (s.kind == "meeting") d.item_ref = eval::item_ref_meeting(s.source_id);
-        else if (s.kind == "teams") d.item_ref = eval::item_ref_teams(s.conversation, s.source_id);
-        else d.item_ref = s.kind + ":" + s.source_id;
-    }
+    const auto ref_of = [](const ItemSource& s) {
+        if (s.kind == "mail") return eval::item_ref_mail(s.source_id);
+        if (s.kind == "calendar") return eval::item_ref_calendar(s.source_id);
+        if (s.kind == "meeting") return eval::item_ref_meeting(s.source_id);
+        if (s.kind == "teams") return eval::item_ref_teams(s.conversation, s.source_id);
+        return s.kind + ":" + s.source_id;
+    };
+    // Every source is listed, so forgetting any of them removes the entry (review minor 10).
+    json sources = json::array();
+    for (const auto& s : before.sources) sources.push_back(ref_of(s));
+    if (!before.sources.empty()) d.item_ref = ref_of(before.sources.front());
     d.result_ref = "agenda:" + before.id;
     const auto view = [](const Item& it) {
         return json{{"state", it.state}, {"title", it.title}, {"due_at", it.due_at}, {"has_time", it.has_time}};
     };
     d.before = view(before);
+    d.before["sources"] = sources;
     d.after = view(after);
     d.instruction_id = eval::Variant::defaults(eval::Step::agenda).instruction_id();
     (void)env.decisions->record(d);
