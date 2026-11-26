@@ -11,7 +11,8 @@ const RpcRegistry::Handler* RpcRegistry::find(const std::string& method, bool fr
     const std::lock_guard lock(mx_);
     const auto it = methods_.find(method);
     if (it == methods_.end()) return nullptr;
-    if (from_pipe && it->second.exposure != RpcExposure::ui_and_pipe) return nullptr;
+    if (from_pipe && it->second.exposure == RpcExposure::ui) return nullptr;
+    if (!from_pipe && it->second.exposure == RpcExposure::pipe) return nullptr;
     return &it->second.handler;
 }
 

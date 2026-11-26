@@ -52,6 +52,9 @@
 #include "app/agenda_rpc.h"
 #include "agenda/service.h"
 #include "app/triage_rpc.h"
+#include "app/eval_rpc.h"
+#include "eval/eval_service.h"
+#include "eval/setting.h"
 #include "triage/triage.h"
 #include "messaging/messaging.h"
 #include "mcp/manager.h"
@@ -257,6 +260,7 @@ struct App {
     // queue, reminders and read-only preparation.
     std::unique_ptr<triage::TriageService> triage_svc;  // event triage (improve-proactive-durable-work D1)
     std::atomic<triage::TriageService*> triage_live{nullptr};  // for Teams events from the pool (add-teams-triage)
+    std::unique_ptr<eval::EvalService> eval_svc;  // client/evaluation (add-evaluation-export)
     void start_triage();
     std::unique_ptr<agenda::Service> agenda_svc;
     std::atomic<agenda::Service*> agenda_live{nullptr};  // read by mail, meeting, channel and Run threads
@@ -824,6 +828,7 @@ void App::register_rpc() {
     });
     // Calls a method that is exposed to the window only, as the window would (manual acceptance runs).
     rpc.add("dev.call", RpcExposure::ui_and_pipe, [this](const json& p) -> Result<json> {
+        // Window lookup: pipe-only methods (eval.*) are not reachable through dev.call (add-evaluation-export D1).
         const auto* h = rpc.find(jstr(p, "method"), /*from_pipe=*/false);
         if (!h) return make_error("not_found", "unknown method");
         return (*h)(p.contains("params") ? p["params"] : json::object());
@@ -2307,6 +2312,11 @@ void App::start_triage() {
     mail_svc->set_page_sink([this](const std::vector<mail::PageChange>& c) { return triage_svc->take_in(c); });
     mail_svc->on_cycle([this] { triage_svc->cycle_completed(); });
     register_triage_rpc(rpc, [this] { return triage_svc.get(); });
+    // client/evaluation: pipe-only export and replay, refused while policy.evaluation.export is off.
+    register_eval_rpc(rpc, [this] { return eval_svc.get(); }, [this] {
+        const auto cur = policy ? policy->current() : nullptr;
+        return cur && eval::export_enabled(*cur);
+    });
     forget.on_forget("source", "event-triage", [this](const std::string& id) {
         if (id == "triage") return triage_svc->delete_data();
         return Status{};

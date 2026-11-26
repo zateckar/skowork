@@ -90,6 +90,18 @@
       "default": "on"
     },
     {
+      "path": "evaluation.export",
+      "owner": "client/evaluation",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off"
+    },
+    {
       "path": "filesystem.deny",
       "owner": "client/policy-enforcement",
       "type": {
@@ -1564,6 +1576,23 @@
             "x-owner": "client/dictation",
             "x-merge": "scalar",
             "default": "on",
+            "x-guardrail": "max-level"
+          }
+        }
+      },
+      "evaluation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "export": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on"
+            ],
+            "x-owner": "client/evaluation",
+            "x-merge": "scalar",
+            "default": "off",
             "x-guardrail": "max-level"
           }
         }

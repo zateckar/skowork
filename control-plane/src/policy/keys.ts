@@ -175,6 +175,8 @@ export const KEYS: KeyDef[] = [
   { path: 'apps.mcp', owner: 'client/local-apps', description: 'Allow Local apps to use the read-risk MCP bridge subject to confirmation and policy.', type: { kind: 'enum', values: ['off', 'read'] }, default: 'read', merge: 'scalar', guardrail: 'max-level' },
   // specs: add-dictation/specs/client/policy-enforcement/spec.md (Dictation Policy)
   { path: 'dictation.mode', owner: 'client/dictation', description: 'Allow the Dictate control for locally transcribing microphone input into a draft.', type: { kind: 'enum', values: ['off', 'on'] }, default: 'on', merge: 'scalar', guardrail: 'max-level' },
+  // specs: add-evaluation-export/specs/client/evaluation/spec.md (Evaluation Setting)
+  { path: 'evaluation.export', owner: 'client/evaluation', description: 'Allow the developer evaluation export and replay on the local pipe. Exports hold personal data in plain text; keep off except for developers evaluating their own data.', type: { kind: 'enum', values: ['off', 'on'] }, default: 'off', merge: 'scalar', guardrail: 'max-level' },
   // specs: add-agenda/specs/client/agenda/spec.md (Agenda Is Opt In, Automatic Preparation)
   { path: 'agenda.mode', owner: 'client/agenda', description: 'Make the Agenda available. Users still turn it on themselves; off stops detection and hides the Agenda.', type: { kind: 'enum', values: ['off', 'available'] }, default: 'available', merge: 'scalar', guardrail: 'max-level' },
   { path: 'agenda.auto_prepare', owner: 'client/agenda', description: 'Allow users to turn on automatic, read-only preparation of Agenda items due within seven days.', type: { kind: 'boolean' }, default: false, merge: 'scalar', guardrail: 'force' },

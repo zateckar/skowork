@@ -2,6 +2,7 @@
 // matcher, path syntax and path rules, egress rules, and the client defaults against the generated schema.
 #include "policy/core.h"
 #include "policy/decide.h"
+#include "eval/setting.h"
 
 #include <gtest/gtest.h>
 
@@ -287,4 +288,13 @@ TEST(PolicyBundle, PayloadClaims) {
     json zero = ok;
     zero["ver"] = 0;
     EXPECT_FALSE(bundle_from_payload(zero));
+}
+
+// add-evaluation-export (client/evaluation Evaluation Setting): policy.evaluation.export is off unless it is exactly on.
+TEST(PolicyCore, EvaluationExportDefaultsOff) {
+    EXPECT_EQ(make(json::object()).string("evaluation.export"), "off");
+    EXPECT_FALSE(eval::export_enabled(make(json::object())));
+    EXPECT_FALSE(eval::export_enabled(make({{"evaluation", {{"export", "yes"}}}})));
+    EXPECT_FALSE(eval::export_enabled(make({{"evaluation", {{"export", true}}}})));
+    EXPECT_TRUE(eval::export_enabled(make({{"evaluation", {{"export", "on"}}}})));
 }

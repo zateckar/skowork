@@ -281,6 +281,17 @@ TEST(Rpc, PipeExposureAndErrors) {
     EXPECT_EQ((*failed)["error"]["data"]["code"], "nope");
 }
 
+// add-evaluation-export design D1: a pipe-only method is offered on the local API and never to the window.
+TEST(Rpc, PipeOnlyHiddenFromWindow) {
+    RpcRegistry rpc;
+    rpc.add("pipe.only", RpcExposure::pipe, [](const json&) -> Result<json> { return json{{"x", 1}}; });
+    EXPECT_EQ(rpc.find("pipe.only", false), nullptr);
+    EXPECT_NE(rpc.find("pipe.only", true), nullptr);
+    auto ok = parse_json(rpc.handle_pipe_request(R"({"jsonrpc":"2.0","id":3,"method":"pipe.only"})"));
+    ASSERT_TRUE(ok);
+    EXPECT_EQ((*ok)["result"]["x"], 1);
+}
+
 // Two pools (desktop-host design D5): four blocked background tasks do not delay a UI request.
 TEST(HostPools, UiRequestsDoNotWaitBehindBlockedBackgroundWork) {
     ThreadPool background{2};

@@ -164,6 +164,7 @@ const json& client_policy_defaults() {
         {"agenda.auto_prepare", false},
         {"agenda.daily_preparations", 10},
         {"agenda.min_confidence", 0.7},
+        {"evaluation.export", "off"},
         {"notifications.completed", true},
         {"notifications.failed", true},
         {"notifications.action", true},
