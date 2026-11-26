@@ -204,6 +204,7 @@ if(WIN32)
     platform/log_test.cpp
     platform/http_stream_test.cpp
     storage/storage_test.cpp
+    eval/instructions_golden_test.cpp
     storage/generated_surface_state_test.cpp
     storage/data_root_test.cpp
     host/host_test.cpp

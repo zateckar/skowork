@@ -132,6 +132,12 @@ struct Extraction {
 
 // The JSON schema the small model is asked to answer with.
 const json& extraction_schema();
+
+// The system instructions of knowledge extraction (with the common-sense rubric), fact rating and name resolution
+// (add-evaluation-export design D3: named so that evaluation replays can override them).
+std::string extraction_system_text();
+std::string score_instructions();
+std::string resolve_instructions();
 // The model's answer (JSON, possibly in a ``` fence) checked against the schema: unknown types, out-of-range chunk
 // indexes and relations between unknown entities are dropped, names and predicates are bounded. nullopt: not JSON.
 // Salience is clamped to 0..1, an unknown durability becomes lasting, and a statement is cut at a word boundary.

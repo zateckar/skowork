@@ -18,6 +18,9 @@ struct Classification {
     std::string action, category;  // relevant results only
 };
 
+// The system instructions the classifier sends (add-evaluation-export design D3).
+std::string classification_instructions();
+
 Result<std::vector<Classification>> classify(model::IChatModel& model, const std::string& responsibilities,
                                               const std::vector<Event>& events,
                                               const std::shared_ptr<CancelToken>& cancel = {});
