@@ -166,6 +166,32 @@ public:
         for (const auto& [id, e] : events_) newest = std::max(newest, e.modified);
         return std::to_string(events_.size()) + "/" + std::to_string(newest);
     }
+    // Calendar items: series (by series_id) and single events, with the newest modification of each.
+    Result<std::vector<OlRow>> calendar_items() override {
+        if (down) return make_error("offline", "Outlook is not running");
+        if (!item_table) return std::vector<OlRow>{};
+        std::map<std::string, long long> newest;
+        for (const auto& [id, e] : events_) {
+            auto& n = newest[e.series_id.empty() ? id : e.series_id];
+            n = std::max(n, e.modified);
+        }
+        std::vector<OlRow> out;
+        for (const auto& [id, m] : newest) out.push_back({id, m, 0});
+        return out;
+    }
+    Result<std::vector<OlEvent>> item_events(const std::string& entry, long long from, long long to) override {
+        if (down) return make_error("offline", "Outlook is not running");
+        items_read.push_back(entry);
+        std::vector<OlEvent> out;
+        bool exists = false;
+        for (const auto& [id, e] : events_)
+            if ((e.series_id.empty() ? id : e.series_id) == entry) {
+                exists = true;
+                if (e.end > from && e.start < to) out.push_back(e);
+            }
+        if (!exists) return make_error("not_found", "no such item");
+        return out;
+    }
     Result<OlEvent> event(const std::string& id) override {
         const auto it = events_.find(id);
         if (it == events_.end()) return make_error("not_found", "no such event");
@@ -207,7 +233,8 @@ public:
     std::optional<MessageQuery> last_query;
     std::set<std::string> unreadable_;
     int opened = 0, saved_events = 0, drafts_ = 0, event_reads = 0, row_reads = 0;
-    bool stamps = true;
+    bool stamps = true, item_table = true;
+    std::vector<std::string> items_read;
     long long now_ms = 0;
     bool down = false;
 };
@@ -252,6 +279,8 @@ struct OutlookFixture {
                 Status remove(const std::string& a) override { return f->remove(a); }
                 Result<std::vector<OlEvent>> events(long long a, long long b, size_t c) override { return f->events(a, b, c); }
                 Result<std::string> calendar_stamp() override { return f->calendar_stamp(); }
+                Result<std::vector<OlRow>> calendar_items() override { return f->calendar_items(); }
+                Result<std::vector<OlEvent>> item_events(const std::string& a, long long b, long long c) override { return f->item_events(a, b, c); }
                 Result<std::string> folder_stamp(const std::string& a) override { return f->folder_stamp(a); }
                 Result<OlEvent> event(const std::string& a) override { return f->event(a); }
                 Result<OlEvent> save_event(const std::string& a, const EventPatch& p) override { return f->save_event(a, p); }
@@ -464,7 +493,8 @@ TEST(OutlookGraph, AnUnchangedCalendarIsNotReadAgain) {
     f.events_.erase("E2");
     auto changed = g.handle("GET", jstr(*same, "@odata.deltaLink"), std::nullopt);
     ASSERT_TRUE(changed);
-    EXPECT_GT(f.event_reads, reads);
+    EXPECT_EQ(f.event_reads, reads);  // only the changed item was read
+    EXPECT_EQ(f.items_read, std::vector<std::string>{"E1"});
     std::set<std::string> ids, removed;
     for (const auto& x : (*changed)["value"]) (x.contains("@removed") ? removed : ids).insert(jstr(x, "id"));
     EXPECT_EQ(ids, std::set<std::string>{"E1"});
@@ -476,6 +506,64 @@ TEST(OutlookGraph, AnUnchangedCalendarIsNotReadAgain) {
     ASSERT_TRUE(plain);
     EXPECT_TRUE((*plain)["value"].empty());
     EXPECT_GT(f.event_reads, before);
+}
+
+TEST(OutlookGraph, AChangedCalendarReadsOnlyTheChangedItems) {
+    FakeOutlook f;
+    const long long now = unix_millis_now();
+    const auto occurrence = [&](const std::string& stamp, long long start) -> OlEvent& {
+        OlEvent& e = f.add_event(occurrence_id("S", stamp), start, start + kHour, "Weekly status");
+        e.series_id = "S";
+        return e;
+    };
+    occurrence("20261201T1000", now + kDay);
+    occurrence("20261208T1000", now + 8 * kDay);
+    occurrence("20261215T1000", now + 15 * kDay);
+    f.add_event("E1", now + 2 * kDay, now + 2 * kDay + kHour, "Steering committee");
+    f.add_event("E2", now + 3 * kDay, now + 3 * kDay + kHour, "Offsite");
+    OutlookGraph g(f, system_clock());
+    const auto iso = [](long long ms) { return iso8601_utc(sys_clock::time_point(std::chrono::milliseconds(ms))); };
+    const std::string view = "/me/calendarView/delta?startDateTime=" + url_encode(iso(now - 30 * kDay)) +
+                             "&endDateTime=" + url_encode(iso(now + 60 * kDay));
+    auto first = g.handle("GET", view, std::nullopt);
+    ASSERT_TRUE(first) << first.error().message;
+    EXPECT_EQ((*first)["value"].size(), 5u);
+    const int reads = f.event_reads;
+
+    // The series changes: its second occurrence moves and its third is deleted, so every occurrence carries the
+    // series' new modification. A single event is deleted; the other single event is unchanged.
+    for (auto& [id, e] : f.events_)
+        if (e.series_id == "S") e.modified = now + 5000;
+    f.events_[occurrence_id("S", "20261208T1000")].start += kHour;
+    f.events_[occurrence_id("S", "20261208T1000")].end += kHour;
+    f.events_.erase(occurrence_id("S", "20261215T1000"));
+    f.events_.erase("E2");
+    auto changed = g.handle("GET", jstr(*first, "@odata.deltaLink"), std::nullopt);
+    ASSERT_TRUE(changed) << changed.error().message;
+    EXPECT_EQ(f.event_reads, reads);  // the window was not read again
+    EXPECT_EQ(f.items_read, std::vector<std::string>{"S"});
+    std::set<std::string> ids, removed;
+    for (const auto& x : (*changed)["value"]) (x.contains("@removed") ? removed : ids).insert(jstr(x, "id"));
+    // The first occurrence's change key carries the series' new modification, so it is listed again too.
+    EXPECT_EQ(ids, (std::set<std::string>{occurrence_id("S", "20261201T1000"), occurrence_id("S", "20261208T1000")}));
+    EXPECT_EQ(removed, (std::set<std::string>{occurrence_id("S", "20261215T1000"), "E2"}));
+
+    // Next cycle, nothing changed: nothing is read or listed, and nothing removed comes back.
+    f.items_read.clear();
+    auto quiet = g.handle("GET", jstr(*changed, "@odata.deltaLink"), std::nullopt);
+    ASSERT_TRUE(quiet);
+    EXPECT_TRUE((*quiet)["value"].empty());
+    EXPECT_TRUE(f.items_read.empty());
+
+    // A session without the item table reads the whole window, as before.
+    f.item_table = false;
+    f.events_["E1"].modified = now + 9000;
+    auto full = g.handle("GET", jstr(*quiet, "@odata.deltaLink"), std::nullopt);
+    ASSERT_TRUE(full);
+    EXPECT_GT(f.event_reads, reads);
+    std::set<std::string> full_ids;
+    for (const auto& x : (*full)["value"]) full_ids.insert(jstr(x, "id"));
+    EXPECT_EQ(full_ids, std::set<std::string>{"E1"});
 }
 
 // ---- the whole mail stack on the Local Outlook backend ----

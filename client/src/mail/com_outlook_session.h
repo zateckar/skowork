@@ -42,6 +42,8 @@ public:
     Status remove(const std::string& id) override;
     Result<std::vector<OlEvent>> events(long long from, long long to, size_t limit) override;
     Result<std::string> calendar_stamp() override;
+    Result<std::vector<OlRow>> calendar_items() override;
+    Result<std::vector<OlEvent>> item_events(const std::string& entry_id, long long from, long long to) override;
     Result<std::string> folder_stamp(const std::string& folder_id) override;
     Result<OlEvent> event(const std::string& id) override;
     Result<OlEvent> save_event(const std::string& id, const EventPatch& p) override;

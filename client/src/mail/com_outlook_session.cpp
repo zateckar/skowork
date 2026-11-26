@@ -280,6 +280,32 @@ std::string jet_date(double local, bool round_up = false) {
     return narrow(std::wstring(d) + L" " + h);
 }
 
+// A Jet string literal: in double quotes, an inner double quote doubled (a subject may hold apostrophes).
+std::string jet_quote(const std::string& s) {
+    std::string out = "\"";
+    for (const char c : s) out += c == '"' ? std::string("\"\"") : std::string(1, c);
+    return out + "\"";
+}
+
+// A binary table cell (VT_ARRAY | VT_UI1) as upper-case hex, the form EntryID properties have.
+std::string hex_of_bytes(const VARIANT& v) {
+    if (v.vt != (VT_ARRAY | VT_UI1) || !v.parray) return {};
+    LONG lo = 0, hi = -1;
+    SafeArrayGetLBound(v.parray, 1, &lo);
+    SafeArrayGetUBound(v.parray, 1, &hi);
+    void* data = nullptr;
+    if (hi < lo || FAILED(SafeArrayAccessData(v.parray, &data))) return {};
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    const auto* b = static_cast<const unsigned char*>(data);
+    for (LONG i = 0; i <= hi - lo; ++i) {
+        out += kHex[b[i] >> 4];
+        out += kHex[b[i] & 15];
+    }
+    SafeArrayUnaccessData(v.parray);
+    return out;
+}
+
 std::string local_stamp(double local) {
     SYSTEMTIME t{};
     VariantTimeToSystemTime(local, &t);
@@ -1177,6 +1203,91 @@ Result<std::string> ComOutlookSession::calendar_stamp() {
             if (Disp first = items.obj(L"GetFirst")) newest = local_to_utc_ms(first.date(L"LastModificationTime"));
         }
         return std::to_string(n) + "/" + std::to_string(newest);
+    });
+}
+
+// The calendar folder table, series not expanded (design D3, Changed calendar: 1,678 items in 34 ms). The EntryID
+// column of a table is the short-term id, so the long-term one, which items and occurrences report, is read instead.
+Result<std::vector<OlRow>> ComOutlookSession::calendar_items() {
+    return impl_->run<std::vector<OlRow>>([s = impl_.get()] {
+        Disp table = s->default_folder(olFolderCalendar).obj(L"GetTable");
+        Disp cols = table.obj(L"Columns");
+        cols.call(L"RemoveAll");
+        cols.call(L"Add", {vstr("http://schemas.microsoft.com/mapi/proptag/0x66700102")});  // PR_LONGTERM_ENTRYID_FROM_TABLE
+        cols.call(L"Add", {vstr("LastModificationTime")});
+        std::vector<OlRow> out;
+        while (!table.flag(L"EndOfTable")) {
+            Var batch = table.call(L"GetArray", {vint(kRowBatch)});
+            SAFEARRAY* sa = (batch.v.vt & VT_ARRAY) ? ((batch.v.vt & VT_BYREF) ? *batch.v.pparray : batch.v.parray) : nullptr;
+            if (!sa || SafeArrayGetDim(sa) != 2) break;
+            LONG r0 = 0, r1 = -1, c0 = 0, c1 = -1;
+            SafeArrayGetLBound(sa, 1, &r0);
+            SafeArrayGetUBound(sa, 1, &r1);
+            SafeArrayGetLBound(sa, 2, &c0);
+            SafeArrayGetUBound(sa, 2, &c1);
+            if (r1 < r0 || c1 - c0 < 1) break;
+            for (LONG i = r0; i <= r1; ++i) {
+                Var id, modified;
+                LONG at[2] = {i, c0};
+                SafeArrayGetElement(sa, at, &id.v);
+                at[1] = c0 + 1;
+                SafeArrayGetElement(sa, at, &modified.v);
+                OlRow r;
+                r.id = hex_of_bytes(id.v);
+                r.modified = local_to_utc_ms(Disp::as_date(modified));
+                if (!r.id.empty()) out.push_back(std::move(r));
+            }
+        }
+        return out;
+    });
+}
+
+// One item's events in the window. A series is read with the window restriction narrowed to its normalized subject,
+// keeping the occurrences that carry its EntryID; its exceptions come from the recurrence pattern, since one may have
+// its own subject. Exceptions far from the window are not opened.
+Result<std::vector<OlEvent>> ComOutlookSession::item_events(const std::string& entry_id, long long from, long long to) {
+    return impl_->run<std::vector<OlEvent>>([s = impl_.get(), entry_id, from, to] {
+        auto& I = *s;
+        Disp item = I.item(entry_id);
+        std::vector<OlEvent> out;
+        std::set<std::string> seen;
+        const auto keep = [&](OlEvent e) {
+            if (e.end > from && e.start < to && seen.insert(e.id).second) out.push_back(std::move(e));
+        };
+        if (item.num(L"Class") != olAppointmentClass) return out;
+        if (!item.flag(L"IsRecurring")) {
+            keep(I.to_event(item));
+            return out;
+        }
+        std::map<std::string, std::vector<OlRecipient>> attendees;
+        I.series_attendees = &attendees;
+        struct Reset {
+            Impl& i;
+            ~Reset() { i.series_attendees = nullptr; }
+        } reset{I};
+        Disp items = I.default_folder(olFolderCalendar).obj(L"Items");
+        items.call(L"Sort", {vstr("[Start]")});
+        items.put(L"IncludeRecurrences", vbool(true));
+        // Jet's [Subject] compares the normalized subject, without a prefix such as "Canceled: " (measured: the full
+        // subject of a cancelled series matched none of its occurrences).
+        std::string subject = I.named_prop(item, L"http://schemas.microsoft.com/mapi/proptag/0x0E1D001F");  // PR_NORMALIZED_SUBJECT
+        if (subject.empty()) subject = item.try_str(L"Subject");
+        const std::string filter = "[Start] < '" + jet_date(utc_ms_to_local(to), true) + "' AND [End] > '" + jet_date(utc_ms_to_local(from)) +
+                                   "' AND [Subject] = " + jet_quote(subject);
+        Disp found = items.obj(L"Restrict", {vstr(filter)});
+        for (Disp it = found.obj(L"GetFirst"); it; it = found.obj(L"GetNext"))
+            if (it.num(L"Class") == olAppointmentClass && it.str(L"EntryID") == entry_id) keep(I.to_event(it));
+        constexpr long long kMargin = 31LL * 86'400'000;  // an exception moves at most this far from its original date
+        Disp exceptions = item.obj(L"GetRecurrencePattern").obj(L"Exceptions");
+        const long n = exceptions.num(L"Count");
+        for (long i = 1; i <= n; ++i) {
+            Disp x = exceptions.obj(L"Item", {vint(i)});
+            if (x.flag(L"Deleted")) continue;
+            const long long original = local_to_utc_ms(x.date(L"OriginalDate"));
+            if (original < from - kMargin || original > to + kMargin) continue;
+            if (Disp a = x.obj(L"AppointmentItem")) keep(I.to_event(a));
+        }
+        return out;
     });
 }
 

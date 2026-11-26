@@ -18,7 +18,7 @@ The client SHALL reach the user's mailbox and calendar through exactly one backe
 - **THEN** mail and calendar tools, Sources and Triggers are unavailable, and the settings section says that classic Outlook was not found
 
 ### Requirement: Local Outlook Backend
-With the Local Outlook backend, the client SHALL access the mailbox and calendar of the user's default classic Outlook profile on the same device, through Outlook's object model, and SHALL provide every behaviour of this capability with it. That includes the mail and calendar tools and their risk classes, the send approval floor, sensitivity labels, exclusions, the sync window, sync, the event feed and offline behaviour. It SHALL NOT open a network connection of its own for mail or calendar. Because Outlook answers on its own window thread, a sync cycle SHALL NOT read items that have not changed since the last cycle. It SHALL NOT list a mail folder, or read the calendar again, while that folder's item count and newest modification are unchanged, and it SHALL list folder contents in batches rather than one call per item. It SHALL try again an item that Outlook could not read only after that item changes.
+With the Local Outlook backend, the client SHALL access the mailbox and calendar of the user's default classic Outlook profile on the same device, through Outlook's object model, and SHALL provide every behaviour of this capability with it. That includes the mail and calendar tools and their risk classes, the send approval floor, sensitivity labels, exclusions, the sync window, sync, the event feed and offline behaviour. It SHALL NOT open a network connection of its own for mail or calendar. Because Outlook answers on its own window thread, a sync cycle SHALL NOT read items that have not changed since the last cycle. It SHALL NOT list a mail folder, or read the calendar again, while that folder's item count and newest modification are unchanged, and it SHALL list folder contents in batches rather than one call per item. When the calendar has changed, a sync cycle SHALL read again only the events of the calendar items (single events and recurring series) added or changed since the last cycle, and SHALL report the events of removed items as removed, rather than reading every event in the sync window. When it must read the whole sync window, it SHALL do so in calls of at most 7 days each, so that Outlook can repaint between calls. It SHALL try again an item that Outlook could not read only after that item changes.
 
 #### Scenario: Quiet sync cycle
 - **WHEN** a sync cycle runs and no message has arrived, changed or been removed in any synced folder since the last cycle
@@ -27,6 +27,10 @@ With the Local Outlook backend, the client SHALL access the mailbox and calendar
 #### Scenario: Unchanged calendar
 - **WHEN** a sync cycle runs and no item in the Outlook calendar has been added, changed or removed since the last cycle
 - **THEN** the cycle reads no calendar items, and the calendar copy stays as it is
+
+#### Scenario: One changed meeting series
+- **WHEN** a sync cycle runs and, since the last cycle, one meeting series in the Outlook calendar has changed and one single event has been deleted
+- **THEN** the cycle reads only that series' occurrences and exceptions in the sync window, reports its changed and removed occurrences and the deleted event, and reads no other event
 
 #### Scenario: Item Outlook cannot read
 - **WHEN** Outlook cannot read a message, such as an encrypted message whose certificate is not available

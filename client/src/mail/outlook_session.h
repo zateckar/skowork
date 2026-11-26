@@ -129,6 +129,17 @@ public:
     // A cheap fingerprint of the calendar folder (item count and newest modification) that changes whenever any item,
     // series or exception in it is added, changed or removed; empty when unknown, meaning "read the calendar".
     virtual Result<std::string> calendar_stamp() { return std::string(); }
+    // Every item of the calendar folder, series not expanded: its long-term EntryID (the id events carry as id or
+    // series_id) and LastModificationTime, from the folder table. An empty vector means "unknown": read the calendar.
+    virtual Result<std::vector<OlRow>> calendar_items() { return std::vector<OlRow>{}; }
+    // The events of one calendar item overlapping [from, to): a single event, or a series' occurrences and exceptions.
+    // not_found when the item is gone.
+    virtual Result<std::vector<OlEvent>> item_events(const std::string& entry_id, long long from, long long to) {
+        (void)entry_id;
+        (void)from;
+        (void)to;
+        return make_error("not_found", "item_events is not supported");
+    }
     virtual Result<OlEvent> event(const std::string& id) = 0;
     // Creates (empty id) or changes an event; with attendees it becomes a meeting and invitations or updates are sent.
     virtual Result<OlEvent> save_event(const std::string& id, const EventPatch& p) = 0;

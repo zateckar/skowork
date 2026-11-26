@@ -132,11 +132,24 @@ std::string to_hex_key(const std::map<std::string, std::string>& m) {
 
 // The snapshot entry for Outlook's fingerprint of a folder or the calendar; never an item id.
 constexpr const char* kStampKey = "\x01stamp";
+// Calendar snapshot entries for a calendar item (a single event or a series): "\x01item:<EntryID>" -> its modification.
+constexpr std::string_view kItemPrefix = "\x01item:";
+// More changed calendar items than this in one cycle: the whole window is read instead, one call per slice.
+constexpr size_t kMaxChangedItems = 25;
 
-// The calendar view in slices of 30 days (fix: one call over the default window of 455 days, with about a thousand
-// occurrences of large meetings, exceeded the 60-second Outlook call limit). Occurrences are listed once, by id.
+bool is_meta(const std::string& key) { return !key.empty() && key[0] == '\x01'; }
+
+// The calendar item an event id belongs to: the series of an occurrence, else the event itself.
+std::string owner_of(const std::string& event_id) {
+    if (const auto occ = split_occurrence_id(event_id)) return occ->first;
+    return event_id;
+}
+
+// The calendar view in slices of 7 days. One call over the default window of 455 days exceeded the 60-second Outlook
+// call limit, and 30-day slices each kept Outlook's window thread busy for over 2 seconds (design D3, Changed
+// calendar). Occurrences are listed once, by id.
 Result<std::vector<OlEvent>> events_in_slices(OutlookSession& s, long long from, long long to, size_t limit) {
-    constexpr long long kSlice = 30LL * 86'400'000;
+    constexpr long long kSlice = 7LL * 86'400'000;
     std::vector<OlEvent> out;
     std::set<std::string> seen;
     for (long long a = from; a < to && out.size() < limit; a += kSlice) {
@@ -373,9 +386,60 @@ Result<json> OutlookGraph::calendar_delta(long long from, long long to, bool ini
             sequences_[seq_id] = std::move(seq);
             return next_page(seq_id, page_size);
         }
+    // The calendar's items and their modification times, from one table read. With the stamps of the last cycle they
+    // say which items to read again (fix: a busy calendar changes several times an hour, and re-reading the whole window
+    // on each change froze Outlook every time; design D3, Changed calendar).
+    std::map<std::string, std::string> items;
+    if (auto listed = s_.calendar_items(); listed)
+        for (const auto& r : *listed) items[std::string(kItemPrefix) + r.id] = std::to_string(r.modified);
+    const bool had_items = std::any_of(old.begin(), old.end(), [](const auto& kv) { return kv.first.rfind(kItemPrefix, 0) == 0; });
+    if (!initial && !stamp.empty() && !items.empty() && had_items) {
+        std::set<std::string> touched;  // EntryIDs of new, changed and removed items
+        std::vector<std::string> to_read;
+        for (const auto& [k, v] : items)
+            if (const auto it = old.find(k); it == old.end() || it->second != v) {
+                touched.insert(k.substr(kItemPrefix.size()));
+                to_read.push_back(k.substr(kItemPrefix.size()));
+            }
+        for (const auto& [k, v] : old)
+            if (k.rfind(kItemPrefix, 0) == 0 && !items.count(k)) touched.insert(k.substr(kItemPrefix.size()));
+        if (to_read.size() <= kMaxChangedItems) {
+            std::map<std::string, std::string> snap = items;
+            snap[kStampKey] = stamp;
+            for (const auto& [k, v] : old)
+                if (!is_meta(k) && !touched.count(owner_of(k))) snap[k] = v;
+            for (const auto& entry : to_read) {
+                auto evs = s_.item_events(entry, from, to);
+                if (!evs) {
+                    if (evs.error().code == "not_found") continue;  // gone since the table read: its events are removed
+                    if (evs.error().code != "bad_request") return evs.error();
+                    // An item Outlook cannot read keeps its events until it changes again (as for unreadable mail).
+                    log::warn("outlook", "skipped a calendar item that could not be read: " + evs.error().message);
+                    for (const auto& [k, v] : old)
+                        if (!is_meta(k) && owner_of(k) == entry) snap[k] = v;
+                    touched.erase(entry);
+                    continue;
+                }
+                for (const auto& e : *evs) {
+                    if (e.end <= from || e.start >= to) continue;
+                    const std::string ck = change_key_of(e);
+                    if (!snap.emplace(e.id, ck).second) continue;  // listed twice
+                    const auto it = old.find(e.id);
+                    if (it == old.end() || it->second != ck) seq.ready.push_back(event_to_graph(e));
+                }
+            }
+            for (const auto& [k, v] : old)
+                if (!is_meta(k) && touched.count(owner_of(k)) && !snap.count(k)) seq.ready.push_back({{"id", k}, {"@removed", {{"reason", "deleted"}}}});
+            seq.snapshot = std::move(snap);
+            const std::string seq_id = std::to_string(next_seq_++);
+            sequences_[seq_id] = std::move(seq);
+            return next_page(seq_id, page_size);
+        }
+    }
     auto events = events_in_slices(s_, from, to, kMaxCalendarItems);
     if (!events) return events.error();
     if (!stamp.empty()) seq.snapshot[kStampKey] = stamp;
+    seq.snapshot.insert(items.begin(), items.end());
     for (const auto& e : *events) {
         // The Jet restriction parses dates in the user's locale; anything outside the window in UTC is dropped here.
         if (e.end <= from || e.start >= to) continue;
@@ -387,7 +451,7 @@ Result<json> OutlookGraph::calendar_delta(long long from, long long to, bool ini
     }
     if (!initial)
         for (const auto& [id, ck] : old)
-            if (id != kStampKey && !seq.snapshot.count(id)) seq.ready.push_back({{"id", id}, {"@removed", {{"reason", "deleted"}}}});
+            if (!is_meta(id) && !seq.snapshot.count(id)) seq.ready.push_back({{"id", id}, {"@removed", {{"reason", "deleted"}}}});
     const std::string seq_id = std::to_string(next_seq_++);
     sequences_[seq_id] = std::move(seq);
     return next_page(seq_id, page_size);

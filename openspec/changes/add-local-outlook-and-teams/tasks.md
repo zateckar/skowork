@@ -33,6 +33,8 @@
 - [x] 5.2 Implement the Daily report service: settings, policy.daily_report.mode, schedule with the late start, digest assembly with caps, the read-only Unattended run in a system-origin Thread, and the notification. Verify with unit tests for the schedule and the digest. Status: done 2026-11-21; report_tests (the app's collection and the read-only hook are not covered by a test)
 - [x] 5.3 Add the Daily report settings section. Verify with a shell test. Status: done 2026-11-21; `ShellSettings.OutlookTeamsAndDailyReportSections`
 
+- [ ] 2.5 Read only changed calendar items when the calendar fingerprint changes, and read the full window in 7-day calls (design D3, Changed calendar). Verify with an OutlookGraph test (one changed series, one deleted event, no other event read) and by timing a sync cycle against Outlook after a meeting update. Status 2026-11-26: `OutlookGraph.AChangedCalendarReadsOnlyTheChangedItems`; against Outlook, `local_apps_probe calendar` read 17 changed items in 0.02 to 0.86 s each, all matching the full view. Not yet observed in the running app over a working day
+
 ## 6. Integration
 
 - [ ] 6.1 Run `openspec validate --all --strict` and fix findings. Status: this change and add-mail-calendar validate strictly (2026-11-21); `--all` still fails on five other in-flight changes (add-api-connectors, improve-generated-surface-guidance, improve-proactive-durable-work, improve-skowork-and-knowledge-control, stabilize-agent-tool-catalog), which this change does not touch

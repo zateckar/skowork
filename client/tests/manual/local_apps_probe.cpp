@@ -1,6 +1,7 @@
 // Read-only probe of the local Outlook and Teams backends on a real laptop (add-local-outlook-and-teams tasks 1.1, 1.3).
 // Not a unit test and not registered with CTest. It never drafts, sends, moves, deletes or answers anything.
 //   local_apps_probe.exe [outlook] [teams] [--days N] [--read N]
+//   local_apps_probe.exe cycle [--days N] | calendar [--days HOURS]
 #include "mail/com_outlook_session.h"
 #include "mail/outlook_graph.h"
 #include "base/time.h"
@@ -19,6 +20,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <string>
 
 using namespace wb;
@@ -170,6 +172,42 @@ int probe_cycle(int days) {
     return 0;
 }
 
+// The changed-calendar path (design D3, Changed calendar): the item table, then each item changed in the last `hours`
+// read on its own, checked against the full view of the next 30 days.
+int probe_calendar(int hours) {
+    std::printf("== Outlook calendar, items changed in the last %d hours\n", hours);
+    mail::outlook::ComOutlookSession ol([] { return false; });
+    auto t = Steady::now();
+    auto items = ol.calendar_items();
+    if (!items) { std::printf("  items: %s\n", items.error().message.c_str()); return 1; }
+    std::printf("  item table: %zu items (%.2fs), sample id %zu chars\n", items->size(), since(t), items->empty() ? 0 : items->front().id.size());
+    const long long from = now_ms(), to = from + 30 * 86'400'000LL;
+    t = Steady::now();
+    auto view = ol.events(from, to, 5000);
+    if (!view) { std::printf("  view: %s\n", view.error().message.c_str()); return 1; }
+    std::printf("  full view of the next 30 days: %zu events (%.2fs)\n", view->size(), since(t));
+    int rc = 0, checked = 0;
+    for (const auto& r : *items) {
+        if (r.modified < now_ms() - hours * 3'600'000LL) continue;
+        t = Steady::now();
+        auto evs = ol.item_events(r.id, from, to);
+        const double s = since(t);
+        if (!evs) { std::printf("  %s: %s\n", r.id.substr(0, 12).c_str(), evs.error().message.c_str()); continue; }
+        std::set<std::string> got, want;
+        std::string subject;
+        for (const auto& e : *evs) got.insert(e.id), subject = e.subject;
+        for (const auto& e : *view)
+            if ((e.series_id.empty() ? e.id : e.series_id) == r.id) want.insert(e.id), subject = e.subject;
+        ++checked;
+        const bool same = got == want;
+        if (!same) rc = 1;
+        std::printf("  %-40s %3zu events %5.2fs  %s\n", cut(subject.empty() ? "(none in the next 30 days)" : subject, 40).c_str(), got.size(), s,
+                    same ? "matches the full view" : ("DIFFERS: full view has " + std::to_string(want.size())).c_str());
+    }
+    std::printf("  checked %d changed items\n", checked);
+    return rc;
+}
+
 int probe_teams() {
     std::printf("== Teams (new Teams IndexedDB cache)\n");
     wchar_t buf[MAX_PATH];
@@ -226,17 +264,19 @@ int probe_teams() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    bool outlook = false, teams_on = false, cycle = false;
+    bool outlook = false, teams_on = false, cycle = false, calendar = false;
     int days = 14, read_n = 50;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "outlook") outlook = true;
         else if (a == "teams") teams_on = true;
         else if (a == "cycle") cycle = true;
+        else if (a == "calendar") calendar = true;
         else if (a == "--days" && i + 1 < argc) days = std::atoi(argv[++i]);
         else if (a == "--read" && i + 1 < argc) read_n = std::atoi(argv[++i]);
     }
     if (cycle) return probe_cycle(days);
+    if (calendar) return probe_calendar(days);
     if (!outlook && !teams_on) outlook = teams_on = true;
     int rc = 0;
     if (outlook) rc |= probe_outlook(days, read_n);
