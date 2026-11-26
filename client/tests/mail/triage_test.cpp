@@ -7,6 +7,8 @@
 
 #include "mail/mail_service.h"
 #include "triage/triage.h"
+#include "eval/decision_log.h"
+#include "eval/registry.h"
 
 #include <algorithm>
 #include <map>
@@ -84,8 +86,10 @@ struct Harness {
     Harness() {
         mail = std::make_unique<MailStore>(db.store->db());
         EXPECT_TRUE(mail->set_folders({{"f-inbox", "Inbox", "inbox"}, {"f-other", "Projekty", ""}, {"f-sent", "Sent Items", "sentitems"}}));
+        log = std::make_unique<eval::DecisionLog>(db.store->db());
         triage::TriageEnv e;
         e.db = &db.store->db();
+        e.decisions = log.get();
         e.clock = &clock;
         e.mail = mail.get();
         e.model = &model;
@@ -176,6 +180,7 @@ struct Harness {
     TriageClock clock;
     TriageModel model;
     std::unique_ptr<MailStore> mail;
+    std::unique_ptr<eval::DecisionLog> log;
     std::unique_ptr<triage::TriageService> svc;
     bool paused = false, fail_start = false, may_read = true;
     int keys = 0;
@@ -739,4 +744,37 @@ TEST(EventTriage, AnUnavailableGatewayKeepsTheBatchAndBacksOff) {
     h.model.fail = false;
     ASSERT_TRUE(h.classify());
     EXPECT_EQ(h.model.last_batch, 20u);
+}
+
+// add-evaluation-export (client/evaluation User Decision Log): Dismiss, No action needed and Start work are logged with
+// the result they decided on, and a later decision keeps the earlier one.
+TEST(EventTriage, DecisionsAreLogged) {
+    Harness h;
+    h.enable();
+    ASSERT_TRUE(h.take({h.message("m1", "Budget Q4", "Please review the budget")}));
+    ASSERT_TRUE(h.classify());
+    const std::string t = h.thread_of("m1");
+    ASSERT_TRUE(h.svc->dismiss(t));
+    ASSERT_TRUE(h.take({h.message("m1", "Budget Q4", "Please review the updated budget")}));
+    ASSERT_TRUE(h.classify());
+    ASSERT_TRUE(h.svc->start_work(t));
+    const auto log = h.log->for_item("mail:m1");
+    ASSERT_EQ(log.size(), 2u);
+    EXPECT_EQ(log[0].kind, "dismiss");
+    EXPECT_EQ(log[0].step, "triage");
+    EXPECT_EQ(log[0].result_ref, "triage:mail/m1");
+    EXPECT_EQ(log[0].before["action"], "required");
+    EXPECT_EQ(log[0].before["suggestion"], "open");
+    EXPECT_EQ(log[0].after["suggestion"], "dismissed");
+    EXPECT_EQ(log[0].instruction_id, eval::Variant::defaults(eval::Step::triage).instruction_id());
+    EXPECT_EQ(log[1].kind, "start");
+    EXPECT_EQ(log[1].after["suggestion"], "started");
+
+    ASSERT_TRUE(h.take({h.message("m2", "Invoice", "Please approve the invoice")}));
+    ASSERT_TRUE(h.classify());
+    ASSERT_TRUE(h.svc->no_action(h.thread_of("m2")));
+    const auto second = h.log->for_item("mail:m2");
+    ASSERT_EQ(second.size(), 1u);
+    EXPECT_EQ(second[0].kind, "no_action");
+    EXPECT_EQ(second[0].after["suggestion"], "no_action");
 }

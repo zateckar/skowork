@@ -175,6 +175,7 @@
   "telemetry.level.on": "Zapnuto",
   "telemetry.level.off": "Vypnuto",
   "telemetry.level.content_active": "Telemetrie obsahu je aktivní: text vašich zadání, odpovědi a argumenty nástrojů se zaznamenávají pro vaši organizaci.",
+  "settings.evaluation_export_on": "Export pro vyhodnocení je zapnutý",
   "telemetry.levels.off": "Vypnuto",
   "telemetry.levels.metadata": "Metadata",
   "telemetry.levels.content": "Obsah",

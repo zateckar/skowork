@@ -7,6 +7,7 @@
 #include "platform/log.h"
 #include "runtime/context.h"
 #include "runtime/runtime.h"
+#include "eval/registry.h"
 #include "triage/classifier.h"
 
 #include <algorithm>
@@ -810,6 +811,7 @@ Status TriageService::dismiss(const std::string& thread_id) {
     u.bind(1, thread_id).bind(2, env_.clock->unix_millis());
     if (Status s = u.run(); !s) return s;
     if (env_.db->changes() == 0) return make_error("not_open", "the suggestion is not open");
+    log_decision(thread_id, "dismiss", "open");
     notify();
     return {};
 }
@@ -817,11 +819,18 @@ Status TriageService::dismiss(const std::string& thread_id) {
 Status TriageService::no_action(const std::string& thread_id) {
     {
         const std::lock_guard lock(env_.db->mutex());
+        std::string before;
+        {
+            auto q = env_.db->prepare("SELECT suggestion FROM triage_items WHERE thread_id=?1");
+            q.bind(1, thread_id);
+            if (q.step()) before = q.col_text(0);
+        }
         auto u = env_.db->prepare("UPDATE triage_items SET suggestion='no_action', updated_at=?2 "
                                   "WHERE thread_id=?1 AND suggestion IN ('open','started')");
         u.bind(1, thread_id).bind(2, env_.clock->unix_millis());
         if (Status s = u.run(); !s) return s;
         if (env_.db->changes() == 0) return make_error("not_open", "the item is not waiting for a decision");
+        log_decision(thread_id, "no_action", before);
     }
     // Outside the database lock: cancelling and archiving touch the runtime's and the inbox's own tables.
     if (env_.cancel_runs) env_.cancel_runs(thread_id);
@@ -878,8 +887,35 @@ Result<std::string> TriageService::start_work(const std::string& thread_id) {
         (void)u.run();
         return run.error();
     }
+    {
+        const std::lock_guard lock(env_.db->mutex());
+        log_decision(thread_id, "start", "open");
+    }
     notify();
     return *run;
+}
+
+void TriageService::log_decision(const std::string& thread_id, const std::string& kind, const std::string& before_suggestion) {
+    if (!env_.decisions) return;
+    auto q = env_.db->prepare("SELECT scope, item_id, action, category, outcome, suggestion FROM triage_items WHERE thread_id=?1");
+    q.bind(1, thread_id);
+    if (!q.step()) return;
+    const std::string scope = q.col_text(0), item = q.col_text(1);
+    eval::Decision d;
+    d.at_ms = env_.clock->unix_millis();
+    d.step = "triage";
+    d.kind = kind;
+    if (scope == "teams") {
+        const auto bar = item.find('|');
+        d.item_ref = eval::item_ref_teams(item.substr(0, bar), bar == std::string::npos ? std::string{} : item.substr(bar + 1));
+    } else {
+        d.item_ref = scope == "calendar" ? eval::item_ref_calendar(item) : eval::item_ref_mail(item);
+    }
+    d.result_ref = "triage:" + scope + "/" + item;
+    d.before = {{"outcome", q.col_text(4)}, {"action", q.col_text(2)}, {"category", q.col_text(3)}, {"suggestion", before_suggestion}};
+    d.after = {{"suggestion", q.col_text(5)}};
+    d.instruction_id = eval::Variant::defaults(eval::Step::triage).instruction_id();
+    if (Status s = env_.decisions->record(d); !s) log::warn(kLog, "could not log a decision: " + s.error().code);
 }
 
 }  // namespace wb::triage

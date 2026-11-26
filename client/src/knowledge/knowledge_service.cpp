@@ -1,4 +1,5 @@
 #include "knowledge/knowledge_service.h"
+#include "eval/registry.h"
 
 #include "base/strings.h"
 #include "platform/crypto.h"
@@ -19,6 +20,23 @@
 #include <utility>
 
 namespace wb::knowledge {
+
+namespace {
+
+// The decision log's item reference for a knowledge item (client/evaluation; add-evaluation-export design D8).
+std::string eval_item_ref(const std::string& source, const std::string& ext_id) {
+    if (source == "mail") return eval::item_ref_mail(ext_id);
+    if (source == "calendar") return eval::item_ref_calendar(ext_id);
+    if (source == "meetings") return eval::item_ref_meeting(ext_id);
+    if (source == "teams") {
+        const auto bar = ext_id.find('|');
+        return eval::item_ref_teams(ext_id.substr(0, bar), bar == std::string::npos ? std::string{} : ext_id.substr(bar + 1));
+    }
+    return source + ":" + ext_id;
+}
+
+}  // namespace
+
 namespace {
 
 constexpr char kLog[] = "knowledge";
@@ -2967,6 +2985,7 @@ Status KnowledgeService::forget_item(long long item_id) {
         if (!store_->remove_item(item_id, true)) return make_error("storage", "The item could not be forgotten.");
     }
     (void)store_->delete_item_previews(it->source, it->ext_id);
+    if (env_.decisions) (void)env_.decisions->forget_item(eval_item_ref(it->source, it->ext_id));
     sync_sharing(false);
     notify();
     return {};
@@ -4538,12 +4557,28 @@ json KnowledgeService::item_detail(long long id, const KnowledgeFilter& filter) 
 
 // ---- Curation (Knowledge Curation, design D5) ----------------------------------------------------------------------------
 
+void KnowledgeService::log_fact_decision(const std::string& kind, const std::string& fact_kind, long long id,
+                                         const std::string& item_ref, const json& before, const json& after) {
+    if (!env_.decisions) return;
+    eval::Decision d;
+    d.at_ms = now_ms();
+    d.step = "knowledge";
+    d.kind = kind;
+    d.item_ref = item_ref;
+    d.result_ref = "fact:" + fact_kind + ":" + std::to_string(id);
+    d.before = before;
+    d.after = after;
+    d.instruction_id = eval::Variant::defaults(eval::Step::knowledge).instruction_id();
+    (void)env_.decisions->record(d);
+}
+
 Status KnowledgeService::edit_fact(const std::string& kind, long long id, const std::string& text_in) {
     const std::string text = trim(text_in);
     if (text.empty()) return make_error("invalid", "The fact is empty.");
     if (text.size() > 2000) return make_error("invalid", "The fact is too long; state it in at most 2000 characters.");
     if (kind == "user") {
         if (!store_->update_fact(id, text)) return make_error("not_found", "no such fact");
+        log_fact_decision("fact_edit", "user", id, "", json::object(), {{"text", text}});
         notify();
         return {};
     }
@@ -4559,6 +4594,8 @@ Status KnowledgeService::edit_fact(const std::string& kind, long long id, const 
     if (!store_->add_fact(r->subject, text, "", now_ms(), item ? item->source : "", item ? item->ext_id : ""))
         return make_error("storage", "The fact could not be stored.");
     store_->delete_relation(id);
+    log_fact_decision("fact_edit", "relation", id, item ? eval_item_ref(item->source, item->ext_id) : std::string{},
+                      {{"subject", r->subject_name}, {"predicate", r->predicate}, {"object", r->object_name}}, {{"text", text}});
     notify();
     return {};
 }
@@ -4566,17 +4603,23 @@ Status KnowledgeService::edit_fact(const std::string& kind, long long id, const 
 Status KnowledgeService::delete_fact(const std::string& kind, long long id) {
     if (kind == "user") {
         if (!store_->delete_fact(id)) return make_error("not_found", "no such fact");
+        log_fact_decision("fact_delete", "user", id, "", json::object(), json::object());
         notify();
         return {};
     }
     if (kind != "relation") return make_error("invalid", "kind must be relation or user");
     const auto r = store_->relation(id);
     if (!r) return make_error("not_found", "no such fact");
+    std::string item_ref;
     if (r->chunk_id)
         for (const auto& c : store_->chunks({r->chunk_id}))
-            if (const auto item = store_->item(c.item_id))
+            if (const auto item = store_->item(c.item_id)) {
                 store_->add_tombstone(item->source, item->ext_id, item->hash, fact_key(r->subject_name, r->predicate, r->object_name));
+                item_ref = eval_item_ref(item->source, item->ext_id);
+            }
     store_->delete_relation(id);
+    log_fact_decision("fact_delete", "relation", id, item_ref,
+                      {{"subject", r->subject_name}, {"predicate", r->predicate}, {"object", r->object_name}}, json::object());
     notify();
     return {};
 }
@@ -4593,6 +4636,14 @@ Status KnowledgeService::set_fact_importance(long long relation_id, const std::s
     const auto r = store_->relation(relation_id);
     if (!r || !relation_visible(*r)) return make_error("not_found", "This fact is no longer in your knowledge.");
     Status s = store_->set_importance(relation_id, mark);
+    if (s) {
+        std::string item_ref;
+        if (r->chunk_id)
+            for (const auto& c : store_->chunks({r->chunk_id}))
+                if (const auto item = store_->item(c.item_id)) item_ref = eval_item_ref(item->source, item->ext_id);
+        log_fact_decision("importance", "relation", relation_id, item_ref,
+                          {{"subject", r->subject_name}, {"predicate", r->predicate}, {"object", r->object_name}}, {{"level", level}});
+    }
     notify();
     return s;
 }

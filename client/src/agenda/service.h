@@ -12,6 +12,7 @@
 #include <string>
 
 #include "agenda/core.h"
+#include "eval/decision_log.h"
 #include "agenda/store.h"
 #include "base/json.h"
 #include "base/result.h"
@@ -36,6 +37,7 @@ struct Env {
     std::function<void(const std::string& title, const std::string& body, const std::string& route)> notify;
     std::function<bool()> hold_reminders;  // presentation mode or paused background work
     std::function<void()> changed;         // the Agenda changed: the UI reloads
+    eval::DecisionLog* decisions = nullptr;  // the user decision log (client/evaluation); null: not logged
 };
 
 constexpr size_t kPendingCap = 500;

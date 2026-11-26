@@ -16,6 +16,11 @@ namespace wb::meeting {
 
 // offered -> notice -> capturing [-> interrupted -> capturing] -> pending -> transcribing -> summarizing -> done; declined, discarded (policy revoked
 // during the capture), failed, unsupported (language) and expired (pending audio deleted by retention) end it.
+struct SpeakerMeta {
+    std::string by = "unknown";  // auto | user | unknown
+    long long at_ms = 0;
+};
+
 struct MeetingRecord {
     std::string id, thread_id, state, source, app, title, event_id, series_id, event_link;
     std::vector<std::string> attendees;
@@ -26,6 +31,9 @@ struct MeetingRecord {
     std::string language, error, action_id, run_id;
     json segments = json::array();
     std::map<std::string, std::string> speakers;
+    // Who gave each speaker its name (add-evaluation-export design D2, migration 2801): auto or user, with the time
+    // of a user rename. A speaker without an entry was named before this was recorded (unknown).
+    std::map<std::string, SpeakerMeta> speaker_meta;
     // The meeting vocabulary from the matched calendar event (improve-meeting-capture-quality D2, migration 1700).
     std::vector<std::string> vocabulary;
     // Live transcription keeps the segments that start before this and decodes from here on (migration 2100,

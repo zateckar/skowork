@@ -2574,7 +2574,8 @@ TEST(ShellTelemetry, ViewerListsSentAndBufferedRecordsWithTheirFields) {
                                          {"summary", {{"exception_code", "0xC000001D"}, {"module", "skowork-worker.exe"}, {"threads", 3},
                                                       {"modules", {"skowork-worker.exe", "ntdll.dll"}}}}});
         return json{{"level", "content"}, {"source", "pilot"}, {"policy_version", 7}, {"content_active", true}, {"crash_reports", true},
-                    {"pending", 1}, {"discarded", 0}, {"records", records}, {"crashes", crashes}};
+                    {"pending", 1}, {"discarded", 0}, {"records", records}, {"crashes", crashes},
+                    {"evaluation_export", true}};
     });
     f.rpc.add("telemetry.crash.delete", RpcExposure::ui, [&f, &deleted](const json& p) -> Result<json> {
         deleted = jstr(p, "id") == "cr1";
@@ -2597,6 +2598,9 @@ TEST(ShellTelemetry, ViewerListsSentAndBufferedRecordsWithTheirFields) {
     EXPECT_EQ(m[L"telemetry-source"].name, L"Set by: pilot");
     EXPECT_EQ(m[L"telemetry-policy-version"].name, L"Policy version: 7");
     EXPECT_TRUE(has(m, L"telemetry-content-active"));
+    // add-evaluation-export: Settings states that evaluation export is on.
+    ASSERT_TRUE(has(m, L"evaluation-export-on"));
+    EXPECT_EQ(m[L"evaluation-export-on"].name, L"Evaluation export is on");
     ASSERT_TRUE(has(m, L"telemetry-record-1"));
     EXPECT_EQ(m[L"telemetry-record-2"].type, UIA_ListItemControlTypeId);
     EXPECT_NE(m[L"telemetry-record-2"].name.find(L"tool.call, Waiting"), std::wstring::npos) << m[L"telemetry-record-2"].name;

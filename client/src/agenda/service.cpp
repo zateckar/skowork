@@ -1,4 +1,5 @@
 #include "agenda/service.h"
+#include "eval/registry.h"
 
 #include <algorithm>
 #include <random>
@@ -8,6 +9,32 @@
 
 namespace wb::agenda {
 namespace {
+
+// The user decision log (client/evaluation User Decision Log): Agenda done, dismiss and edit, with the item before and
+// after. Logged right after the item is stored.
+void log_agenda_decision(const Env& env, const std::string& kind, const Item& before, const Item& after) {
+    if (!env.decisions) return;
+    eval::Decision d;
+    d.at_ms = env.now ? env.now() : 0;
+    d.step = "agenda";
+    d.kind = kind;
+    if (!before.sources.empty()) {
+        const ItemSource& s = before.sources.front();
+        if (s.kind == "mail") d.item_ref = eval::item_ref_mail(s.source_id);
+        else if (s.kind == "calendar") d.item_ref = eval::item_ref_calendar(s.source_id);
+        else if (s.kind == "meeting") d.item_ref = eval::item_ref_meeting(s.source_id);
+        else if (s.kind == "teams") d.item_ref = eval::item_ref_teams(s.conversation, s.source_id);
+        else d.item_ref = s.kind + ":" + s.source_id;
+    }
+    d.result_ref = "agenda:" + before.id;
+    const auto view = [](const Item& it) {
+        return json{{"state", it.state}, {"title", it.title}, {"due_at", it.due_at}, {"has_time", it.has_time}};
+    };
+    d.before = view(before);
+    d.after = view(after);
+    d.instruction_id = eval::Variant::defaults(eval::Step::agenda).instruction_id();
+    (void)env.decisions->record(d);
+}
 
 constexpr long long kDayMs = 86'400'000;
 constexpr long long kHourMs = 3'600'000;
@@ -412,9 +439,11 @@ json Service::list() {
 Result<json> Service::mark_done(const std::string& id) {
     auto it = store_.get(id);
     if (!it) return not_found();
+    const Item before = *it;
     it->state = "done";
     it->state_at = it->updated_at = env_.now();
     if (auto r = store_.put(*it); !r) return r.error();
+    log_agenda_decision(env_, "agenda_done", before, *it);
     changed();
     return to_json(*it);
 }
@@ -422,9 +451,11 @@ Result<json> Service::mark_done(const std::string& id) {
 Result<json> Service::dismiss(const std::string& id) {
     auto it = store_.get(id);
     if (!it) return not_found();
+    const Item before = *it;
     it->state = "dismissed";
     it->state_at = it->updated_at = env_.now();
     if (auto r = store_.put(*it); !r) return r.error();
+    log_agenda_decision(env_, "agenda_dismiss", before, *it);
     changed();
     return to_json(*it);
 }
@@ -443,6 +474,7 @@ Result<json> Service::edit(const std::string& id, const json& patch) {
     auto it = store_.get(id);
     if (!it) return not_found();
     if (!patch.is_object()) return make_error("invalid", "The change must be an object.");
+    const Item before = *it;
     if (const auto t = patch.find("title"); t != patch.end()) {
         if (!t->is_string() || trim(t->get<std::string>()).empty()) return make_error("invalid", "The title must not be empty.");
         it->title = utf8_truncate(trim(t->get<std::string>()), 480);
@@ -465,6 +497,7 @@ Result<json> Service::edit(const std::string& id, const json& patch) {
     it->notice.clear();
     it->updated_at = env_.now();
     if (auto r = store_.put(*it); !r) return r.error();
+    log_agenda_decision(env_, "agenda_edit", before, *it);
     changed();
     return to_json(*it);
 }

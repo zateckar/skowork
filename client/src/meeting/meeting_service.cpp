@@ -1,4 +1,5 @@
 #include "meeting/meeting_service.h"
+#include "eval/registry.h"
 
 #include "base/strings.h"
 #include "platform/crypto.h"
@@ -595,6 +596,7 @@ void MeetingService::live_step() {
     cur->segments = segments_json(all);
     cur->live_from_ms = next;
     cur->speakers = name_speakers(all, env_.user_name ? env_.user_name() : std::string{}, cur->attendees, cur->speakers);
+    mark_auto_names(*cur);
     (void)store_->put(*cur);
     notify();
 }
@@ -704,6 +706,7 @@ void MeetingService::transcribe_one(MeetingRecord m) {
     m.segments = segments_json(*segs);
     m.live_from_ms = 0;
     m.speakers = name_speakers(*segs, env_.user_name ? env_.user_name() : std::string{}, m.attendees, m.speakers);
+    mark_auto_names(m);
     m.error.clear();
     // Audio Retention: the raw audio goes once the transcript exists, unless policy keeps it.
     if (!cfg_.keep_audio) delete_audio(m);
@@ -883,6 +886,8 @@ Status MeetingService::transcribe_again(const std::string& meeting_id, const std
         if (m->audio_deleted || m->audio_dir.empty()) return make_error("no_audio", "The audio of this meeting is no longer kept.");
         if (m->state != "done" && m->state != "failed" && m->state != "unsupported")
             return make_error("busy", "The meeting is still being recorded or transcribed.");
+        log_decision("transcribe_again", eval::item_ref_meeting(meeting_id), eval::item_ref_meeting(meeting_id),
+                     {{"language", m->language}}, {{"language", l}});
         m->language = l;
         m->segments = json::array();
         m->live_from_ms = 0;
@@ -1057,6 +1062,30 @@ Status MeetingService::transcribe_now(const std::string& meeting_id) {
     return {};
 }
 
+void MeetingService::log_decision(const std::string& kind, const std::string& item_ref, const std::string& result_ref,
+                                  const json& before, const json& after) {
+    if (!env_.decisions) return;
+    eval::Decision d;
+    d.at_ms = now();
+    d.step = "meeting";
+    d.kind = kind;
+    d.item_ref = item_ref;
+    d.result_ref = result_ref;
+    d.before = before;
+    d.after = after;
+    d.instruction_id = eval::Variant::defaults(eval::Step::diarize).instruction_id();
+    (void)env_.decisions->record(d);
+}
+
+// add-evaluation-export design D2: a name the client chose is auto; a name the user gave stays user.
+void MeetingService::mark_auto_names(MeetingRecord& m) {
+    for (const auto& [k, v] : m.speakers) {
+        (void)v;
+        auto it = m.speaker_meta.find(k);
+        if (it == m.speaker_meta.end() || it->second.by != "user") m.speaker_meta[k] = SpeakerMeta{"auto", 0};
+    }
+}
+
 Status MeetingService::rename_speaker(const std::string& meeting_id, const std::string& speaker, const std::string& name) {
     const std::string n = trim(name);
     if (n.empty() || n.size() > 100) return make_error("invalid_params", "A speaker name is 1 to 100 characters.");
@@ -1065,8 +1094,12 @@ Status MeetingService::rename_speaker(const std::string& meeting_id, const std::
         auto m = store_->get(meeting_id);
         if (!m) return make_error("not_found", "No such meeting.");
         if (!m->speakers.count(speaker)) return make_error("not_found", "No such speaker.");
+        const std::string before = m->speakers[speaker];
         m->speakers[speaker] = n;
+        m->speaker_meta[speaker] = SpeakerMeta{"user", now()};
         (void)store_->put(*m);
+        log_decision("speaker_rename", eval::item_ref_meeting(meeting_id), eval::item_ref_meeting(meeting_id) + "/" + speaker,
+                     {{"name", before}}, {{"name", n}});
         // The knowledge item is re-indexed with the new name, which re-links its mentions.
         if (env_.knowledge && (m->state == "done" || m->state == "summarizing"))
             if (auto segs = parse_segments({{"segments", m->segments}})) env_.knowledge(*m, knowledge_turns(*segs, m->speakers));
@@ -1106,6 +1139,7 @@ Status MeetingService::add_term(const std::string& term) {
         if (have.size() >= kMaxUserTerms)
             return make_error("limit", "You have " + std::to_string(kMaxUserTerms) + " terms, the most there can be. Remove one first.");
         if (Status s = store_->add_term(t, now()); !s) return s;
+        log_decision("term_add", "", "meeting:terms", json::object(), {{"term", t}});
     }
     notify();
     return {};
@@ -1131,6 +1165,7 @@ Status MeetingService::forget(const std::string& meeting_id) {
         if (capture_ && capture_->meeting_id == meeting_id) finish_capture(true, "forgotten");
         delete_audio(*m);
         (void)store_->remove(meeting_id);
+        if (env_.decisions) (void)env_.decisions->forget_item(eval::item_ref_meeting(meeting_id));
     }
     if (env_.knowledge_removed) env_.knowledge_removed(meeting_id);
     notify();

@@ -7,6 +7,6 @@ skowork_warnings(wb_knowledge_core)
 
 if(WIN32)
   add_library(wb_knowledge STATIC kg_store.cpp knowledge_service.cpp knowledge_tools.cpp publication.cpp)
-  target_link_libraries(wb_knowledge PUBLIC wb_knowledge_core wb_runtime wb_model wb_storage wb_platform wb_base)
+  target_link_libraries(wb_knowledge PUBLIC wb_knowledge_core wb_eval wb_runtime wb_model wb_storage wb_platform wb_base)
   skowork_warnings(wb_knowledge)
 endif()

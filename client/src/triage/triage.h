@@ -8,6 +8,7 @@
 #include "base/json.h"
 #include "base/result.h"
 #include "base/time.h"
+#include "eval/decision_log.h"
 #include "mail/mail_store.h"
 #include "mail/mail_sync.h"
 #include "model/types.h"
@@ -70,6 +71,8 @@ struct TriageEnv {
     std::function<Status(const std::string& thread_id)> archive_thread;
     // Settings, status or a suggestion changed (the UI reloads).
     std::function<void()> changed;
+    // The user decision log (client/evaluation); null: decisions are not logged.
+    eval::DecisionLog* decisions = nullptr;
 };
 
 // The instruction of an automatic preparation Run for an item of this scope (improve-triage-results D2, D6).
@@ -161,6 +164,8 @@ private:
     bool prepare(const std::string& thread_id, const std::string& scope, const std::string& item_id);
     std::string day_of(long long ms);
     void notify();
+    // Logs a decision on the item of a Thread (add-evaluation-export design D8); call with the database lock held.
+    void log_decision(const std::string& thread_id, const std::string& kind, const std::string& before_suggestion);
     void run();
 
     TriageEnv env_;

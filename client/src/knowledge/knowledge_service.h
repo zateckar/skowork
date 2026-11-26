@@ -7,6 +7,7 @@
 #pragma once
 
 #include "base/json.h"
+#include "eval/decision_log.h"
 #include "base/result.h"
 #include "base/time.h"
 #include "knowledge/kg_store.h"
@@ -100,6 +101,8 @@ struct KnowledgeEnv {
     std::function<void(const std::function<Status(const std::string& remote_id)>& remove)> retry_withdrawals;
     bool background = true;         // tests drive step() themselves
     long long sweep_interval_ms = 60'000;  // files rescan and reconciliation
+    // The user decision log (client/evaluation); null: fact decisions are not logged.
+    eval::DecisionLog* decisions = nullptr;
 };
 
 // The category and history filter the knowledge tools and the Knowledge view share (client/knowledge-graph Retrieval
@@ -395,6 +398,9 @@ public:
     long long user_entity();
 
 private:
+    // client/evaluation User Decision Log: a decision on a fact, logged after kg.db stored it (design D8).
+    void log_fact_decision(const std::string& kind, const std::string& fact_kind, long long id, const std::string& item_ref,
+                           const json& before, const json& after);
     struct Task {
         std::string op;  // upsert | remove
         std::string source, id;

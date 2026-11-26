@@ -22,6 +22,6 @@ if(WIN32)
   skowork_warnings(wb_speech_package)
 
   add_library(wb_meeting STATIC capture.cpp meeting_store.cpp meeting_service.cpp dictation.cpp)
-  target_link_libraries(wb_meeting PUBLIC wb_meeting_audio wb_speech_package wb_storage wb_platform wb_base mmdevapi ole32 oleaut32 uuid)
+  target_link_libraries(wb_meeting PUBLIC wb_eval wb_meeting_audio wb_speech_package wb_storage wb_platform wb_base mmdevapi ole32 oleaut32 uuid)
   skowork_warnings(wb_meeting)
 endif()

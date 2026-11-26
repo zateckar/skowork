@@ -1191,6 +1191,8 @@ void PagePane::build_telemetry() {
         level == "content" ? Paint::warning : Paint::text);
     text(*c, shell_.t("telemetry.levels_help." + level), Paint::text_secondary, "telemetry-level-help");
     if (jbool(v, "content_active")) text(*c, shell_.t("telemetry.level.content_active"), Paint::warning, "telemetry-content-active");
+    // client/evaluation Evaluation Setting: Settings states that evaluation export is on.
+    if (jbool(v, "evaluation_export")) text(*c, shell_.t("settings.evaluation_export_on"), Paint::warning, "evaluation-export-on");
     const std::string source = jstr(v, "source", "default");
     row(*c, "telemetry-source", shell_.t("telemetry.level.source"),
         source == "default" ? shell_.t("telemetry.level.default_source") : u16(source));

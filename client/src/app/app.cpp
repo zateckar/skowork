@@ -53,6 +53,7 @@
 #include "agenda/service.h"
 #include "app/triage_rpc.h"
 #include "app/eval_rpc.h"
+#include "eval/decision_log.h"
 #include "eval/eval_service.h"
 #include "eval/setting.h"
 #include "triage/triage.h"
@@ -261,6 +262,7 @@ struct App {
     std::unique_ptr<triage::TriageService> triage_svc;  // event triage (improve-proactive-durable-work D1)
     std::atomic<triage::TriageService*> triage_live{nullptr};  // for Teams events from the pool (add-teams-triage)
     std::unique_ptr<eval::EvalService> eval_svc;  // client/evaluation (add-evaluation-export)
+    std::unique_ptr<eval::DecisionLog> user_decisions;  // client/evaluation User Decision Log
     void start_triage();
     std::unique_ptr<agenda::Service> agenda_svc;
     std::atomic<agenda::Service*> agenda_live{nullptr};  // read by mail, meeting, channel and Run threads
@@ -552,6 +554,8 @@ void App::tick() {
             telemetry_flushing = false;
         });
     }
+    // client/evaluation: decision log entries older than 365 days go (hourly; cheap when there is nothing to prune).
+    if (user_decisions && ticks % 3600 == 900) (void)user_decisions->prune(system_clock().unix_millis());
     if (telemetry && ticks % 3600 == 600) {
         PROCESS_MEMORY_COUNTERS pmc{};
         pmc.cb = sizeof pmc;
@@ -606,7 +610,10 @@ void App::register_rpc() {
     // The Telemetry viewer (client/telemetry Telemetry Viewer): the level, its source and the last 30 days of records.
     rpc.add("telemetry.view", RpcExposure::ui_and_pipe, [this](const json&) -> Result<json> {
         if (!telemetry) return make_error("unavailable", "telemetry is not available");
-        return telemetry->view();
+        json v = telemetry->view();
+        const auto cur = policy ? policy->current() : nullptr;
+        v["evaluation_export"] = cur && eval::export_enabled(*cur);  // client/evaluation Evaluation Setting
+        return v;
     });
     rpc.add("telemetry.crash.delete", RpcExposure::ui_and_pipe, [this](const json& p) -> Result<json> {
         if (!telemetry) return make_error("unavailable", "telemetry is not available");
@@ -1110,6 +1117,13 @@ void App::start_identity_and_channel() {
     };
     policy = std::make_unique<policy::PolicyManager>(*store, system_clock(), pd);
     decisions = std::make_unique<policy::DecisionLog>(store->db());
+    user_decisions = std::make_unique<eval::DecisionLog>(store->db());
+    // A forgotten Source takes its decision log entries with it (client/evaluation User Decision Log).
+    forget.on_forget("source", "decision-log", [this](const std::string& id) {
+        if (id == "mail" || id == "calendar" || id == "teams") return user_decisions->forget_source(id);
+        if (id == "meetings") return user_decisions->forget_source("meeting");
+        return Status{};
+    });
     decisions->set_observer([this](const policy::DecisionRecord& r) { if (telemetry) telemetry::record_decision(*telemetry, r); });
     grants = std::make_unique<policy::FolderGrants>(store->db());
     // The egress proxy checks hosts against the policy in force at each request and logs every refusal.
@@ -1621,6 +1635,7 @@ void App::agenda_chat_message(const json& payload) {
 void App::start_agenda() {
     if (!agent || !store || !model) return;
     agenda::Env ae;
+    ae.decisions = user_decisions.get();
     ae.policy = [this](const std::string& key) -> std::optional<json> {
         const auto p = policy ? policy->current() : nullptr;
         if (!p || !p->is_set(key)) return std::nullopt;
@@ -2252,6 +2267,7 @@ void App::start_mail() {
 void App::start_triage() {
     if (!mail_svc || !store || !agent || !inbox) return;
     triage::TriageEnv te;
+    te.decisions = user_decisions.get();
     te.db = &store->db();
     te.clock = &system_clock();
     te.mail = &mail_svc->store();
@@ -2345,6 +2361,7 @@ void App::start_knowledge() {
     }
     if (outcome.degraded) log::error(kLog, "kg.db migration failed; running read-only: " + outcome.failure);
     knowledge::KnowledgeEnv ke;
+    ke.decisions = user_decisions.get();
     ke.clock = &system_clock();
     ke.policy = [this](const std::string& name) -> std::optional<json> {
         const auto p = policy ? policy->current() : nullptr;
@@ -2524,6 +2541,7 @@ std::filesystem::path active_speech_path(const std::filesystem::path& data_root)
 void App::start_meetings() {
     if (!agent || !inbox || !store || !root) return;
     meeting::MeetingEnv env;
+    env.decisions = user_decisions.get();
     env.clock = &system_clock();
     env.policy = [this](const std::string& key) -> std::optional<json> {
         const auto p = policy ? policy->current() : nullptr;

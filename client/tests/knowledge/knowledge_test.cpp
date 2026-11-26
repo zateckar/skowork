@@ -12,6 +12,7 @@
 #include "teams/teams_service.h"
 #include "support/dev_endpoints.h"
 #include "support/graph_mock.h"
+#include "eval/decision_log.h"
 #include "support/runtime_harness.h"
 
 #include <gtest/gtest.h>
@@ -251,6 +252,7 @@ struct Kg {
         make(background);
     }
     ~Kg() { svc.reset(); }
+    eval::DecisionLog* decisions = nullptr;  // the user decision log, set before make() (client/evaluation)
 
     void make(bool background) {
         svc.reset();
@@ -264,6 +266,7 @@ struct Kg {
         EXPECT_TRUE(db);
         KnowledgeEnv e;
         e.clock = &clock;
+        e.decisions = decisions;
         e.policy = [this](const std::string& k) -> std::optional<json> {
             const std::lock_guard lock(mx);
             if (policy.contains(k)) return policy[k];
@@ -6399,4 +6402,34 @@ TEST(CitationNumbers, NumbersAreUniquePerRunAndContinueAfterARestart) {
     const auto after_restart = json::parse(tool(restarted, "knowledge.search").run(run1_again, {{"query", "quarterly roadmap launch"}}).content)["results"];
     ASSERT_GE(after_restart.size(), 1u);
     EXPECT_EQ(after_restart[0]["n"], static_cast<int>(first.size() + second.size()) + 1);
+}
+
+// add-evaluation-export (client/evaluation User Decision Log): fact edits, deletions and importance marks are logged
+// against the item the fact came from, and forgetting the item removes them.
+TEST(KnowledgeCuration, FactDecisionsAreLogged) {
+    MailDb app;
+    eval::DecisionLog log(app.store->db());
+    Kg kg({{"knowledge.directory_enrichment", "off"}});
+    kg.decisions = &log;
+    kg.make(false);
+    write_file(kg.folder / "phoenix.txt", "Od pondělí vede projekt Phoenix Jana Nováková.");
+    ASSERT_TRUE(kg.svc->add_document(kg.file_path("phoenix.txt")));
+    kg.idle();
+    auto& store = kg.svc->store();
+    auto rel = store.relations_of(store.find_entities("Jana Nováková", 1)[0].id, 10);
+    ASSERT_EQ(rel.size(), 1u);
+    ASSERT_TRUE(kg.svc->set_fact_importance(rel[0].id, "high"));
+    ASSERT_TRUE(kg.svc->edit_fact("relation", rel[0].id, "Jana Nováková leads Phoenix and Falcon"));
+    const long long item = store.item("files", store.documents()[0])->id;
+    const std::string ref = "files:" + store.item("files", store.documents()[0])->ext_id;
+    auto entries = log.for_item(ref);
+    ASSERT_EQ(entries.size(), 2u);
+    EXPECT_EQ(entries[0].kind, "importance");
+    EXPECT_EQ(entries[0].after["level"], "high");
+    EXPECT_EQ(entries[1].kind, "fact_edit");
+    EXPECT_EQ(entries[1].step, "knowledge");
+    EXPECT_EQ(entries[1].result_ref, "fact:relation:" + std::to_string(rel[0].id));
+    EXPECT_EQ(entries[1].after["text"], "Jana Nováková leads Phoenix and Falcon");
+    ASSERT_TRUE(kg.svc->forget_item(item));
+    EXPECT_TRUE(log.for_item(ref).empty());
 }

@@ -2,6 +2,7 @@
 // through a fake small model, admission counters, merging, dismissal, withdrawal, user edits, preparation, reminders
 // and deletion, on a real encrypted app.db.
 #include "agenda/service.h"
+#include "eval/decision_log.h"
 #include "app/agenda_intake.h"
 #include "base/time.h"
 #include "platform/crypto.h"
@@ -76,6 +77,7 @@ struct Rig {
     bool unattended = false;
     int runs = 0;
     std::unique_ptr<agenda::Service> svc;
+    std::unique_ptr<eval::DecisionLog> log;
 
     Rig() {
         auto root = DataRoot::open(dir);
@@ -87,6 +89,7 @@ struct Rig {
         auto opened = open_and_migrate(root->file("app.db"), *k, app_migrations(), o);
         EXPECT_TRUE(opened);
         db = std::move(*opened);
+        log = std::make_unique<eval::DecisionLog>(*db);
         make();
     }
     ~Rig() {
@@ -115,6 +118,7 @@ struct Rig {
         };
         e.notify = [this](const std::string& t, const std::string& b, const std::string& r) { notes.emplace_back(t, b, r); };
         e.hold_reminders = [this] { return presentation; };
+        e.decisions = log.get();
         svc = std::make_unique<agenda::Service>(*db, std::move(e));
     }
     void enable() {
@@ -613,4 +617,28 @@ TEST(AgendaService, TeamsMessagesAreASelectableSource) {
     // A Teams message that is deleted withdraws the item it alone supported.
     r.svc->withdraw("teams", "19:grp@thread.v2|m3");
     EXPECT_TRUE(r.svc->list()["items"].empty());
+}
+
+// add-evaluation-export (client/evaluation User Decision Log): done, dismiss and edit are logged against the source.
+TEST(AgendaService, DecisionsAreLogged) {
+    Rig r;
+    r.enable();
+    r.svc->offer(mail("m1", kAsk));
+    r.model.text = answer("m1", candidate("send me the Q4 slides"));
+    r.svc->detect_now();
+    const std::string id = jstr(r.svc->list()["items"][0], "id");
+    ASSERT_TRUE(r.svc->edit(id, {{"title", "Send the Q4 slides to Petr"}}));
+    ASSERT_TRUE(r.svc->mark_done(id));
+    ASSERT_TRUE(r.svc->reopen(id));
+    ASSERT_TRUE(r.svc->dismiss(id));
+    const auto log = r.log->for_item("mail:m1");
+    ASSERT_EQ(log.size(), 3u);
+    EXPECT_EQ(log[0].kind, "agenda_edit");
+    EXPECT_EQ(log[0].after["title"], "Send the Q4 slides to Petr");
+    EXPECT_EQ(log[1].kind, "agenda_done");
+    EXPECT_EQ(log[1].before["state"], "open");
+    EXPECT_EQ(log[1].after["state"], "done");
+    EXPECT_EQ(log[2].kind, "agenda_dismiss");
+    EXPECT_EQ(log[2].result_ref, "agenda:" + id);
+    EXPECT_EQ(log[2].step, "agenda");
 }

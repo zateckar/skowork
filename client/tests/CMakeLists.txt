@@ -207,6 +207,7 @@ if(WIN32)
     eval/instructions_golden_test.cpp
     eval/registry_test.cpp
     eval/eval_rpc_test.cpp
+    eval/decision_log_test.cpp
     storage/generated_surface_state_test.cpp
     storage/data_root_test.cpp
     host/host_test.cpp

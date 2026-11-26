@@ -5,6 +5,7 @@
 #pragma once
 
 #include "base/json.h"
+#include "eval/decision_log.h"
 #include "base/result.h"
 #include "base/time.h"
 #include "meeting/audio_file.h"
@@ -70,6 +71,7 @@ struct MeetingEnv {
     std::function<void(bool available)> availability;
     std::function<bool()> deferred;          // client/desktop-host defers background work
     std::function<std::string()> user_name;  // the local track's speaker
+    eval::DecisionLog* decisions = nullptr;  // the user decision log (client/evaluation); null: not logged
     std::function<std::string()> language;   // the UI language, for the notice before the meeting language is known
     std::function<void()> changed;           // the Settings section shows something new
     bool background = true;                  // false (tests): no threads; call tick() and run_transcriptions()
@@ -131,6 +133,9 @@ public:
     MeetingStore& store() { return *store_; }
 
 private:
+    void log_decision(const std::string& kind, const std::string& item_ref, const std::string& result_ref, const json& before,
+                      const json& after);
+    static void mark_auto_names(MeetingRecord& m);
     struct Capture {
         std::string meeting_id;
         std::vector<std::unique_ptr<Recorder>> recorders;

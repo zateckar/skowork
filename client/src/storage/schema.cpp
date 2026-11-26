@@ -5,7 +5,7 @@
 // 1100-1199 knowledge (app.db side), 1200-1299 meeting-capture, 1300-1399 skills additions made after them, 1400-1499 user-messaging,
 // 1500-1599 fix-long-thread-model-calls, 1600-1699 agent-created-skills, 1700-1799 improve-meeting-capture-quality,
 // 1800-1899 improve-skowork-and-knowledge-control, 1900-1999 agenda, 2000-2099 proactive durable work,
-// 2100-2199 meeting transcription progress and language.
+// 2100-2199 meeting transcription progress and language, 2800-2899 evaluation export.
 #include "storage/app_store.h"
 
 namespace wb {
@@ -740,6 +740,25 @@ DROP TABLE triage_items;
 ALTER TABLE triage_items_new RENAME TO triage_items;
 CREATE INDEX triage_items_pending ON triage_items(state, queued_at);
 CREATE INDEX triage_items_thread ON triage_items(thread_id);
+)sql"},
+        // The user decision log (client/evaluation User Decision Log, add-evaluation-export design D8).
+        {2800, R"sql(
+CREATE TABLE decision_log(
+  id INTEGER PRIMARY KEY,
+  at INTEGER NOT NULL,
+  step TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  item_ref TEXT NOT NULL,
+  result_ref TEXT NOT NULL,
+  before_json TEXT NOT NULL,
+  after_json TEXT NOT NULL,
+  instruction_id TEXT NOT NULL);
+CREATE INDEX decision_log_item ON decision_log(item_ref);
+CREATE INDEX decision_log_at ON decision_log(at);
+)sql"},
+        // Who named each meeting speaker (add-evaluation-export design D2): {"s1": {"by": "auto"|"user", "at": ms}}.
+        {2801, R"sql(
+ALTER TABLE meetings ADD COLUMN speaker_meta TEXT NOT NULL DEFAULT '{}';
 )sql"},
     };
     return migrations;

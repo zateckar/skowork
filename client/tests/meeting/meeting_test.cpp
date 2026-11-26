@@ -4,6 +4,7 @@
 // runtime and scheduler on app.db with fakes for the audio devices and the machine probe. Only the disabled, hand-run
 // MeetingCapture test opens real audio devices (3.1 track separation; it plays an audible tone).
 #include "base/strings.h"
+#include "eval/decision_log.h"
 #include "host/workers.h"
 #include "meeting/audio_file.h"
 #include "meeting/capture.h"
@@ -1408,6 +1409,8 @@ struct Meetings {
             return language;
         };
         e.background = background;
+        if (!log) log = std::make_unique<eval::DecisionLog>(*env.db);
+        e.decisions = log.get();
         svc = std::make_unique<MeetingService>(std::move(e), std::make_unique<MeetingStore>(*env.db));
         svc->start();
     }
@@ -1537,6 +1540,7 @@ struct Meetings {
     std::vector<bool> availability;
     std::atomic<bool> deferred{false};
     std::unique_ptr<wb::scheduler::Scheduler> sched;
+    std::unique_ptr<eval::DecisionLog> log;
     std::unique_ptr<MeetingService> svc;
 };
 
@@ -3019,4 +3023,50 @@ TEST(Dictation, LanguageChosenOrDetectedWithTheWindowLanguageAsFallback) {
         ASSERT_FALSE(no);
         EXPECT_EQ(no.error().code, "unsupported_language");
     }
+}
+
+// add-evaluation-export design D2: names the client chose are marked auto; a rename is marked user with its time and
+// logged (client/evaluation User Decision Log). Forgetting the meeting removes its log entries.
+TEST(MeetingSpeakers, AutoNamesAndUserRenamesAreRecorded) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    Meetings f({{"meeting_capture.enabled", true}, {"meeting_capture.require_notice", false}});
+    f.make();
+    f.env.model.push_text("Summary.");
+    const std::string id = f.capture_one();
+    f.svc->run_transcriptions();
+    ASSERT_TRUE(f.settle(id));
+    auto m = f.svc->store().get(id);
+    ASSERT_TRUE(m);
+    ASSERT_TRUE(m->speakers.count("s2"));
+    for (const auto& [k, v] : m->speakers) {
+        (void)v;
+        EXPECT_EQ(m->speaker_meta[k].by, "auto") << k;
+    }
+    const std::string before = m->speakers["s2"];
+    ASSERT_TRUE(f.svc->rename_speaker(id, "s2", "Petra Malá"));
+    m = f.svc->store().get(id);
+    EXPECT_EQ(m->speaker_meta["s2"].by, "user");
+    EXPECT_GT(m->speaker_meta["s2"].at_ms, 0);
+    const auto log = f.log->for_item("meeting:" + id);
+    ASSERT_EQ(log.size(), 1u);
+    EXPECT_EQ(log[0].kind, "speaker_rename");
+    EXPECT_EQ(log[0].result_ref, "meeting:" + id + "/s2");
+    EXPECT_EQ(log[0].before["name"], before);
+    EXPECT_EQ(log[0].after["name"], "Petra Malá");
+    ASSERT_TRUE(f.svc->forget(id));
+    EXPECT_TRUE(f.log->for_item("meeting:" + id).empty());
+}
+
+TEST(MeetingSpeakers, OldRowsReadUnknown) {
+    Meetings f;
+    f.make();
+    MeetingRecord r;
+    r.id = "mtg_old";
+    r.state = "done";
+    r.speakers = {{"s1", "Speaker 1"}};
+    ASSERT_TRUE(f.svc->store().put(r));
+    const auto back = f.svc->store().get("mtg_old");
+    ASSERT_TRUE(back);
+    EXPECT_FALSE(back->speaker_meta.count("s1"));
+    EXPECT_EQ(SpeakerMeta{}.by, "unknown");
 }
