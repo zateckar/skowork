@@ -77,6 +77,14 @@ struct TriageEnv {
     std::function<void(const std::string& counter)> quality;
 };
 
+// The text triage classifies for an item (add-evaluation-export design D4: a replay sends the same text), cut to limit.
+std::string mail_event_text(const mail::Person& from, const std::string& subject, long long received_at, const std::string& body,
+                            size_t limit);
+std::string teams_event_text(const std::string& sender, const std::string& conversation, long long at_ms, const std::string& body,
+                             size_t limit);
+std::string calendar_event_text(const std::string& subject, const mail::Person& organizer, long long start_at, long long end_at,
+                                const std::string& location, bool cancelled, const std::string& body, size_t limit);
+
 // The instruction of an automatic preparation Run for an item of this scope (improve-triage-results D2, D6).
 std::string prepare_preamble(const std::string& scope, const std::string& item_id);
 

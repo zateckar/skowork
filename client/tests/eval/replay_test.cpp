@@ -1,0 +1,319 @@
+// Replay of an evaluation export (client/evaluation Replay Without Side Effects, Replay Variants, Replay Limits And
+// Progress), the export job on the pipe, and the speech worker's replay inputs.
+#include <gtest/gtest.h>
+
+#include "app/eval_rpc.h"
+#include "eval/eval_jobs.h"
+#include "eval/jsonl.h"
+#include "eval/replay.h"
+#include "eval/wav.h"
+#include "host/rpc.h"
+#include "mail/mail_store.h"
+#include "meeting/audio_file.h"
+#include "meeting/core.h"
+#include "support/dev_endpoints.h"
+#include "support/graph_mock.h"
+
+#include <atomic>
+#include <fstream>
+
+using namespace wb;
+using namespace std::chrono_literals;
+
+namespace {
+
+// Answers triage batches: every event is relevant and needs action; counts requests; can block or fail.
+class ReplayModel : public model::IChatModel {
+public:
+    std::optional<model::RoleInfo> role_info(model::Role role) override {
+        if (role != model::Role::small) return std::nullopt;
+        model::RoleInfo info;
+        info.role = role;
+        info.kind = "chat";
+        return info;
+    }
+    model::ModelResult<model::ChatResponse> chat(const model::ChatRequest& r, const model::ChatSink&) override {
+        ++requests;
+        last_system = r.messages.at(0).content;
+        while (hold) std::this_thread::sleep_for(5ms);
+        if (fail) return model::ModelFailure{"TIMEOUT", "timed out", "", 0, "", 0, true, false};
+        const auto data = parse_json(r.messages.at(1).content);
+        json results = json::array();
+        if (data && data->contains("events"))
+            for (const auto& e : (*data)["events"])
+                results.push_back({{"id", jstr(e, "id")}, {"revision", jstr(e, "revision")}, {"outcome", "relevant"},
+                                   {"reason", "Asks you"}, {"action", "required"}, {"category", "request"}});
+        model::ChatResponse out;
+        out.finish_reason = "stop";
+        out.text = json{{"results", results}}.dump();
+        return out;
+    }
+    std::atomic<int> requests{0};
+    std::atomic<bool> hold{false}, fail{false};
+    std::string last_system;
+};
+
+struct Folder {
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / ("skowork-replay-" + std::to_string(::GetCurrentProcessId()));
+    Folder() {
+        std::filesystem::remove_all(dir);
+        std::filesystem::create_directories(dir);
+        std::ofstream(dir / "manifest.json") << json{{"complete", true}}.dump() << "\n";
+    }
+    ~Folder() { std::filesystem::remove_all(dir); }
+    void mail(int n) {
+        std::ofstream out(dir / "mail.jsonl", std::ios::binary);
+        for (int i = 0; i < n; ++i)
+            out << json{{"id", "mail:m" + std::to_string(i)},
+                        {"item", {{"from", {{"name", "Petra"}, {"address", "petra@example.cz"}}}, {"subject", "Budget"},
+                                  {"received_at", 1'790'000'000'000LL}, {"body", "Please review the budget"}, {"to", json::array()}}}}
+                       .dump()
+                << "\n";
+    }
+    void meetings(const json& audio) {
+        std::ofstream out(dir / "meetings.jsonl", std::ios::binary);
+        out << json{{"id", "meeting:mtg1"}, {"item", {{"language", "en"}, {"attendees", {"a@example.cz", "b@example.cz"}}, {"audio", audio}}}}.dump()
+            << "\n";
+    }
+    std::vector<json> results(const std::string& run) const {
+        std::vector<json> out;
+        std::ifstream in(dir / "runs" / run / "results.jsonl", std::ios::binary);
+        std::string line;
+        while (std::getline(in, line))
+            if (auto j = parse_json(line)) out.push_back(*j);
+        return out;
+    }
+    json run_json(const std::string& run) const {
+        std::ifstream in(dir / "runs" / run / "run.json", std::ios::binary);
+        std::string line;
+        std::getline(in, line);
+        auto j = parse_json(line);
+        return j ? *j : json();
+    }
+};
+
+eval::ReplayEnv env_with(ReplayModel& model) {
+    eval::ReplayEnv e;
+    e.model = &model;
+    e.responsibilities = [] { return std::string("Budgets"); };
+    e.now = [] { return 1'790'000'000'000LL; };
+    e.pause_poll = 20ms;
+    return e;
+}
+
+eval::ReplayRequest triage_request(const Folder& f, json variant = json::object(), int max = 200) {
+    eval::ReplayRequest r;
+    r.folder = f.dir;
+    r.step = eval::Step::triage;
+    r.variant = std::move(variant);
+    r.max_items = max;
+    return r;
+}
+
+}  // namespace
+
+TEST(Replay, TriageWritesResultsOnly) {
+    Folder f;
+    f.mail(30);
+    ReplayModel model;
+    eval::Replayer rep(env_with(model));
+    auto id = rep.start(triage_request(f));
+    ASSERT_TRUE(id) << id.error().message;
+    rep.wait();
+    const auto lines = f.results(*id);
+    ASSERT_EQ(lines.size(), 30u);
+    EXPECT_EQ(lines[0]["result"]["action"], "required");
+    EXPECT_EQ(model.requests.load(), 2);  // batches of 20
+    const json run = f.run_json(*id);
+    EXPECT_EQ(run["items"], 30);
+    EXPECT_EQ(run["state"], "done");
+    EXPECT_EQ(run["instruction_id"], eval::Variant::defaults(eval::Step::triage).instruction_id());
+    EXPECT_EQ(model.last_system, eval::Variant::defaults(eval::Step::triage).text("triage.instructions"));
+    EXPECT_EQ(rep.status()["state"], "done");
+}
+
+TEST(Replay, VariantAppliesAndUnknownIsRejectedBeforeFirstItem) {
+    Folder f;
+    f.mail(5);
+    ReplayModel model;
+    eval::Replayer rep(env_with(model));
+    auto bad = rep.start(triage_request(f, {{"triage.instructons", "x"}}));
+    ASSERT_FALSE(bad);
+    EXPECT_EQ(model.requests.load(), 0);
+    auto good = rep.start(triage_request(f, {{"triage.instructions", "Be brief."}, {"triage.batch_size", 2}}));
+    ASSERT_TRUE(good);
+    rep.wait();
+    EXPECT_EQ(model.last_system, "Be brief.");
+    EXPECT_EQ(model.requests.load(), 3);
+    EXPECT_NE(f.run_json(*good)["instruction_id"], eval::Variant::defaults(eval::Step::triage).instruction_id());
+}
+
+TEST(Replay, MaxItemsBounds) {
+    Folder f;
+    const std::string dir = meeting::path_to_utf8(f.dir);
+    EXPECT_FALSE(eval::replay_request_from_json({{"folder", dir}, {"step", "triage"}, {"max_items", 0}}));
+    EXPECT_FALSE(eval::replay_request_from_json({{"folder", dir}, {"step", "triage"}, {"max_items", 2001}}));
+    EXPECT_FALSE(eval::replay_request_from_json({{"folder", dir}, {"step", "triagee"}}));
+    auto ok = eval::replay_request_from_json({{"folder", dir}, {"step", "triage"}});
+    ASSERT_TRUE(ok);
+    EXPECT_EQ(ok->max_items, 200);
+    f.mail(10);
+    ReplayModel model;
+    eval::Replayer rep(env_with(model));
+    auto id = rep.start(triage_request(f, json::object(), 3));
+    ASSERT_TRUE(id);
+    rep.wait();
+    EXPECT_EQ(f.results(*id).size(), 3u);
+}
+
+TEST(Replay, BusyAndCancelKeepsWritten) {
+    Folder f;
+    f.mail(60);
+    ReplayModel model;
+    eval::Replayer rep(env_with(model));
+    auto id = rep.start(triage_request(f, {{"triage.batch_size", 1}}));
+    ASSERT_TRUE(id);
+    for (int i = 0; i < 400 && model.requests.load() < 5; ++i) std::this_thread::sleep_for(5ms);
+    model.hold = true;
+    auto second = rep.start(triage_request(f));
+    ASSERT_FALSE(second);
+    EXPECT_EQ(second.error().code, "busy");
+    rep.cancel();
+    model.hold = false;
+    rep.wait();
+    const auto written = f.results(*id).size();
+    EXPECT_GE(written, 4u);
+    EXPECT_LT(written, 60u);
+    EXPECT_EQ(rep.status()["state"], "cancelled");
+}
+
+TEST(Replay, FailuresAreCountedByKind) {
+    Folder f;
+    f.mail(3);
+    ReplayModel model;
+    model.fail = true;
+    eval::Replayer rep(env_with(model));
+    auto id = rep.start(triage_request(f));
+    ASSERT_TRUE(id);
+    rep.wait();
+    EXPECT_EQ(f.run_json(*id)["failures_by_kind"]["unavailable"], 3);
+    EXPECT_EQ(f.results(*id)[0]["error"]["kind"], "unavailable");
+}
+
+TEST(Replay, AttendeesClusterCount) {
+    EXPECT_EQ(eval::cluster_count("attendees", {"Jan Novák", "a", "b", "c"}, "Jan Novák"), 3);
+    EXPECT_EQ(eval::cluster_count("attendees", {"Jan Novák", "a"}, "Jan Novák"), -1);
+    EXPECT_EQ(eval::cluster_count("auto", {"a", "b", "c"}, "x"), -1);
+}
+
+TEST(Replay, SkipsMeetingWithoutAudioAndPausesDuringCapture) {
+    Folder f;
+    f.meetings("unavailable");
+    ReplayModel model;
+    auto e = env_with(model);
+    std::atomic<int> speech_calls{0};
+    e.speech = [&](const json&) -> Result<json> {
+        ++speech_calls;
+        return json{{"language", "en"}, {"segments", json::array()}};
+    };
+    std::atomic<bool> busy{false};
+    e.speech_busy = [&] { return busy.load(); };
+    {
+        eval::Replayer rep(e);
+        eval::ReplayRequest r;
+        r.folder = f.dir;
+        r.step = eval::Step::diarize;
+        auto id = rep.start(r);
+        ASSERT_TRUE(id);
+        rep.wait();
+        EXPECT_EQ(f.run_json(*id)["failures_by_kind"]["no_audio"], 1);
+        EXPECT_EQ(speech_calls.load(), 0);
+    }
+    f.meetings({{"remote", "audio/mtg1/remote.wav"}});
+    busy = true;
+    eval::Replayer rep(e);
+    eval::ReplayRequest r;
+    r.folder = f.dir;
+    r.step = eval::Step::asr;
+    r.variant = {{"asr.beam_paths", 2}};
+    auto id = rep.start(r);
+    ASSERT_TRUE(id);
+    for (int i = 0; i < 400 && rep.status()["state"] != "paused"; ++i) std::this_thread::sleep_for(5ms);
+    EXPECT_EQ(rep.status()["state"], "paused");
+    EXPECT_EQ(speech_calls.load(), 0);
+    busy = false;
+    rep.wait();
+    EXPECT_EQ(speech_calls.load(), 1);
+    EXPECT_EQ(f.results(*id).size(), 1u);
+}
+
+TEST(SttRequest, SettingsDefaultsAndOverrides) {
+    const auto d = meeting::engine_settings_from_json(json::object());
+    EXPECT_EQ(d.vad_threshold, 0.5f);
+    EXPECT_EQ(d.diarize_threshold, 0.5f);
+    EXPECT_EQ(d.num_clusters, -1);
+    EXPECT_EQ(d.max_active_paths, 4);
+    EXPECT_EQ(d.hotwords_score, 2.0f);
+    const auto o = meeting::engine_settings_from_json({{"threshold", 0.7}, {"num_clusters", 3}, {"max_active_paths", 2}, {"hotwords_score", 9.0}});
+    EXPECT_FLOAT_EQ(o.diarize_threshold, 0.7f);
+    EXPECT_EQ(o.num_clusters, 3);
+    EXPECT_EQ(o.max_active_paths, 2);
+    EXPECT_EQ(o.hotwords_score, 2.0f);  // out of range: the default stays
+}
+
+TEST(SttRequest, AcceptsExportedWavTracks) {
+    WB_REQUIRES_DEV_ENDPOINTS();
+    Folder f;
+    std::vector<std::int16_t> pcm(16000 * 2);
+    for (size_t i = 0; i < pcm.size(); ++i) pcm[i] = static_cast<std::int16_t>((i % 80) * 300);
+    ASSERT_TRUE(eval::write_wav(f.dir / "remote.wav", pcm, 16000));
+    auto r = meeting::stt_request("stt.transcribe", {{"tracks", {meeting::path_to_utf8(f.dir / "remote.wav")}}, {"engine", "test"},
+                                                     {"settings", {{"num_clusters", 2}}}});
+    ASSERT_TRUE(r) << r.error().message;
+    EXPECT_TRUE(r->contains("segments"));
+    ASSERT_TRUE(eval::write_wav(f.dir / "other.wav", pcm, 16000));
+    EXPECT_FALSE(meeting::stt_request("stt.transcribe", {{"tracks", {meeting::path_to_utf8(f.dir / "other.wav")}}, {"engine", "test"}}));
+}
+
+TEST(EvalRpc, ExportJobLifecycle) {
+    MailDb db;
+    mail::MailStore store(db.store->db());
+    ASSERT_TRUE(store.set_folders({{"f-inbox", "Inbox", "inbox"}}));
+    for (int i = 0; i < 3; ++i) {
+        mail::StoredMessage m;
+        m.id = "m" + std::to_string(i);
+        m.folder_id = "f-inbox";
+        m.change_key = "k";
+        m.subject = "S";
+        m.received_at = 1'790'000'000'000LL + i;
+        store.upsert_message(m);
+    }
+    eval::ExportEnv xe;
+    xe.mail = &store;
+    xe.app_db = &db.store->db();
+    xe.now = [] { return 1'790'000'000'000LL; };
+    ReplayModel model;
+    eval::EvalJobs jobs(xe, env_with(model));
+    RpcRegistry rpc;
+    register_eval_rpc(rpc, [&] { return static_cast<eval::EvalService*>(&jobs); }, [] { return true; });
+    Folder f;
+    const json params = {{"out_dir", meeting::path_to_utf8(f.dir / "exports")}, {"from", "2026-09-01"}, {"to", "2026-10-01"}, {"sources", {"mail"}}};
+    json dry_params = params;
+    dry_params["dry_run"] = true;
+    auto dry = (*rpc.find("eval.export", true))(dry_params);
+    ASSERT_TRUE(dry);
+    EXPECT_EQ((*dry)["audio_bytes"], 0);
+    auto started = (*rpc.find("eval.export", true))(params);
+    ASSERT_TRUE(started) << started.error().message;
+    jobs.wait();
+    auto st = (*rpc.find("eval.status", true))({{"job", (*started)["job"]}});
+    ASSERT_TRUE(st);
+    EXPECT_EQ((*st)["state"], "done");
+    EXPECT_EQ((*st)["counts"]["mail"]["written"], 3);
+    const std::filesystem::path folder = meeting::path_from_utf8(jstr(*started, "folder"));
+    std::ifstream in(folder / "manifest.json");
+    std::string line;
+    std::getline(in, line);
+    EXPECT_TRUE((*parse_json(line))["complete"].get<bool>());
+    EXPECT_FALSE((*rpc.find("eval.status", true))({{"job", "nope"}}));
+}

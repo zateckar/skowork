@@ -78,6 +78,12 @@ std::string classification_instructions() {
 
 Result<std::vector<Classification>> classify(model::IChatModel& model, const std::string& responsibilities,
                                               const std::vector<Event>& events, const std::shared_ptr<CancelToken>& cancel) {
+    return classify(model, responsibilities, events, classification_instructions(), cancel);
+}
+
+Result<std::vector<Classification>> classify(model::IChatModel& model, const std::string& responsibilities,
+                                              const std::vector<Event>& events, const std::string& instructions,
+                                              const std::shared_ptr<CancelToken>& cancel) {
     if (events.empty() || events.size() > 20 || responsibilities.size() > 4096) return invalid_input();
     std::set<std::string> ids;
     for (const auto& e : events)
@@ -98,7 +104,7 @@ Result<std::vector<Classification>> classify(model::IChatModel& model, const std
     request.cancel = cancel;
     model::ChatMessage system;
     system.role = "system";
-    system.content = classification_instructions();
+    system.content = instructions;
     model::ChatMessage user;
     user.role = "user";
     try {

@@ -56,6 +56,10 @@ skowork_fuzz_target(fuzz_speech_manifest speech_manifest_fuzz.cpp)
 target_link_libraries(fuzz_speech_manifest PRIVATE wb_meeting_core)
 skowork_fuzz_target(fuzz_speech_archive speech_archive_fuzz.cpp)
 target_link_libraries(fuzz_speech_archive PRIVATE wb_meeting_core)
+# Evaluation export lines (add-evaluation-export task 4.4); the writer is portable, so it is built in directly.
+skowork_fuzz_target(fuzz_eval_jsonl eval_jsonl_fuzz.cpp)
+target_sources(fuzz_eval_jsonl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/eval/jsonl.cpp)
+target_link_libraries(fuzz_eval_jsonl PRIVATE wb_base)
 if(WIN32)
   # PDF extraction is Windows-only (pdfium.dll); the target runs with the DLL next to it.
   skowork_fuzz_target(fuzz_pdf pdf_fuzz.cpp)

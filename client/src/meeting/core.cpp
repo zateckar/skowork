@@ -1236,4 +1236,24 @@ json meeting_trigger_detail(const std::string& event, const std::string& meeting
     return d;
 }
 
+EngineSettings engine_settings_from_json(const json& j) {
+    EngineSettings s;
+    if (!j.is_object()) return s;
+    const auto num = [&](const char* key, double lo, double hi, auto& out) {
+        const auto it = j.find(key);
+        if (it == j.end() || !it->is_number()) return;
+        const double v = it->get<double>();
+        if (v >= lo && v <= hi) out = static_cast<std::remove_reference_t<decltype(out)>>(v);
+    };
+    num("vad_threshold", 0.2, 0.8, s.vad_threshold);
+    num("threshold", 0.3, 0.9, s.diarize_threshold);
+    num("max_active_paths", 1, 8, s.max_active_paths);
+    num("hotwords_score", 0.0, 5.0, s.hotwords_score);
+    if (const auto it = j.find("num_clusters"); it != j.end() && it->is_number_integer()) {
+        const int n = it->get<int>();
+        if (n == -1 || (n >= 1 && n <= 20)) s.num_clusters = n;
+    }
+    return s;
+}
+
 }  // namespace wb::meeting

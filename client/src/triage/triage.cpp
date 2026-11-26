@@ -191,24 +191,39 @@ bool TriageService::eligible(const Settings& s, const std::string& scope, const 
 }
 
 std::string TriageService::source_text(const std::string& scope, const std::string& item_id) {
-    std::string text;
     if (scope == "teams") {
         const auto c = chat(item_id);
         if (!c) return {};
-        text = "Teams message\nFrom: " + c->sender + "\nConversation: " + c->conversation + "\nSent: " + time_text(c->at_ms) + "\n\n" + c->text;
+        return teams_event_text(c->sender, c->conversation, c->at_ms, c->text, kMaxEventText);
     } else if (scope == "calendar") {
         const auto e = env_.mail->event(item_id);
         if (!e) return {};
-        text = "Calendar event\nSubject: " + e->subject + "\nOrganizer: " + person(e->organizer) + "\nStart: " + time_text(e->start_at) +
-               "\nEnd: " + time_text(e->end_at) + (e->location.empty() ? "" : "\nLocation: " + e->location) +
-               (e->cancelled ? "\nCancelled: yes" : "") + "\n\n" + e->body;
-    } else {
-        const auto m = env_.mail->message(item_id);
-        if (!m) return {};
-        text = "Mail message\nFrom: " + person(m->from) + "\nSubject: " + m->subject + "\nReceived: " + time_text(m->received_at) + "\n\n" +
-               (m->body.empty() ? m->preview : m->body);
+        return calendar_event_text(e->subject, e->organizer, e->start_at, e->end_at, e->location, e->cancelled, e->body, kMaxEventText);
     }
-    return std::string(runtime::utf8_prefix(text, kMaxEventText));
+    const auto m = env_.mail->message(item_id);
+    if (!m) return {};
+    return mail_event_text(m->from, m->subject, m->received_at, m->body.empty() ? m->preview : m->body, kMaxEventText);
+}
+
+std::string mail_event_text(const mail::Person& from, const std::string& subject, long long received_at, const std::string& body,
+                            size_t limit) {
+    const std::string text = "Mail message\nFrom: " + person(from) + "\nSubject: " + subject + "\nReceived: " + time_text(received_at) +
+                             "\n\n" + body;
+    return std::string(runtime::utf8_prefix(text, limit));
+}
+
+std::string teams_event_text(const std::string& sender, const std::string& conversation, long long at_ms, const std::string& body,
+                             size_t limit) {
+    const std::string text = "Teams message\nFrom: " + sender + "\nConversation: " + conversation + "\nSent: " + time_text(at_ms) + "\n\n" + body;
+    return std::string(runtime::utf8_prefix(text, limit));
+}
+
+std::string calendar_event_text(const std::string& subject, const mail::Person& organizer, long long start_at, long long end_at,
+                                const std::string& location, bool cancelled, const std::string& body, size_t limit) {
+    const std::string text = "Calendar event\nSubject: " + subject + "\nOrganizer: " + person(organizer) + "\nStart: " + time_text(start_at) +
+                             "\nEnd: " + time_text(end_at) + (location.empty() ? "" : "\nLocation: " + location) +
+                             (cancelled ? "\nCancelled: yes" : "") + "\n\n" + body;
+    return std::string(runtime::utf8_prefix(text, limit));
 }
 
 std::string TriageService::source_title(const std::string& scope, const std::string& item_id) {

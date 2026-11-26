@@ -54,6 +54,7 @@
 #include "app/triage_rpc.h"
 #include "app/eval_rpc.h"
 #include "eval/decision_log.h"
+#include "eval/eval_jobs.h"
 #include "eval/eval_service.h"
 #include "eval/quality.h"
 #include "eval/registry.h"
@@ -263,7 +264,8 @@ struct App {
     // queue, reminders and read-only preparation.
     std::unique_ptr<triage::TriageService> triage_svc;  // event triage (improve-proactive-durable-work D1)
     std::atomic<triage::TriageService*> triage_live{nullptr};  // for Teams events from the pool (add-teams-triage)
-    std::unique_ptr<eval::EvalService> eval_svc;  // client/evaluation (add-evaluation-export)
+    std::unique_ptr<eval::EvalService> eval_svc;  // client/evaluation (add-evaluation-export), made on first use
+    std::mutex eval_mx;
     std::unique_ptr<eval::DecisionLog> user_decisions;  // client/evaluation User Decision Log
     std::unique_ptr<eval::QualityCounters> quality;     // client/telemetry Quality Counters
     void start_triage();
@@ -615,6 +617,9 @@ void App::quit(bool force) {
         else finish(true);
     });
 }
+
+// The speech package folder of the active version (defined with the meeting wiring below).
+std::filesystem::path active_speech_path(const std::filesystem::path& data_root);
 
 void App::register_rpc() {
     // The Telemetry viewer (client/telemetry Telemetry Viewer): the level, its source and the last 30 days of records.
@@ -2345,7 +2350,48 @@ void App::start_triage() {
     mail_svc->on_cycle([this] { triage_svc->cycle_completed(); });
     register_triage_rpc(rpc, [this] { return triage_svc.get(); });
     // client/evaluation: pipe-only export and replay, refused while policy.evaluation.export is off.
-    register_eval_rpc(rpc, [this] { return eval_svc.get(); }, [this] {
+    register_eval_rpc(rpc, [this]() -> eval::EvalService* {
+        const std::lock_guard lock(eval_mx);
+        if (eval_svc) return eval_svc.get();
+        if (!store) return nullptr;
+        eval::ExportEnv xe;
+        xe.mail = mail_svc ? &mail_svc->store() : nullptr;
+        xe.teams = teams_svc.get();
+        xe.meetings = meeting_svc ? &meeting_svc->store() : nullptr;
+        xe.app_db = &store->db();
+        xe.decisions = user_decisions.get();
+        xe.facts_of = [this](const std::string& source, const std::string& ext_id) -> json {
+            if (!knowledge_svc) return json::array();
+            const auto item = knowledge_svc->store().item(source, ext_id);
+            if (!item) return json::array();
+            const json detail = knowledge_svc->item_detail(item->id);
+            return detail.contains("facts") ? detail["facts"] : json::array();
+        };
+        xe.now = [] { return system_clock().unix_millis(); };
+        xe.client_version = kVersion;
+        eval::ReplayEnv re;
+        re.model = model.get();
+        re.responsibilities = [this] { return triage_svc ? jstr(triage_svc->status(), "responsibilities") : std::string{}; };
+        re.identity = [this] { return agenda_identity(); };
+        re.tz_offset_min = [](long long ms) { return local_offset_at(ms); };
+        re.user_name = [this] { return agenda_identity().name; };
+        re.now = [] { return system_clock().unix_millis(); };
+        re.speech = [this](const json& request) -> Result<json> {
+            if (!workers || !root) return make_error("unavailable", "no worker host");
+            json p = {{"tracks", request.value("tracks", json::array())},
+                      {"language", jstr(request, "language")},
+                      {"vocabulary", request.value("vocabulary", json::array())},
+                      {"settings", request.value("settings", json::object())},
+                      {"diarize", true}};
+            p["speech_dir"] = narrow(active_speech_path(root->root()).wstring());
+            return workers->call(WorkerRole::stt, "stt.transcribe", p);
+        };
+        re.speech_busy = [this] {
+            return meeting_svc && (meeting_svc->capturing() || !meeting_svc->store().in_states({"transcribing"}).empty());
+        };
+        eval_svc = std::make_unique<eval::EvalJobs>(std::move(xe), std::move(re));
+        return eval_svc.get();
+    }, [this] {
         const auto cur = policy ? policy->current() : nullptr;
         return cur && eval::export_enabled(*cur);
     });

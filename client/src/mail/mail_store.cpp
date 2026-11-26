@@ -292,6 +292,20 @@ std::vector<std::string> MailStore::all_message_ids() {
     return out;
 }
 
+std::vector<StoredMessage> MailStore::messages_between(long long from, long long to) {
+    std::vector<std::string> ids;
+    {
+        const std::lock_guard lock(db_.mutex());
+        auto s = db_.prepare("SELECT id FROM mail_messages WHERE received_at >= ?1 AND received_at < ?2 ORDER BY received_at, id");
+        s.bind(1, from).bind(2, to);
+        while (s.step()) ids.push_back(s.col_text(0));
+    }
+    std::vector<StoredMessage> out;
+    for (const auto& id : ids)
+        if (auto m = message(id)) out.push_back(std::move(*m));
+    return out;
+}
+
 std::vector<std::string> MailStore::event_ids() {
     const std::lock_guard lock(db_.mutex());
     auto s = db_.prepare("SELECT id FROM cal_events");

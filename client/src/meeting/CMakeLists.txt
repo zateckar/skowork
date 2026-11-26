@@ -10,7 +10,7 @@ skowork_warnings(wb_meeting_core)
 if(WIN32)
   # sherpa_engine.cpp only includes the sherpa-onnx C header; the worker loads the DLL from the speech package at run
   # time (add-meeting-capture design D4), so nothing links it.
-  add_library(wb_meeting_audio STATIC audio_file.cpp sherpa_engine.cpp)
+  add_library(wb_meeting_audio STATIC audio_file.cpp sherpa_engine.cpp wav.cpp)
   target_link_libraries(wb_meeting_audio PUBLIC wb_meeting_core wb_platform wb_base)
   target_include_directories(wb_meeting_audio SYSTEM PRIVATE ${TP}/sherpa-onnx/include)
   skowork_warnings(wb_meeting_audio)
@@ -22,6 +22,6 @@ if(WIN32)
   skowork_warnings(wb_speech_package)
 
   add_library(wb_meeting STATIC capture.cpp meeting_store.cpp meeting_service.cpp dictation.cpp)
-  target_link_libraries(wb_meeting PUBLIC wb_eval wb_meeting_audio wb_speech_package wb_storage wb_platform wb_base mmdevapi ole32 oleaut32 uuid)
+  target_link_libraries(wb_meeting PUBLIC wb_eval_core wb_meeting_audio wb_speech_package wb_storage wb_platform wb_base mmdevapi ole32 oleaut32 uuid)
   skowork_warnings(wb_meeting)
 endif()

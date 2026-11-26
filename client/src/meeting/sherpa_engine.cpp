@@ -199,6 +199,7 @@ public:
         : api_(api), paths_(std::move(paths)), threads_(threads), force_whisper_(force_whisper) {}
 
     Result<json> transcribe(const std::vector<TrackAudio>& tracks, const TranscribeOptions& options) override {
+        settings_ = options.settings;
         for (const auto& t : tracks)
             if (static_cast<std::int32_t>(t.rate) != kRate) return make_error("invalid", "tracks are 16 kHz");
         // 1. Speech spans per track: VAD runs over the whole track, so spans stay the same from pass to pass; only those
@@ -286,7 +287,7 @@ private:
     Result<std::vector<Span>> vad(const TrackAudio& t) const {
         SherpaOnnxVadModelConfig c{};
         c.silero_vad.model = paths_.vad.c_str();
-        c.silero_vad.threshold = 0.5f;
+        c.silero_vad.threshold = settings_.vad_threshold;
         c.silero_vad.min_silence_duration = 0.4f;
         c.silero_vad.min_speech_duration = 0.25f;
         c.silero_vad.window_size = 512;
@@ -332,8 +333,8 @@ private:
         c.embedding.model = paths_.embedding.c_str();
         c.embedding.num_threads = threads_;
         c.embedding.provider = "cpu";
-        c.clustering.num_clusters = -1;  // unknown: a distance threshold decides
-        c.clustering.threshold = 0.5f;
+        c.clustering.num_clusters = settings_.num_clusters;  // -1, unknown: a distance threshold decides
+        c.clustering.threshold = settings_.diarize_threshold;
         c.min_duration_on = 0.3f;
         c.min_duration_off = 0.5f;
         const auto* sd = api_->SherpaOnnxCreateOfflineSpeakerDiarization(&c);
@@ -426,9 +427,9 @@ private:
             hot_file = narrow(hot.hotwords.wstring());
             bpe_file = narrow(hot.vocab.wstring());
             c.decoding_method = "modified_beam_search";
-            c.max_active_paths = 4;
+            c.max_active_paths = settings_.max_active_paths;
             c.hotwords_file = hot_file.c_str();
-            c.hotwords_score = 2.0f;
+            c.hotwords_score = settings_.hotwords_score;
             c.model_config.modeling_unit = "bpe";
             c.model_config.bpe_vocab = bpe_file.c_str();
         }
@@ -555,6 +556,7 @@ private:
     const Api* api_;
     Paths paths_;
     int threads_;
+    EngineSettings settings_;  // of the current transcribe call
     bool force_whisper_;
     std::vector<std::string> hotwords_;
 };

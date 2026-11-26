@@ -6,6 +6,6 @@ skowork_warnings(wb_agenda_core)
 
 if(WIN32)
   add_library(wb_agenda STATIC store.cpp service.cpp)
-  target_link_libraries(wb_agenda PUBLIC wb_agenda_core wb_eval wb_storage wb_model wb_base)
+  target_link_libraries(wb_agenda PUBLIC wb_agenda_core wb_eval_core wb_storage wb_model wb_base)
   skowork_warnings(wb_agenda)
 endif()

@@ -1,4 +1,5 @@
 #include "meeting/audio_file.h"
+#include "meeting/wav.h"
 
 #include "meeting/sherpa_engine.h"
 
@@ -183,7 +184,19 @@ Result<json> stt_request(const std::string& method, const json& params) {
     std::vector<TrackPart> parts;
     for (const auto& p : *paths) {
         if (!p.is_string()) return make_error("invalid_params", "tracks is a list of files");
-        auto t = read_track(path_from_utf8(p.get<std::string>()));
+        const std::filesystem::path file = path_from_utf8(p.get<std::string>());
+        if (file.extension() == ".wav") {
+            // An exported track replayed by an evaluation (add-evaluation-export design D4): its kind is its file name.
+            int rate = 16000;
+            auto pcm = read_wav(file, &rate);
+            if (!pcm) return pcm.error();
+            const std::string kind = file.stem().string();
+            if (kind != "local" && kind != "remote" && kind != "system" && kind != "mic")
+                return make_error("invalid_params", "A WAV track is named local.wav, remote.wav, system.wav or mic.wav.");
+            parts.push_back({kind, 0, std::move(*pcm), static_cast<std::uint32_t>(rate)});
+            continue;
+        }
+        auto t = read_track(file);
         if (!t) return t.error();
         parts.push_back({to_string(t->header.kind), t->header.start_ms, std::move(t->pcm), t->header.sample_rate});
     }
@@ -199,6 +212,7 @@ Result<json> stt_request(const std::string& method, const json& params) {
     options.language = jstr(params, "language");
     options.from_ms = std::max(0LL, jint(params, "from_ms"));
     options.diarize = !params.contains("diarize") || jbool(params, "diarize");
+    if (const json* st = jobj(params, "settings")) options.settings = engine_settings_from_json(*st);
     auto r = engine->transcribe(tracks, options);
     if (!r) return r;
     attach_echo_evidence(*r, tracks);

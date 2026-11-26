@@ -27,6 +27,8 @@ public:
     std::vector<StoredMessage> search(const SearchQuery& q);
     std::vector<std::string> message_ids(const std::string& folder_id);
     std::vector<std::string> all_message_ids();
+    // Every message received in [from, to), withheld ones included, oldest first (client/evaluation export).
+    std::vector<StoredMessage> messages_between(long long from, long long to);
 
     Change upsert_event(const StoredEvent& e, Status* status = nullptr);
     std::optional<StoredEvent> remove_event(const std::string& id, Status* status = nullptr);

@@ -315,10 +315,24 @@ struct TrackAudio {
 // The engine behind the stt worker. The sherpa-onnx engine needs the models package (design D1); without it the
 // worker reports model_missing.
 // What one transcription does (show-meeting-transcription-progress D1).
+// The tunable speech settings (add-evaluation-export design D3). The defaults are the live values; an evaluation replay
+// may set others within the registry's ranges.
+struct EngineSettings {
+    float vad_threshold = 0.5f;
+    float diarize_threshold = 0.5f;
+    int num_clusters = -1;  // -1: the threshold decides
+    int max_active_paths = 4;
+    float hotwords_score = 2.0f;
+};
+// Reads {vad_threshold, threshold, num_clusters, max_active_paths, hotwords_score}; missing or out-of-range values keep
+// the default.
+EngineSettings engine_settings_from_json(const json& j);
+
 struct TranscribeOptions {
     std::string language;   // a code, or empty to detect it
     long long from_ms = 0;  // decode only speech that starts at or after this (a live pass, or the rest after one)
     bool diarize = true;    // separate the speakers of every track but the user's own
+    EngineSettings settings;
 };
 
 class SpeechEngine {

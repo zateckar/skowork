@@ -209,6 +209,8 @@ if(WIN32)
     eval/eval_rpc_test.cpp
     eval/decision_log_test.cpp
     eval/quality_test.cpp
+    eval/exporter_test.cpp
+    eval/replay_test.cpp
     storage/generated_surface_state_test.cpp
     storage/data_root_test.cpp
     host/host_test.cpp
