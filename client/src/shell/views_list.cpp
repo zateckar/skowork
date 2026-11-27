@@ -4,6 +4,7 @@
 
 #include "shell/format.h"
 #include "shell/shell.h"
+#include "ui/markdown.h"
 #include "ui/text16.h"
 
 namespace wb::shell {
@@ -42,18 +43,17 @@ public:
         height = Sizing::fill;
         if (row.item) {
             entry_ = *row.item;
-            // The preview is one line: line breaks and runs of spaces become single spaces.
+            // The preview is one line of text (client/work-inbox Plain Previews): Markdown syntax goes, line breaks and
+            // runs of spaces become single spaces.
+            const std::string text = ui::to_utf8(ui::plain_text(ui::parse_markdown(entry_.preview)));
             std::string one;
-            for (char ch : entry_.preview) {
+            for (char ch : text) {
                 const bool space = ch == '\n' || ch == '\r' || ch == '\t' || ch == ' ';
                 if (space && (one.empty() || one.back() == ' ')) continue;
                 one += space ? ' ' : ch;
             }
             entry_.preview = one;
-            when_ = format_relative(entry_.last_activity, s.now(), s.ui().strings, [](long long ms) {
-                const std::string iso = iso_from_millis(ms);
-                return ui::to_utf16(iso.substr(0, 10));
-            });
+            when_ = format_relative(entry_.last_activity, s.now(), s.ui().strings, [&s](long long ms) { return s.day(ms); });
         }
     }
     int cursor() const override { return 1; }

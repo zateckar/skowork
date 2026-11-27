@@ -7,6 +7,7 @@
 
 #include "base/strings.h"
 #include "base/time.h"
+#include "ui/generated_surface.h"
 
 namespace wb::agenda {
 namespace {
@@ -161,7 +162,23 @@ std::optional<std::string> unfence(const std::string& text) {
     return inner;
 }
 
+namespace {
+// The body of the first draft component of a valid surface in the answer (add-content-templates D5), or empty.
+std::string surface_draft(const json& components) {
+    if (!components.is_array()) return {};
+    for (const auto& c : components) {
+        const auto type = jstr(c, "type");
+        if (type == "draft") return jstr(c, "body");
+        if (type == "section" || type == "card")
+            if (auto inner = surface_draft(c.value("components", json::array())); !inner.empty()) return inner;
+    }
+    return {};
+}
+}  // namespace
+
 std::string extract_draft(const std::string& answer) {
+    for (const auto& block : ui::discover_generated_surfaces(answer))
+        if (auto body = surface_draft(block.surface["components"]); !body.empty()) return body;
     std::vector<std::string> lines;
     for (size_t pos = 0; pos <= answer.size();) {
         size_t e = answer.find('\n', pos);

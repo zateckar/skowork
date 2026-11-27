@@ -125,8 +125,9 @@ void PagePane::build_agenda() {
             // A readable date (Agenda View Layout): the weekday and day, the year only when it is not this year.
             const long long day = local_day(jint(it, "due_at"), tz);
             const int y = std::stoi(local.substr(0, 4)), mo = std::stoi(local.substr(5, 2)), dd = std::stoi(local.substr(8, 2));
-            std::string date = std::to_string(dd) + ". " + std::to_string(mo) + ".";
-            if (local.substr(0, 4) != iso_from_millis(now + tz * 60'000).substr(0, 4)) date += " " + std::to_string(y);
+            // Day.month, as everywhere in the window ("27.11." or "27.11.2027").
+            std::string date = std::to_string(dd) + "." + std::to_string(mo) + ".";
+            if (local.substr(0, 4) != iso_from_millis(now + tz * 60'000).substr(0, 4)) date += std::to_string(y);
             const std::u16string due = shell_.t("calendar.weekday." + std::to_string((weekday(day) + 1) % 7)) + u" " + u16(date) +
                                        (timed ? u" " + u16(local.substr(11, 5)) : std::u16string());
             auto* item = list->emplace<ui::Box>("agenda-item-" + id, Paint::surface, 8, overdue ? Paint::warning : Paint::border);

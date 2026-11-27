@@ -7,6 +7,7 @@
 #include "inbox/inbox_service.h"
 #include "storage/forget.h"
 #include "support/inbox_harness.h"
+#include "ui/generated_surface.h"
 
 #include <map>
 
@@ -504,6 +505,31 @@ TEST(InboxNotifications, BackgroundCompletionFailureAndActionNotifyFocusedAndCan
     ASSERT_TRUE(in.env.wait(r, RunState::cancelled));
     in.svc->wait_idle();
     EXPECT_EQ(in.toast_list().size(), 2u);
+}
+
+// add-content-templates D5 (client/work-inbox Surface Text In Previews): the list preview and the toast show a surface's
+// summary, never its JSON; an invalid block is left out.
+TEST(InboxNotifications, PreviewAndToastShowTheSurfaceSummary) {
+    Inbox in;
+    in.env.start();
+    const auto t = in.env.thread();
+    const std::string example(wb::ui::content_template_example("daily_report"));
+    in.run_to_end(t, "report", "Two meetings today.\n\n```skowork-ui\n" + example + "\n```");
+    EXPECT_EQ(in.entry(t).preview, "Two meetings today.\n\nTwo meetings and one overdue item.");
+    const auto toasts = in.toast_list();
+    ASSERT_FALSE(toasts.empty());
+    EXPECT_EQ(toasts.back().body.find("skowork-ui"), std::string::npos);
+    EXPECT_NE(toasts.back().body.find("Two meetings and one overdue item."), std::string::npos);
+    // Search finds words inside the surface, and its excerpt is text, not JSON.
+    const auto hits = in.svc->store().search("Steering", 10);
+    ASSERT_EQ(hits.size(), 1u);
+    EXPECT_NE(hits[0].snippet.find("[[Steering]]"), std::string::npos);
+    EXPECT_EQ(hits[0].snippet.find("\"type\""), std::string::npos) << hits[0].snippet;
+    EXPECT_TRUE(in.svc->store().search("timeline", 10).empty());
+    in.run_to_end(t, "again", "Short answer.\n```skowork-ui\n{\"version\":1\n```");
+    EXPECT_EQ(in.entry(t).preview, "Short answer.");
+    in.run_to_end(t, "plain", "No surface here.");
+    EXPECT_EQ(in.entry(t).preview, "No surface here.");
 }
 
 TEST(InboxNotifications, TogglesAndManagedSettings) {

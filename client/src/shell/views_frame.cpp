@@ -442,9 +442,10 @@ void StatusBarView::rebuild() {
                       "status-policy");
         }
     }
-    // Context usage of the open Thread: warns at 75 % and offers Compact now.
+    // Context usage of the open Thread: warns at 75 % and offers Compact now. Only while the Thread is shown (client/work-
+    // inbox Context Indicator Scope): the other pages would show the last Thread's usage.
     const json& ctx = shell_.context();
-    if (!shell_.open_id().empty() && ctx.is_object()) {
+    if (shell_.route().name == RouteName::thread && !shell_.open_id().empty() && ctx.is_object()) {
         const double tokens = static_cast<double>(jint(ctx, "tokens")), window = static_cast<double>(jint(ctx, "window"));
         const double budget = static_cast<double>(jint(ctx, "input_budget"));
         const bool budget_known = ctx.contains("input_budget") && ctx["input_budget"].is_number_integer();

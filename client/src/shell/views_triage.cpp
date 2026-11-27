@@ -14,13 +14,7 @@ using ui::TextStyle;
 namespace {
 
 std::u16string u16(const std::string& s) { return ui::to_utf16(s); }
-std::u16string num(long long n) { return u16(std::to_string(n)); }
 
-// "2026-10-26T15:04:05.123Z" as "2026-10-26 15:04 UTC".
-std::u16string when(const std::string& iso) {
-    if (iso.size() < 16) return u16(iso);
-    return u16(iso.substr(0, 10) + " " + iso.substr(11, 5) + " UTC");
-}
 
 }  // namespace
 
@@ -81,7 +75,11 @@ void PagePane::build_triage(Node& c) {
             item->gap = 8;
             const std::u16string what = shell_.t("settings.triage.folder", {{"name", u16(folder)}});
             item->name = what;
-            item->emplace<ui::Label>(shell_.ui(), what, TextStyle::body, Paint::text, false)->role = ui::Role::none;
+            {
+                auto* l = item->emplace<ui::Label>(shell_.ui(), what, TextStyle::body, Paint::text, true);
+                l->role = ui::Role::none;
+                l->padding.top = 6;  // fills the row, so the action sits at its end (Settings Row Layout); in line with the button's text
+            }
             auto* rm = button(*item, "triage-folder-remove-" + folder, shell_.t("settings.mail.remove"), [configure, folders, folder] {
                 json rest = json::array();
                 for (const auto& f : folders)
@@ -131,20 +129,24 @@ void PagePane::build_triage(Node& c) {
         if (jstr(s, "baseline") == "pending") text(c, shell_.t("settings.triage.baseline"), Paint::text_secondary, "triage-baseline");
         if (jbool(s, "paused")) text(c, shell_.t("settings.triage.paused"), Paint::text_secondary, "triage-paused");
         row(c, "triage-counts", shell_.t("settings.triage.counts_label"),
-            shell_.t("settings.triage.counts", {{"pending", num(jint(s, "pending"))}, {"suggestions", num(jint(s, "suggestions"))},
-                                                {"dismissed", num(jint(s, "dismissed"))}}));
-        if (jint(s, "expired") > 0 || jint(s, "uncertain") > 0)
-            text(c, shell_.t("settings.triage.skipped", {{"expired", num(jint(s, "expired"))}, {"uncertain", num(jint(s, "uncertain"))}}),
-                 Paint::text_secondary, "triage-skipped");
+            shell_.t("settings.triage.counts", {{"pending", shell_.number(jint(s, "pending"))}, {"suggestions", shell_.number(jint(s, "suggestions"))},
+                                                {"dismissed", shell_.number(jint(s, "dismissed"))}}));
+        // Each count agrees with its noun (Plain Settings Wording): "1 item expired before it was read."
+        if (const long long expired = jint(s, "expired"), uncertain = jint(s, "uncertain"); expired > 0 || uncertain > 0) {
+            std::u16string skipped;
+            if (expired > 0) skipped = shell_.count("settings.triage.expired", expired);
+            if (uncertain > 0) skipped += (skipped.empty() ? u"" : u" ") + shell_.count("settings.triage.unclassified", uncertain);
+            text(c, skipped, Paint::text_secondary, "triage-skipped");
+        }
         if (const std::string err = jstr(s, "last_error"); !err.empty())
             text(c, shell_.t("settings.triage.last_error", {{"reason", u16(err)}}), Paint::warning, "triage-last-error");
         // Gaps: a scope paused at the 1,000-event limit until the user acknowledges it.
         if (const json* gaps = jobj(s, "gaps"); gaps && gaps->is_object() && !gaps->empty()) {
             for (const auto& [scope, g] : gaps->items())
                 text(c, shell_.t("settings.triage.gap", {{"scope", shell_.t("settings.triage.scope_" + scope)},
-                                                          {"since", when(jstr(g, "since"))},
-                                                          {"missed", num(jint(g, "missed"))},
-                                                          {"limit", num(jint(s, "limit", 1000))}}),
+                                                          {"since", shell_.moment_of(jstr(g, "since"))},
+                                                          {"missed", shell_.number(jint(g, "missed"))},
+                                                          {"limit", shell_.number(jint(s, "limit", 1000))}}),
                      Paint::warning, "triage-gap-" + scope);
             button(c, "triage-gap-ack", shell_.t("settings.triage.resume"), [this] {
                 act("triage", "triage.ack_gap", json::object(), [this](const json&) {
@@ -217,7 +219,7 @@ void ThreadPane::rebuild_suggestion() {
     suggestion_->emplace<ui::Label>(
         shell_.ui(),
         shell_.t(scope == "calendar" ? "thread.suggestion.event" : scope == "teams" ? "thread.suggestion.teams" : "thread.suggestion.message",
-                 {{"subject", u16(jstr(*src, "subject"))}, {"from", u16(jstr(*src, "from"))}, {"at", when(jstr(*src, "at"))}}),
+                 {{"subject", u16(jstr(*src, "subject"))}, {"from", u16(jstr(*src, "from"))}, {"at", shell_.moment_of(jstr(*src, "at"))}}),
         TextStyle::body, Paint::text, true, "thread-suggestion-source");
     if (const std::string reason = jstr(s, "reason"); !reason.empty())
         suggestion_->emplace<ui::Label>(shell_.ui(), shell_.t("thread.suggestion.reason", {{"reason", u16(reason)}}), TextStyle::caption,

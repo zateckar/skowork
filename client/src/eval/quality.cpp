@@ -145,7 +145,7 @@ void QualityCounters::collect_day(const std::string& day, long long from_ms, lon
         }
         // Triage suggestions made that day.
         auto t = db_.prepare("SELECT category, action, instruction_id FROM triage_items "
-                             "WHERE suggestion IN ('open','started','dismissed','no_action','withdrawn') AND queued_at >= ?1 AND queued_at < ?2");
+                             "WHERE (suggestion IN ('open','started','dismissed','no_action','withdrawn') OR (suggestion='replied' AND thread_id<>'')) AND queued_at >= ?1 AND queued_at < ?2");
         t.bind(1, from_ms).bind(2, to_ms);
         while (t.step()) hits.push_back({"triage", "suggestion_created", t.col_text(2), t.col_text(0), t.col_text(1)});
         // Agenda items admitted that day.

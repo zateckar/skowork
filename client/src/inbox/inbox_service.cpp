@@ -3,6 +3,7 @@
 #include "base/encoding.h"
 #include "base/strings.h"
 #include "tools/text.h"
+#include "ui/generated_surface.h"
 
 #include <algorithm>
 
@@ -207,6 +208,12 @@ void InboxService::process(const json& e) {
         changed(thread);
     } else if (kind == "action.created") {
         notify("action", thread, data);
+        changed(thread);
+    } else if (kind == "message" && jstr(data, "role") == "assistant" && jstr(data, "content").find("skowork-ui") != std::string::npos) {
+        // A surface block shows as its summary, never its JSON (client/work-inbox Surface Text In Previews).
+        const std::string content = jstr(data, "content");
+        (void)store_.replace_preview(thread, content, ui::generated_surface_text(content));
+        (void)store_.replace_search_text(run_id, jint(e, "seq"), ui::generated_surface_search_text(content));
         changed(thread);
     } else if (kind == "message" || kind == "action.resolved" || kind == "compaction" || kind == "subagent" || kind == "progress") {
         changed(thread);

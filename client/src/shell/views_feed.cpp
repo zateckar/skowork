@@ -4,6 +4,7 @@
 #include "shell/shell.h"
 #include "platform/crypto.h"
 #include "ui/generated_save_queue.h"
+#include "ui/generated_surface.h"
 #include "ui/generated_surface_view.h"
 #include "ui/text16.h"
 
@@ -286,6 +287,26 @@ private:
             field_ = emplace<ui::TextField>(u, id("args-field"), shell_.t("approval.args_label"), o);
             field_->set_text(draft_.empty() ? ui::to_utf16(args.dump(2)) : draft_);
             field_->on_change = [this] { draft_ = field_->text(); };
+        } else if (args.is_object() && !args.empty()) {
+            // One line per argument, its name and its value (client/work-inbox Readable Approval Arguments); nested
+            // values as compact JSON. Edit arguments keeps the JSON.
+            auto* list = emplace<Node>(id("args"));
+            list->role = ui::Role::list;
+            list->name = shell_.t("approval.args");
+            list->gap = 4;
+            for (const auto& [key, value] : args.items()) {
+                auto* r = list->emplace<Node>(id("arg-" + key));
+                r->axis = ui::Axis::row;
+                r->gap = 12;
+                r->role = ui::Role::list_item;
+                const std::u16string text = ui::to_utf16(value.is_string() ? value.get<std::string>() : value.dump());
+                r->name = ui::to_utf16(key) + u": " + text;
+                auto* k = r->emplace<ui::Label>(u, ui::to_utf16(key), TextStyle::body, Paint::text_secondary, true);
+                k->role = ui::Role::none;
+                k->width = Sizing::fixed;
+                k->fixed_w = 120;
+                r->emplace<ui::Label>(u, text, TextStyle::body, Paint::text, true)->role = ui::Role::none;
+            }
         } else {
             code_box(shell_, *this, id("args"), args.dump(2));
         }
@@ -763,7 +784,7 @@ void FeedView::add_citations(Node& wrap, const std::vector<Citation>& citations,
         std::u16string label = u"[" + ui::to_utf16(std::to_string(c.n ? c.n : static_cast<long long>(i) + 1)) + u"] " +
                                ui::to_utf16(c.title.empty() ? c.ref : c.title);
         if (shell_.ui().strings.has(source_key)) label += u" · " + shell_.t(source_key);
-        if (c.date.size() >= 10) label += u" · " + ui::to_utf16(c.date.substr(0, 10));
+        if (c.date.size() >= 10) label += u" · " + shell_.date_of(c.date.size() > 10 ? c.date : c.date.substr(0, 10));
         auto* link = list->emplace<ui::Button>(u, id_of(item_prefix, key) + "-" + std::to_string(i), label, ui::Button::Kind::subtle);
         link->width = Sizing::fit;
         link->role = ui::Role::link;
@@ -851,10 +872,13 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
         msg->role = ui::Role::group;
         msg->name = shell_.t("feed.agent");
         message_header(shell_, *msg, it);
-        const auto blocks = generated_surfaces_enabled_ ? eligible_generated_surfaces(it) : std::vector<ui::GeneratedSurfaceBlock>{};
+        // Display-only surfaces render whatever the Generated surfaces setting; surfaces with controls need it
+        // (add-content-templates D4).
+        const auto blocks = eligible_generated_surfaces(it);
         bool supported = !blocks.empty();
         for (const auto& block : blocks)
-            if (!ui::generated_surface_presentation_supported(block.surface, true, true)) supported = false;
+            if ((!generated_surfaces_enabled_ && ui::generated_surface_has_controls(block.surface)) ||
+                !ui::generated_surface_presentation_supported(block.surface, generated_surfaces_enabled_, true)) supported = false;
         if (supported) {
             bool ready = true;
             for (size_t i = 0; i < blocks.size(); ++i) {
@@ -905,7 +929,8 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
                         if (!alive.lock()) return;
                         writer->save(ui::generated_surface_view_state_to_json(*state));
                     };
-                    ui::GeneratedActionView::Submit submit = [this, alive, state, identity, key, item_key = it.key](std::string button,
+                    ui::GeneratedActionView::Submit submit;
+                    if (generated_surfaces_enabled_) submit = [this, alive, state, identity, key, item_key = it.key](std::string button,
                             std::vector<ui::GeneratedFieldValue> fields, std::function<void(bool)> done) {
                         if (!alive.lock()) return done(false);
                         auto params = identity;

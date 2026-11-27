@@ -79,6 +79,9 @@ struct Rig {
     int runs = 0;
     std::unique_ptr<agenda::Service> svc;
     std::unique_ptr<eval::DecisionLog> log;
+    std::map<std::string, long long> replies;                    // conversation -> when the user replied
+    std::vector<std::pair<std::string, std::string>> closed_preps;  // thread, run
+    std::set<std::string> teams_answered;                            // "<conversation>|<message>" the user replied to
 
     Rig() {
         auto root = DataRoot::open(dir);
@@ -120,6 +123,14 @@ struct Rig {
         e.notify = [this](const std::string& t, const std::string& b, const std::string& r) { notes.emplace_back(t, b, r); };
         e.hold_reminders = [this] { return presentation; };
         e.decisions = log.get();
+        e.user_replied = [this](const std::string& conversation, long long after) {
+            const auto it = replies.find(conversation);
+            return it != replies.end() && it->second > after;
+        };
+        e.close_preparation = [this](const std::string& thread, const std::string& run) { closed_preps.emplace_back(thread, run); };
+        e.teams_replied = [this](const std::string& conversation, const std::string& message) {
+            return teams_answered.count(conversation + "|" + message) > 0;
+        };
         svc = std::make_unique<agenda::Service>(*db, std::move(e));
     }
     void enable() {
@@ -318,6 +329,7 @@ TEST(AgendaService, PreparationStartsOnceWithAReadOnlyPreambleAndUntrustedData) 
     EXPECT_FALSE(r.unattended);
     EXPECT_NE(r.preamble.find("Do not send"), std::string::npos);
     EXPECT_NE(r.preamble.find("untrusted"), std::string::npos);
+    EXPECT_NE(r.preamble.find("\"template\":\"briefing\""), std::string::npos);  // add-content-templates 3.1
     EXPECT_NE(r.prepared[0].find("send me the Q4 slides"), std::string::npos);  // the quote travels as data
     EXPECT_EQ(jstr(*p, "prep_thread_id"), "t-1");
     EXPECT_TRUE(r.svc->is_preparation_run("run-1"));
@@ -657,4 +669,110 @@ TEST(InstructionId, StoredOnNewAgendaItems) {
     q.bind(1, id);
     ASSERT_TRUE(q.step());
     EXPECT_EQ(q.col_text(0), eval::Variant::defaults(eval::Step::agenda).instruction_id());
+}
+
+namespace {
+std::pair<std::string, std::string> state_of(Rig& r, const std::string& id) {
+    auto q = r.db->prepare("SELECT state, notice FROM agenda_items WHERE id=?1");
+    q.bind(1, id);
+    if (!q.step()) return {};
+    return {q.col_text(0), q.col_text(1)};
+}
+}  // namespace
+
+// close-replied-work: the request at 09:30 is answered in Outlook at 09:50; the item is done and its preparation closed.
+TEST(AgendaService, AReplyInTheConversationClosesTheItemAndItsPreparation) {
+    Rig r;
+    r.enable();
+    r.svc->offer(mail("m1", kAsk));
+    r.model.text = answer("m1", candidate("send me the Q4 slides"));
+    r.svc->detect_now();
+    ASSERT_EQ(r.svc->list()["items"].size(), 1u);
+    const std::string id = jstr(r.svc->list()["items"][0], "id");
+    ASSERT_TRUE(r.svc->prepare(id));
+    // A reply before the request, or in another conversation, closes nothing.
+    EXPECT_EQ(r.svc->user_replied("conv-1", ms("2026-11-17T09:00:00Z")), 0);
+    EXPECT_EQ(r.svc->user_replied("conv-2", ms("2026-11-17T09:50:00Z")), 0);
+    EXPECT_EQ(r.svc->user_replied("", ms("2026-11-17T09:50:00Z")), 0);
+    EXPECT_EQ(r.svc->list()["items"].size(), 1u);
+    EXPECT_EQ(r.svc->user_replied("conv-1", ms("2026-11-17T09:50:00Z")), 1);
+    EXPECT_TRUE(r.svc->list()["items"].empty());
+    EXPECT_EQ(state_of(r, id), std::make_pair(std::string("done"), std::string("replied")));
+    ASSERT_EQ(r.closed_preps.size(), 1u);
+    EXPECT_EQ(r.closed_preps[0], std::make_pair(std::string("t-1"), std::string("run-1")));
+    EXPECT_TRUE(r.log->for_item("mail:m1").empty());  // not the user's decision in Skowork (D4)
+    EXPECT_EQ(r.svc->user_replied("conv-1", ms("2026-11-17T09:55:00Z")), 0);  // closed once
+    // The user can reopen it; the notice goes with the close.
+    auto reopened = r.svc->reopen(id);
+    ASSERT_TRUE(reopened);
+    EXPECT_EQ(jstr(*reopened, "state"), "open");
+    EXPECT_EQ(jstr(*reopened, "notice"), "");
+}
+
+TEST(AgendaService, AnItemWithANewerNonMailSourceStaysOpen) {
+    Rig r;
+    r.enable();
+    r.svc->offer(mail("m1", kAsk));
+    r.model.text = answer("m1", candidate("send me the Q4 slides"));
+    r.svc->detect_now();
+    auto chat = mail("c1", kAsk);
+    chat.kind = "chat";
+    chat.at_ms = ms("2026-11-17T09:45:00Z");
+    r.svc->offer(chat);
+    r.model.text = answer("c1", candidate("send me the Q4 slides"));
+    r.svc->detect_now();
+    const json list = r.svc->list();
+    ASSERT_EQ(list["items"].size(), 1u);
+    ASSERT_EQ(list["items"][0]["sources"].size(), 2u);
+    // The reply covers the mail, not necessarily what the Chat asked (D3).
+    EXPECT_EQ(r.svc->user_replied("conv-1", ms("2026-11-17T09:50:00Z")), 0);
+    EXPECT_EQ(r.svc->list()["items"].size(), 1u);
+}
+
+TEST(AgendaService, MailAnsweredBeforeDetectionAddsNoItemButANewQuestionDoes) {
+    Rig r;
+    r.enable();
+    r.replies["conv-1"] = ms("2026-11-17T09:40:00Z");
+    r.svc->offer(mail("m1", kAsk));  // received 09:30, answered 09:40, detected at 10:00
+    r.model.text = answer("m1", candidate("send me the Q4 slides"));
+    r.svc->detect_now();
+    EXPECT_TRUE(r.svc->list()["items"].empty());
+    EXPECT_EQ(jint(r.svc->status(), "replied_skipped"), 1);
+    EXPECT_EQ(jint(r.svc->status(), "pending"), 0);
+    // The sender asks again at 09:55, after the reply: a new request can become an open item.
+    auto again = mail("m2", "One more thing: could you send me the Q4 slides by Friday?");
+    again.at_ms = ms("2026-11-17T09:55:00Z");
+    r.svc->offer(again);
+    r.model.text = answer("m2", candidate("send me the Q4 slides"));
+    r.svc->detect_now();
+    EXPECT_EQ(r.svc->list()["items"].size(), 1u);
+}
+
+// close-replied-work D5: a Teams item closes when the user answers its newest Teams message; a Teams message the user
+// already answered adds no item, but the user's own message is still read for a commitment.
+TEST(AgendaService, ATeamsReplyClosesTheItemAndAnsweredTeamsMessagesAddNone) {
+    Rig r;
+    r.enable();
+    auto ask = mail("19:a@unq.gbl.spaces|1", kAsk, "19:a@unq.gbl.spaces");
+    ask.kind = "teams";
+    r.svc->offer(ask);
+    r.model.text = answer("19:a@unq.gbl.spaces|1", candidate("send me the Q4 slides"));
+    r.svc->detect_now();
+    ASSERT_EQ(r.svc->list()["items"].size(), 1u);
+    const std::string id = jstr(r.svc->list()["items"][0], "id");
+    EXPECT_EQ(r.svc->user_replied_teams("19:a@unq.gbl.spaces"), 0);  // nothing answers it yet
+    EXPECT_EQ(r.svc->user_replied("19:a@unq.gbl.spaces", ms("2026-11-17T09:50:00Z")), 0);  // the mail rule is not the Teams rule
+    r.teams_answered.insert("19:a@unq.gbl.spaces|1");
+    EXPECT_EQ(r.svc->user_replied_teams("19:a@unq.gbl.spaces"), 1);
+    EXPECT_EQ(state_of(r, id), std::make_pair(std::string("done"), std::string("replied")));
+
+    // Answered before detection: no item.
+    auto answered = mail("19:b@unq.gbl.spaces|2", kAsk, "19:b@unq.gbl.spaces");
+    answered.kind = "teams";
+    r.teams_answered.insert("19:b@unq.gbl.spaces|2");
+    r.svc->offer(answered);
+    r.model.text = answer("19:b@unq.gbl.spaces|2", candidate("send me the Q4 slides"));
+    r.svc->detect_now();
+    EXPECT_TRUE(r.svc->list()["items"].empty());
+    EXPECT_EQ(jint(r.svc->status(), "replied_skipped"), 1);
 }

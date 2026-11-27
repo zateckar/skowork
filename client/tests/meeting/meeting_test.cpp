@@ -2004,6 +2004,7 @@ TEST(MeetingService, VocabularyReachesTranscriptionOnly) {
     // Name Absent From The Transcript: the trusted preamble holds no vocabulary term.
     ASSERT_EQ(f.preambles.size(), 1u);
     for (const char* t : {"Eva", "Svobodová", "Petr", "Zatecka", "Skoda", "Břetislav"}) EXPECT_EQ(f.preambles[0].find(t), std::string::npos) << t;
+    EXPECT_NE(f.preambles[0].find("\"template\":\"meeting_summary\""), std::string::npos);  // add-content-templates 3.1
     // The section lists the terms; removing one; the limit of 200.
     EXPECT_EQ(f.svc->status()["terms"], json::array({"Břetislav"}));
     ASSERT_TRUE(f.svc->remove_term("Břetislav"));

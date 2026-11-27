@@ -87,7 +87,10 @@ void PagePane::build_meetings(Node& c) {
         auto* list = c.emplace<Node>("settings-meetings-sources");
         list->role = ui::Role::list;
         list->name = shell_.t("settings.meetings.manual");
-        list->gap = 4;
+        // The sources are actions: buttons on one wrapping row, not lines of text (Settings Row Layout).
+        list->axis = ui::Axis::row;
+        list->wraps = true;
+        list->gap = 8;
         if (const json* src = jobj(meetings_, "sources"))
             for (const auto& s : *src) {
                 const std::string source = jstr(s, "source");
@@ -96,7 +99,7 @@ void PagePane::build_meetings(Node& c) {
                                                                 : shell_.t("settings.meetings.source_app", {{"name", u16(jstr(s, "name"))}});
                 auto* b = button(*list, "meetings-capture-" + source, label, [this, source] {
                     act("meetings", "meetings.capture", {{"source", source}}, [this](const json&) { load_meetings(); });
-                }, ui::Button::Kind::subtle);
+                });
                 b->role = ui::Role::list_item;
                 b->enabled = busy_.empty();
             }
@@ -121,11 +124,15 @@ void PagePane::build_meetings(Node& c) {
             auto* head = item->emplace<Node>();
             head->axis = ui::Axis::row;
             head->gap = 8;
-            head->emplace<ui::Label>(shell_.ui(), title, TextStyle::body_strong, Paint::text, true)->role = ui::Role::none;
+            head->emplace<ui::Label>(shell_.ui(), title, TextStyle::body_strong, Paint::text, false)->role = ui::Role::none;
+            // The state as a badge beside the title, as in the Agenda and Skills (Settings Row Layout).
             const std::string skey = "settings.meetings.states." + state;
-            head->emplace<ui::Label>(shell_.ui(), shell_.ui().strings.has(skey) ? shell_.t(skey) : u16(state), TextStyle::caption,
-                                     Paint::text_secondary, false, "meeting-state-" + id);
-            text(*item, shell_.moment(jint(m, "started_at") ? jint(m, "started_at") : jint(m, "detected_at")), Paint::text_secondary);
+            const bool trouble = state == "failed" || state == "unsupported";
+            head->emplace<ui::Badge>(shell_.ui(), shell_.ui().strings.has(skey) ? shell_.t(skey) : u16(state),
+                                     trouble ? Paint::warning_background : Paint::info_background, Paint::text,
+                                     "meeting-state-" + id);
+            if (const std::u16string at = shell_.moment(jint(m, "started_at") ? jint(m, "started_at") : jint(m, "detected_at")); !at.empty())
+                text(*item, at, Paint::text_secondary);  // no empty line for a meeting without a time
             if (const std::string e = jstr(m, "error"); !e.empty()) text(*item, u16(e), Paint::warning, "meeting-error-" + id);
             auto* actions = item->emplace<Node>();
             actions->axis = ui::Axis::row;
@@ -255,7 +262,11 @@ void PagePane::build_meetings(Node& c) {
             item->axis = ui::Axis::row;
             item->gap = 8;
             item->name = u16(term);
-            item->emplace<ui::Label>(shell_.ui(), u16(term), TextStyle::body, Paint::text, false)->role = ui::Role::none;
+            {
+                auto* l = item->emplace<ui::Label>(shell_.ui(), u16(term), TextStyle::body, Paint::text, true);
+                l->role = ui::Role::none;
+                l->padding.top = 6;  // fills the row, so the action sits at its end (Settings Row Layout); in line with the button's text
+            }
             auto* rm = button(*item, "term-remove-" + n, shell_.t("settings.meetings.term_remove"), [this, term] {
                 act("meetings", "meetings.remove_term", {{"term", term}}, [this](const json&) { load_meetings(); });
             }, ui::Button::Kind::subtle);
@@ -280,7 +291,11 @@ void PagePane::build_meetings(Node& c) {
             item->gap = 8;
             const std::u16string series_title = u16(jstr(s, "title"));
             item->name = series_title;
-            item->emplace<ui::Label>(shell_.ui(), series_title, TextStyle::body, Paint::text, false)->role = ui::Role::none;
+            {
+                auto* l = item->emplace<ui::Label>(shell_.ui(), series_title, TextStyle::body, Paint::text, true);
+                l->role = ui::Role::none;
+                l->padding.top = 6;  // fills the row, so the action sits at its end (Settings Row Layout); in line with the button's text
+            }
             auto* rm = button(*item, "series-remove-" + id, shell_.t("settings.meetings.remove_series"), [this, id] {
                 act("meetings", "meetings.remove_series", {{"id", id}}, [this](const json&) { load_meetings(); });
             }, ui::Button::Kind::subtle);

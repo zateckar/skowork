@@ -113,11 +113,20 @@ void PagePane::build_automations(Node& c) {
                                 ui::Button::Kind::subtle);
             open->role = ui::Role::link;
             open->name = shell_.t("settings.automations.history_named", {{"name", u16(tname)}});
-            head->emplace<ui::Label>(shell_.ui(), kind, TextStyle::caption, Paint::text_secondary, false)->role = ui::Role::none;
-            if (jstr(t, "created_by") == "agent")
-                head->emplace<ui::Badge>(shell_.ui(), shell_.t("settings.automations.by_agent"), Paint::info_background, Paint::text,
-                                         "automation-by-agent-" + id)
+            // The name lines up with the lines under it, and the kind and badge with the name (Settings Row Layout).
+            open->padding.left = 0;
+            open->padding.right = 0;
+            auto* kind_label = head->emplace<ui::Label>(shell_.ui(), kind, TextStyle::caption, Paint::text_secondary, false);
+            kind_label->role = ui::Role::none;
+            kind_label->padding.top = 8;
+            if (jstr(t, "created_by") == "agent") {
+                auto* holder = head->emplace<Node>();
+                holder->width = ui::Sizing::fit;
+                holder->padding.top = 6;
+                holder->emplace<ui::Badge>(shell_.ui(), shell_.t("settings.automations.by_agent"), Paint::info_background, Paint::text,
+                                           "automation-by-agent-" + id)
                     ->role = ui::Role::none;
+            }
             const auto caption = [&](const std::u16string& s, const std::string& cid) {
                 item->emplace<ui::Label>(shell_.ui(), s, TextStyle::caption, Paint::text_secondary, true, cid);
             };
@@ -292,7 +301,16 @@ AutomationEditor::AutomationEditor(Shell& shell, const Route& route)
     name = shell_.t(id_.empty() ? "titles.automation_new" : "titles.automation_edit");
     status_ = emplace<ui::Label>(shell_.ui(), u"", TextStyle::body, Paint::text_secondary, true, "automation-editor-status");
     status_->visible = false;
-    name_ = emplace<ui::TextField>(shell_.ui(), "automation-name", shell_.t("automation_editor.name"));
+    // Each field has its label above it (client/work-inbox Labelled Fields); the field keeps it as accessible name.
+    const auto field = [this](Node& parent, const std::string& id, const std::u16string& label, ui::TextField::Options o = {}) {
+        auto* group = parent.emplace<Node>(id + "-group");
+        group->gap = 4;
+        group->emplace<ui::Label>(shell_.ui(), label, TextStyle::body, Paint::text, true)->role = ui::Role::none;
+        auto* f = group->emplace<ui::TextField>(shell_.ui(), id, label, std::move(o));
+        f->set_placeholder({});  // the label is above it; an example replaces this where one helps
+        return f;
+    };
+    name_ = field(*this, "automation-name", shell_.t("automation_editor.name"));
 
     const auto labelled_button = [this](Node& parent, const std::string& id, const std::u16string& label) {
         auto* r = parent.emplace<Node>();
@@ -317,17 +335,17 @@ AutomationEditor::AutomationEditor(Shell& shell, const Route& route)
 
     schedule_ = emplace<Node>("automation-schedule");
     schedule_->gap = 6;
-    cron_ = schedule_->emplace<ui::TextField>(shell_.ui(), "automation-cron", shell_.t("automation_editor.cron"));
+    cron_ = field(*schedule_, "automation-cron", shell_.t("automation_editor.cron"));
     cron_->set_placeholder(u"0 8 * * 1-5");
     schedule_->emplace<ui::Label>(shell_.ui(), shell_.t("automation_editor.cron_hint"), TextStyle::caption, Paint::text_secondary, true);
-    interval_ = schedule_->emplace<ui::TextField>(shell_.ui(), "automation-interval", shell_.t("automation_editor.interval"));
-    zone_ = schedule_->emplace<ui::TextField>(shell_.ui(), "automation-zone", shell_.t("automation_editor.zone"));
+    interval_ = field(*schedule_, "automation-interval", shell_.t("automation_editor.interval"));
+    zone_ = field(*schedule_, "automation-zone", shell_.t("automation_editor.zone"));
     zone_->set_placeholder(u"Europe/Prague");
 
     file_ = emplace<Node>("automation-file");
     file_->gap = 6;
-    folder_ = file_->emplace<ui::TextField>(shell_.ui(), "automation-folder", shell_.t("automation_editor.folder"));
-    pattern_ = file_->emplace<ui::TextField>(shell_.ui(), "automation-pattern", shell_.t("automation_editor.pattern"));
+    folder_ = field(*file_, "automation-folder", shell_.t("automation_editor.folder"));
+    pattern_ = field(*file_, "automation-pattern", shell_.t("automation_editor.pattern"));
     pattern_->set_placeholder(u"*.pdf");
 
     session_ = emplace<Node>("automation-session");
@@ -342,14 +360,14 @@ AutomationEditor::AutomationEditor(Shell& shell, const Route& route)
     };
 
     source_ = emplace<Node>("automation-source");
-    conditions_ = source_->emplace<ui::TextField>(shell_.ui(), "automation-conditions-json", shell_.t("automation_editor.conditions_json"));
+    conditions_ = field(*source_, "automation-conditions-json", shell_.t("automation_editor.conditions_json"));
 
     ui::TextField::Options po;
     po.multiline = true;
     po.min_lines = 3;
     po.max_lines = 10;
-    prompt_ = emplace<ui::TextField>(shell_.ui(), "automation-prompt", shell_.t("automation_editor.prompt"), po);
-    skill_ = emplace<ui::TextField>(shell_.ui(), "automation-skill", shell_.t("automation_editor.skill"));
+    prompt_ = field(*this, "automation-prompt", shell_.t("automation_editor.prompt"), po);
+    skill_ = field(*this, "automation-skill", shell_.t("automation_editor.skill"));
     mode_button_ = labelled_button(*this, "automation-thread-mode", shell_.t("automation_editor.thread_mode"));
     mode_button_->on_click = [this] {
         menu(mode_button_, "automation-thread-mode",

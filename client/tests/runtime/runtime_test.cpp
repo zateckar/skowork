@@ -10,6 +10,7 @@
 #include "support/http_server.h"
 #include "support/runtime_harness.h"
 #include "storage/generated_surface_state.h"
+#include "ui/generated_surface.h"
 #include "inbox/inbox_store.h"
 #include <sstream>
 
@@ -5679,6 +5680,38 @@ TEST(LocalRunApi, SurfaceStateIsGatedAndBoundToStoredAssistantEvents) {
     const auto reopened = enabled.call(rpc, "surfaces.open", identity);
     ASSERT_TRUE(reopened);
     EXPECT_TRUE(jbool(*reopened, "accepted"));
+}
+
+// add-content-templates D4: with the setting off, a display-only surface keeps its state; one with controls does not.
+TEST(LocalRunApi, DisplayOnlySurfacesWorkWithTheSettingOff) {
+    ServiceEnv s;
+    RpcRegistry rpc;
+    s.svc->register_rpc(rpc, true);
+    const auto open_last = [&](const std::string& reply) -> Result<json> {
+        s.env.model.push_text(reply);
+        const auto sent = s.call(rpc, "threads.send", {{"text", "go"}});
+        EXPECT_TRUE(sent);
+        const auto thread = jstr(*sent, "thread_id"), run = jstr(*sent, "run_id");
+        EXPECT_TRUE(s.svc->runtime().wait_for_state(run, RunState::succeeded, 10s));
+        long long seq = 0;
+        for (const auto& event : s.svc->runtime().events(run))
+            if (event.kind == "message" && jbool(event.payload, "surface_complete")) seq = event.seq;
+        EXPECT_GT(seq, 0);
+        const json identity = {{"thread_id", thread}, {"run_id", run}, {"event_seq", seq}, {"block_index", 0}};
+        auto opened = s.call(rpc, "surfaces.open", identity);
+        if (!opened) return opened;
+        auto save = identity;
+        save["revision"] = (*opened)["revision"];
+        save["state"] = {{"sections", {{"more", false}}}};
+        if (auto saved = s.call(rpc, "surfaces.save", save); !saved) return saved.error();
+        return s.call(rpc, "surfaces.open", identity);
+    };
+    const auto display = open_last("Summary.\n\n```skowork-ui\n" + std::string(ui::content_template_example("meeting_prep")) + "\n```");
+    ASSERT_TRUE(display) << display.error().message;
+    EXPECT_EQ((*display)["state"], json({{"sections", {{"more", false}}}}));
+    const auto controls = open_last("```skowork-ui\n{\"version\":1,\"id\":\"s\",\"summary\":\"S\",\"components\":[{\"type\":\"button\",\"id\":\"send\",\"label\":\"Send\"}]}\n```");
+    ASSERT_FALSE(controls);
+    EXPECT_EQ(controls.error().code, "disabled");
 }
 
 TEST(LocalRunApi, ReleaseBuildKeepsEveryMethodOffThePipe) {

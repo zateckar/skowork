@@ -69,6 +69,8 @@ struct TriageEnv {
     // No action needed (improve-triage-results D7): cancel the Thread's active Run, if any, and archive the Thread.
     std::function<void(const std::string& thread_id)> cancel_runs;
     std::function<Status(const std::string& thread_id)> archive_thread;
+    // The user replied to this Teams message (close-replied-work D5; TeamsService::user_replied); unset: never.
+    std::function<bool(const std::string& conversation_id, const std::string& message_id)> teams_replied;
     // Settings, status or a suggestion changed (the UI reloads).
     std::function<void()> changed;
     // The user decision log (client/evaluation); null: decisions are not logged.
@@ -129,6 +131,13 @@ public:
     // No action needed: records the decision on an open or started item, cancels the Thread's Run and archives the
     // Thread. Later revisions keep the decision. Fails "not_open" for any other item.
     Status no_action(const std::string& thread_id);
+    // The user sent mail in this mail conversation at `sent_at` (close-replied-work D2, D3): open or started action items
+    // from mail of that conversation received before it become "replied", their Run is cancelled and their Thread
+    // archived. Later revisions keep it. Returns how many items closed.
+    int user_replied(const std::string& conversation, long long sent_at);
+    // The user posted in this Teams conversation (close-replied-work D5): open or started Teams action items of it that
+    // the user has now answered (TriageEnv::teams_replied) close the same way. Returns how many items closed.
+    int user_replied_teams(const std::string& conversation);
     // The user deleted a suggestion Thread: the item counts as dismissed for its current revision and loses the link.
     Status thread_deleted(const std::string& thread_id);
 
@@ -170,6 +179,8 @@ private:
     bool exists(const std::string& scope, const std::string& item_id);
     // Withdraws the item's suggestion (or forgets the row when it has none).
     Status withdraw(const std::string& scope, const std::string& item_id);
+    // Moves these Threads' open or started items to "replied", cancels their Runs and archives them (close-replied-work).
+    int close_replied(const std::vector<std::string>& threads);
     Status expire(long long now);
     // Starts the read-only preparation of an action item's Thread when allowed (D2); false when it stays a suggestion.
     bool prepare(const std::string& thread_id, const std::string& scope, const std::string& item_id);

@@ -3,6 +3,7 @@
 
 #include "agenda/core.h"
 #include "base/time.h"
+#include "ui/generated_surface.h"
 
 using namespace wb;
 using namespace wb::agenda;
@@ -284,6 +285,18 @@ TEST(AgendaDraft, BoldHeadingFencesAndQuotes) {
     EXPECT_EQ(extract_draft("Brief text\n\n**Draft reply:**\n```\nDear team,\nagreed.\n```\n**Notes**\nx"), "Dear team,\nagreed.");
     EXPECT_EQ(extract_draft("### Návrh\n> Ahoj,\n> posílám.\n"), "Ahoj,\nposílám.");
     EXPECT_EQ(extract_draft("Draft: Sounds good, see you Monday."), "Sounds good, see you Monday.");
+}
+
+TEST(AgendaDraft, ReadsTheDraftComponentOfASurfaceFirst) {
+    // add-content-templates D5: the first draft component of a valid surface, then the heading rules.
+    const std::string example(wb::ui::content_template_example("briefing"));
+    EXPECT_EQ(extract_draft("Lucie needs a reply.\n\n```skowork-ui\n" + example + "\n```\n\n## Draft\nOld style"),
+              "Hi Lucie,\n\nI confirm the invoice.\n\nJan");
+    const std::string no_draft =
+        R"({"version":1,"id":"b","summary":"S","components":[{"type":"markdown","id":"m","label":"Brief","content":"x"}]})";
+    EXPECT_EQ(extract_draft("```skowork-ui\n" + no_draft + "\n```\n\n## Draft\nHello"), "Hello");
+    // An invalid block is not read; its text does not look like a draft either.
+    EXPECT_EQ(extract_draft("```skowork-ui\n{\"type\":\"draft\",\"body\":\"x\"}\n```\n"), "");
 }
 
 TEST(AgendaDraft, NoDraft) {

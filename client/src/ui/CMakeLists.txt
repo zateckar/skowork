@@ -45,7 +45,7 @@ add_custom_command(
 add_custom_target(ui_strings_checked ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/strings.checked)
 
 if(WIN32)
-  add_library(wb_ui STATIC device.cpp theme.cpp system_language.cpp canvas.cpp elements.cpp generated_citations.cpp generated_table_view.cpp generated_chart_view.cpp generated_diagram_view.cpp generated_slider.cpp generated_field_view.cpp generated_action_view.cpp generated_surface_view.cpp richtext.cpp textfield.cpp uia.cpp window.cpp)
+  add_library(wb_ui STATIC device.cpp theme.cpp system_language.cpp canvas.cpp elements.cpp generated_citations.cpp generated_table_view.cpp generated_chart_view.cpp generated_content_view.cpp generated_diagram_view.cpp generated_slider.cpp generated_field_view.cpp generated_action_view.cpp generated_surface_view.cpp richtext.cpp textfield.cpp uia.cpp window.cpp)
   target_link_libraries(wb_ui PUBLIC wb_ui_core wb_platform wb_base d2d1 d3d11 dxgi dwrite windowscodecs dwmapi
                                uiautomationcore oleacc shcore ole32 oleaut32 shell32 user32)
   add_dependencies(wb_ui ui_strings_checked)

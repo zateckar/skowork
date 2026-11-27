@@ -89,6 +89,9 @@ public:
     // ---- the local copy ----
     std::optional<StoredConversation> conversation(const std::string& id);
     std::optional<StoredTeamsMessage> message(const std::string& conversation_id, const std::string& id);
+    // The user replied to this message (close-replied-work D5): a later non-system message of the user in the same
+    // conversation; in a channel, in the same thread. False when the message is not in the local copy or is the user's.
+    bool user_replied(const std::string& conversation_id, const std::string& message_id);
     // Messages of a conversation in [from, to), oldest first, at most `limit`.
     std::vector<StoredTeamsMessage> messages(const std::string& conversation_id, long long from, long long to, size_t limit);
     // Messages before (at_ms, id) from `from` on, oldest first, at most `limit` (the newest of them).

@@ -3,6 +3,7 @@
 #include <shobjidl.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -341,6 +342,7 @@ void Shell::navigate(const std::string& hash) {
 
 void Shell::apply_route() {
     nav_->rebuild();
+    status_bar_->rebuild();  // the context indicator belongs to a shown Thread only
     list_->rebuild();
     if (const std::string shown = shown_entry(); !shown.empty()) list_->select_thread(shown);
     update_chat_slot();
@@ -518,16 +520,86 @@ void Shell::load_context() {
     });
 }
 
+namespace {
+
+// A moment (unix ms) as local wall time with the UTC offset in effect at that moment (client/work-inbox Local Dates And
+// Numbers). FileTimeToLocalFileTime would apply today's daylight-saving offset to every date.
+bool local_system_time(long long unix_ms, SYSTEMTIME& out) {
+    if (unix_ms <= 0) return false;
+    const unsigned long long ticks = static_cast<unsigned long long>(unix_ms) * 10000ULL + 116444736000000000ULL;
+    const FILETIME ft{static_cast<DWORD>(ticks), static_cast<DWORD>(ticks >> 32)};
+    SYSTEMTIME utc;
+    return ::FileTimeToSystemTime(&ft, &utc) && ::SystemTimeToTzSpecificLocalTime(nullptr, &utc, &out);
+}
+
+// The window's one date and time format, in every language (client/work-inbox Local Dates And Numbers): 24-hour time
+// ("15:00") and day.month.year ("27.11.2026").
+std::u16string hh_mm(const SYSTEMTIME& st) {
+    char buf[8];
+    std::snprintf(buf, sizeof buf, "%02u:%02u", static_cast<unsigned>(st.wHour % 24), static_cast<unsigned>(st.wMinute % 60));
+    return ui::to_utf16(buf);
+}
+
+std::u16string d_m_y(const SYSTEMTIME& st) {
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "%u.%u.%u", static_cast<unsigned>(st.wDay % 32), static_cast<unsigned>(st.wMonth % 13),
+                  static_cast<unsigned>(st.wYear % 10000));
+    return ui::to_utf16(buf);
+}
+
+}  // namespace
+
 std::u16string Shell::clock(long long unix_seconds) {
-    if (unix_seconds <= 0) return u"—";
-    const unsigned long long ticks = static_cast<unsigned long long>(unix_seconds) * 10000000ULL + 116444736000000000ULL;
-    FILETIME ft{static_cast<DWORD>(ticks), static_cast<DWORD>(ticks >> 32)}, lft;
     SYSTEMTIME st;
-    if (!::FileTimeToLocalFileTime(&ft, &lft) || !::FileTimeToSystemTime(&lft, &st)) return u"—";
-    const std::wstring locale(language_.begin(), language_.end());
-    wchar_t time[64]{};
-    ::GetTimeFormatEx(locale.c_str(), TIME_NOSECONDS, &st, nullptr, time, 64);
-    return std::u16string(reinterpret_cast<const char16_t*>(time));
+    if (!local_system_time(unix_seconds * 1000, st)) return u"—";
+    return hh_mm(st);
+}
+
+std::u16string Shell::day(long long unix_ms) {
+    SYSTEMTIME st;
+    if (!local_system_time(unix_ms, st)) return {};
+    return d_m_y(st);
+}
+
+std::u16string Shell::moment_of(const std::string& iso) {
+    if (const auto ms = iso_millis(iso)) return moment(*ms);
+    return ui::to_utf16(iso);
+}
+
+std::u16string Shell::date_of(const std::string& iso) {
+    // A calendar date ("2026-11-26") is a day, not a moment: no time zone applies.
+    if (iso.size() == 10 && iso[4] == '-' && iso[7] == '-') {
+        SYSTEMTIME st{};
+        try {
+            st.wYear = static_cast<WORD>(std::stoi(iso.substr(0, 4)));
+            st.wMonth = static_cast<WORD>(std::stoi(iso.substr(5, 2)));
+            st.wDay = static_cast<WORD>(std::stoi(iso.substr(8, 2)));
+        } catch (...) {
+            return ui::to_utf16(iso);
+        }
+        return d_m_y(st);
+    }
+    if (const auto ms = iso_millis(iso)) return day(*ms);
+    return ui::to_utf16(iso);
+}
+
+std::u16string Shell::number(long long n) {
+    const std::string& lang = ui().strings.lang();
+    const std::wstring locale(lang.begin(), lang.end());
+    const std::wstring digits = std::to_wstring(n);
+    NUMBERFMTW fmt{};
+    wchar_t decimal[8]{}, thousand[8]{};
+    ::GetLocaleInfoEx(locale.c_str(), LOCALE_SDECIMAL, decimal, 8);
+    ::GetLocaleInfoEx(locale.c_str(), LOCALE_STHOUSAND, thousand, 8);
+    fmt.NumDigits = 0;
+    fmt.LeadingZero = 1;
+    fmt.Grouping = 3;
+    fmt.lpDecimalSep = decimal;
+    fmt.lpThousandSep = thousand;
+    fmt.NegativeOrder = 1;
+    wchar_t out[64]{};
+    if (::GetNumberFormatEx(locale.c_str(), 0, digits.c_str(), &fmt, out, 64) <= 0) return ui::to_utf16(std::to_string(n));
+    return std::u16string(reinterpret_cast<const char16_t*>(out));
 }
 
 std::u16string Shell::tool_words(const std::string& tool) {
@@ -542,21 +614,10 @@ std::u16string Shell::tool_words(const std::string& tool) {
 }
 
 std::u16string Shell::moment(long long unix_ms) {
-    FILETIME ft;
-    const unsigned long long ticks = static_cast<unsigned long long>(unix_ms) * 10000ULL + 116444736000000000ULL;
-    ft.dwLowDateTime = static_cast<DWORD>(ticks);
-    ft.dwHighDateTime = static_cast<DWORD>(ticks >> 32);
-    FILETIME lft;
     SYSTEMTIME st;
-    if (unix_ms <= 0 || !::FileTimeToLocalFileTime(&ft, &lft) || !::FileTimeToSystemTime(&lft, &st)) return {};
-    const std::string& lang = ui().strings.lang();
-    const std::wstring locale(lang.begin(), lang.end());  // "en", "de", "cs": locale names
-    wchar_t date[64]{}, time[64]{};
-    ::GetTimeFormatEx(locale.c_str(), TIME_NOSECONDS, &st, nullptr, time, 64);
-    const std::u16string t16(reinterpret_cast<const char16_t*>(time));
-    if (local_day_start(unix_ms, 0) == local_day_start(now(), 0)) return t16;
-    ::GetDateFormatEx(locale.c_str(), DATE_SHORTDATE, &st, nullptr, date, 64, nullptr);
-    return std::u16string(reinterpret_cast<const char16_t*>(date)) + u" " + t16;
+    if (!local_system_time(unix_ms, st)) return {};
+    if (local_day_start(unix_ms, 0) == local_day_start(now(), 0)) return hh_mm(st);
+    return d_m_y(st) + u" " + hh_mm(st);
 }
 
 bool Shell::copy_text(const std::string& utf8) {

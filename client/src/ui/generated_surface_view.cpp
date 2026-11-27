@@ -1,6 +1,7 @@
 #include "ui/generated_surface_view.h"
 
 #include "ui/generated_chart_view.h"
+#include "ui/generated_content_view.h"
 #include "ui/generated_diagram_view.h"
 #include "ui/generated_field_view.h"
 #include "ui/generated_section_view.h"
@@ -23,7 +24,7 @@ bool supports_components(const json& components, bool allow_interactions) {
         const auto type = jstr(component, "type");
         if (type == "section" || type == "card") {
             if (!supports_components(component["components"], allow_interactions)) return false;
-        } else if (type != "paragraph" && type != "table" && type != "bar" && type != "line" && type != "diagram" &&
+        } else if (type != "paragraph" && type != "table" && !is_generated_display_component(type) && type != "bar" && type != "line" && type != "diagram" &&
                    !(allow_interactions && (type == "select" || type == "multiselect" || type == "switch" ||
                                             type == "text" || type == "slider" || type == "button"))) return false;
     }
@@ -47,6 +48,8 @@ void compose(Ui& ui, Node& parent, const json& surface, const json& components,
             paragraph->emplace<Label>(ui, label, TextStyle::body_strong);
             paragraph->emplace<Label>(ui, to_utf16(jstr(component, "content")), TextStyle::body);
             if (component.contains("citations")) add_generated_citations(ui, *paragraph, component["citations"], resolver, id);
+        } else if (is_generated_display_component(type)) {
+            add_generated_display_component(ui, parent, component, resolver);
         } else if (type == "table") {
             auto& table = state->tables[id];
             if (!table) table = std::make_shared<GeneratedTableState>();
@@ -91,6 +94,7 @@ GeneratedSurfaceView::GeneratedSurfaceView(Ui& ui, const json& surface, std::sha
                        automation_id() + "-accepted");
         submit = {};
     }
+    add_generated_template_header(ui, *this, surface);
     compose(ui, *this, surface, surface["components"], state, changed, submit, resolver);
 }
 

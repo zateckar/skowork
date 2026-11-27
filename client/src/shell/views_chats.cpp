@@ -247,9 +247,7 @@ std::u16string ChatsView::title_of(const json& c) const {
 std::u16string ChatsView::when(const std::string& iso) {
     const auto ms = parse_iso8601_ms(iso);
     if (!ms) return u16(iso);
-    std::u16string t = shell_.clock(*ms / 1000);
-    if (shell_.now() - *ms > 20LL * 3600 * 1000) t = u16(iso.substr(0, 10)) + u" " + t;
-    return t;
+    return shell_.moment(*ms);  // the time today, with its local date otherwise
 }
 
 // ---- data ------------------------------------------------------------------------------------------------------------

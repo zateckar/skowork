@@ -240,6 +240,11 @@ Status MailSync::sync_folder(const StoredFolder& f, SyncReport& r, const std::sh
                             MailEvent e{"mail.received", id, std::move(detail)};
                             if (backfill) e.detail["backfill"] = true;
                             events.push_back(std::move(e));
+                        } else if (change == MailStore::Change::created && !m->is_draft && !backfill && to_lower(f.well_known) == "sentitems") {
+                            // The user sent it (close-replied-work D1, D2): the Agenda and triage close what it answered.
+                            detail["conversation_id"] = m->conversation_id;
+                            detail["sent_at"] = m->received_at;
+                            events.push_back({"mail.sent", id, std::move(detail)});
                         } else if (change == MailStore::Change::updated) {
                             events.push_back({"mail.updated", id, std::move(detail)});
                         }

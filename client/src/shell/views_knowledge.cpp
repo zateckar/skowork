@@ -17,7 +17,6 @@ using ui::TextStyle;
 namespace {
 
 std::u16string u16(const std::string& s) { return ui::to_utf16(s); }
-std::u16string num(long long n) { return u16(std::to_string(n)); }
 
 // A timestamp in the window's language and local time: the time today, the date and time otherwise (improve-threads-
 // calendar-agenda: Plain Information).
@@ -155,15 +154,19 @@ void PagePane::build_knowledge(Node& c) {
             const std::u16string heading = state == "paused" || state == "policy_off" ? item->name : label;
             item->emplace<ui::Label>(shell_.ui(), heading, TextStyle::body_strong, Paint::text, false)->role = ui::Role::none;
             const std::string last = jstr(s, "last_update");
-            text(*item,
-                 shell_.t("settings.knowledge.counts", {{"items", num(jint(s, "items"))},
-                                                        {"pending", num(jint(s, "pending"))},
-                                                        {"last", last.empty() ? shell_.t("settings.mail.never") : when(shell_, last)}}),
-                 Paint::text_secondary, "knowledge-source-counts-" + kind);
+            // A Source the organization turned off and that holds nothing has no counts to show (Plain Settings Wording).
+            if (policy_on || jint(s, "items") > 0)
+                text(*item,
+                     last.empty() ? shell_.t("settings.knowledge.counts_new", {{"items", shell_.number(jint(s, "items"))},
+                                                                               {"pending", shell_.number(jint(s, "pending"))}})
+                                  : shell_.t("settings.knowledge.counts", {{"items", shell_.number(jint(s, "items"))},
+                                                                           {"pending", shell_.number(jint(s, "pending"))},
+                                                                           {"last", when(shell_, last)}}),
+                     Paint::text_secondary, "knowledge-source-counts-" + kind);
             if (const std::string e = jstr(s, "error"); !e.empty())
                 text(*item, shell_.t("settings.knowledge.source_error", {{"reason", u16(e)}}), Paint::warning, "knowledge-source-error-" + kind);
             if (const long long n = jint(s, "skipped_count"); n > 0) {
-                text(*item, shell_.t("settings.knowledge.skipped", {{"count", num(n)}}), Paint::text_secondary, "knowledge-skipped-" + kind);
+                text(*item, shell_.t("settings.knowledge.skipped", {{"count", shell_.number(n)}}), Paint::text_secondary, "knowledge-skipped-" + kind);
                 int shown = 0;
                 if (const json* sk = jobj(s, "skipped"); sk && sk->is_array())
                     for (const auto& x : *sk) {
@@ -240,7 +243,11 @@ void PagePane::build_knowledge(Node& c) {
             auto* item = row_box(*folders, "knowledge-folder-" + path);
             item->role = ui::Role::list_item;
             item->name = u16(path);
-            item->emplace<ui::Label>(shell_.ui(), u16(path), TextStyle::body, Paint::text, false)->role = ui::Role::none;
+            {
+                auto* l = item->emplace<ui::Label>(shell_.ui(), u16(path), TextStyle::body, Paint::text, true);
+                l->role = ui::Role::none;
+                l->padding.top = 6;  // fills the row, so the action sits at its end (Settings Row Layout); in line with the button's text
+            }
             auto* rm = button(*item, "knowledge-folder-remove-" + path, shell_.t("settings.mail.remove"), [this, path] {
                 act("knowledge", "knowledge.folder.remove", {{"path", path}}, [this](const json&) { load_knowledge(); });
             }, ui::Button::Kind::subtle);
@@ -289,7 +296,11 @@ void PagePane::build_knowledge(Node& c) {
             }
             const std::u16string what = shell_.t("settings.knowledge.excluded_" + kind, {{"name", shown}});
             item->name = what;
-            item->emplace<ui::Label>(shell_.ui(), what, TextStyle::body, Paint::text, false)->role = ui::Role::none;
+            {
+                auto* l = item->emplace<ui::Label>(shell_.ui(), what, TextStyle::body, Paint::text, true);
+                l->role = ui::Role::none;
+                l->padding.top = 6;  // fills the row, so the action sits at its end (Settings Row Layout); in line with the button's text
+            }
             auto* rm = button(*item, "knowledge-exclusion-remove-" + key, shell_.t("settings.mail.remove"), [this, kind, value] {
                 act("knowledge", "knowledge.exclusion.remove", {{"kind", kind}, {"value", value}}, [this](const json&) { load_knowledge(); });
             }, ui::Button::Kind::subtle);
@@ -320,14 +331,14 @@ void PagePane::build_knowledge(Node& c) {
     c.emplace<ui::Label>(shell_.ui(), shell_.t("settings.knowledge.status"), TextStyle::body_strong)->role = ui::Role::heading;
     const json* backlog = jobj(knowledge_, "backlog");
     row(c, "settings-knowledge-backlog", shell_.t("settings.knowledge.backlog"),
-        shell_.t("settings.knowledge.backlog_value", {{"embed", num(backlog ? jint(*backlog, "embed") : 0)},
-                                                      {"extract", num(backlog ? jint(*backlog, "extract") : 0)}}));
+        shell_.t("settings.knowledge.backlog_value", {{"embed", shell_.number(backlog ? jint(*backlog, "embed") : 0)},
+                                                      {"extract", shell_.number(backlog ? jint(*backlog, "extract") : 0)}}));
     if (const json* b = jobj(knowledge_, "budget")) {
         row(c, "settings-knowledge-budget", shell_.t("settings.knowledge.budget"),
-            shell_.t("settings.knowledge.budget_value", {{"tokens", num(jint(*b, "embed_tokens_used"))},
-                                                         {"token_limit", num(jint(*b, "embed_tokens_limit"))},
-                                                         {"calls", num(jint(*b, "extract_calls_used"))},
-                                                         {"call_limit", num(jint(*b, "extract_calls_limit"))}}));
+            shell_.t("settings.knowledge.budget_value", {{"tokens", shell_.number(jint(*b, "embed_tokens_used"))},
+                                                         {"token_limit", shell_.number(jint(*b, "embed_tokens_limit"))},
+                                                         {"calls", shell_.number(jint(*b, "extract_calls_used"))},
+                                                         {"call_limit", shell_.number(jint(*b, "extract_calls_limit"))}}));
         if (jbool(*b, "embed_exhausted") || jbool(*b, "extract_exhausted"))
             text(c, shell_.t("settings.knowledge.budget_reached"), Paint::warning, "settings-knowledge-budget-reached");
     }
@@ -359,7 +370,11 @@ void PagePane::build_knowledge(Node& c) {
             auto* item = row_box(*items, "knowledge-item-" + std::to_string(id));
             item->role = ui::Role::list_item;
             item->name = what;
-            item->emplace<ui::Label>(shell_.ui(), what, TextStyle::body, Paint::text, false)->role = ui::Role::none;
+            {
+                auto* l = item->emplace<ui::Label>(shell_.ui(), what, TextStyle::body, Paint::text, true);
+                l->role = ui::Role::none;
+                l->padding.top = 6;  // fills the row, so the action sits at its end (Settings Row Layout); in line with the button's text
+            }
             auto* f = button(*item, "knowledge-item-forget-" + std::to_string(id), shell_.t("settings.knowledge.forget"), [this, id, what] {
                 ask_forget("knowledge", what, "knowledge.item.forget", {{"item_id", id}}, [this] { find_knowledge(false); });
             }, ui::Button::Kind::subtle);
@@ -389,7 +404,11 @@ void PagePane::build_knowledge(Node& c) {
             auto* item = row_box(*list, "knowledge-entity-" + sid);
             item->role = ui::Role::list_item;
             item->name = what;
-            item->emplace<ui::Label>(shell_.ui(), what, TextStyle::body, Paint::text, false)->role = ui::Role::none;
+            {
+                auto* l = item->emplace<ui::Label>(shell_.ui(), what, TextStyle::body, Paint::text, true);
+                l->role = ui::Role::none;
+                l->padding.top = 6;  // fills the row, so the action sits at its end (Settings Row Layout); in line with the button's text
+            }
             button(*item, "knowledge-entity-open-" + sid, shell_.t("settings.knowledge.details"), [this, id] { open_entity(id); }, ui::Button::Kind::subtle)
                 ->enabled = busy_.empty();
             if (!knowledge_merge_from_) {
@@ -435,7 +454,7 @@ void PagePane::build_knowledge(Node& c) {
         for (const char* k : {"email", "department", "title", "manager"})
             if (const std::string v = jstr(knowledge_entity_, k); !v.empty())
                 row(*box, std::string("knowledge-entity-") + k, shell_.t(std::string("settings.knowledge.field_") + k), u16(v));
-        row(*box, "knowledge-entity-mentions", shell_.t("settings.knowledge.mentions"), num(jint(knowledge_entity_, "mentions")));
+        row(*box, "knowledge-entity-mentions", shell_.t("settings.knowledge.mentions"), shell_.number(jint(knowledge_entity_, "mentions")));
         if (const json* rels = jobj(knowledge_entity_, "relations"); rels && rels->is_array())
             for (const auto& r : *rels)
                 text(*box, u16(jstr(r, "subject") + " \xE2\x80\x94 " + jstr(r, "predicate") + " \xE2\x80\x94 " + jstr(r, "object")), Paint::text_secondary);

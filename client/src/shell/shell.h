@@ -161,6 +161,14 @@ public:
     std::u16string clock(long long unix_seconds);
     // A moment (unix ms) in the window's language: the time today, the date and time otherwise.
     std::u16string moment(long long unix_ms);
+    // The local date of a moment (unix ms) in the window's language, without the time.
+    std::u16string day(long long unix_ms);
+    // The local date of an ISO 8601 moment, or of a calendar date ("2026-11-26"); the text itself if it is neither.
+    std::u16string date_of(const std::string& iso);
+    // An ISO 8601 moment as moment() shows it; the text itself if it is not one.
+    std::u16string moment_of(const std::string& iso);
+    // A count with the digit grouping of the window's language ("18,234" in English).
+    std::u16string number(long long n);
     // A Tool in words (client/work-inbox Plain Action Details): a name for the built-in Tools, "<tool> (<server>)" for
     // Connector Tools, the id otherwise.
     std::u16string tool_words(const std::string& tool);

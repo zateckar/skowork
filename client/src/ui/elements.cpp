@@ -73,7 +73,8 @@ Button::Button(Ui& ui, std::string id, std::u16string label, Kind kind, char16_t
     measure = [this](float) {
         float w = 0;
         if (glyph_) w += 16;
-        if (!label_.empty()) w += (glyph_ ? 8 : 0) + ui_.measure_text(label_, TextStyle::body, 100000.f, false).w;
+        // Measured with the style it is drawn with: a bold (chosen) tab is wider (client/work-inbox Tabs Fit Their Labels).
+        if (!label_.empty()) w += (glyph_ ? 8 : 0) + ui_.measure_text(label_, text_style_, 100000.f, false).w;
         return Size{label_.empty() ? kControlHeight - 2 * 8 : w, kControlHeight - 2 * 5};
     };
     padding = label_.empty() ? Insets::xy(8, 5) : Insets::xy(12, 5);
@@ -146,9 +147,13 @@ Checkbox::Checkbox(Ui& ui, std::string id, std::u16string label, bool checked)
     name = label_;
     width = Sizing::fit;
     padding = Insets::xy(0, 4);
-    measure = [this](float) {
-        const Size t = ui_.measure_text(label_, TextStyle::body, 100000.f, false);
-        return Size{20 + 8 + t.w, std::max(20.f, t.h)};
+    // A label longer than the room wraps onto further lines instead of being cut off (client/work-inbox Settings Row
+    // Layout).
+    measure = [this](float avail) {
+        const Size one = ui_.measure_text(label_, TextStyle::body, 100000.f, false);
+        if (avail <= 28 || 28 + one.w <= avail) return Size{20 + 8 + one.w, std::max(20.f, one.h)};
+        const Size t = ui_.measure_text(label_, TextStyle::body, avail - 28, true);
+        return Size{avail, std::max(20.f, t.h)};
     };
 }
 
@@ -161,7 +166,13 @@ void Checkbox::set_checked(bool on) {
 
 void Checkbox::draw(Canvas& c) {
     const Rect& f = frame();
-    const Rect box{f.x, f.y + (f.h - 20) / 2, 20, 20};
+    IDWriteTextLayout* t = ui_.layout(label_, TextStyle::body, std::max(1.f, f.w - 28), true);
+    DWRITE_TEXT_METRICS m{};
+    if (t) t->GetMetrics(&m);
+    // One line: the box and the text centred; several lines: the box beside the first line.
+    const bool lines = m.lineCount > 1;
+    const float text_y = lines ? f.y + padding.top : f.y + (f.h - m.height) / 2;
+    const Rect box{f.x, lines ? text_y + (m.height / static_cast<float>(m.lineCount) - 20) / 2 : f.y + (f.h - 20) / 2, 20, 20};
     if (checked_ && !enabled) {  // checked and fixed (a member already): muted, not the accent
         c.round(box, kRadius, Paint::surface_alt, Paint::control_border);
         c.text(ui_.layout(glyph_text(icon::check), TextStyle::icon, 100.f, false), box.x + 2, box.y + 1, Paint::text_secondary);
@@ -173,10 +184,7 @@ void Checkbox::draw(Canvas& c) {
         state_fill(c, box, Paint::surface, hovered_, pressed_);
         c.round(box, kRadius, Paint::none, Paint::control_border);
     }
-    IDWriteTextLayout* t = ui_.layout(label_, TextStyle::body, std::max(1.f, f.w - 28), false);
-    DWRITE_TEXT_METRICS m{};
-    if (t) t->GetMetrics(&m);
-    c.text(t, f.x + 28, f.y + (f.h - m.height) / 2, enabled ? Paint::text : Paint::text_secondary);
+    c.text(t, f.x + 28, text_y, enabled ? Paint::text : Paint::text_secondary);
 }
 
 // --- Card ---------------------------------------------------------------------------------------------------

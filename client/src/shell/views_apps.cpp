@@ -111,60 +111,61 @@ void PagePane::build_apps() {
     auto* list = emplace<Node>("apps-list");
     list->role = ui::Role::list;
     list->name = shell_.t("titles.apps");
-    list->gap = 8;
+    list->gap = 12;
     const json* all = jobj(apps_, "apps");
     if (!all || all->empty()) text(*list, shell_.t("apps.empty"), Paint::text_secondary, "apps-empty");
     const char decimal = shell_.decimal();
     if (all)
         for (const auto& a : *all) {
+            // Each App is a card (client/work-inbox App Cards): name and Running badge, description, size and last use,
+            // Open, and the rest in a More menu named after the App.
             const std::string id = jstr(a, "id");
             const std::u16string title = u16(jstr(a, "name"));
             const bool running = jbool(a, "running");
-            auto* item = list->emplace<Node>("app-" + id);
+            auto* item = list->emplace<ui::Box>("app-" + id, Paint::surface, 8, Paint::border);
             item->role = ui::Role::list_item;
+            item->padding = ui::Insets::all(12);
             item->gap = 4;
             item->name = title;
             auto* head = item->emplace<Node>();
             head->axis = ui::Axis::row;
             head->gap = 8;
-            head->emplace<ui::Label>(shell_.ui(), title, TextStyle::body_strong, Paint::text, true)->role = ui::Role::none;
-            if (running) head->emplace<ui::Label>(shell_.ui(), shell_.t("apps.running"), TextStyle::caption, Paint::success, false, "app-running-" + id);
-            if (const std::string desc = jstr(a, "description"); !desc.empty()) text(*item, u16(desc), Paint::text_secondary, "app-description-" + id);
+            head->emplace<ui::Label>(shell_.ui(), title, TextStyle::body_strong, Paint::text, false)->role = ui::Role::none;
+            if (running) head->emplace<ui::Badge>(shell_.ui(), shell_.t("apps.running"), Paint::info_background, Paint::text, "app-running-" + id);
+            if (const std::string desc = jstr(a, "description"); !desc.empty()) text(*item, u16(desc), Paint::text, "app-description-" + id);
             const std::string used = jstr(a, "last_used");
-            const std::u16string when = used.empty() ? shell_.t("apps.never") : format_relative(used, shell_.now(), shell_.ui().strings, [](long long ms) {
-                return ui::to_utf16(iso_from_millis(ms).substr(0, 10));
-            });
+            const std::u16string when = used.empty() ? shell_.t("apps.never")
+                                                     : format_relative(used, shell_.now(), shell_.ui().strings, [this](long long ms) { return shell_.day(ms); });
             text(*item, shell_.t("apps.meta", {{"size", u16(format_bytes(static_cast<double>(jint(a, "size")), decimal))}, {"when", when}}),
                  Paint::text_secondary, "app-meta-" + id);
             if (const std::string p = jstr(a, "problem"); !p.empty()) text(*item, u16(p), Paint::warning, "app-problem-" + id);
             auto* actions = item->emplace<Node>();
             actions->axis = ui::Axis::row;
             actions->gap = 8;
+            actions->padding.top = 4;
             auto* open = button(*actions, "app-open-" + id, shell_.t("apps.open"), [this, id, title] { open_app(id, title); });
             open->name = shell_.t("apps.open_named", {{"name", title}});
             open->enabled = busy_.empty() && can_run && jstr(a, "problem").empty();
-            if (running) {
-                auto* stop = button(*actions, "app-stop-" + id, shell_.t("apps.stop"), [this, id, title] {
-                    act("apps", "apps.stop", {{"id", id}}, [this, title](const json& r) {
-                        apps_ = r;
-                        shell_.announce(shell_.t("apps.stopped", {{"name", title}}));
+            auto* more = actions->emplace<ui::IconButton>(shell_.ui(), "app-more-" + id, ui::icon::more, shell_.t("apps.more_named", {{"name", title}}));
+            more->enabled = busy_.empty();
+            ui::IconButton* mp = more;
+            const bool can_change = shell_.runs_blocked().empty();
+            more->on_click = [this, id, title, running, can_change, mp] {
+                auto menu = std::make_unique<ui::Menu>("app-menu-" + id, shell_.t("apps.more_named", {{"name", title}}));
+                if (running)
+                    menu->add_item(shell_.ui(), "app-stop-" + id, shell_.t("apps.stop"), [this, id, title] {
+                        act("apps", "apps.stop", {{"id", id}}, [this, title](const json& r) {
+                            apps_ = r;
+                            shell_.announce(shell_.t("apps.stopped", {{"name", title}}));
+                        });
                     });
-                }, ui::Button::Kind::subtle);
-                stop->name = shell_.t("apps.stop_named", {{"name", title}});
-                stop->enabled = busy_.empty();
-            }
-            auto* reveal = button(*actions, "app-folder-" + id, shell_.t("apps.folder"),
-                                  [this, id] { act("apps", "apps.reveal", {{"id", id}}); }, ui::Button::Kind::subtle);
-            reveal->name = shell_.t("apps.folder_named", {{"name", title}});
-            reveal->enabled = busy_.empty();
-            auto* change = button(*actions, "app-change-" + id, shell_.t("apps.change"), [this, id, title] { ask_change_app(id, title); },
-                                  ui::Button::Kind::subtle);
-            change->name = shell_.t("apps.change_named", {{"name", title}});
-            change->enabled = busy_.empty() && shell_.runs_blocked().empty();
-            auto* del = button(*actions, "app-delete-" + id, shell_.t("apps.delete"), [this, id, title] { ask_delete_app(id, title); },
-                               ui::Button::Kind::subtle);
-            del->name = shell_.t("apps.delete_named", {{"name", title}});
-            del->enabled = busy_.empty();
+                menu->add_item(shell_.ui(), "app-folder-" + id, shell_.t("apps.folder"), [this, id] { act("apps", "apps.reveal", {{"id", id}}); });
+                if (can_change)
+                    menu->add_item(shell_.ui(), "app-change-" + id, shell_.t("apps.change"), [this, id, title] { ask_change_app(id, title); });
+                menu->add_item(shell_.ui(), "app-delete-" + id, shell_.t("apps.delete"), [this, id, title] { ask_delete_app(id, title); });
+                shell_.window().overlay().show(std::move(menu), mp->frame(), true);
+                shell_.window().render();
+            };
         }
     error_line(*this, "apps");
 }

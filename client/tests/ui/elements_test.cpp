@@ -21,6 +21,7 @@
 #include "ui/generated_field_view.h"
 #include "ui/generated_action_view.h"
 #include "ui/generated_citations.h"
+#include "ui/generated_content_view.h"
 #include "ui/list.h"
 #include "ui/richtext.h"
 #include "ui/text16.h"
@@ -895,4 +896,116 @@ TEST(UiMarkdown, CtrlCCopiesTheSelectedWordsAndAPressElsewhereClearsThem) {
     EXPECT_TRUE(md->selected_text().empty());
     EXPECT_FALSE(copy_message_selection(*s.ui, ctrl_c));
     EXPECT_EQ(copied.size(), 1u);
+}
+
+// --- Content templates (add-content-templates 2.1) -------------------------------------------------------------------
+
+namespace {
+Node* find_node(Node& root, const std::string& id) {
+    if (root.automation_id() == id) return &root;
+    for (const auto& child : root.children())
+        if (auto* found = find_node(*child, id)) return found;
+    return nullptr;
+}
+
+const char* kDisplaySurface = R"({"version":1,"id":"brief","template":"briefing","title":"Reply to Lucie","summary":"Lucie needs a reply.","components":[
+  {"type":"facts","id":"facts","label":"Request","items":[{"label":"Asked by","value":"Lucie","citations":["1"]},{"label":"Due","value":"29 Nov"}]},
+  {"type":"callout","id":"state","label":"Status","tone":"success","content":"You replied on 26 Nov at 14:02."},
+  {"type":"markdown","id":"md","label":"Brief","content":"See [the Thread](#/threads/t1).","citations":["1"]},
+  {"type":"timeline","id":"today","label":"Today","items":[{"time":"09:30","title":"Steering","detail":"Room 4","tag":"Teams"}]},
+  {"type":"tasks","id":"todo","label":"Follow-ups","items":[{"title":"Check the balance","owner":"Klara","due":"2 Dec","state":"overdue","link":"#/agenda"},{"title":"Send slides","state":"done"}]},
+  {"type":"draft","id":"draft","label":"Draft","to":["Lucie"],"cc":["Jan"],"subject":"Re: Invoice","body":"Hi Lucie,\n\nconfirmed.\n\nJan"}]})";
+}  // namespace
+
+TEST(UiGeneratedContent, DisplayComponentsAreNamedAndActLocally) {
+    Surface s(640, 1000);
+    std::vector<std::string> routes;
+    s.ui->open_route = [&](const std::string& r) { routes.push_back(r); };
+    int opens = 0;
+    GeneratedCitationResolver resolver = [&](const std::string& id) -> std::optional<GeneratedCitation> {
+        if (id == "1") return GeneratedCitation{u"Invoice mail", [&] { ++opens; }};
+        return std::nullopt;
+    };
+    const auto surface = *parse_generated_surface(kDisplaySurface);
+    EXPECT_TRUE(generated_surface_presentation_supported(surface, false, true));
+    EXPECT_FALSE(generated_surface_presentation_supported(surface, false, false));  // Citations need the host's resolver
+    auto* view = s.content().emplace<GeneratedSurfaceView>(*s.ui, surface, std::make_shared<GeneratedSurfaceViewState>(),
+                                                           std::function<void()>{}, GeneratedActionView::Submit{}, resolver);
+    ASSERT_FALSE(view->children().empty());
+    // The template header: icon, localized name, title.
+    auto* name = dynamic_cast<Label*>(find_node(*view, "brief-header-template"));
+    ASSERT_NE(name, nullptr);
+    EXPECT_EQ(name->text(), u"Briefing");
+    auto* title = dynamic_cast<Label*>(find_node(*view, "brief-header-title"));
+    ASSERT_NE(title, nullptr);
+    EXPECT_EQ(title->role, Role::heading);
+    EXPECT_EQ(title->text(), u"Reply to Lucie");
+    // Facts, timeline and tasks are lists with named items; the callout says its tone.
+    auto* facts = find_node(*view, "facts-items");
+    ASSERT_NE(facts, nullptr);
+    EXPECT_EQ(facts->role, Role::list);
+    EXPECT_EQ(facts->children()[0]->role, Role::list_item);
+    EXPECT_EQ(facts->children()[0]->name, u"Asked by: Lucie");
+    EXPECT_NE(find_node(*view, "facts-item-0-citation-0"), nullptr);
+    EXPECT_EQ(find_node(*view, "state")->name, u"Done: Status");
+    EXPECT_EQ(find_node(*view, "today-item-0")->name, u"09:30 Steering, Teams. Room 4");
+    EXPECT_EQ(find_node(*view, "todo-item-0")->name, u"Check the balance, Overdue, Owner: Klara, Due 2 Dec");
+    EXPECT_EQ(find_node(*view, "todo-item-1")->name, u"Send slides, Done");
+    // The task link opens in the window, never in the browser.
+    auto* open = dynamic_cast<Button*>(find_node(*view, "todo-item-0-open"));
+    ASSERT_NE(open, nullptr);
+    EXPECT_EQ(open->role, Role::link);
+    open->invoke();
+    EXPECT_EQ(routes, std::vector<std::string>{"#/agenda"});
+    EXPECT_TRUE(s.opened.empty());
+    EXPECT_EQ(find_node(*view, "todo-item-1-open"), nullptr);
+    // Copy puts the body on the clipboard and sends nothing.
+    auto* copy = dynamic_cast<Button*>(find_node(*view, "draft-copy"));
+    ASSERT_NE(copy, nullptr);
+    EXPECT_TRUE(copy->focusable);
+    copy->invoke();
+    EXPECT_EQ(s.copied, std::vector<std::u16string>{u"Hi Lucie,\n\nconfirmed.\n\nJan"});
+    EXPECT_EQ(s.announced.back(), u"The draft is on the clipboard");
+    auto* meta = dynamic_cast<Label*>(find_node(*view, "draft-meta"));
+    ASSERT_NE(meta, nullptr);
+    EXPECT_EQ(meta->text(), u"To Lucie · Cc Jan · Subject: Re: Invoice");
+    EXPECT_TRUE(a11y_problems(s.tree).empty());
+    const auto px = s.render();
+    EXPECT_GT(ink(px, s.r->width_px(), {0, 0, 640, 1000}, 0xFFFFFF), 2000u);
+    EXPECT_EQ(opens, 0);
+}
+
+// Every template's example renders in the light and dark themes. SKOWORK_TEMPLATE_PNG_DIR saves the images for review.
+TEST(UiGeneratedContent, EveryTemplateRendersInBothThemes) {
+    const char* dir = std::getenv("SKOWORK_TEMPLATE_PNG_DIR");
+    GeneratedCitationResolver resolver = [](const std::string& id) -> std::optional<GeneratedCitation> {
+        if (id == "1") return GeneratedCitation{u"Mail from Finance", [] {}};
+        return std::nullopt;
+    };
+    for (const auto kind : content_template_kinds()) {
+        for (const bool dark : {false, true}) {
+            Surface s(560, 820);
+            s.ui->theme = make_theme(dark, false, kSys);
+            Node& c = s.content();
+            c.padding = Insets::all(16);
+            auto* message = c.emplace<Box>("message", Paint::surface, 8, Paint::border);
+            message->padding = Insets::xy(14, 10);
+            const auto surface = parse_generated_surface(content_template_example(kind));
+            ASSERT_TRUE(surface) << kind;
+            auto* view = message->emplace<GeneratedSurfaceView>(*s.ui, *surface, std::make_shared<GeneratedSurfaceViewState>(),
+                                                                std::function<void()>{}, GeneratedActionView::Submit{}, resolver);
+            EXPECT_GT(view->children().size(), 2u) << kind;
+            EXPECT_TRUE(a11y_problems(s.tree).empty()) << kind;
+            const auto px = s.render();
+            const uint32_t bg = dark ? 0x131A17 : 0xF1F5F3;
+            EXPECT_EQ(s.at(px, 4, 4), bg) << kind;
+            EXPECT_GT(ink(px, s.r->width_px(), {0, 0, 560, 820}, bg), 2000u) << kind;
+            if (dir) {
+                const HRESULT com = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+                write_png(std::filesystem::path(dir) / (std::string(kind) + (dark ? "_dark.png" : "_light.png")), px,
+                          s.r->width_px(), s.r->height_px());
+                if (SUCCEEDED(com)) ::CoUninitialize();
+            }
+        }
+    }
 }

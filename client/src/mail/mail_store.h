@@ -29,6 +29,9 @@ public:
     std::vector<std::string> all_message_ids();
     // Every message received in [from, to), withheld ones included, oldest first (client/evaluation export).
     std::vector<StoredMessage> messages_between(long long from, long long to);
+    // The user replied (close-replied-work D1): a non-draft message in Sent Items with this conversation id, sent after
+    // `after_ms`. Never matched by subject; false for an empty conversation id.
+    bool user_replied(const std::string& conversation_id, long long after_ms);
 
     Change upsert_event(const StoredEvent& e, Status* status = nullptr);
     std::optional<StoredEvent> remove_event(const std::string& id, Status* status = nullptr);

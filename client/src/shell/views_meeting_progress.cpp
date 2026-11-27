@@ -60,7 +60,7 @@ void ThreadPane::rebuild_meeting_facts() {
     if (start > 0) {
         const std::tm s = local_tm(start);
         char day[16];
-        std::snprintf(day, sizeof day, "%d. %d. %d", s.tm_mday, s.tm_mon + 1, s.tm_year + 1900);
+        std::snprintf(day, sizeof day, "%d.%d.%d", s.tm_mday, s.tm_mon + 1, s.tm_year + 1900);
         facts = shell_.t(std::string("calendar.weekday.") + std::to_string(s.tm_wday)) + u" " + ui::to_utf16(day) + u", " + hhmm(s);
         if (end > start) {
             facts += u"–" + hhmm(local_tm(end));

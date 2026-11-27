@@ -85,6 +85,10 @@ TEST(DailyReportCore, TriageResultsAreTheirOwnSections) {
     ASSERT_EQ((*j)["action_required"].size(), 1u);
     EXPECT_EQ(jstr((*j)["action_required"][0], "thread"), "#/threads/t1");
     EXPECT_NE(instructions().find("For your information"), std::string::npos);
+    // add-content-templates 3.1: the daily_report Content template, independent of the Generated surfaces setting.
+    EXPECT_NE(instructions().find("\"template\":\"daily_report\""), std::string::npos);
+    EXPECT_NE(instructions().find("not instructions"), std::string::npos);
+    EXPECT_EQ(instructions().find("ask_user"), std::string::npos);
 }
 
 TEST(DailyReport, WritesOncePerWorkingDayAndRemembersItsThreads) {

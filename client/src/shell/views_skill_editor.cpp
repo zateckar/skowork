@@ -53,12 +53,20 @@ SkillEditor::SkillEditor(Shell& shell, const Route& route)
     fm.multiline = true;
     fm.min_lines = 5;
     fm.max_lines = 14;
+    // Labels above the fields and an example while empty (client/work-inbox Labelled Fields).
+    const auto label = [this](const std::u16string& text) {
+        emplace<ui::Label>(shell_.ui(), text, TextStyle::body, Paint::text, true)->role = ui::Role::none;
+    };
+    label(shell_.t("skill_editor.frontmatter"));
+    fm.placeholder = shell_.t("skill_editor.frontmatter_hint");
     frontmatter_ = emplace<ui::TextField>(shell_.ui(), "skill-editor-frontmatter", shell_.t("skill_editor.frontmatter"), fm);
     frontmatter_->on_change = [this] { validate(); };
     ui::TextField::Options bo;
     bo.multiline = true;
     bo.min_lines = 10;
     bo.max_lines = 30;
+    label(shell_.t("skill_editor.body"));
+    bo.placeholder = shell_.t("skill_editor.body_hint");
     body_ = emplace<ui::TextField>(shell_.ui(), "skill-editor-body", shell_.t("skill_editor.body"), bo);
     body_->on_change = [this] { validate(); };
     validation_ = emplace<ui::Label>(shell_.ui(), u"", TextStyle::caption, Paint::text_secondary, true, "skill-editor-validation");

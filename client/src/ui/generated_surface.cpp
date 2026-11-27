@@ -59,4 +59,67 @@ std::vector<GeneratedSurfaceBlock> discover_generated_surfaces(std::string_view 
     }
     return out;
 }
+
+namespace {
+// The words a surface shows, for the search index: every string except identifiers, types, routes and states.
+void shown_words(const json& value, const std::string& key, std::string& out) {
+    if (value.is_string()) {
+        if (key == "type" || key == "id" || key == "template" || key == "link" || key == "tone" || key == "state" || key == "citations")
+            return;
+        out += value.get_ref<const std::string&>();
+        out += '\n';
+    } else if (value.is_object()) {
+        for (auto it = value.begin(); it != value.end(); ++it) shown_words(*it, it.key(), out);
+    } else if (value.is_array()) {
+        for (const auto& v : value) shown_words(v, key, out);
+    }
+}
+
+std::string text_of(std::string_view markdown, bool all_words) {
+    if (markdown.find("skowork-ui") == std::string_view::npos) return std::string(markdown);
+    const auto blocks = discover_generated_surfaces(markdown);
+    const auto next_line = [&](size_t from) {
+        const size_t e = markdown.find('\n', from);
+        return e == std::string_view::npos ? markdown.size() : e + 1;
+    };
+    std::string out;
+    size_t cursor = 0, next = 0;
+    while (cursor < markdown.size()) {
+        if (next < blocks.size() && blocks[next].begin == cursor) {
+            if (all_words) shown_words(blocks[next].surface, {}, out);
+            else out += jstr(blocks[next].surface, "summary") + "\n";
+            cursor = blocks[next++].end;
+            continue;
+        }
+        const size_t endline = next_line(cursor);
+        const auto line = markdown.substr(cursor, endline - cursor);
+        cursor = endline;
+        auto bare = line;
+        while (!bare.empty() && (bare.back() == '\n' || bare.back() == '\r' || bare.back() == ' ' || bare.back() == '\t'))
+            bare.remove_suffix(1);
+        size_t n = 0;
+        if (!bare.empty() && (bare[0] == '`' || bare[0] == '~'))
+            while (n < bare.size() && bare[n] == bare[0]) ++n;
+        if (n < 3 || bare.substr(n) != "skowork-ui") {
+            out += line;
+            continue;
+        }
+        // An invalid or incomplete surface: left out up to its closing fence or the end of the message.
+        const char marker = bare[0];
+        while (cursor < markdown.size()) {
+            const size_t close_end = next_line(cursor);
+            const auto close = markdown.substr(cursor, close_end - cursor);
+            cursor = close_end;
+            size_t count = 0;
+            while (count < close.size() && close[count] == marker) ++count;
+            if (count >= n && close.substr(count).find_first_not_of(" \t\r\n") == std::string_view::npos) break;
+        }
+    }
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r' || out.back() == ' ')) out.pop_back();
+    return out;
+}
+}  // namespace
+
+std::string generated_surface_text(std::string_view markdown) { return text_of(markdown, false); }
+std::string generated_surface_search_text(std::string_view markdown) { return text_of(markdown, true); }
 }  // namespace wb::ui

@@ -29,8 +29,6 @@ const char* const kTabs[] = {"files", "notes", "threads", "mail", "calendar", "m
 
 std::u16string u16(const std::string& s) { return ui::to_utf16(s); }
 
-std::u16string day(const std::string& iso) { return u16(iso.size() >= 10 ? iso.substr(0, 10) : iso); }
-
 bool blank(const std::u16string& s) { return s.find_first_not_of(u" \t\r\n") == std::u16string::npos; }
 
 // A tab (Selected Tabs, improve-plain-information D6): the chosen one is drawn with an accent underline and is
@@ -1300,12 +1298,12 @@ void KnowledgeView::rebuild_list() {
             const std::u16string title = u16(jstr(p, "title"));
             const std::u16string meta = source == "team"
                                             ? shell_.t("knowledge.team_meta", {{"owner", u16(jstr(p, "owner"))}, {"groups", joined(p.value("groups", json::array()))}})
-                                            : shell_.t("knowledge.result_meta", {{"source", shell_.t("knowledge.tab." + source)}, {"date", day(jstr(p, "date"))}});
+                                            : shell_.t("knowledge.result_meta", {{"source", shell_.t("knowledge.tab." + source)}, {"date", shell_.date_of(jstr(p, "date"))}});
             const std::u16string label = source == "team"
                                              ? shell_.t("knowledge.team_result", {{"title", title}, {"owner", u16(jstr(p, "owner"))},
                                                                                   {"groups", joined(p.value("groups", json::array()))}})
                                              : shell_.t("knowledge.result", {{"title", title}, {"source", shell_.t("knowledge.tab." + source)},
-                                                                             {"date", day(jstr(p, "date"))}});
+                                                                             {"date", shell_.date_of(jstr(p, "date"))}});
             const long long id = jint(p, "item_id");
             const std::string key = std::to_string(id);
             std::function<void()> open;
@@ -1363,8 +1361,8 @@ void KnowledgeView::rebuild_list() {
         const long long id = jint(it, "id"), note_id = jint(it, "note_id");
         const std::string key = note_id ? "n" + std::to_string(note_id) : std::to_string(id);
         const std::u16string title = u16(jstr(it, "title"));
-        const std::u16string meta = shell_.t("knowledge.row_meta", {{"date", day(jstr(it, "date"))}, {"size", size_text(jint(it, "size"))}});
-        std::u16string accessible = shell_.t("knowledge.row", {{"title", title}, {"date", day(jstr(it, "date"))}, {"size", size_text(jint(it, "size"))}});
+        const std::u16string meta = shell_.t("knowledge.row_meta", {{"date", shell_.date_of(jstr(it, "date"))}, {"size", size_text(jint(it, "size"))}});
+        std::u16string accessible = shell_.t("knowledge.row", {{"title", title}, {"date", shell_.date_of(jstr(it, "date"))}, {"size", size_text(jint(it, "size"))}});
         const json* row_share = jobj(it, "sharing");
         const bool unverified = row_share && jstr(*row_share, "state") == "unverified";
         if (jbool(it, "pending")) accessible += u" · " + shell_.t("knowledge.state_pending");
@@ -1573,7 +1571,7 @@ void KnowledgeView::build_item(Node& parent) {
     box->gap = 8;
     box->emplace<ui::Label>(u, title, TextStyle::subtitle, Paint::text, true, "knowledge-item-title")->role = ui::Role::heading;
     const std::u16string size = size_text(jint(item_, "size"));
-    box->emplace<ui::Label>(u, shell_.t("knowledge.item_meta", {{"source", shell_.t("knowledge.tab." + source)}, {"date", day(jstr(item_, "date"))}, {"size", size}}),
+    box->emplace<ui::Label>(u, shell_.t("knowledge.item_meta", {{"source", shell_.t("knowledge.tab." + source)}, {"date", shell_.date_of(jstr(item_, "date"))}, {"size", size}}),
                             TextStyle::caption, Paint::text_secondary, true, "knowledge-item-meta");
     if (jbool(item_, "pending"))
         box->emplace<ui::Label>(u, shell_.t("knowledge.pending"), TextStyle::caption, Paint::text_secondary, true, "knowledge-item-pending");
@@ -2199,7 +2197,7 @@ void KnowledgeView::build_fact(Node& parent) {
     }
     const std::string from = jstr(detail_, "valid_from"), to = jstr(detail_, "valid_to");
     if (!from.empty() || !to.empty())
-        box->emplace<ui::Label>(u, shell_.t("knowledge.valid", {{"from", from.empty() ? u"…" : day(from)}, {"to", to.empty() ? u"…" : day(to)}}),
+        box->emplace<ui::Label>(u, shell_.t("knowledge.valid", {{"from", from.empty() ? u"…" : shell_.date_of(from)}, {"to", to.empty() ? u"…" : shell_.date_of(to)}}),
                                 TextStyle::caption, Paint::text_secondary, true, "knowledge-fact-valid");
     if (const json cats = detail_.value("categories", json::array()); !cats.empty())
         box->emplace<ui::Label>(u, shell_.t("knowledge.categories_line", {{"names", joined(cats)}}), TextStyle::caption, Paint::text_secondary, true,

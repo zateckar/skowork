@@ -397,6 +397,21 @@ void PagePane::rebuild() {
         if (!v) v = std::make_unique<KnowledgeView>(shell_);
         knowledge_view_ = static_cast<KnowledgeView*>(add(std::move(v)));
     }
+    // A sub-heading inside a section starts a new group: space above it (client/work-inbox Settings Row Layout). Section
+    // titles ("h-<id>") and headings that open their container keep their place.
+    if (r.name == RouteName::settings || r.name == RouteName::status || r.name == RouteName::telemetry) {
+        std::function<void(Node&)> space = [&](Node& n) {
+            bool first = true;
+            for (const auto& c : n.children()) {
+                if (!first && c->visible && c->role == ui::Role::heading && !c->automation_id().starts_with("h-") &&
+                    dynamic_cast<ui::Label*>(c.get()))
+                    c->padding.top = std::max(c->padding.top, 8.f);
+                if (c->visible) first = false;
+                space(*c);
+            }
+        };
+        space(*this);
+    }
     if (r.name != RouteName::skill_editor) kept_editor_.reset();
     if (r.name != RouteName::automation_editor) kept_auto_editor_.reset();
     if (r.name != RouteName::knowledge) kept_knowledge_view_.reset();
@@ -439,11 +454,12 @@ void PagePane::build_status() {
                                  : kind == "update_required" ? "status.connection.state_help.update_required"
                                                              : "status.connection.state_help." + kind;
     std::u16string state = shell_.t("status.connection." + kind);
-    if (shell_.ui().strings.has(help_key)) state += u" — " + shell_.t(help_key);
+    // The explanation only where it adds something: "Connected" says it all (Plain Settings Wording).
+    if (kind != "connected" && shell_.ui().strings.has(help_key)) state += u" — " + shell_.t(help_key);
     row(*c, "status-connection-state", shell_.t("status.connection.state"), state,
         kind == "connected" ? Paint::text : Paint::warning);
     const std::string url = jstr(cp, "url");
-    row(*c, "status-connection-server", shell_.t("status.connection.server"), url.empty() ? shell_.t("status.connection.none") : u16(url));
+    if (!url.empty()) row(*c, "status-connection-server", shell_.t("status.connection.server"), u16(url));  // unknown: left out
     if (!is_not_configured(s))
         row(*c, "status-connection-push", shell_.t("status.connection.push"),
             shell_.t(jbool(cp, "push_up") ? "status.connection.push_up" : "status.connection.push_down"));
@@ -451,8 +467,6 @@ void PagePane::build_status() {
         row(*c, "status-connection-config-error", shell_.t("status.connection.config_error"), u16(e), Paint::error);
     if (const std::string v = jstr(cp, "min_version"); !v.empty())
         row(*c, "status-connection-min-version", shell_.t("status.connection.min_version"), u16(v));
-    if (const std::string i = jstr(cp, "installation_id"); !i.empty())
-        row(*c, "status-connection-installation", shell_.t("status.connection.installation"), u16(i));
 
     // Identity.
     Node* id = card("identity", shell_.t("status.identity.title"));
@@ -893,7 +907,7 @@ void PagePane::build_skills(Node& c) {
                                      Paint::text, "skill-state-" + skill)
                 ->role = ui::Role::none;
             const auto caption = [&](const std::u16string& t, const std::string& id = {}) {
-                item->emplace<ui::Label>(shell_.ui(), t, TextStyle::caption, Paint::text_secondary, true, id);  // read out
+                return item->emplace<ui::Label>(shell_.ui(), t, TextStyle::caption, Paint::text_secondary, true, id);  // read out
             };
             if (const std::string d = jstr(s, "description"); !d.empty())
                 item->emplace<ui::Label>(shell_.ui(), u16(d), TextStyle::body, Paint::text, true)->role = ui::Role::none;
@@ -907,11 +921,21 @@ void PagePane::build_skills(Node& c) {
                 if (!risk.empty())
                     caption(shell_.t("settings.skills.risk", {{"risk", shell_.ui().strings.has("feed.risk." + risk) ? shell_.t("feed.risk." + risk) : u16(risk)}}),
                             "skill-risk-" + skill);
-                const std::string tools = joined(s.contains("tools") ? s["tools"] : json());
-                caption(tools.empty() ? shell_.t("settings.skills.no_tools") : shell_.t("settings.skills.tools", {{"tools", u16(tools)}}),
-                        "skill-tools-" + skill);
-                if (const std::string missing = joined(s.contains("unavailable_tools") ? s["unavailable_tools"] : json()); !missing.empty())
-                    caption(shell_.t("settings.skills.unavailable_tools", {{"tools", u16(missing)}}), "skill-unavailable-tools-" + skill);
+                // Tools by name, as the Approval card names them (Plain Settings Wording); the ids in the tooltip.
+                const auto tool_names = [this](const json& v) {
+                    std::u16string out;
+                    if (v.is_array())
+                        for (const auto& t : v)
+                            if (t.is_string()) out += (out.empty() ? u"" : u", ") + shell_.tool_words(t.get<std::string>());
+                    return out;
+                };
+                const std::u16string tools = tool_names(s.value("tools", json()));
+                caption(tools.empty() ? shell_.t("settings.skills.no_tools") : shell_.t("settings.skills.tools", {{"tools", tools}}),
+                        "skill-tools-" + skill)
+                    ->help = u16(joined(s.value("tools", json())));
+                if (const std::u16string missing = tool_names(s.value("unavailable_tools", json())); !missing.empty())
+                    caption(shell_.t("settings.skills.unavailable_tools", {{"tools", missing}}), "skill-unavailable-tools-" + skill)->help =
+                        u16(joined(s.value("unavailable_tools", json())));
             }
             // Registry Skills: a pin, a pending update and the version to roll back to (Skill Updates And Rollback).
             if (jbool(s, "held")) caption(shell_.t("settings.skills.pinned"), "skill-pinned-" + skill);
@@ -998,6 +1022,48 @@ std::string policy_value(const json& v) {
     }
     return v.dump();
 }
+
+// A folder pattern of the Policy in words (client/work-inbox Plain Settings Wording): environment variables resolved,
+// "\**" as "and its subfolders", the folder by its name; `full` gets the resolved path for the tooltip.
+std::u16string folder_words(Shell& shell, const std::string& pattern, std::u16string& full) {
+    const std::u16string p16 = ui::to_utf16(pattern);
+    std::wstring w(p16.begin(), p16.end());
+    if (const DWORD n = ::ExpandEnvironmentStringsW(w.c_str(), nullptr, 0); n > 0) {
+        std::wstring out(n, L' ');
+        if (::ExpandEnvironmentStringsW(w.c_str(), out.data(), n) == n) {
+            out.resize(n - 1);
+            w = out;
+        }
+    }
+    bool subfolders = false;
+    for (const std::wstring_view tail : {std::wstring_view(L"\\**"), std::wstring_view(L"/**"), std::wstring_view(L"\\*"),
+                                         std::wstring_view(L"/*")})
+        if (w.size() > tail.size() && w.ends_with(tail)) {
+            subfolders = tail.size() == 3;
+            w.resize(w.size() - tail.size());
+            break;
+        }
+    full.assign(w.begin(), w.end());
+    const auto cut = full.find_last_of(u"\\/");
+    const std::u16string name = cut == std::u16string::npos || cut + 1 == full.size() ? full : full.substr(cut + 1);
+    return subfolders ? shell.t("settings.files.with_subfolders", {{"folder", name}}) : name;
+}
+
+// Folder patterns in words, joined; `tip` gets the resolved paths, one per line.
+std::u16string folders_words(Shell& shell, const json& v, std::u16string& tip) {
+    std::u16string out;
+    tip.clear();
+    const auto add = [&](const std::string& p) {
+        std::u16string full;
+        out += (out.empty() ? u"" : u", ") + folder_words(shell, p, full);
+        tip += (tip.empty() ? u"" : u"\n") + full;
+    };
+    if (v.is_string()) add(v.get<std::string>());
+    else if (v.is_array())
+        for (const auto& x : v)
+            if (x.is_string()) add(x.get<std::string>());
+    return out;
+}
 }  // namespace
 
 // The Policy page (improve-usability: client/work-inbox Policy Page): what the policy in force allows, and where each
@@ -1015,9 +1081,10 @@ void PagePane::build_policy(Node& c) {
     // The Group or guardrail a key comes from: the key itself or its nearest parent in the bundle's sources.
     const auto source_of = [&](std::string key) -> std::u16string {
         for (;;) {
-            if (const std::string s = jstr(src, key.c_str()); !s.empty()) return u16(s);
+            if (const std::string s = jstr(src, key.c_str()); !s.empty())
+                return s.starts_with("group:") ? shell_.t("settings.policy.from_group", {{"group", u16(s.substr(6))}}) : u16(s);
             const auto dot = key.rfind('.');
-            if (dot == std::string::npos) return shell_.t("settings.policy.default");
+            if (dot == std::string::npos) return {};  // the default is not marked
             key.resize(dot);
         }
     };
@@ -1040,9 +1107,14 @@ void PagePane::build_policy(Node& c) {
         }
         return out;
     };
+    // A value and, when a Group set it, that Group: "github.com · Group engineering".
+    const auto sourced = [&](const std::u16string& value, const std::string& key) {
+        const std::u16string from = source_of(key);
+        return from.empty() ? value : value + u"  · " + from;
+    };
     const auto setting = [&](const std::string& id, const char* label, const json& v, const std::string& key) {
         const std::u16string s = words(v);
-        row(c, "policy-" + id, shell_.t(label), (s.empty() ? none : s) + u"  · " + source_of(key));
+        row(c, "policy-" + id, shell_.t(label), sourced(s.empty() ? none : s, key));
     };
     const std::string state = jstr(policy_, "state");
     row(c, "policy-state", shell_.t("settings.policy.state"), shell_.t("settings.policy.states." + (state.empty() ? std::string("none") : state)),
@@ -1057,10 +1129,10 @@ void PagePane::build_policy(Node& c) {
         c.emplace<ui::Label>(shell_.ui(), shell_.t("settings.policy.tools_title"), TextStyle::body_strong)->role = ui::Role::heading;
         const std::string cm = jstr(*tools, "computer_mode", "off"), sm = jstr(*tools, "shell_mode", "off");
         row(c, "policy-computer", shell_.t("settings.policy.computer"),
-            shell_.t(cm == "off" ? "settings.policy.off" : "settings.policy.on") + u"  · " + source_of("tools.computer.mode"),
+            sourced(shell_.t(cm == "off" ? "settings.policy.off" : "settings.policy.on"), "tools.computer.mode"),
             cm == "off" ? Paint::warning : Paint::text);
         const char* shell_key = sm == "off" ? "settings.policy.off" : sm == "allow" ? "settings.policy.shell_allow" : "settings.policy.shell_sandboxed";
-        std::u16string shell = shell_.t(shell_key) + u"  · " + source_of("tools.shell.mode");
+        std::u16string shell = sourced(shell_.t(shell_key), "tools.shell.mode");
         if (const std::string why = jstr(*tools, "shell_unavailable"); !why.empty()) shell += u" — " + u16(why);
         row(c, "policy-shell", shell_.t("settings.policy.shell"), shell, sm == "off" ? Paint::warning : Paint::text);
         setting("risk", "settings.policy.risk", tools->value("risk", json()), "tools.risk");
@@ -1070,8 +1142,14 @@ void PagePane::build_policy(Node& c) {
     if (policy_.contains("models")) setting("models", "settings.policy.models", policy_["models"], "llm.models");
     if (const json* fs = jobj(policy_, "filesystem"); fs && fs->is_object()) {
         c.emplace<ui::Label>(shell_.ui(), shell_.t("settings.policy.files_title"), TextStyle::body_strong)->role = ui::Role::heading;
-        for (const char* k : {"read", "write", "deny", "grantable"})
-            setting(std::string("fs-") + k, ("settings.policy.fs." + std::string(k)).c_str(), fs->value(k, json()), std::string("filesystem.") + k);
+        for (const char* k : {"read", "write", "deny", "grantable"}) {
+            // Folders in words, the resolved paths in the tooltip.
+            std::u16string tip;
+            const std::u16string folders = folders_words(shell_, fs->value(k, json()), tip);
+            row(c, std::string("policy-fs-") + k, shell_.t("settings.policy.fs." + std::string(k)),
+                sourced(folders.empty() ? none : folders, std::string("filesystem.") + k));
+            if (!tip.empty()) c.children().back()->help = tip;
+        }
     }
     if (const json* net = jobj(policy_, "network"); net && net->is_object()) {
         c.emplace<ui::Label>(shell_.ui(), shell_.t("settings.policy.network_title"), TextStyle::body_strong)->role = ui::Role::heading;
@@ -1105,8 +1183,10 @@ void PagePane::build_files(Node& c) {
     }
     const json* fs = jobj(policy_, "filesystem");
     const std::string grantable = fs ? policy_value(fs->value("grantable", json())) : std::string();
-    text(c, grantable.empty() ? shell_.t("settings.files.none_grantable") : shell_.t("settings.files.grantable", {{"folders", u16(grantable)}}),
-         Paint::text_secondary, "files-grantable");
+    std::u16string grantable_tip;
+    const std::u16string grantable_words = fs ? folders_words(shell_, fs->value("grantable", json()), grantable_tip) : std::u16string();
+    text(c, grantable.empty() ? shell_.t("settings.files.none_grantable") : shell_.t("settings.files.grantable", {{"folders", grantable_words}}),
+         Paint::text_secondary, "files-grantable")->help = grantable_tip;
     const json* grants = jobj(policy_, "grants");
     if (!grants || !grants->is_array() || grants->empty()) {
         text(c, shell_.t("settings.files.empty"), Paint::text_secondary, "files-empty");
@@ -1184,8 +1264,8 @@ void PagePane::build_privacy(Node& c) {
             shell_.refresh_app_status();
         });
     });
-    text(c, on ? shell_.t("settings.diagnostics.on", {{"until", shell_.clock(until)}}) : shell_.t("settings.diagnostics.off"),
-         Paint::text_secondary, "settings-verbose-state");
+    // The switch says off; only the end of a running period adds something (Plain Settings Wording).
+    if (on) text(c, shell_.t("settings.diagnostics.on", {{"until", shell_.clock(until)}}), Paint::text_secondary, "settings-verbose-state");
     std::vector<std::pair<std::string, std::u16string>> durations;
     for (long long m : kVerboseChoices) durations.emplace_back(std::to_string(m), minutes_label(shell_, m));
     choice(c, "settings-verbose-for", shell_.t("settings.diagnostics.duration"), minutes_label(shell_, verbose_minutes_), durations,
@@ -1197,7 +1277,7 @@ void PagePane::build_privacy(Node& c) {
     error_line(c, "verbose");
 
     // Delete everything.
-    c.emplace<ui::Label>(shell_.ui(), shell_.t("settings.privacy.delete"), TextStyle::body_strong)->role = ui::Role::heading;
+    c.emplace<ui::Label>(shell_.ui(), shell_.t("settings.privacy.delete_heading"), TextStyle::body_strong)->role = ui::Role::heading;
     text(c, shell_.t("settings.privacy.body"), Paint::text_secondary);
     button(c, "settings-delete-everything", shell_.t("settings.privacy.delete"), [this] { ask_wipe(); })->enabled = !wiped_;
     if (wiped_) text(c, shell_.t("settings.privacy.done"), Paint::text, "settings-wiped");

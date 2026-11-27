@@ -117,6 +117,10 @@ context: |
     state changes). The feed is built from Run events.
   - Passage: a chunk of knowledge returned by knowledge.search.
   - Citation: a numbered source listed under an answer, for a Passage the answer refers to.
+  - Generated surface: a versioned JSON block (fence skowork-ui) in an assistant message that the Thread renders
+    with native components (client/work-inbox).
+  - Content template: a named layout of a Generated surface for content Skowork produces repeatedly
+    (daily_report, meeting_summary, briefing, action_prep, meeting_prep); see client/work-inbox Content Templates.
   - Inbox: the implicit folder that holds every Inbox entry not in a user folder.
   - Inbox entry: a Thread or a Chat as listed in the Inbox views (client/work-inbox Chat Entries).
   - Inbox views: Unread, Action, Running, All, Archive, Folders and, when the Agenda is enabled, Agenda (see client/work-inbox).
@@ -237,6 +241,7 @@ context: |
   53 add-evaluation-export            [Hardening, Knowledge]
   54 improve-threads-calendar-agenda  [Productivity]
   55 improve-plain-information        [Productivity]
+  56 improve-remaining-views          [Productivity]
 
 rules:
   proposal:

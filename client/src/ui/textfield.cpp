@@ -59,6 +59,8 @@ TextField::TextField(Ui& ui, std::string id, std::u16string nm, Options o) : Nod
     role = Role::edit;
     focusable = true;
     name = std::move(nm);
+    // An empty field shows what it is for (client/work-inbox Labelled Fields): its label, unless a hint is given.
+    if (opt_.placeholder.empty() && !opt_.secret) opt_.placeholder = name;
     lines_ = std::max(1, opt_.min_lines);
     measure = [this](float w) { return Size{w, static_cast<float>(lines_) * line_height() + 2 * kPadY + 2}; };
     ui_.fields.push_back(this);

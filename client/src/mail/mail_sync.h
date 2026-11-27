@@ -18,7 +18,8 @@
 
 namespace wb::mail {
 
-// kind: mail.received | mail.updated | mail.deleted | event.created | event.updated | event.cancelled.
+// kind: mail.received | mail.sent | mail.updated | mail.deleted | event.created | event.updated | event.cancelled. mail.sent
+// (close-replied-work): a new non-draft message in Sent Items outside backfill, for client/agenda and client/event-triage only.
 struct MailEvent {
     std::string kind;
     std::string id;

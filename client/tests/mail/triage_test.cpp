@@ -99,6 +99,9 @@ struct Harness {
             if (it == chats.end()) return std::nullopt;
             return it->second;
         };
+        e.teams_replied = [this](const std::string& conversation, const std::string& id) {
+            return teams_answered.count(conversation + "|" + id) > 0;
+        };
         e.background_paused = [this] { return paused; };
         e.create_thread = [this](const std::string& title, const json& ref) -> Result<std::string> {
             const std::string id = "t" + std::to_string(threads.size() + 1);
@@ -148,6 +151,7 @@ struct Harness {
         m.from = {"Petra Malá", "petra.mala@dodavatel-test.example"};
         m.received_at = clock.unix_millis();
         m.withheld = withheld;
+        m.conversation_id = conversation;
         mail->upsert_message(m);
         PageChange c;
         c.scope = "mail";
@@ -186,7 +190,9 @@ struct Harness {
     std::unique_ptr<triage::TriageService> svc;
     bool paused = false, fail_start = false, may_read = true;
     int keys = 0;
+    std::string conversation;  // the conversation id of the next messages
     std::map<std::string, triage::TriageChat> chats;  // "<conversation>|<message>"
+    std::set<std::string> teams_answered;              // Teams messages the user replied to (TeamsService::user_replied)
     std::map<std::string, std::string> threads;
     std::map<std::string, json> refs;
     std::set<std::string> unread, deleted, cancelled, archived;
@@ -671,6 +677,9 @@ TEST(EventTriage, ThePreparationOfATeamsItemNeverSendsMail) {
     EXPECT_NE(p.find("cannot send"), std::string::npos);
     EXPECT_EQ(p.find("mail.send"), std::string::npos);
     EXPECT_EQ(triage::prepare_preamble("calendar", "e1").find("mail.send"), std::string::npos);
+    // add-content-templates 3.1: the summary is an action_prep Content template; the question step is unchanged.
+    EXPECT_NE(p.find("\"template\":\"action_prep\""), std::string::npos);
+    EXPECT_LT(p.find("ask_user once"), p.find("\"template\":\"action_prep\""));
 }
 
 TEST(EventTriage, NoActionNeededIsRecordedCancelsTheRunAndArchives) {
@@ -815,4 +824,172 @@ TEST(EventTriage, FailedBatchesAreCounted) {
     EXPECT_TRUE(h.classify());
     ASSERT_EQ(h.quality.size(), 1u);
     EXPECT_EQ(h.quality[0], "batch_failed_unavailable");
+}
+
+// close-replied-work: the user answered the mail in Outlook; triage closes the work and does not raise it again.
+TEST(EventTriage, ARepliedItemIsClosedItsRunCancelledAndItsThreadArchived) {
+    Harness h;
+    h.enable({{"auto_prepare", true}});
+    h.conversation = "conv-invoice";
+    ASSERT_TRUE(h.take({h.message("m1", "Order 4711", "Will another invoice come for this order?")}));
+    h.conversation = "conv-other";
+    ASSERT_TRUE(h.take({h.message("m2", "Budget Q1", "Please review it")}));
+    ASSERT_TRUE(h.classify());
+    const std::string t = h.thread_of("m1");
+    ASSERT_EQ(jstr(h.svc->suggestion(t), "status"), "started");  // prepared, waiting on its Question card
+    // 20 minutes later the user answers in Outlook; the sync stores the reply in Sent Items.
+    h.clock.advance(20min);
+    h.conversation = "conv-invoice";
+    ASSERT_TRUE(h.take({h.message("s1", "RE: Order 4711", "No, that was the last one.", "f-sent")}));
+    EXPECT_EQ(h.svc->user_replied("conv-invoice", h.clock.unix_millis()), 1);
+    const json s = h.svc->suggestion(t);
+    EXPECT_EQ(jstr(s, "status"), "replied");
+    EXPECT_EQ(jstr(s["source"], "subject"), "Order 4711");  // restoring the Thread shows why it closed
+    EXPECT_TRUE(h.cancelled.contains(t));
+    EXPECT_TRUE(h.archived.contains(t));
+    EXPECT_EQ(jstr(h.refs[t], "action"), "none");
+    EXPECT_TRUE(h.log->for_item("mail:m1").empty());  // not a decision of the user (D4)
+    // Closed once; the other conversation is untouched and still open work in the Daily report.
+    EXPECT_EQ(h.svc->user_replied("conv-invoice", h.clock.unix_millis()), 0);
+    EXPECT_EQ(h.svc->no_action(t).error().code, "not_open");
+    const auto d = h.svc->digest();
+    ASSERT_EQ(d.action.size(), 1u);
+    EXPECT_EQ(d.action[0].thread_id, h.thread_of("m2"));
+    // A later revision of the same mail does not reopen it; withdrawal keeps it.
+    const size_t starts = h.starts.size();
+    ASSERT_TRUE(h.take({h.message("m1", "Order 4711", "Will another invoice come for this order? (resent)")}));
+    (void)h.classify();
+    EXPECT_EQ(jstr(h.svc->suggestion(t), "status"), "replied");
+    EXPECT_EQ(h.starts.size(), starts);
+    ASSERT_TRUE(h.take({PageChange{"mail", "m1", true, false, "f-inbox", "inbox"}}));
+    auto q = h.db.store->db().prepare("SELECT suggestion FROM triage_items WHERE item_id='m1'");
+    ASSERT_TRUE(q.step());
+    EXPECT_EQ(q.col_text(0), "replied");
+}
+
+TEST(EventTriage, AReplyOnlyClosesMailReceivedBeforeIt) {
+    Harness h;
+    h.enable();
+    h.conversation = "conv-1";
+    const long long reply_at = h.clock.unix_millis() - 1;  // sent before m1 arrived
+    ASSERT_TRUE(h.take({h.message("m1", "Slides", "Please send the slides")}));
+    ASSERT_TRUE(h.classify());
+    EXPECT_EQ(h.svc->user_replied("conv-1", reply_at), 0);
+    EXPECT_EQ(h.svc->user_replied("", h.clock.unix_millis() + 1), 0);
+    EXPECT_EQ(h.svc->user_replied("conv-2", h.clock.unix_millis() + 1), 0);
+    EXPECT_EQ(jstr(h.svc->suggestion(h.thread_of("m1")), "status"), "open");
+    EXPECT_TRUE(h.archived.empty());
+}
+
+TEST(EventTriage, MailAnsweredBeforeTriageGetsNoThreadButANewQuestionDoes) {
+    Harness h;
+    h.enable({{"auto_prepare", true}});
+    h.conversation = "conv-invoice";
+    ASSERT_TRUE(h.take({h.message("m1", "Order 4711", "Will another invoice come for this order?")}));
+    // Answered within the gather wait, before the classification. A draft does not count; the sent reply does.
+    h.clock.advance(10s);
+    ASSERT_TRUE(h.take({h.message("d1", "RE: Order 4711", "Draft", "f-sent")}));
+    {
+        auto u = h.db.store->db().prepare("UPDATE mail_messages SET is_draft=1 WHERE id='d1'");
+        ASSERT_TRUE(u.run());
+    }
+    EXPECT_FALSE(h.mail->user_replied("conv-invoice", h.clock.unix_millis() - 20'000));  // a draft has not left
+    h.clock.advance(10s);
+    ASSERT_TRUE(h.take({h.message("s1", "RE: Order 4711", "No, that was the last one.", "f-sent")}));
+    ASSERT_TRUE(h.classify());
+    EXPECT_TRUE(h.threads.empty());
+    EXPECT_TRUE(h.starts.empty());
+    auto q = h.db.store->db().prepare("SELECT suggestion, thread_id FROM triage_items WHERE item_id='m1'");
+    ASSERT_TRUE(q.step());
+    EXPECT_EQ(q.col_text(0), "replied");
+    EXPECT_EQ(q.col_text(1), "");
+    // The sender asks again after the reply: that is new work.
+    h.clock.advance(1h);
+    ASSERT_TRUE(h.take({h.message("m2", "RE: Order 4711", "And when will the goods arrive?")}));
+    ASSERT_TRUE(h.classify());
+    EXPECT_FALSE(h.thread_of("m2").empty());
+    EXPECT_EQ(h.starts.size(), 1u);
+}
+
+// Migration 2900 rebuilds triage_items with the replied state and keeps every row and its instruction id.
+TEST(EventTriage, MigrationAddsRepliedAndKeepsRows) {
+    MailDb db;
+    const std::filesystem::path file = db.file.parent_path() / L"triage-old.db";
+    std::vector<Migration> before;
+    for (const auto& m : app_migrations())
+        if (m.version < 2900) before.push_back(m);
+    {
+        MigrationOutcome o;
+        auto old = open_and_migrate(file, *db.key, before, o);
+        ASSERT_TRUE(old);
+        ASSERT_TRUE((*old)->exec("INSERT INTO triage_items(scope, item_id, revision, state, thread_id, suggestion, queued_at, updated_at, "
+                                 "action, category, reported_at, instruction_id) "
+                                 "VALUES('mail', 'm1', 'r1', 'evaluated', 't1', 'no_action', 5, 6, 'required', 'request', 7, 'triage-v3')"));
+        EXPECT_FALSE((*old)->exec("UPDATE triage_items SET suggestion='replied' WHERE item_id='m1'"));
+    }
+    MigrationOutcome o;
+    auto opened = open_and_migrate(file, *db.key, app_migrations(), o);
+    ASSERT_TRUE(opened);
+    EXPECT_TRUE(o.migrated);
+    auto q = (*opened)->prepare("SELECT thread_id, suggestion, queued_at, updated_at, action, category, reported_at, instruction_id "
+                                "FROM triage_items WHERE scope='mail' AND item_id='m1'");
+    ASSERT_TRUE(q.step());
+    EXPECT_EQ(q.col_text(0), "t1");
+    EXPECT_EQ(q.col_text(1), "no_action");
+    EXPECT_EQ(q.col_int(2), 5);
+    EXPECT_EQ(q.col_int(3), 6);
+    EXPECT_EQ(q.col_text(4), "required");
+    EXPECT_EQ(q.col_text(5), "request");
+    EXPECT_EQ(q.col_int(6), 7);
+    EXPECT_EQ(q.col_text(7), "triage-v3");
+    EXPECT_TRUE((*opened)->exec("UPDATE triage_items SET suggestion='replied' WHERE item_id='m1'"));
+    EXPECT_FALSE((*opened)->exec("UPDATE triage_items SET suggestion='bogus' WHERE item_id='m1'"));
+}
+
+// close-replied-work D5: the user's reply in Teams closes the Teams action Thread it answered, and a Teams message the
+// user already answered gets no Thread.
+TEST(EventTriage, ATeamsReplyClosesTheTeamsThreadItAnswered) {
+    Harness h;
+    h.chats["19:a@unq.gbl.spaces|1"] = {"Petra Malá", "Petra Malá", "Can you send the slides today?", 1, true, false, false};
+    h.chats["19:b@unq.gbl.spaces|2"] = {"Karel Dvořák", "Karel Dvořák", "Please approve the order", 2, true, false, false};
+    h.enable({{"auto_prepare", true}});
+    ASSERT_TRUE(h.svc->configure({{"teams", true}}));
+    h.svc->cycle_completed();
+    ASSERT_TRUE(h.svc->take_in_teams("teams.message", "19:a@unq.gbl.spaces", "1"));
+    ASSERT_TRUE(h.svc->take_in_teams("teams.message", "19:b@unq.gbl.spaces", "2"));
+    ASSERT_TRUE(h.classify());
+    const std::string t = h.thread_of("19:a@unq.gbl.spaces|1"), other = h.thread_of("19:b@unq.gbl.spaces|2");
+    ASSERT_FALSE(t.empty());
+    ASSERT_EQ(jstr(h.svc->suggestion(t), "status"), "started");
+    // A post that does not answer it (another thread of a channel, say) closes nothing.
+    EXPECT_EQ(h.svc->user_replied_teams("19:a@unq.gbl.spaces"), 0);
+    EXPECT_EQ(h.svc->user_replied_teams(""), 0);
+    // The user answers in the chat.
+    h.teams_answered.insert("19:a@unq.gbl.spaces|1");
+    EXPECT_EQ(h.svc->user_replied_teams("19:a@unq.gbl.spaces"), 1);
+    EXPECT_EQ(jstr(h.svc->suggestion(t), "status"), "replied");
+    EXPECT_TRUE(h.cancelled.contains(t));
+    EXPECT_TRUE(h.archived.contains(t));
+    EXPECT_EQ(jstr(h.svc->suggestion(other), "status"), "started");
+    EXPECT_EQ(h.svc->user_replied_teams("19:a@unq.gbl.spaces"), 0);  // closed once
+    const auto d = h.svc->digest();
+    ASSERT_EQ(d.action.size(), 1u);
+    EXPECT_EQ(d.action[0].thread_id, other);
+}
+
+TEST(EventTriage, ATeamsMessageAnsweredBeforeTriageGetsNoThread) {
+    Harness h;
+    h.chats["19:a@unq.gbl.spaces|1"] = {"Petra Malá", "Petra Malá", "Can you send the slides today?", 1, true, false, false};
+    h.enable({{"auto_prepare", true}});
+    ASSERT_TRUE(h.svc->configure({{"teams", true}}));
+    h.svc->cycle_completed();
+    ASSERT_TRUE(h.svc->take_in_teams("teams.message", "19:a@unq.gbl.spaces", "1"));
+    h.teams_answered.insert("19:a@unq.gbl.spaces|1");  // answered within the gather wait
+    ASSERT_TRUE(h.classify());
+    EXPECT_TRUE(h.threads.empty());
+    EXPECT_TRUE(h.starts.empty());
+    auto q = h.db.store->db().prepare("SELECT suggestion, thread_id FROM triage_items WHERE item_id='19:a@unq.gbl.spaces|1'");
+    ASSERT_TRUE(q.step());
+    EXPECT_EQ(q.col_text(0), "replied");
+    EXPECT_EQ(q.col_text(1), "");
 }

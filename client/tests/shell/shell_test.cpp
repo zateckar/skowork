@@ -32,6 +32,7 @@
 #include "shell/main_window.h"
 #include "shell/shell.h"
 #include "storage/generated_surface_submission.h"
+#include "ui/generated_surface.h"
 #include "skills/catalog.h"
 #include "ui/richtext.h"
 #include "ui/generated_save_queue.h"
@@ -889,6 +890,45 @@ TEST(ShellFeed, EnabledCompletedSurfaceRendersNativeTableAndKeepsExplorationLoca
     const auto before = f.in.env.model.request_count();
     EXPECT_TRUE(w.invoke("costs-sort-0"));
     EXPECT_EQ(f.in.env.model.request_count(), before);
+}
+
+// add-content-templates D4: with the Generated surfaces setting off, a display-only template surface renders natively;
+// a surface with controls stays readable text without active controls.
+TEST(ShellFeed, DisplayOnlySurfaceRendersWithTheSettingOff) {
+    Fixture f;
+    int opened = 0;
+    f.rpc.add("surfaces.capabilities", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"enabled", false}}; });
+    f.rpc.add("surfaces.open", RpcExposure::ui, [&opened](const json&) -> Result<json> {
+        ++opened;
+        return json{{"revision", "test-revision"}, {"state", nullptr}};
+    });
+    f.rpc.add("surfaces.save", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"ok", true}}; });
+    const auto t = f.in.env.thread();
+    f.in.run_to_end(t, "prepare", "The committee decides the budget.\n\n```skowork-ui\n" +
+                                      std::string(ui::content_template_example("meeting_prep")) + "\n```\n");
+    f.in.run_to_end(t, "choose", R"(```skowork-ui
+{"version":1,"id":"choice","summary":"Choice","components":[{"type":"switch","id":"notify","label":"Notify","value":false},{"type":"button","id":"go","label":"Continue"}]}
+```
+)");
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + t); });
+    // Runs on the window thread.
+    const auto exists = [&](const std::string& id) {
+        std::function<bool(ui::Node&)> find = [&](ui::Node& node) {
+            if (node.automation_id() == id) return true;
+            for (const auto& child : node.children()) if (find(*child)) return true;
+            return false;
+        };
+        return find(w.main().window()->tree().root());
+    };
+    ASSERT_TRUE(w.until([&] { return exists("prep-header-title"); }));
+    w.run([&] {
+        EXPECT_TRUE(exists("prepare-item-0"));
+        EXPECT_FALSE(exists("go-review"));
+        EXPECT_FALSE(exists("notify-input"));
+    });
+    EXPECT_EQ(opened, 1);  // only the display-only surface is opened
 }
 
 TEST(ShellFeed, GeneratedVisualsAreAccessibleInLocalizedHighContrastThreads) {
@@ -2272,8 +2312,8 @@ TEST(ShellPages, SkillsSectionShowsTiersShadowingErrorsAndUnavailableTools) {
     EXPECT_FALSE(has(m, L"settings-later-skills"));
     EXPECT_EQ(m[L"settings-skills"].type, UIA_ListControlTypeId);
     EXPECT_EQ(m[L"skill-entry-weekly-report"].name, L"weekly-report, Private, In use");
-    EXPECT_EQ(m[L"skill-tools-weekly-report"].name, L"Tools: files.read");
-    EXPECT_EQ(m[L"skill-unavailable-tools-weekly-report"].name, L"Not allowed by your policy: shell.run");
+    EXPECT_EQ(m[L"skill-tools-weekly-report"].name, L"Tools: Read a file");
+    EXPECT_EQ(m[L"skill-unavailable-tools-weekly-report"].name, L"Not allowed by your policy: Run a command");
     EXPECT_FALSE(has(m, L"skill-other-weekly-report-0"));  // behind Details (Plain Settings Details)
     ASSERT_TRUE(w.invoke("skill-details-weekly-report"));
     ASSERT_TRUE(w.until([&] { return w.exists("skill-other-weekly-report-0"); }));
@@ -3386,9 +3426,9 @@ TEST(ShellPages, PolicyPageAndFolderGrants) {
     {
         Uia uia;
         auto m = uia.by_id(w.hwnd());
-        EXPECT_EQ(m[L"policy-computer"].name, L"Computer use: Off  · default");
-        EXPECT_EQ(m[L"policy-shell"].name, L"Shell commands: Sandboxed  · group:engineering");
-        EXPECT_EQ(m[L"policy-net-allow"].name, L"Allowed hosts: github.com  · group:engineering");
+        EXPECT_EQ(m[L"policy-computer"].name, L"Computer use: Off");
+        EXPECT_EQ(m[L"policy-shell"].name, L"Shell commands: Sandboxed  · Group engineering");
+        EXPECT_EQ(m[L"policy-net-allow"].name, L"Allowed hosts: github.com  · Group engineering");
         EXPECT_TRUE(m.contains(L"policy-ask-admin"));
     }
     ASSERT_TRUE(w.invoke("policy-refresh"));
@@ -3933,7 +3973,7 @@ TEST(ShellKnowledge, SearchResultsShowAsOpenableCitations) {
         });
         return out;
     };
-    EXPECT_EQ(name_of(base + "-0"), u"Open [1] Phoenix kickoff · Threads · 2026-10-20");
+    EXPECT_EQ(name_of(base + "-0"), u"Open [1] Phoenix kickoff · Threads · 20.10.2026");
     EXPECT_EQ(name_of(base + "-1"), u"Open [2] Jahresbericht.docx · Files");
     EXPECT_EQ(name_of(base + "-2"), u"Open [3] Budget · Mail");
     ASSERT_TRUE(w.until([&] { return w.exists("source-table-row-0-cell-0-citation-0"); }));
@@ -4582,7 +4622,7 @@ TEST(ShellKnowledge, SourcesFoldersExclusionsForgetMergeAndSplit) {
         EXPECT_EQ(name_of("knowledge-source-mail"), u"Mail: Off by policy");
         EXPECT_TRUE(w.exists("knowledge-source-policy-mail"));
         EXPECT_FALSE(w.exists("knowledge-source-enabled-mail"));  // the user cannot switch on what policy turned off
-        EXPECT_EQ(name_of("settings-knowledge-policy-exclusions"), u"Excluded by your organisation: **\\HR\\**");
+        EXPECT_EQ(name_of("settings-knowledge-policy-exclusions"), u"Excluded by your organization: **\\HR\\**");
         EXPECT_TRUE(w.exists("settings-knowledge-no-folders"));
         EXPECT_TRUE(w.exists("settings-knowledge-extraction-off"));
 
@@ -5242,7 +5282,12 @@ TEST(ShellApps, ListOpensWithConfirmationStopsRevealsChangesAndDeletes) {
     EXPECT_EQ(m[L"app-meta-q3-deck"].name, L"3.0 KB · last used never");
     EXPECT_EQ(m[L"app-open-q3-deck"].name, L"Open Q3 deck");
     EXPECT_TRUE(w.exists("app-running-notes"));
-    EXPECT_FALSE(w.exists("app-stop-q3-deck"));
+    EXPECT_EQ(m[L"app-more-notes"].name, L"More actions for Notes");  // App Cards: the rest is in the More menu
+    ASSERT_TRUE(w.invoke("app-more-q3-deck"));
+    ASSERT_TRUE(w.until([&] { return w.exists("app-folder-q3-deck"); }));
+    EXPECT_FALSE(w.exists("app-stop-q3-deck"));  // not running: no Stop
+    w.key(ui::kKeyEscape);
+    ASSERT_TRUE(w.until([&] { return !w.exists("app-folder-q3-deck"); }));
     std::vector<std::string> problems;
     w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
     EXPECT_TRUE(problems.empty()) << problems.front();
@@ -5256,17 +5301,25 @@ TEST(ShellApps, ListOpensWithConfirmationStopsRevealsChangesAndDeletes) {
     ASSERT_TRUE(w.until([&] { return count("apps.open") == 2 && w.exists("app-running-q3-deck"); }));
     EXPECT_EQ(count("apps.confirm"), 1);
 
-    // Stop and Show folder.
+    // Stop and Show folder, from the More menu.
+    ASSERT_TRUE(w.invoke("app-more-notes"));
+    ASSERT_TRUE(w.until([&] { return w.exists("app-stop-notes"); }));
     ASSERT_TRUE(w.invoke("app-stop-notes"));
     ASSERT_TRUE(w.until([&] { return !w.exists("app-running-notes"); }));
+    ASSERT_TRUE(w.invoke("app-more-notes"));
+    ASSERT_TRUE(w.until([&] { return w.exists("app-folder-notes"); }));
     ASSERT_TRUE(w.invoke("app-folder-notes"));
     ASSERT_TRUE(w.until([&] { return count("apps.reveal") == 1; }));
 
     // Delete asks first; Cancel keeps the app.
+    ASSERT_TRUE(w.invoke("app-more-notes"));
+    ASSERT_TRUE(w.until([&] { return w.exists("app-delete-notes"); }));
     ASSERT_TRUE(w.invoke("app-delete-notes"));
     ASSERT_TRUE(w.until([&] { return w.exists("apps-delete-dialog"); }));
     ASSERT_TRUE(w.invoke("apps-delete-cancel"));
     EXPECT_EQ(count("apps.delete"), 0);
+    ASSERT_TRUE(w.invoke("app-more-notes"));
+    ASSERT_TRUE(w.until([&] { return w.exists("app-delete-notes"); }));
     ASSERT_TRUE(w.invoke("app-delete-notes"));
     ASSERT_TRUE(w.until([&] { return w.exists("apps-delete-confirm"); }));
     ASSERT_TRUE(w.invoke("apps-delete-confirm"));
@@ -5274,6 +5327,8 @@ TEST(ShellApps, ListOpensWithConfirmationStopsRevealsChangesAndDeletes) {
 
     // Change with the agent: a new Thread about the app.
     f.in.env.model.push_text("I will change it.");
+    ASSERT_TRUE(w.invoke("app-more-q3-deck"));
+    ASSERT_TRUE(w.until([&] { return w.exists("app-change-q3-deck"); }));
     ASSERT_TRUE(w.invoke("app-change-q3-deck"));
     ASSERT_TRUE(w.until([&] { return w.exists("apps-change-dialog-field"); }));
     w.type("apps-change-dialog-field", u"Add a chart slide");
@@ -5358,10 +5413,10 @@ TEST(ShellAgenda, ViewGroupsItemsAndOffersNamedActions) {
     EXPECT_TRUE(w.exists("agenda-group-today"));
     EXPECT_TRUE(w.exists("agenda-group-later"));
     EXPECT_FALSE(w.exists("agenda-group-tomorrow"));
-    EXPECT_EQ(m[L"agenda-item-a1"].name, L"Send the Q4 slides, due Tuesday 17. 11.");
+    EXPECT_EQ(m[L"agenda-item-a1"].name, L"Send the Q4 slides, due Tuesday 17.11.");
     // Agenda View Layout: the due date as its own chip, the source kinds as badges, the group counts.
-    EXPECT_EQ(m[L"agenda-meta-a1"].name, L"Due Tuesday 17. 11. (inferred)");
-    EXPECT_EQ(m[L"agenda-meta-a2"].name, L"Due Thursday 26. 11. 14:00");
+    EXPECT_EQ(m[L"agenda-meta-a1"].name, L"Due Tuesday 17.11. (inferred)");
+    EXPECT_EQ(m[L"agenda-meta-a2"].name, L"Due Thursday 26.11. 14:00");
     EXPECT_TRUE(w.exists("agenda-tags-a1"));
     EXPECT_TRUE(w.exists("agenda-quote-a1"));
     EXPECT_EQ(m[L"agenda-more-a1"].name, L"More actions for Send the Q4 slides");
@@ -6023,7 +6078,7 @@ TEST(ShellChats, EntriesConversationNewChatLeaveAndOff) {
     ASSERT_TRUE(w.until([&] { return row_names().empty(); }));
     w.run([&] { w.main().open("#/chats/d1"); });
     ASSERT_TRUE(w.until([&] { return w.exists("chats-off"); }));
-    EXPECT_EQ(uia.by_id(w.hwnd())[L"chats-off"].name, L"Messaging is turned off by your organisation's policy.");
+    EXPECT_EQ(uia.by_id(w.hwnd())[L"chats-off"].name, L"Messaging is turned off by your organization's policy.");
 }// ==== improve-usability 2.4 (design D5): specified behaviour reachable in the desktop app ============================
 
 // client/work-inbox Folders: a folder view's header renames the folder and deletes it after asking; its Threads move to
@@ -6803,7 +6858,7 @@ TEST(ShellDictation, SpeechBlockVerifiesRepairsAndTestsTheMicrophoneOnlyWhenAske
     w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
     EXPECT_TRUE(problems.empty()) << problems.front();
     ASSERT_TRUE(w.invoke("settings-speech-test-stop"));
-    ASSERT_TRUE(name_becomes(L"settings-speech-test-result", L"Recognised: Dobrý den, tohle je zkouška"));
+    ASSERT_TRUE(name_becomes(L"settings-speech-test-result", L"Recognized: Dobrý den, tohle je zkouška"));
     EXPECT_EQ(called("dictation.stop"), 1u);
     EXPECT_TRUE(w.exists("settings-speech-test")) << "the check can run again";
 
@@ -6989,7 +7044,7 @@ TEST(ShellPages, ConnectorsShowApiStatesAndTakeAPersonalTokenOnce) {
         EXPECT_EQ(m[L"api-connector-weather"].name, L"Weather, API, Ready");
         EXPECT_EQ(m[L"settings-connector-token-open-orders"].name, L"Replace token");
         EXPECT_EQ(m[L"settings-connector-token-open-jira"].name, L"Add token");
-        EXPECT_EQ(m[L"settings-connector-token-open-wiki"].name, L"Add token");
+        EXPECT_EQ(m[L"settings-connector-token-open-wiki"].name, L"Replace token");  // a rejected token is replaced
         EXPECT_TRUE(has(m, L"settings-connector-token-remove-orders"));
         EXPECT_TRUE(has(m, L"settings-connector-token-remove-wiki"));
         EXPECT_FALSE(has(m, L"settings-connector-token-remove-jira"));   // no token to remove
@@ -7001,11 +7056,17 @@ TEST(ShellPages, ConnectorsShowApiStatesAndTakeAPersonalTokenOnce) {
     EXPECT_TRUE(std::any_of(token_set.begin(), token_set.end(), [](const std::u16string& l) {
         return l.starts_with(u"Token set on ") && l.find(u"UTC") == std::u16string::npos && l.find(u"2026-11-10") == std::u16string::npos;
     }));
-    EXPECT_TRUE(has_label("api-connector-jira", u"Warning: no usable tools: add your token to use this connector"));
+    EXPECT_TRUE(has_label("api-connector-jira", u"No usable tools: add your token to use this connector"));
     EXPECT_TRUE(has_label("api-connector-jira", u"No token set"));
     EXPECT_TRUE(has_label("api-connector-jira", u"Create a personal access token in your Jira profile."));
-    EXPECT_TRUE(has_label("api-connector-jira", u"Help: https://jira.example/profile"));
-    EXPECT_TRUE(has_label("api-connector-wiki", u"Warning: no usable tools: token rejected, replace it"));
+    EXPECT_FALSE(has_label("api-connector-jira", u"0 of 0 tools usable"));  // no Tools: the reason says it
+    std::u16string help_link;
+    w.with("api-connector-help-jira", [&](ui::Node& n) {
+        help_link = n.help;
+        return true;
+    });
+    EXPECT_EQ(help_link, u"https://jira.example/profile");  // a link to follow, the address in its tooltip
+    EXPECT_TRUE(has_label("api-connector-wiki", u"No usable tools: token rejected, replace it"));
     EXPECT_TRUE(has_label("api-connector-weather", u"1 of 1 tools usable"));
 
     // Add token: a masked field; Save sends the typed token once and clears the field.

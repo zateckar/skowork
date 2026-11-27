@@ -208,6 +208,21 @@ Status InboxStore::update_flag(const std::string& thread_id, const char* column,
     return {};
 }
 
+Status InboxStore::replace_preview(const std::string& thread_id, const std::string& raw, const std::string& text) {
+    const std::lock_guard lock(db_.mutex());
+    // substr() as in the run_events_inbox trigger, so the comparison matches what the trigger stored.
+    auto st = db_.prepare("UPDATE threads SET preview=substr(?3,1,200) WHERE id=?1 AND preview=substr(?2,1,200)");
+    st.bind(1, thread_id).bind(2, raw).bind(3, text);
+    return st.run();
+}
+
+Status InboxStore::replace_search_text(const std::string& run_id, long long seq, const std::string& text) {
+    const std::lock_guard lock(db_.mutex());
+    auto st = db_.prepare("UPDATE thread_search SET body=?3 WHERE run_id=?1 AND seq=?2");
+    st.bind(1, run_id).bind(2, seq).bind(3, text);
+    return st.run();
+}
+
 Status InboxStore::set_unread(const std::string& thread_id, bool unread) { return update_flag(thread_id, "unread", unread); }
 Status InboxStore::set_archived(const std::string& thread_id, bool archived) { return update_flag(thread_id, "archived", archived); }
 Status InboxStore::set_pinned(const std::string& thread_id, bool pinned) { return update_flag(thread_id, "pinned", pinned); }

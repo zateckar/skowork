@@ -779,6 +779,33 @@ CREATE TABLE quality_counts(
   PRIMARY KEY(day, step, counter, category, action, instruction_id));
 CREATE TABLE quality_marks(kind TEXT NOT NULL, ref TEXT NOT NULL, PRIMARY KEY(kind, ref));
 )sql"},
+        // Replied (close-replied-work D4): the user answered the mail, so triage closed the item. The table is rebuilt
+        // with its rows, as in 2700, keeping instruction_id (2802).
+        {2900, R"sql(
+CREATE TABLE triage_items_new(
+  scope TEXT NOT NULL CHECK(scope IN ('mail','calendar','teams')),
+  item_id TEXT NOT NULL,
+  revision TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('pending','evaluated','expired','removed')),
+  outcome TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  thread_id TEXT NOT NULL DEFAULT '',
+  suggestion TEXT NOT NULL DEFAULT '' CHECK(suggestion IN ('','open','started','dismissed','withdrawn','no_action','replied')),
+  dismissed_revision TEXT NOT NULL DEFAULT '',
+  queued_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  action TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT '',
+  reported_at INTEGER NOT NULL DEFAULT 0,
+  instruction_id TEXT NOT NULL DEFAULT 'unknown',
+  PRIMARY KEY(scope, item_id));
+INSERT INTO triage_items_new SELECT scope, item_id, revision, state, outcome, reason, thread_id, suggestion, dismissed_revision,
+  queued_at, updated_at, action, category, reported_at, instruction_id FROM triage_items;
+DROP TABLE triage_items;
+ALTER TABLE triage_items_new RENAME TO triage_items;
+CREATE INDEX triage_items_pending ON triage_items(state, queued_at);
+CREATE INDEX triage_items_thread ON triage_items(thread_id);
+)sql"},
     };
     return migrations;
 }

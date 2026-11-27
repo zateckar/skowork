@@ -236,3 +236,35 @@ TEST(TeamsService, TheUsersOwnMessagesAreMarkedOnceTheUserIsKnown) {
     ASSERT_TRUE(fx.svc->sync_now());
     EXPECT_TRUE(fx.svc->message("19:grp@thread.v2", "g1")->mine);
 }
+
+// close-replied-work D5: the user replied to a Teams message when a later message of the user is in the same
+// conversation, and in a channel in the same thread; an earlier message or the user's own message never counts.
+TEST(TeamsService, UserRepliedIsALaterOwnMessageAndInAChannelTheSameThread) {
+    TeamsFixture fx;
+    const std::string chat = "19:a_b@unq.gbl.spaces", group = "19:grp@thread.v2", channel = "19:chan@thread.tacv2";
+    fx.cache.conversations.push_back({channel, "channel", "General", fx.now});
+    fx.say(chat, "c0", kMe, "Morning", fx.now - 3 * kHour);
+    fx.say(chat, "c1", kPetra, "Can you send the slides?", fx.now - 2 * kHour);
+    fx.say(group, "g1", kPetra, "@Jan budget numbers?", fx.now - 2 * kHour);
+    fx.say(channel, "t1", kPetra, "@Jan please review", fx.now - 2 * kHour);
+    fx.say(channel, "t2", kPetra, "Other topic", fx.now - 2 * kHour);
+    ASSERT_TRUE(fx.svc->configure({{"enabled", true}}));
+    ASSERT_TRUE(fx.svc->sync_now());
+    EXPECT_FALSE(fx.svc->user_replied(chat, "c1"));  // the user's earlier message is not a reply
+    EXPECT_FALSE(fx.svc->user_replied(chat, "c0"));  // the user's own message
+    EXPECT_FALSE(fx.svc->user_replied(chat, "missing"));
+
+    fx.say(chat, "c2", kMe, "Sent", fx.now - kHour);
+    fx.say(group, "g2", kMe, "Here they are", fx.now - kHour);
+    fx.say(channel, "t2r", kMe, "Agreed", fx.now - kHour).parent_id = "t2";  // a different thread of the channel
+    ASSERT_TRUE(fx.svc->sync_now());
+    EXPECT_TRUE(fx.svc->user_replied(chat, "c1"));
+    EXPECT_FALSE(fx.svc->user_replied(chat, "c2"));  // the reply itself is the user's
+    EXPECT_TRUE(fx.svc->user_replied(group, "g1"));
+    EXPECT_TRUE(fx.svc->user_replied(channel, "t2"));
+    EXPECT_FALSE(fx.svc->user_replied(channel, "t1"));  // nothing yet in the mention's thread
+
+    fx.say(channel, "t1r", kMe, "Done", fx.now - kHour / 2).parent_id = "t1";
+    ASSERT_TRUE(fx.svc->sync_now());
+    EXPECT_TRUE(fx.svc->user_replied(channel, "t1"));
+}

@@ -49,7 +49,7 @@ std::u16string hhmm(long long ms) {
 std::u16string day_label(Shell& s, long long ms) {
     const std::tm lt = local_tm(ms);
     char buf[16];
-    std::snprintf(buf, sizeof buf, "%d. %d.", lt.tm_mday, lt.tm_mon + 1);
+    std::snprintf(buf, sizeof buf, "%d.%d.", lt.tm_mday, lt.tm_mon + 1);
     return s.t(std::string("calendar.weekday.") + std::to_string(lt.tm_wday)) + u" " + u16(buf);
 }
 
@@ -313,8 +313,8 @@ void PagePane::build_calendar() {
         const long long a = jint(calendar_, "from"), b = jint(calendar_, "to") - 1;
         const std::tm ta = local_tm(a), tb = local_tm(b);
         char buf[48];
-        if (calendar_mode_ == "day") std::snprintf(buf, sizeof buf, "%d. %d. %d", ta.tm_mday, ta.tm_mon + 1, ta.tm_year + 1900);
-        else std::snprintf(buf, sizeof buf, "%d. %d. – %d. %d. %d", ta.tm_mday, ta.tm_mon + 1, tb.tm_mday, tb.tm_mon + 1, tb.tm_year + 1900);
+        if (calendar_mode_ == "day") std::snprintf(buf, sizeof buf, "%d.%d.%d", ta.tm_mday, ta.tm_mon + 1, ta.tm_year + 1900);
+        else std::snprintf(buf, sizeof buf, "%d.%d. – %d.%d.%d", ta.tm_mday, ta.tm_mon + 1, tb.tm_mday, tb.tm_mon + 1, tb.tm_year + 1900);
         auto* range = bar->emplace<ui::Label>(shell_.ui(), u16(buf), TextStyle::body_strong, Paint::text, false, "calendar-range");
         range->padding.top = 6;
         range->role = ui::Role::text;
@@ -581,13 +581,13 @@ void PagePane::build_teams(Node& c) {
         return;
     }
     const std::string last = jstr(teams_, "last_read");
-    row(c, "settings-teams-last-read", shell_.t("settings.teams.last_read"), last.empty() ? shell_.t("settings.mail.never") : u16(last));
+    row(c, "settings-teams-last-read", shell_.t("settings.teams.last_read"), last.empty() ? shell_.t("settings.mail.never") : shell_.moment_of(last));
     row(c, "settings-teams-counts", shell_.t("settings.teams.local_copy"),
-        shell_.t("settings.teams.counts", {{"conversations", u16(std::to_string(jint(teams_, "conversations")))},
-                                           {"messages", u16(std::to_string(jint(teams_, "messages")))}}));
+        shell_.t("settings.teams.counts", {{"conversations", shell_.number(jint(teams_, "conversations"))},
+                                           {"messages", shell_.number(jint(teams_, "messages"))}}));
     if (const std::string e = jstr(teams_, "error"); !e.empty()) text(c, shell_.t("settings.teams.problem", {{"reason", u16(e)}}), Paint::warning, "settings-teams-error");
     if (const json* n = jobj(teams_, "counts"); n && (jint(*n, "skipped") > 0 || jint(*n, "decode_errors") > 0))
-        text(c, shell_.t("settings.teams.skipped", {{"skipped", u16(std::to_string(jint(*n, "skipped") + jint(*n, "decode_errors")))}}),
+        text(c, shell_.t("settings.teams.skipped", {{"skipped", shell_.number(jint(*n, "skipped") + jint(*n, "decode_errors"))}}),
              Paint::text_secondary, "settings-teams-skipped");
     auto* actions = c.emplace<Node>();
     actions->axis = ui::Axis::row;
@@ -671,18 +671,31 @@ void PagePane::build_daily_report(Node& c) {
         return;
     }
     if (report_time_.empty()) report_time_ = u16(jstr(report_, "time", "08:00"));
-    auto* time = c.emplace<ui::TextField>(shell_.ui(), "settings-report-time", shell_.t("settings.daily_report.time"));
+    // The time on one row: its label, a short field and Save (client/work-inbox Labelled Fields, Settings Row Layout).
+    auto* time_row = c.emplace<Node>("settings-report-time-row");
+    time_row->axis = ui::Axis::row;
+    time_row->gap = 12;
+    auto* time_label = time_row->emplace<ui::Label>(shell_.ui(), shell_.t("settings.daily_report.time"), TextStyle::body, Paint::text, false);
+    time_label->role = ui::Role::none;
+    time_label->padding.top = 6;
+    auto* time = time_row->emplace<ui::TextField>(shell_.ui(), "settings-report-time", shell_.t("settings.daily_report.time"));
+    time->width = ui::Sizing::fixed;
+    time->fixed_w = 96;
     time->set_text(report_time_);
     ui::TextField* tp = time;
     time->on_change = [this, tp] { report_time_ = tp->text(); };
-    button(c, "settings-report-time-save", shell_.t("settings.daily_report.save_time"), [this, configure] {
+    button(*time_row, "settings-report-time-save", shell_.t("settings.daily_report.save_time"), [this, configure] {
         configure({{"time", ui::to_utf8(report_time_)}});
     })->enabled = busy_.empty();
     c.emplace<ui::Label>(shell_.ui(), shell_.t("settings.daily_report.days"), TextStyle::body_strong)->role = ui::Role::heading;
     const json days = report_.value("days", json::array());
+    auto* day_row = c.emplace<Node>("settings-report-days");
+    day_row->axis = ui::Axis::row;
+    day_row->wraps = true;
+    day_row->gap = 16;
     for (int d : {1, 2, 3, 4, 5, 6, 0}) {
         const bool has = std::find(days.begin(), days.end(), json(d)) != days.end();
-        setting_switch(c, "settings-report-day-" + std::to_string(d), shell_.t("calendar.weekday." + std::to_string(d)), has, false,
+        setting_switch(*day_row, "settings-report-day-" + std::to_string(d), shell_.t("calendar.weekday." + std::to_string(d)), has, false,
                        [configure, days, d](bool v) {
                            json next = json::array();
                            for (const auto& x : days)
@@ -690,9 +703,10 @@ void PagePane::build_daily_report(Node& c) {
                            if (v) next.push_back(d);
                            configure({{"days", next}});
                        });
+        day_row->children().back()->width = ui::Sizing::fit;
     }
     if (const std::string last = jstr(report_, "last_day"); !last.empty())
-        row(c, "settings-report-last", shell_.t("settings.daily_report.last"), u16(last));
+        row(c, "settings-report-last", shell_.t("settings.daily_report.last"), shell_.date_of(last));
     auto* actions = c.emplace<Node>();
     actions->axis = ui::Axis::row;
     actions->gap = 8;

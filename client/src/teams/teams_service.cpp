@@ -588,6 +588,22 @@ std::optional<StoredTeamsMessage> TeamsService::message(const std::string& conve
     return row_message(q);
 }
 
+bool TeamsService::user_replied(const std::string& conversation_id, const std::string& message_id) {
+    const auto source = message(conversation_id, message_id);
+    if (!source || source->mine) return false;  // the user's own message is a commitment, not a request to answer
+    const auto c = conversation(conversation_id);
+    const bool channel = c && c->type == "channel";
+    const auto root = [](const std::string& id, const std::string& parent) { return parent.empty() ? id : parent; };
+    const std::string thread = root(source->id, source->parent_id);
+    const std::lock_guard lock(env_.db->mutex());
+    auto q = env_.db->prepare("SELECT id, parent_id FROM teams_messages WHERE conversation_id=?1 AND mine=1 AND system=0 "
+                              "AND (at_ms>?2 OR (at_ms=?2 AND id>?3))");
+    q.bind(1, conversation_id).bind(2, source->at_ms).bind(3, source->id);
+    while (q.step())
+        if (!channel || root(q.col_text(0), q.col_text(1)) == thread) return true;
+    return false;
+}
+
 std::vector<StoredTeamsMessage> TeamsService::messages(const std::string& conversation_id, long long from, long long to, size_t limit) {
     std::vector<StoredTeamsMessage> out;
     const std::lock_guard lock(env_.db->mutex());

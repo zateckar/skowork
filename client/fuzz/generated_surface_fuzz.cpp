@@ -12,5 +12,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     (void)wb::ui::discover_generated_surfaces(input);
     const std::string fenced = "```skowork-ui\n" + std::string(input) + "\n```\n";
     (void)wb::ui::discover_generated_surfaces(fenced);
+    (void)wb::ui::generated_surface_text(fenced);
+    (void)wb::ui::generated_surface_text(input);
     return 0;
 }

@@ -61,7 +61,7 @@ void PagePane::build_api_connectors(Node& c) {
     auto* items = c.emplace<Node>("settings-api-connectors");
     items->role = ui::Role::list;
     items->name = shell_.t("settings.connectors.api.heading");
-    items->gap = 8;
+    items->gap = 16;  // items of several lines (Plain Settings Details)
     for (const json* x : apis) {
         const std::string id = jstr(*x, "id");
         const std::string state = jstr(*x, "state");
@@ -93,21 +93,32 @@ void PagePane::build_api_connectors(Node& c) {
                                  state == "needs-token" || state == "token-rejected" ? Paint::warning_background : Paint::info_background,
                                  Paint::text)
             ->role = ui::Role::none;
-        item->emplace<ui::Label>(shell_.ui(),
-                                 shell_.t("settings.connectors.tools", {{"usable", u16(std::to_string(usable))}, {"total", u16(std::to_string(total))}}),
-                                 TextStyle::caption, Paint::text_secondary)
-            ->role = ui::Role::none;
+        // "0 of 0 tools usable" says nothing; the reason line below does (Plain Settings Wording).
+        if (total > 0)
+            item->emplace<ui::Label>(shell_.ui(),
+                                     shell_.t("settings.connectors.tools", {{"usable", shell_.number(usable)}, {"total", shell_.number(total)}}),
+                                     TextStyle::caption, Paint::text_secondary)
+                ->role = ui::Role::none;
         if (usable == 0) {
             std::u16string why = shell_.t("settings.connectors.api.no_usable_tools");
             if (!reason.empty()) why += u": " + shell_.t("settings.connectors.api.reason." + reason);
-            item->emplace<ui::Label>(shell_.ui(), shell_.t("settings.connectors.warning") + u": " + why, TextStyle::caption)->role = ui::Role::none;
+            item->emplace<ui::Label>(shell_.ui(), why, TextStyle::caption, Paint::warning, true, "api-connector-why-" + id)->role = ui::Role::none;
         }
         if (const std::string ht = jstr(*x, "help_text"); !ht.empty())
             item->emplace<ui::Label>(shell_.ui(), u16(ht), TextStyle::caption, Paint::text_secondary, true)->role = ui::Role::none;
-        if (const std::string hl = jstr(*x, "help_link"); !hl.empty())
-            item->emplace<ui::Label>(shell_.ui(), shell_.t("settings.connectors.api.help_link", {{"link", u16(hl)}}), TextStyle::caption,
-                                     Paint::text_secondary, true)
-                ->role = ui::Role::none;
+        if (const std::string hl = jstr(*x, "help_link"); !hl.empty()) {
+            // A link the user can follow (the window asks before opening the browser), not an address to copy.
+            auto* link = item->emplace<ui::Button>(shell_.ui(), "api-connector-help-" + id, shell_.t("settings.connectors.api.help_open"),
+                                                   ui::Button::Kind::subtle);
+            link->make_inline();
+            link->padding.left = 0;  // in line with the text above
+            link->width = ui::Sizing::fit;
+            link->role = ui::Role::link;
+            link->help = u16(hl);
+            link->on_click = [this, hl] {
+                if (shell_.ui().open_link) shell_.ui().open_link(u16(hl));
+            };
+        }
         if (auth != "user-pat") continue;
 
         // The personal access token: whether one is set and when, never its text.
@@ -123,7 +134,7 @@ void PagePane::build_api_connectors(Node& c) {
         actions->axis = ui::Axis::row;
         actions->gap = 8;
         if (!editing) {
-            const bool replacing = has && state == "ready";
+            const bool replacing = has;  // a set token is replaced, a rejected one too (Plain Settings Wording)
             button(*actions, "settings-connector-token-open-" + id,
                    shell_.t(replacing ? "settings.connectors.api.replace_token" : "settings.connectors.api.add_token"),
                    [this, id] {

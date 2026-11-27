@@ -121,9 +121,9 @@ void PagePane::build_mail(Node& c) {
     const std::string last = jstr(mail_, "last_sync");
     row(c, "settings-mail-last-sync", shell_.t("settings.mail.last_sync"), last.empty() ? shell_.t("settings.mail.never") : sync_time(shell_, last));
     row(c, "settings-mail-counts", shell_.t("settings.mail.local_copy"),
-        shell_.t("settings.mail.counts", {{"messages", u16(std::to_string(jint(mail_, "messages")))},
-                                          {"events", u16(std::to_string(jint(mail_, "events")))},
-                                          {"withheld", u16(std::to_string(jint(mail_, "withheld")))}}));
+        shell_.t("settings.mail.counts", {{"messages", shell_.number(jint(mail_, "messages"))},
+                                          {"events", shell_.number(jint(mail_, "events"))},
+                                          {"withheld", shell_.number(jint(mail_, "withheld"))}}));
     if (const std::string e = jstr(mail_, "sync_error"); !e.empty())
         text(c, shell_.t("settings.mail.sync_error", {{"reason", u16(e)}}), Paint::warning, "settings-mail-sync-error");
 
@@ -160,7 +160,11 @@ void PagePane::build_mail(Node& c) {
             item->gap = 8;
             const std::u16string what = shell_.t(std::string("settings.mail.excluded_") + kind, {{"name", u16(value)}});
             item->name = what;
-            item->emplace<ui::Label>(shell_.ui(), what, TextStyle::body, Paint::text, false)->role = ui::Role::none;
+            {
+                auto* l = item->emplace<ui::Label>(shell_.ui(), what, TextStyle::body, Paint::text, true);
+                l->role = ui::Role::none;
+                l->padding.top = 6;  // fills the row, so the action sits at its end (Settings Row Layout); in line with the button's text
+            }
             auto* rm = button(*item, "mail-exclusion-remove-" + key, shell_.t("settings.mail.remove"), [this, kind = std::string(kind), value] {
                 act("mail", "mail.exclusions.remove", {{"kind", kind}, {"value", value}}, [this](const json&) { load_mail(); });
             }, ui::Button::Kind::subtle);

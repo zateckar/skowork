@@ -38,6 +38,13 @@ struct Env {
     std::function<bool()> hold_reminders;  // presentation mode or paused background work
     std::function<void()> changed;         // the Agenda changed: the UI reloads
     eval::DecisionLog* decisions = nullptr;  // the user decision log (client/evaluation); null: not logged
+    // Replied Items Close (close-replied-work D1, D2): whether the user sent mail in this mail conversation after
+    // `after_ms`, read from the local copy; unset: never.
+    std::function<bool(const std::string& conversation, long long after_ms)> user_replied;
+    // Whether the user replied to this Teams message (close-replied-work D5; TeamsService::user_replied); unset: never.
+    std::function<bool(const std::string& conversation_id, const std::string& message_id)> teams_replied;
+    // Cancels the preparation Run, if it is still active, and archives the preparation Thread.
+    std::function<void(const std::string& thread_id, const std::string& run_id)> close_preparation;
 };
 
 constexpr size_t kPendingCap = 500;
@@ -66,6 +73,13 @@ public:
     void offer(const SourceItem& item);
     // The source item is gone, excluded or no longer accessible (Agenda Item Withdrawal And Retention).
     void withdraw(const std::string& kind, const std::string& source_id);
+    // The user sent mail in this conversation at `sent_at` (close-replied-work D2, D3): open items whose newest source is
+    // mail of that conversation received before it are done with the notice "replied", their preparation closed. The
+    // user decision log is not written (D4). Returns how many items closed.
+    int user_replied(const std::string& conversation, long long sent_at);
+    // The user posted in this Teams conversation (close-replied-work D5): open items whose newest source is a Teams
+    // message of it that the user has now answered (Env::teams_replied) close the same way.
+    int user_replied_teams(const std::string& conversation);
 
     // Bounded background work: one detection batch at most every 60 seconds, reminders, automatic preparation and
     // retention. Safe to call often; returns at once while another tick runs.
@@ -105,6 +119,8 @@ private:
     void detect(const std::vector<Pending>& batch);
     void accept(const Candidate& c, const SourceItem& item, const Due& due);
     std::optional<Due> local_due(const Candidate& c, long long source_ms, int tz_now);
+    // Closes open items whose newest source `answered` (close-replied-work D3); returns how many closed.
+    int close_replied(const std::function<bool(const ItemSource& newest)>& answered);
     std::optional<std::string> model_merge(const Candidate& c, const std::vector<Item>& nearby);
     void reminders(long long now);
     void auto_prepare(long long now);

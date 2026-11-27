@@ -597,6 +597,42 @@ TEST(OutlookBackend, SyncBackfillsThenAnnouncesNewChangedAndDeletedMail) {
     EXPECT_EQ(fx.svc->store().counts().messages, 2);
 }
 
+// close-replied-work: a new message in Sent Items is "mail sent" (not received); backfill and drafts are not.
+TEST(OutlookBackend, MailTheUserSentIsAnnouncedAsSentOutsideBackfill) {
+    OutlookFixture fx;
+    fx.fake->add("M1", fx.now - 2 * kHour, "Order 4711").conversation_id = "C-ORDER";
+    fx.fake->add("S0", fx.now - 3 * kHour, "Earlier reply", "F-SENT").conversation_id = "C-OLD";
+    ASSERT_TRUE(fx.svc->sync_now());
+    auto ev = fx.take();
+    EXPECT_EQ(fx.count(ev, "mail.sent"), 0);  // the first read of Sent Items is a backfill
+    EXPECT_EQ(fx.count(ev, "mail.sent", true), 0);
+    EXPECT_FALSE(fx.svc->store().user_replied("C-ORDER", fx.now - 2 * kHour));
+
+    auto& draft = fx.fake->add("D9", fx.now - kHour, "RE: Order 4711 (draft)", "F-DRAFTS");
+    draft.conversation_id = "C-ORDER";
+    draft.is_draft = true;
+    fx.fake->add("S1", fx.now - kHour, "RE: Order 4711", "F-SENT").conversation_id = "C-ORDER";
+    ASSERT_TRUE(fx.svc->sync_now());
+    ev = fx.take();
+    EXPECT_EQ(fx.count(ev, "mail.sent"), 1);
+    EXPECT_EQ(fx.count(ev, "mail.received"), 0);
+    const auto sent = std::find_if(ev.begin(), ev.end(), [](const MailEvent& e) { return e.kind == "mail.sent"; });
+    ASSERT_NE(sent, ev.end());
+    EXPECT_EQ(sent->id, "S1");
+    EXPECT_EQ(jstr(sent->detail, "conversation_id"), "C-ORDER");
+    const auto stored = fx.svc->store().message("S1");
+    ASSERT_TRUE(stored);
+    EXPECT_EQ(jint(sent->detail, "sent_at"), stored->received_at);
+    // The reply lookup over the local copy: after the request, not after the reply itself, never another conversation.
+    EXPECT_TRUE(fx.svc->store().user_replied("C-ORDER", fx.now - 2 * kHour));
+    EXPECT_FALSE(fx.svc->store().user_replied("C-ORDER", stored->received_at));
+    EXPECT_FALSE(fx.svc->store().user_replied("C-OTHER", 0));
+    EXPECT_FALSE(fx.svc->store().user_replied("", 0));
+    // Nothing is announced twice.
+    ASSERT_TRUE(fx.svc->sync_now());
+    EXPECT_EQ(fx.count(fx.take(), "mail.sent"), 0);
+}
+
 TEST(OutlookBackend, RestartKeepsTheDeltaAndAnnouncesNothingTwice) {
     OutlookFixture fx;
     fx.fake->add("M1", fx.now - kHour, "Hello");

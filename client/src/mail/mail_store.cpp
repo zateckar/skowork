@@ -306,6 +306,15 @@ std::vector<StoredMessage> MailStore::messages_between(long long from, long long
     return out;
 }
 
+bool MailStore::user_replied(const std::string& conversation_id, long long after_ms) {
+    if (conversation_id.empty()) return false;
+    const std::lock_guard lock(db_.mutex());
+    auto s = db_.prepare("SELECT 1 FROM mail_messages m JOIN mail_folders f ON f.id = m.folder_id "
+                         "WHERE m.conversation_id = ?1 AND m.received_at > ?2 AND m.is_draft = 0 AND lower(f.well_known) = 'sentitems' LIMIT 1");
+    s.bind(1, conversation_id).bind(2, after_ms);
+    return s.step();
+}
+
 std::vector<std::string> MailStore::event_ids() {
     const std::lock_guard lock(db_.mutex());
     auto s = db_.prepare("SELECT id FROM cal_events");

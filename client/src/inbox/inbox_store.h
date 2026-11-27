@@ -98,6 +98,11 @@ public:
     // set_archived, set_pinned and move also take a Chat entry id (Chat Entry Triage); a Chat's read state, title and
     // existence belong to client/user-messaging.
     Status set_unread(const std::string& thread_id, bool unread);
+    // Replaces the preview the database derived from a message's raw text with its readable text (client/work-inbox
+    // Surface Text In Previews); nothing when a later message already changed the preview.
+    Status replace_preview(const std::string& thread_id, const std::string& raw, const std::string& text);
+    // Replaces the searchable text of one message (its search excerpts then show text, not surface JSON).
+    Status replace_search_text(const std::string& run_id, long long seq, const std::string& text);
     Status set_archived(const std::string& thread_id, bool archived);
     Status set_pinned(const std::string& thread_id, bool pinned);
     Status rename(const std::string& thread_id, const std::string& title);
