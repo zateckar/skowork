@@ -3,7 +3,7 @@
 # Windows: GCC on MinGW-w64 builds everything. Other platforms (the Linux sanitizer/fuzz CI job) build only
 # the portable libraries under src/base and their tests.
 cmake_minimum_required(VERSION 3.25)
-project(skowork_client VERSION 0.1.0 LANGUAGES C CXX)
+project(skowork_client VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
