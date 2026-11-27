@@ -33,6 +33,28 @@ std::u16string day(const std::string& iso) { return u16(iso.size() >= 10 ? iso.s
 
 bool blank(const std::u16string& s) { return s.find_first_not_of(u" \t\r\n") == std::u16string::npos; }
 
+// A tab (Selected Tabs, improve-plain-information D6): the chosen one is drawn with an accent underline and is
+// selected for UI Automation.
+class TabButton : public ui::Button {
+public:
+    TabButton(ui::Ui& ui, std::string id, std::u16string label, bool selected)
+        : Button(ui, std::move(id), std::move(label), Kind::subtle), selected_(selected) {
+        role = ui::Role::list_item;
+        width = Sizing::fit;
+        if (selected_) text_style_ = TextStyle::body_strong;
+    }
+    int selected_state() const override { return selected_ ? 1 : 0; }
+    void select() override { invoke(); }
+    void draw(ui::Canvas& c) override {
+        Button::draw(c);
+        const ui::Rect f = frame();
+        if (selected_) c.round({f.x + 6, f.bottom() - 3, f.w - 12, 3}, 1.5f, Paint::accent);
+    }
+
+private:
+    bool selected_;
+};
+
 Node* row_box(Node& parent, const std::string& id = {}) {
     auto* r = id.empty() ? parent.emplace<Node>() : parent.emplace<Node>(id);
     r->axis = ui::Axis::row;
@@ -173,7 +195,7 @@ KnowledgeView::KnowledgeView(Shell& shell) : Node("knowledge-view"), shell_(shel
 
     // Sections (task 10.1): Sources with their tabs, Knowledge, Review and Sharing.
     sections_ = row_box(*this, "knowledge-sections");
-    sections_->role = ui::Role::group;
+    sections_->role = ui::Role::list;
     sections_->name = shell_.t("knowledge.sections");
     sections_->gap = 4;
 
@@ -182,7 +204,7 @@ KnowledgeView::KnowledgeView(Shell& shell) : Node("knowledge-view"), shell_(shel
 
     // Source tabs with counts (D3).
     tabs_ = row_box(*this, "knowledge-tabs");
-    tabs_->role = ui::Role::group;
+    tabs_->role = ui::Role::list;
     tabs_->name = shell_.t("knowledge.tabs");
     tabs_->gap = 4;
 
@@ -1237,7 +1259,8 @@ void KnowledgeView::rebuild_tabs() {
         if (counts_.is_object() && counts_.contains(tab))
             label = shell_.t("knowledge.tab_count", {{"name", label}, {"n", u16(std::to_string(jint(counts_, tab.c_str())))}});
         const bool on = tab == tab_ && !results_.is_object();
-        auto* b = button(*tabs_, "knowledge-tab-" + tab, label, [this, tab] {
+        auto* b = tabs_->emplace<TabButton>(shell_.ui(), "knowledge-tab-" + tab, label, on);
+        b->on_click = [this, tab] {
             if (tab_ == tab && !results_.is_object()) return;
             ++search_request_;
             if (tab_ != tab) {
@@ -1248,7 +1271,7 @@ void KnowledgeView::rebuild_tabs() {
             results_ = nullptr;
             shown_query_.clear();
             rebuild();
-        }, on ? ui::Button::Kind::standard : ui::Button::Kind::subtle);
+        };
         b->name = on ? shell_.t("knowledge.tab_selected", {{"name", label}}) : label;
         b->enabled = true;
     }
@@ -1861,15 +1884,16 @@ void KnowledgeView::rebuild_sections() {
         const std::string section = s;
         const bool on = section == section_ && !results_.is_object();
         std::u16string label = shell_.t("knowledge.section." + section);
-        auto* b = button(*sections_, "knowledge-section-" + section, label, [this, section] { set_section(section); },
-                         on ? ui::Button::Kind::standard : ui::Button::Kind::subtle);
+        auto* b = sections_->emplace<TabButton>(shell_.ui(), "knowledge-section-" + section, label, on);
+        b->on_click = [this, section] { set_section(section); };
         b->name = on ? shell_.t("knowledge.tab_selected", {{"name", label}}) : label;
         b->enabled = true;
     }
 }
 
 void KnowledgeView::list_chip(Node& parent, const std::string& id, const std::u16string& label, bool on, std::function<void()> f) {
-    auto* b = button(parent, id, label, std::move(f), on ? ui::Button::Kind::standard : ui::Button::Kind::subtle);
+    auto* b = parent.emplace<TabButton>(shell_.ui(), id, label, on);
+    b->on_click = std::move(f);
     b->name = on ? shell_.t("knowledge.tab_selected", {{"name", label}}) : label;
     b->enabled = true;
 }

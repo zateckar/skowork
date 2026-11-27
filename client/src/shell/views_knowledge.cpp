@@ -19,10 +19,11 @@ namespace {
 std::u16string u16(const std::string& s) { return ui::to_utf16(s); }
 std::u16string num(long long n) { return u16(std::to_string(n)); }
 
-// "2026-10-26T15:04:05.123Z" as "2026-10-26 15:04 UTC".
-std::u16string when(const std::string& iso) {
-    if (iso.size() < 16) return u16(iso);
-    return u16(iso.substr(0, 10) + " " + iso.substr(11, 5) + " UTC");
+// A timestamp in the window's language and local time: the time today, the date and time otherwise (improve-threads-
+// calendar-agenda: Plain Information).
+std::u16string when(Shell& shell, const std::string& iso) {
+    const auto ms = iso_millis(iso);
+    return ms ? shell.moment(*ms) : u16(iso);
 }
 
 // A text field whose text survives page rebuilds in `keep`.
@@ -137,7 +138,7 @@ void PagePane::build_knowledge(Node& c) {
     auto* sources = c.emplace<Node>("settings-knowledge-sources");
     sources->role = ui::Role::list;
     sources->name = shell_.t("settings.knowledge.sources");
-    sources->gap = 12;
+    sources->gap = 16;
     if (const json* list = jobj(knowledge_, "sources"); list && list->is_array())
         for (const auto& s : *list) {
             const std::string kind = jstr(s, "kind");
@@ -150,12 +151,14 @@ void PagePane::build_knowledge(Node& c) {
             item->role = ui::Role::list_item;
             item->gap = 4;
             item->name = label + u": " + shell_.t("settings.knowledge.states." + state);
-            item->emplace<ui::Label>(shell_.ui(), item->name, TextStyle::body_strong, Paint::text, false)->role = ui::Role::none;
+            // The switch shows on and off; the heading adds the state only when the switch cannot say it.
+            const std::u16string heading = state == "paused" || state == "policy_off" ? item->name : label;
+            item->emplace<ui::Label>(shell_.ui(), heading, TextStyle::body_strong, Paint::text, false)->role = ui::Role::none;
             const std::string last = jstr(s, "last_update");
             text(*item,
                  shell_.t("settings.knowledge.counts", {{"items", num(jint(s, "items"))},
                                                         {"pending", num(jint(s, "pending"))},
-                                                        {"last", last.empty() ? shell_.t("settings.mail.never") : when(last)}}),
+                                                        {"last", last.empty() ? shell_.t("settings.mail.never") : when(shell_, last)}}),
                  Paint::text_secondary, "knowledge-source-counts-" + kind);
             if (const std::string e = jstr(s, "error"); !e.empty())
                 text(*item, shell_.t("settings.knowledge.source_error", {{"reason", u16(e)}}), Paint::warning, "knowledge-source-error-" + kind);
@@ -165,32 +168,61 @@ void PagePane::build_knowledge(Node& c) {
                 if (const json* sk = jobj(s, "skipped"); sk && sk->is_array())
                     for (const auto& x : *sk) {
                         if (++shown > 10) break;
-                        text(*item, u16(jstr(x, "id")) + u" — " + u16(jstr(x, "reason")), Paint::text_secondary);
+                        // By file name with a translated reason (Plain Settings Details); the full id in the tooltip.
+                        const std::string sid = jstr(x, "id"), why = jstr(x, "reason");
+                        const auto cut = sid.find_last_of("/\\");
+                        // The service records an English reason; known ones are shown translated.
+                        const std::string code = why == "not permitted by policy"            ? "policy"
+                                                 : why == "unsupported type"                 ? "unsupported"
+                                                 : why == "not text"                         ? "not_text"
+                                                 : why == "too large" || why.starts_with("larger than") ? "too_large"
+                                                 : why.starts_with("text extraction failed") ? "extraction"
+                                                                                             : why;
+                        const std::string rkey = "settings.knowledge.skip_reasons." + code;
+                        auto* l = text(*item, u16(cut == std::string::npos ? sid : sid.substr(cut + 1)) + u" — " +
+                                                  (shell_.ui().strings.has(rkey) ? shell_.t(rkey) : u16(why)),
+                                       Paint::text_secondary);
+                        l->help = u16(sid);
                     }
             }
             auto* actions = row_box(*item);
             if (!policy_on) {
                 text(*actions, shell_.t("settings.knowledge.policy_off"), Paint::text_secondary, "knowledge-source-policy-" + kind);
             } else {
-                button(*actions, "knowledge-source-toggle-" + kind, shell_.t(user_on ? "settings.knowledge.turn_off" : "settings.knowledge.turn_on"),
-                       [this, kind, user_on] { act("knowledge", "knowledge.source.set", {{"kind", kind}, {"enabled", !user_on}}, [this](const json&) { load_knowledge(); }); })
-                    ->enabled = busy_.empty();
-                if (user_on)
-                    button(*actions, "knowledge-source-pause-" + kind, shell_.t(paused ? "settings.knowledge.resume" : "settings.knowledge.pause"),
-                           [this, kind, paused] { act("knowledge", "knowledge.source.pause", {{"kind", kind}, {"paused", !paused}}, [this](const json&) { load_knowledge(); }); })
-                        ->enabled = busy_.empty();
-                button(*actions, "knowledge-source-reindex-" + kind, shell_.t("settings.knowledge.reindex"), [this, kind] {
-                    act("knowledge", "knowledge.source.reindex", {{"kind", kind}}, [this](const json&) {
-                        shell_.announce(shell_.t("settings.knowledge.reindex_started"));
-                        load_knowledge();
-                    });
-                })->enabled = busy_.empty();
+                // On/off is a switch like every other setting; the rest is in the More menu (Plain Settings Details).
+                setting_switch(*actions, "knowledge-source-enabled-" + kind, shell_.t("settings.knowledge.use_source", {{"name", label}}), user_on,
+                               false, [this, kind](bool on) {
+                                   act("knowledge", "knowledge.source.set", {{"kind", kind}, {"enabled", on}}, [this](const json&) { load_knowledge(); });
+                               });
             }
-            auto* forget = button(*actions, "knowledge-source-forget-" + kind, shell_.t("settings.knowledge.forget"),
-                                  [this, kind, label] { ask_forget("knowledge", label, "knowledge.source.forget", {{"kind", kind}}); },
-                                  ui::Button::Kind::subtle);
-            forget->name = shell_.t("settings.knowledge.forget_named", {{"name", label}});
-            forget->enabled = busy_.empty() && jint(s, "items") > 0;
+            const bool can_forget = jint(s, "items") > 0;
+            if (policy_on || can_forget) {
+                auto* more = actions->emplace<ui::IconButton>(shell_.ui(), "knowledge-source-more-" + kind, ui::icon::more,
+                                                              shell_.t("settings.knowledge.more_named", {{"name", label}}));
+                more->enabled = busy_.empty();
+                ui::IconButton* mp = more;
+                more->on_click = [this, kind, label, user_on, paused, policy_on, can_forget, mp] {
+                    auto menu = std::make_unique<ui::Menu>("knowledge-source-menu-" + kind, shell_.t("settings.knowledge.more_named", {{"name", label}}));
+                    if (policy_on && user_on)
+                        menu->add_item(shell_.ui(), "knowledge-source-pause-" + kind, shell_.t(paused ? "settings.knowledge.resume" : "settings.knowledge.pause"),
+                                       [this, kind, paused] {
+                                           act("knowledge", "knowledge.source.pause", {{"kind", kind}, {"paused", !paused}},
+                                               [this](const json&) { load_knowledge(); });
+                                       });
+                    if (policy_on)
+                        menu->add_item(shell_.ui(), "knowledge-source-reindex-" + kind, shell_.t("settings.knowledge.reindex"), [this, kind] {
+                            act("knowledge", "knowledge.source.reindex", {{"kind", kind}}, [this](const json&) {
+                                shell_.announce(shell_.t("settings.knowledge.reindex_started"));
+                                load_knowledge();
+                            });
+                        });
+                    if (can_forget)
+                        menu->add_item(shell_.ui(), "knowledge-source-forget-" + kind, shell_.t("settings.knowledge.forget"),
+                                       [this, kind, label] { ask_forget("knowledge", label, "knowledge.source.forget", {{"kind", kind}}); });
+                    shell_.window().overlay().show(std::move(menu), mp->frame(), true);
+                    shell_.window().render();
+                };
+            }
         }
 
     // ---- Folders of the files Source ----

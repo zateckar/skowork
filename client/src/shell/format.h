@@ -4,12 +4,22 @@
 
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/json.h"
 #include "ui/strings.h"
 
 namespace wb::shell {
+
+// A cron schedule in words (improve-plain-information D2): daily, workdays, weekly (one weekday, 0 = Sunday) or hourly
+// with a fixed minute and hour; anything else is custom.
+struct ScheduleWords {
+    std::string kind = "custom";  // daily | workdays | weekly | hourly | custom
+    int hour = -1, minute = -1, weekday = -1;
+    bool operator==(const ScheduleWords&) const = default;
+};
+ScheduleWords describe_schedule(std::string_view cron);
 
 // Binary sizes with Windows-style labels: 1536 -> "1.5 KB". `decimal` is the language's decimal separator.
 std::string format_bytes(double bytes, char decimal = '.');

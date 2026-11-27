@@ -151,6 +151,7 @@ public:
     std::string revision(const std::string& scope, const std::string& item_id);
 
 private:
+    std::optional<json> decided_ref(const std::string& thread_id);
     struct Settings {
         bool enabled = false, calendar = false, teams = false, auto_prepare = true;
         std::vector<std::string> folders;

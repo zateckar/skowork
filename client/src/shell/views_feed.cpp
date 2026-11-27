@@ -52,6 +52,21 @@ std::string id_of(std::string_view prefix, const std::string& key) {
     return s;
 }
 
+// A source's short reference: a file's name, a web page's host; nothing for other kinds (their kind says enough).
+std::u16string source_reference(const std::string& kind, const std::string& id) {
+    if (id.empty()) return {};
+    if (kind == "files") {
+        const auto cut = id.find_last_of("/\\");
+        return ui::to_utf16(cut == std::string::npos ? id : id.substr(cut + 1));
+    }
+    if (kind == "web" || kind == "browser") {
+        const auto scheme = id.find("://");
+        const size_t from = scheme == std::string::npos ? 0 : scheme + 3;
+        return ui::to_utf16(id.substr(from, id.find('/', from) - from));
+    }
+    return {};
+}
+
 // A timestamp in the window's language: the time today, the date and time otherwise.
 std::u16string format_at(Shell& s, const std::string& iso) {
     const auto ms = iso_millis(iso);
@@ -245,10 +260,11 @@ private:
     void build_approval() {
         ui::Ui& u = shell_.ui();
         const json& p = a_.payload;
-        const std::u16string tool = ui::to_utf16(jstr(p, "tool"));
+        const std::u16string tool = shell_.tool_words(jstr(p, "tool"));
         name = shell_.t("approval.title") + u": " + tool;
         auto* h = emplace<ui::Label>(u, name, TextStyle::body_strong, Paint::text, true, id("title"));
         h->role = ui::Role::heading;
+        h->help = ui::to_utf16(jstr(p, "tool"));  // the Tool's id, for whoever needs it
         const std::string risk = jstr(p, "risk");
         const std::u16string risk_text = u.strings.has("feed.risk." + risk) ? shell_.t("feed.risk." + risk) : ui::to_utf16(risk);
         emplace<ui::Label>(u, shell_.t("approval.risk") + u": " + risk_text, TextStyle::body, Paint::text, true, id("risk"));
@@ -287,10 +303,11 @@ private:
             for (const json& src : *prov) {
                 const std::string kind = jstr(src, "source_kind");
                 std::u16string line = u.strings.has("approval.sources." + kind) ? shell_.t("approval.sources." + kind) : ui::to_utf16(kind);
-                line += u": " + ui::to_utf16(jstr(src, "source_id"));
+                if (const std::u16string ref = source_reference(kind, jstr(src, "source_id")); !ref.empty()) line += u": " + ref;
                 if (const std::string at = jstr(src, "at"); !at.empty()) line += u", " + format_at(shell_, at);
                 auto* l = list->emplace<ui::Label>(u, line, TextStyle::body, Paint::text, true, id("source-" + std::to_string(i++)));
                 l->role = ui::Role::list_item;
+                l->help = ui::to_utf16(jstr(src, "source_id"));  // the full reference
             }
         }
         if (!a_.open()) {

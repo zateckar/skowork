@@ -429,17 +429,17 @@ void StatusBarView::rebuild() {
             auto* b = emplace<ui::Button>(shell_.ui(), "status-mcp", std::move(text), ui::Button::Kind::subtle);
             b->make_inline();
             b->help = shell_.t("status_bar.connectors_title");
-            b->on_click = [this] { shell_.navigate("#/settings"); };
+            b->on_click = [this] { shell_.navigate("#/settings/connections"); };
         }
         if (const json* p = jobj(s, "policy")) {
             const std::string state = jstr(*p, "state");
             // The version is a number in the status (a string in older builds).
             const auto ver = p->find("version");
             const std::u16string v = ui::to_utf16(ver != p->end() && ver->is_number_integer() ? std::to_string(ver->get<long long>()) : jstr(*p, "version"));
-            label(state == "valid"     ? shell_.t("status_bar.policy", {{"version", v}})
-                  : state == "expired" ? shell_.t("status_bar.policy_expired", {{"version", v}})
-                                       : shell_.t("status_bar.no_policy"),
-                  "status-policy");
+            // A valid policy needs no mention; an expired or missing one is a warning (Plain Information).
+            if (state != "valid")
+                label(state == "expired" ? shell_.t("status_bar.policy_expired", {{"version", v}}) : shell_.t("status_bar.no_policy"),
+                      "status-policy");
         }
     }
     // Context usage of the open Thread: warns at 75 % and offers Compact now.

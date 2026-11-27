@@ -662,6 +662,17 @@ TEST(UiMarkdown, BlocksBecomeElementsWithLinksAndCopy) {
     s.tree.set_focus(links[1]);
     s.tree.key({kKeyEnter});
     EXPECT_EQ(s.opened.size(), 2u);  // the window's open_link shows the target and asks before opening
+    // In-window links (improve-threads-calendar-agenda 1.1): routes go to open_route, never to the browser.
+    std::vector<std::string> routes;
+    s.ui->open_route = [&](const std::string& r) { routes.push_back(r); };
+    LinkSpan to_route(*s.ui, u"Thread", u"#/threads/thr_1", 0, 6), to_ref(*s.ui, u"Thread", u"skowork://thread/thr_2", 0, 6),
+        to_web(*s.ui, u"guide", u"https://example.com/guide", 0, 5);
+    to_route.invoke();
+    to_ref.invoke();
+    to_web.invoke();
+    EXPECT_EQ(routes, (std::vector<std::string>{"#/threads/thr_1", "#/threads/thr_2"}));
+    EXPECT_EQ(s.opened.size(), 3u);
+    s.ui->open_route = nullptr;
 
     // The code block's Copy button copies the code and announces it.
     Node* copy = nullptr;

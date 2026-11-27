@@ -42,6 +42,57 @@ const Section kSections[] = {
 
 std::u16string u16(const std::string& s) { return ui::to_utf16(s); }
 
+// The groups of the Settings list (client/work-inbox Settings Navigation), in kSections ids.
+struct SectionGroup {
+    const char* title;
+    std::vector<const char*> ids;
+};
+const SectionGroup kSectionGroups[] = {
+    {"settings.group.personal", {"general", "notifications", "privacy"}},
+    {"settings.group.sources", {"mail", "teams", "files", "knowledge", "meetings"}},
+    {"settings.group.assistant", {"skills", "automations", "connections", "triage", "agenda", "daily_report"}},
+    {"settings.group.organization", {"policy", "about"}},
+};
+
+// One entry of the Settings list: its title, marked when chosen (SelectionItem for UI Automation).
+class SectionItem : public Node {
+public:
+    SectionItem(ui::Ui& ui, std::string id, std::u16string label, bool selected, std::function<void()> go)
+        : Node(std::move(id)), ui_(ui), label_(std::move(label)), selected_(selected), go_(std::move(go)) {
+        role = ui::Role::list_item;
+        focusable = true;
+        name = label_;
+        height = Sizing::fixed;
+        fixed_h = 34;
+    }
+    bool can_invoke() const override { return true; }
+    void invoke() override {
+        if (go_) go_();
+    }
+    int selected_state() const override { return selected_ ? 1 : 0; }
+    void select() override { invoke(); }
+    int cursor() const override { return 1; }
+    void draw(ui::Canvas& c) override {
+        const ui::Rect f = frame().inset(1);
+        if (selected_) c.round(f, 4, Paint::selection);
+        else if (pressed_) c.round(f, 4, Paint::text, Paint::none, 0.10f);
+        else if (hovered_) c.round(f, 4, Paint::text, Paint::none, 0.05f);
+        if (selected_ && !ui_.theme.high_contrast) c.round({f.x, f.y + 8, 3, f.h - 16}, 1.5f, Paint::accent);
+        const Paint ink = selected_ && ui_.theme.high_contrast ? Paint::selection_text : Paint::text;
+        IDWriteTextLayout* l = ui_.layout(label_, selected_ ? TextStyle::body_strong : TextStyle::body, std::max(1.f, f.w - 24), false);
+        DWRITE_TEXT_METRICS m{};
+        if (l) l->GetMetrics(&m);
+        c.text(l, f.x + 14, f.y + (f.h - m.height) / 2, ink);
+    }
+
+private:
+    ui::Ui& ui_;
+    std::u16string label_;
+    bool selected_;
+    std::function<void()> go_;
+};
+
+
 // The storage bar: one segment per category, as a share of the quota.
 class UsageBar : public Node {
 public:
@@ -255,9 +306,11 @@ void PagePane::load() {
 void PagePane::rebuild() {
     const Route& r = shell_.route();
     const bool page = is_page(r.name);
-    const bool entered = page && (r.name != shown_ || r.hash != shown_hash_);
+    // Settings sections share one load (Settings Navigation): moving between them only shows another section.
+    const std::string page_key = r.name == RouteName::settings ? std::string("#/settings") : r.hash;
+    const bool entered = page && (r.name != shown_ || page_key != shown_hash_);
     shown_ = page ? r.name : RouteName::inbox;
-    shown_hash_ = page ? r.hash : std::string();
+    shown_hash_ = page ? page_key : std::string();
     if (entered) {
         automation_ = nullptr;
         copied_.clear();
@@ -312,7 +365,7 @@ void PagePane::rebuild() {
     } else if (r.name == RouteName::settings) {
         build_settings();
     } else if (r.name == RouteName::telemetry) {
-        button(*head, "telemetry-back", shell_.t("telemetry.back"), [this] { shell_.navigate("#/settings"); });
+        button(*head, "telemetry-back", shell_.t("telemetry.back"), [this] { shell_.navigate("#/settings/privacy"); });
         button(*head, "telemetry-refresh", shell_.t("telemetry.refresh"), [this] { load(); });
         build_telemetry();
     } else if (r.name == RouteName::about) {
@@ -324,7 +377,7 @@ void PagePane::rebuild() {
         if (!e || e->key() != r.hash) e = std::make_unique<SkillEditor>(shell_, r);
         editor_ = static_cast<SkillEditor*>(add(std::move(e)));
     } else if (r.name == RouteName::automation) {
-        button(*head, "automation-back", shell_.t("automation.back"), [this] { shell_.navigate("#/settings"); });
+        button(*head, "automation-back", shell_.t("automation.back"), [this] { shell_.navigate("#/settings/automations"); });
         build_automation();
     } else if (r.name == RouteName::automation_editor) {
         std::unique_ptr<AutomationEditor> e = std::move(kept_auto_editor_);
@@ -400,8 +453,6 @@ void PagePane::build_status() {
         row(*c, "status-connection-min-version", shell_.t("status.connection.min_version"), u16(v));
     if (const std::string i = jstr(cp, "installation_id"); !i.empty())
         row(*c, "status-connection-installation", shell_.t("status.connection.installation"), u16(i));
-    if (cp.contains("last_ack") && cp["last_ack"].is_number())
-        row(*c, "status-connection-last-ack", shell_.t("status.connection.last_ack"), u"#" + u16(std::to_string(jint(cp, "last_ack"))));
 
     // Identity.
     Node* id = card("identity", shell_.t("status.identity.title"));
@@ -411,8 +462,6 @@ void PagePane::build_status() {
         shell_.ui().strings.has(sk) ? shell_.t(sk) : u16(as), as == "signed_in" ? Paint::text : Paint::warning);
     if (const std::string u = auth.contains("user") ? display_user(auth["user"]) : std::string(); !u.empty())
         row(*id, "status-identity-user", shell_.t("status.identity.user"), u16(u));
-    if (as == "signed_in" && jint(auth, "access_token_expires_at") > 0)
-        row(*id, "status-identity-token", shell_.t("status.identity.token_until"), shell_.clock(jint(auth, "access_token_expires_at")));
     // Offline sign-in (client/identity Offline Token Type): shown when on, as active or not available.
     if (const std::string off = jstr(auth, "offline_sign_in"); off == "active" || off == "not_available")
         row(*id, "status-identity-offline", shell_.t("status.identity.offline"), shell_.t("status.identity.offline." + off),
@@ -442,14 +491,26 @@ void PagePane::build_status() {
     pause->gap = 8;
     pause->role = ui::Role::group;
     pause->name = shell_.t("status.background.pause_group");
-    for (long long m : kPauseChoices) {
-        const std::u16string label = minutes_label(shell_, m);
-        button(*pause, "status-pause-" + std::to_string(m), shell_.t("status.background.pause_for", {{"label", label}}), [this, m, label] {
-            act("pause", "background.pause", {{"minutes", m}}, [this, label](const json&) {
-                shell_.announce(shell_.t("status.background.paused_for", {{"label", label}}));
-                shell_.refresh_app_status();
-            });
-        })->enabled = busy_.empty();
+    // One Pause button with the durations in its menu; while paused, only Resume now (Plain Information).
+    if (!paused) {
+        auto* p = button(*pause, "status-pause-button", shell_.t("status.background.pause"), [] {});
+        p->enabled = busy_.empty();
+        ui::Button* pp = p;
+        p->on_click = [this, pp] {
+            auto menu = std::make_unique<ui::Menu>("status-pause-menu", shell_.t("status.background.pause_group"));
+            for (long long m : kPauseChoices) {
+                const std::u16string label = minutes_label(shell_, m);
+                menu->add_item(shell_.ui(), "status-pause-" + std::to_string(m), shell_.t("status.background.pause_for", {{"label", label}}),
+                               [this, m, label] {
+                                   act("pause", "background.pause", {{"minutes", m}}, [this, label](const json&) {
+                                       shell_.announce(shell_.t("status.background.paused_for", {{"label", label}}));
+                                       shell_.refresh_app_status();
+                                   });
+                               });
+            }
+            shell_.window().overlay().show(std::move(menu), pp->frame(), true);
+            shell_.window().render();
+        };
     }
     if (paused)
         button(*pause, "status-resume", shell_.t("status.background.resume"), [this] {
@@ -498,7 +559,11 @@ void PagePane::build_status() {
             auto* list = sc->emplace<Node>("status-storage-categories");
             list->role = ui::Role::list;
             list->name = shell_.t("status.storage.categories");
-            for (const UsageSegment& g : segs) row(*list, "status-storage-" + g.name, u16(g.name), u16(format_bytes(static_cast<double>(g.bytes), d)));
+            for (const UsageSegment& g : segs) {
+                const std::string key = "status.storage.category." + g.name;
+                row(*list, "status-storage-" + g.name, shell_.ui().strings.has(key) ? shell_.t(key) : u16(g.name),
+                    u16(format_bytes(static_cast<double>(g.bytes), d)));
+            }
             for (const auto& item : list->children()) item->role = ui::Role::list_item;
         }
     }
@@ -516,33 +581,38 @@ void PagePane::build_status() {
 // ---- Settings ------------------------------------------------------------------------------------------------------
 
 void PagePane::build_settings() {
-    auto* nav = emplace<Node>("settings-sections");
-    nav->gap = 2;
-    nav->role = ui::Role::group;
-    nav->name = shell_.t("settings.sections");
-    Node* line = nullptr;
-    size_t links = 0;
-    for (const Section& s : kSections) {
-        const std::string id = s.id;
-        if (links++ % 6 == 0) {  // six links a line
-            line = nav->emplace<Node>();
-            line->axis = ui::Axis::row;
-            line->gap = 2;
-        }
-        button(*line, "settings-jump-" + id, shell_.t(s.title), [this, id] {
-            std::function<Node*(Node&)> find = [&](Node& n) -> Node* {
-                if (n.automation_id() == "h-" + id) return &n;
-                for (const auto& c : n.children())
-                    if (Node* x = find(*c)) return x;
-                return nullptr;
-            };
-            ui::Tree* t = Node::tree();
-            if (Node* h = find(*this); h && t) {
-                t->scroll_to(*this, scroll_y() + (h->frame().y - frame().y) - padding.top);
-                t->set_focus(h);
-            }
-        }, ui::Button::Kind::subtle);
+    // Settings Navigation (improve-threads-calendar-agenda D6): the grouped list of sections and the chosen one only.
+    const std::string asked = shell_.route().section;
+    if (!asked.empty()) settings_section_ = asked;
+    if (std::none_of(std::begin(kSections), std::end(kSections), [&](const Section& s) { return settings_section_ == s.id; }))
+        settings_section_ = "general";
+    if (settings_section_ != settings_shown_section_) {
+        settings_shown_section_ = settings_section_;
+        set_scroll_y(0);
     }
+    auto* layout = emplace<Node>("settings-layout");
+    layout->axis = ui::Axis::row;
+    layout->gap = 24;
+    auto* nav = layout->emplace<Node>("settings-sections");
+    nav->width = Sizing::fixed;
+    nav->fixed_w = 220;
+    nav->gap = 2;
+    nav->role = ui::Role::list;
+    nav->name = shell_.t("settings.sections");
+    for (const SectionGroup& g : kSectionGroups) {
+        auto* h = nav->emplace<ui::Label>(shell_.ui(), shell_.t(g.title), TextStyle::caption, Paint::text_secondary, false);
+        h->padding = {14, 10, 0, 4};
+        h->role = ui::Role::none;  // a visual grouping; each item names its section
+        for (const char* id : g.ids)
+            for (const Section& s : kSections)
+                if (std::string(s.id) == id) {
+                    const std::string sid = id;
+                    nav->emplace<SectionItem>(shell_.ui(), "settings-jump-" + sid, shell_.t(s.title), settings_section_ == sid,
+                                              [this, sid] { shell_.navigate("#/settings/" + sid); });
+                }
+    }
+    auto* content = layout->emplace<Node>("settings-content");
+    content->gap = 16;
     const json empty = json::object();
     auto setting = [&](const char* key) -> const json& {
         const json* v = settings_.is_object() ? jobj(settings_, key) : nullptr;
@@ -551,7 +621,9 @@ void PagePane::build_settings() {
 
     for (const Section& s : kSections) {
         const std::string id = s.id;
+        if (id != settings_section_) continue;
         Node* c = card(id, shell_.t(s.title));
+        content->add(remove(c));
         if (s.later) {
             text(*c, shell_.t("settings.later"), Paint::text_secondary, "settings-later-" + id);
             continue;
@@ -799,7 +871,7 @@ void PagePane::build_skills(Node& c) {
         auto* items = c.emplace<Node>("settings-skills");
         items->role = ui::Role::list;
         items->name = shell_.t("settings.skills.title");
-        items->gap = 8;
+        items->gap = 16;
         for (const json& s : *list) {
             const std::string skill = jstr(s, "name");
             const std::string state = jstr(s, "state");
@@ -814,10 +886,6 @@ void PagePane::build_skills(Node& c) {
             head->gap = 8;
             head->emplace<ui::Label>(shell_.ui(), u16(skill), TextStyle::body_strong, Paint::text, false)->role = ui::Role::none;
             head->emplace<ui::Label>(shell_.ui(), tier, TextStyle::caption, Paint::text_secondary, false)->role = ui::Role::none;
-            if (const std::string v = jstr(s, "version"); !v.empty())
-                head->emplace<ui::Label>(shell_.ui(), shell_.t("settings.skills.version", {{"version", u16(v)}}), TextStyle::caption,
-                                         Paint::text_secondary, false)
-                    ->role = ui::Role::none;
             head->emplace<ui::Badge>(shell_.ui(), st,
                                      state == "invalid"       ? Paint::error_background
                                      : state == "unavailable" ? Paint::warning_background
@@ -829,7 +897,6 @@ void PagePane::build_skills(Node& c) {
             };
             if (const std::string d = jstr(s, "description"); !d.empty())
                 item->emplace<ui::Label>(shell_.ui(), u16(d), TextStyle::body, Paint::text, true)->role = ui::Role::none;
-            if (const std::string src = jstr(s, "source"); !src.empty()) caption(shell_.t("settings.skills.source", {{"source", u16(src)}}));
             if (const json* e = jobj(s, "error"); e && e->is_object())
                 caption(shell_.t("settings.skills.error", {{"field", u16(jstr(*e, "field"))}, {"message", u16(jstr(*e, "message"))}}),
                         "skill-error-" + skill);
@@ -837,7 +904,9 @@ void PagePane::build_skills(Node& c) {
                 caption(shell_.t("settings.skills.unavailable", {{"reason", u16(why)}}), "skill-unavailable-" + skill);
             if (state != "invalid") {
                 const std::string risk = jstr(s, "risk");
-                if (!risk.empty()) caption(shell_.t("settings.skills.risk", {{"risk", u16(risk)}}));
+                if (!risk.empty())
+                    caption(shell_.t("settings.skills.risk", {{"risk", shell_.ui().strings.has("feed.risk." + risk) ? shell_.t("feed.risk." + risk) : u16(risk)}}),
+                            "skill-risk-" + skill);
                 const std::string tools = joined(s.contains("tools") ? s["tools"] : json());
                 caption(tools.empty() ? shell_.t("settings.skills.no_tools") : shell_.t("settings.skills.tools", {{"tools", u16(tools)}}),
                         "skill-tools-" + skill);
@@ -847,19 +916,37 @@ void PagePane::build_skills(Node& c) {
             // Registry Skills: a pin, a pending update and the version to roll back to (Skill Updates And Rollback).
             if (jbool(s, "held")) caption(shell_.t("settings.skills.pinned"), "skill-pinned-" + skill);
             const std::string tier_id = jstr(s, "tier");
+            auto* acts = item->emplace<Node>("skill-actions-" + skill);
+            acts->axis = ui::Axis::row;
+            acts->gap = 8;
+            acts->wraps = true;
             if (const std::string offer = jstr(s, "offer"); !offer.empty())
-                button(*item, "skill-update-" + skill, shell_.t("settings.skills.update", {{"version", u16(offer)}}), [this, skill, tier_id] {
+                button(*acts, "skill-update-" + skill, shell_.t("settings.skills.update", {{"version", u16(offer)}}), [this, skill, tier_id] {
                     act("skills", "skills.update", {{"tier", tier_id}, {"name", skill}}, [this](const json&) { load_skills(true); });
                 });
             if (const std::string prev = jstr(s, "previous"); !prev.empty())
-                button(*item, "skill-rollback-" + skill, shell_.t("settings.skills.rollback", {{"version", u16(prev)}}), [this, skill, tier_id] {
+                button(*acts, "skill-rollback-" + skill, shell_.t("settings.skills.rollback", {{"version", u16(prev)}}), [this, skill, tier_id] {
                     act("skills", "skills.rollback", {{"tier", tier_id}, {"name", skill}}, [this](const json&) { load_skills(true); });
                 }, ui::Button::Kind::subtle);
             // Skill Authoring: the user's own Skills open in the editor.
             if (tier_id == "private")
-                button(*item, "skill-edit-" + skill, shell_.t("settings.skills.edit"), [this, skill] { shell_.navigate("#/skills/edit/" + skill); },
+                button(*acts, "skill-edit-" + skill, shell_.t("settings.skills.edit"), [this, skill] { shell_.navigate("#/skills/edit/" + skill); },
                        ui::Button::Kind::subtle)
                     ->name = shell_.t("settings.skills.edit_named", {{"name", u16(skill)}});
+            // Details (Plain Settings Details): where the Skill comes from, its version and its other copies.
+            const std::string dkey = "skill:" + jstr(s, "tier") + ":" + skill;
+            const bool open = details_open_.contains(dkey);
+            auto* dt = button(*acts, "skill-details-" + skill, shell_.t(open ? "settings.details_hide" : "settings.details_show"), [this, dkey, open] {
+                if (open) details_open_.erase(dkey);
+                else details_open_.insert(dkey);
+                rebuild();
+            }, ui::Button::Kind::subtle);
+            dt->name = shell_.t(open ? "settings.details_hide_named" : "settings.details_show_named", {{"name", u16(skill)}});
+            if (!open) continue;
+            if (const std::string src = jstr(s, "source"); !src.empty())
+                caption(shell_.t("settings.skills.source", {{"source", u16(src)}}), "skill-source-" + skill);
+            if (const std::string v = jstr(s, "version"); !v.empty())
+                caption(shell_.t("settings.skills.version", {{"version", u16(v)}}), "skill-version-" + skill);
             if (const json* others = jobj(s, "others"); others && others->is_array()) {
                 size_t i = 0;
                 for (const json& o : *others) {
@@ -935,16 +1022,33 @@ void PagePane::build_policy(Node& c) {
         }
     };
     const auto none = shell_.t("settings.policy.none");
+    // Decisions and risk classes in words (Plain Settings Details): "Read: Allowed; Changes local data: Asks you".
+    const std::function<std::u16string(const json&)> words = [&](const json& v) -> std::u16string {
+        const auto word = [&](const std::string& x) {
+            for (const char* prefix : {"settings.policy.decision.", "feed.risk."})
+                if (shell_.ui().strings.has(prefix + x)) return shell_.t(prefix + x);
+            return u16(x);
+        };
+        std::u16string out;
+        if (v.is_string()) return word(v.get<std::string>());
+        if (v.is_array()) {
+            for (const auto& x : v) out += (out.empty() ? u"" : u", ") + words(x);
+        } else if (v.is_object()) {
+            for (const auto& [k, x] : v.items()) out += (out.empty() ? u"" : u"; ") + word(k) + u": " + words(x);
+        } else if (!v.is_null()) {
+            out = u16(policy_value(v));
+        }
+        return out;
+    };
     const auto setting = [&](const std::string& id, const char* label, const json& v, const std::string& key) {
-        const std::string s = policy_value(v);
-        row(c, "policy-" + id, shell_.t(label), (s.empty() ? none : u16(s)) + u"  · " + source_of(key));
+        const std::u16string s = words(v);
+        row(c, "policy-" + id, shell_.t(label), (s.empty() ? none : s) + u"  · " + source_of(key));
     };
     const std::string state = jstr(policy_, "state");
     row(c, "policy-state", shell_.t("settings.policy.state"), shell_.t("settings.policy.states." + (state.empty() ? std::string("none") : state)),
         state == "valid" ? Paint::text : Paint::warning);
     if (state != "none") {
-        row(c, "policy-version", shell_.t("settings.policy.version"),
-            u16(std::to_string(jint(policy_, "version"))) + u" — " + shell_.t("settings.policy.expires", {{"time", shell_.clock(jint(policy_, "expires_at"))}}));
+        row(c, "policy-version", shell_.t("settings.policy.valid_until"), shell_.moment(jint(policy_, "expires_at") * 1000));  // seconds, as shell_.clock takes them
         row(c, "policy-groups", shell_.t("settings.policy.groups"), u16(policy_value(policy_.value("groups", json::array()))));
     }
     if (const std::string e = jstr(policy_, "explanation"); !e.empty()) text(c, u16(e), Paint::warning, "policy-explanation");
@@ -973,7 +1077,9 @@ void PagePane::build_policy(Node& c) {
         c.emplace<ui::Label>(shell_.ui(), shell_.t("settings.policy.network_title"), TextStyle::body_strong)->role = ui::Role::heading;
         setting("net-allow", "settings.policy.net.allow", net->value("egress_allow", json()), "network.egress_allow");
         setting("net-deny", "settings.policy.net.deny", net->value("egress_deny", json()), "network.egress_deny");
-        row(c, "policy-net-enforcement", shell_.t("settings.policy.net.enforcement"), u16(policy_value(net->value("enforcement", json()))));
+        const std::string enf = policy_value(net->value("enforcement", json()));
+        const std::string ekey = "settings.policy.net.enforcement_values." + enf;
+        row(c, "policy-net-enforcement", shell_.t("settings.policy.net.enforcement"), shell_.ui().strings.has(ekey) ? shell_.t(ekey) : u16(enf));
     }
     if (const json* un = jobj(policy_, "unattended"); un && un->is_object()) {
         c.emplace<ui::Label>(shell_.ui(), shell_.t("settings.policy.unattended_title"), TextStyle::body_strong)->role = ui::Role::heading;
@@ -1214,7 +1320,7 @@ void PagePane::build_telemetry() {
         auto* list = cc->emplace<Node>("telemetry-crashes-list");
         list->role = ui::Role::list;
         list->name = shell_.t("telemetry.crashes.title");
-        list->gap = 10;
+        list->gap = 8;
         for (const json& cr : *crashes) {
             const std::string id = jstr(cr, "id");
             const std::string state = jstr(cr, "state");
@@ -1270,7 +1376,7 @@ void PagePane::build_telemetry() {
     auto* list = rc->emplace<Node>("telemetry-records-list");
     list->role = ui::Role::list;
     list->name = shell_.t("telemetry.records.title");
-    list->gap = 10;
+    list->gap = 8;
     for (size_t i = 0; i < shown; ++i) {
         const json& r = (*recs)[i];
         const bool sent = jstr(r, "state") == "sent";

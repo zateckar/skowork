@@ -80,6 +80,9 @@ struct ThreadSummary {
     int open_actions = 0;
 };
 
+// The English reason of a continuation blocker code (RunStore::continuation_blocker_code), for errors and logs.
+std::string continuation_blocker_text(const std::string& code);
+
 class RunStore {
 public:
     RunStore(Database& db, const Clock& clock) : db_(db), clock_(clock) {}
@@ -145,6 +148,9 @@ public:
     // the latest top-level Run, its Thread has an active Run, it was stopped or continued, or an unknown call of its
     // subtree is not answered Continue (then pending is set).
     [[nodiscard]] std::string continuation_blocker(const std::string& failed_run_id, bool* pending = nullptr);
+    // The same as a code: missing | subagent | not_interrupted | stopped | already_continued | newer_run | active_run |
+    // unknown_outcome; empty when the Run can continue (Continuation Blocker Codes).
+    [[nodiscard]] std::string continuation_blocker_code(const std::string& failed_run_id, bool* pending = nullptr);
 
     // ---- Event log ----
     Result<long long> append_event(const std::string& run_id, const std::string& kind, const json& payload);

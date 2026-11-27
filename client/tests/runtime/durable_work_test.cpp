@@ -271,6 +271,9 @@ TEST(ShutdownRecovery, AnUnknownCallAsksThenContinuesOnceWithoutRepeatingIt) {
     ASSERT_FALSE(twice);
     EXPECT_EQ(twice.error().code, "not_continuable");
     EXPECT_EQ(jstr(env.rt->recovery_status(c.run), "continuation"), *cont);
+    // Continuation Blocker Codes (improve-plain-information 1.1): a code for the window, the old text for errors.
+    EXPECT_EQ(jstr(env.rt->recovery_status(c.run), "blocker_code"), "already_continued");
+    EXPECT_EQ(jstr(env.rt->recovery_status(c.run), "blocker"), "the Run was already continued");
 }
 
 TEST(ShutdownRecovery, OneStopEndsTheFailedRunForGood) {
@@ -286,6 +289,7 @@ TEST(ShutdownRecovery, OneStopEndsTheFailedRunForGood) {
     const auto status = env.rt->recovery_status(c.run);
     EXPECT_TRUE(jbool(status, "stopped"));
     EXPECT_FALSE(jbool(status, "continuable"));
+    EXPECT_EQ(jstr(status, "blocker_code"), "stopped");
     auto r = env.rt->retry_run(c.thread);
     ASSERT_FALSE(r);
     EXPECT_EQ(r.error().code, "not_continuable");

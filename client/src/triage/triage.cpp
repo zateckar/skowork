@@ -823,19 +823,35 @@ json TriageService::suggestion(const std::string& thread_id) {
     return out;
 }
 
+// The origin ref of a triage Thread the user decided on: action "none", so "Needs your action" goes away even when the
+// Thread never had a Run (client/work-inbox Live List Entries; improve-threads-calendar-agenda D3). Called with the
+// database lock held; the caller writes the ref after releasing it.
+std::optional<json> TriageService::decided_ref(const std::string& thread_id) {
+    auto q = env_.db->prepare("SELECT scope, item_id, category FROM triage_items WHERE thread_id=?1");
+    q.bind(1, thread_id);
+    if (!q.step()) return std::nullopt;
+    return json{{"kind", "triage"}, {"scope", q.col_text(0)}, {"item_id", q.col_text(1)}, {"action", "none"}, {"category", q.col_text(2)}};
+}
+
 Status TriageService::dismiss(const std::string& thread_id) {
-    const std::lock_guard lock(env_.db->mutex());
-    auto u = env_.db->prepare("UPDATE triage_items SET suggestion='dismissed', dismissed_revision=revision, updated_at=?2 "
-                              "WHERE thread_id=?1 AND suggestion='open'");
-    u.bind(1, thread_id).bind(2, env_.clock->unix_millis());
-    if (Status s = u.run(); !s) return s;
-    if (env_.db->changes() == 0) return make_error("not_open", "the suggestion is not open");
-    log_decision(thread_id, "dismiss", "open");
+    std::optional<json> ref;
+    {
+        const std::lock_guard lock(env_.db->mutex());
+        auto u = env_.db->prepare("UPDATE triage_items SET suggestion='dismissed', dismissed_revision=revision, updated_at=?2 "
+                                  "WHERE thread_id=?1 AND suggestion='open'");
+        u.bind(1, thread_id).bind(2, env_.clock->unix_millis());
+        if (Status s = u.run(); !s) return s;
+        if (env_.db->changes() == 0) return make_error("not_open", "the suggestion is not open");
+        log_decision(thread_id, "dismiss", "open");
+        ref = decided_ref(thread_id);
+    }
+    if (ref && env_.set_origin_ref) (void)env_.set_origin_ref(thread_id, *ref);
     notify();
     return {};
 }
 
 Status TriageService::no_action(const std::string& thread_id) {
+    std::optional<json> ref;
     {
         const std::lock_guard lock(env_.db->mutex());
         std::string before;
@@ -850,7 +866,9 @@ Status TriageService::no_action(const std::string& thread_id) {
         if (Status s = u.run(); !s) return s;
         if (env_.db->changes() == 0) return make_error("not_open", "the item is not waiting for a decision");
         log_decision(thread_id, "no_action", before);
+        ref = decided_ref(thread_id);
     }
+    if (ref && env_.set_origin_ref) (void)env_.set_origin_ref(thread_id, *ref);
     // Outside the database lock: cancelling and archiving touch the runtime's and the inbox's own tables.
     if (env_.cancel_runs) env_.cancel_runs(thread_id);
     if (env_.archive_thread)

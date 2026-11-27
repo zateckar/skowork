@@ -1,7 +1,7 @@
 # The native window's screens (add-native-ui group 3). wb_shell_core is portable: the view models ported from the
 # web UI (feed fold, Thread list order and grouping, routes, shortcuts, status derivations, formatting), unit-tested
 # everywhere. wb_shell is the Windows part: the main window and its views on the wb_ui toolkit.
-add_library(wb_shell_core STATIC model.cpp feed.cpp inbox_model.cpp routes.cpp derive.cpp shortcuts.cpp format.cpp)
+add_library(wb_shell_core STATIC model.cpp feed.cpp inbox_model.cpp routes.cpp derive.cpp shortcuts.cpp format.cpp calendar_layout.cpp)
 target_include_directories(wb_shell_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(wb_shell_core PUBLIC wb_ui_core wb_base nlohmann_json)
 skowork_warnings(wb_shell_core)

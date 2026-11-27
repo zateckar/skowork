@@ -522,27 +522,39 @@ void ChatsView::build_conversation(Node& parent) {
     box->emplace<ui::Label>(shell_.ui(), title, TextStyle::subtitle, Paint::text, true, "chat-title")->role = ui::Role::heading;
     const bool team = jstr(c, "kind") == "team";
     if (team) {
+        // Compact Chat Header: the member count with the names in the tooltip, Add people, and the rest in a More menu.
         std::u16string names;
-        for (const auto& m : c.value("members", json::array()))
+        size_t count = 0;
+        for (const auto& m : c.value("members", json::array())) {
             names += (names.empty() ? u"" : u", ") + u16(jstr(m, "display_name", jstr(m, "user_name"))) + u" (" + presence_text(jstr(m, "presence")) + u")";
-        box->emplace<ui::Label>(shell_.ui(), shell_.t("chats.members", {{"names", names}}), TextStyle::caption, Paint::text_secondary, true, "chat-members");
+            ++count;
+        }
         auto* actions = row_box(*box, "chat-actions");
         actions->wraps = true;
-        button(*actions, "chat-rename", shell_.t("chats.rename"), [this, id, title] {
-            shell_.ask_text_value("chat-rename", shell_.t("chats.rename_title"), shell_.t("chats.team_name"), title, [this, id](const std::string& v) {
-                act("messaging.rename", {{"chat", id}, {"name", v}}, [this, id](const json&) {
-                    load_list();
-                    open(id);
-                });
-            });
-        }, ui::Button::Kind::standard, ui::icon::rename);
+        auto* members = actions->emplace<ui::Label>(shell_.ui(), shell_.t("chats.member_count", {{"count", u16(std::to_string(count))}}),
+                                                    TextStyle::caption, Paint::text_secondary, false, "chat-members");
+        members->help = names;
+        members->padding.top = 6;
         button(*actions, "chat-add", shell_.t("chats.add"), [this, id, members = c.value("members", json::array())] { ask_add(id, members); },
                ui::Button::Kind::standard, ui::icon::add_people);
-        if (save_as_note_)
-            button(*actions, "chat-save-note", shell_.t("chats.save_as_note"), [this, id] { ask_save_note(id); }, ui::Button::Kind::standard,
-                   ui::icon::note);
-        button(*actions, "chat-leave", shell_.t("chats.leave"), [this, id, title] { ask_leave(id, title); }, ui::Button::Kind::subtle,
-               ui::icon::leave);
+        auto* more = actions->emplace<ui::IconButton>(shell_.ui(), "chat-more", ui::icon::more, shell_.t("chats.more_named", {{"name", title}}));
+        ui::IconButton* mp = more;
+        const bool can_note = save_as_note_;
+        more->on_click = [this, id, title, mp, can_note] {
+            auto menu = std::make_unique<ui::Menu>("chat-menu", shell_.t("chats.more_named", {{"name", title}}));
+            menu->add_item(shell_.ui(), "chat-rename", shell_.t("chats.rename"), [this, id, title] {
+                shell_.ask_text_value("chat-rename", shell_.t("chats.rename_title"), shell_.t("chats.team_name"), title, [this, id](const std::string& v) {
+                    act("messaging.rename", {{"chat", id}, {"name", v}}, [this, id](const json&) {
+                        load_list();
+                        open(id);
+                    });
+                });
+            }, ui::icon::rename);
+            if (can_note) menu->add_item(shell_.ui(), "chat-save-note", shell_.t("chats.save_as_note"), [this, id] { ask_save_note(id); }, ui::icon::note);
+            menu->add_item(shell_.ui(), "chat-leave", shell_.t("chats.leave"), [this, id, title] { ask_leave(id, title); }, ui::icon::leave);
+            shell_.window().overlay().show(std::move(menu), mp->frame(), true);
+            shell_.window().render();
+        };
     } else {
         if (const json* p = jobj(c, "peer"))
             box->emplace<ui::Label>(shell_.ui(), presence_text(jstr(*p, "presence")), TextStyle::caption, Paint::text_secondary, true, "chat-presence");

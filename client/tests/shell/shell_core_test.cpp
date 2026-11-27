@@ -4,6 +4,7 @@
 
 #include <chrono>
 
+#include "shell/calendar_layout.h"
 #include "shell/derive.h"
 #include "shell/feed.h"
 #include "shell/format.h"
@@ -661,7 +662,13 @@ TEST(ShellRoutes, ParsesAndCanonicalises) {
     EXPECT_EQ(parse_route("#/settings")->name, RouteName::settings);
     EXPECT_EQ(parse_route("#/settings/telemetry")->name, RouteName::telemetry);
     EXPECT_EQ(parse_route("/settings/telemetry/")->hash, "#/settings/telemetry");
-    EXPECT_FALSE(parse_route("#/settings/other"));
+    // Settings Navigation: one route per section; anything else is not a route.
+    EXPECT_EQ(parse_route("#/settings/meetings")->name, RouteName::settings);
+    EXPECT_EQ(parse_route("#/settings/meetings")->section, "meetings");
+    EXPECT_EQ(parse_route("/settings/daily_report/")->hash, "#/settings/daily_report");
+    EXPECT_TRUE(parse_route("#/settings")->section.empty());
+    EXPECT_FALSE(parse_route("#/settings/Other-1"));
+    EXPECT_FALSE(parse_route("#/settings/a/b"));
     EXPECT_EQ(parse_route("#/status")->hash, "#/status");
     EXPECT_FALSE(parse_route(""));
     EXPECT_FALSE(parse_route("#/nowhere"));
@@ -1310,6 +1317,10 @@ TEST(ShellModel, TriageThreadsShowStatusAndCategoryInsteadOfTheOriginBadge) {
     e.has_action = false;
     e.last_run_state = "succeeded";  // the reply was sent
     EXPECT_FALSE(needs_action(e));
+    e.last_run_state.clear();  // decided without a Run (improve-threads-calendar-agenda 3.2)
+    e.origin_ref["action"] = "none";
+    EXPECT_FALSE(needs_action(e));
+    e.origin_ref["action"] = "required";
     e.origin_ref.erase("category");  // a Thread from before the change: status only
     b = triage_badges(e);
     ASSERT_TRUE(b);
@@ -1343,4 +1354,39 @@ TEST(ShellFeed, ARunFromASourceShowsOnlyTheSourceCollapsed) {
     ASSERT_FALSE(p.empty());
     EXPECT_TRUE(p[0].source_kind.empty());
     EXPECT_EQ(p[0].text, "Send it");
+}
+
+// improve-threads-calendar-agenda 4.1: overlapping events of a day go side by side; back-to-back ones do not.
+TEST(CalendarGrid, OverlappingEventsShareLanesAndBackToBackOnesDoNot) {
+    using L = LanePlacement;
+    // 13:00-14:20 and 14:00-15:00 overlap; 15:00-15:30 starts as the second ends.
+    EXPECT_EQ(lay_out_lanes({{780, 860}, {840, 900}, {900, 930}}), (std::vector<L>{{0, 2}, {1, 2}, {0, 1}}));
+    // A chain: a overlaps b, b overlaps c, a and c do not: one cluster of two lanes, c back in the first lane.
+    EXPECT_EQ(lay_out_lanes({{600, 660}, {630, 720}, {670, 700}}), (std::vector<L>{{0, 2}, {1, 2}, {0, 2}}));
+    // Three at once, given out of order; the longest of equal starts takes the left lane.
+    EXPECT_EQ(lay_out_lanes({{540, 570}, {480, 600}, {480, 540}}), (std::vector<L>{{1, 2}, {0, 2}, {1, 2}}));
+    EXPECT_EQ(lay_out_lanes({{480, 600}, {480, 600}, {480, 600}}), (std::vector<L>{{0, 3}, {1, 3}, {2, 3}}));
+    EXPECT_TRUE(lay_out_lanes({}).empty());
+    EXPECT_EQ(lay_out_lanes({{600, 600}}), (std::vector<L>{{0, 1}}));  // zero length still gets a place
+}
+
+TEST(CalendarGrid, HoursCoverTheWorkingDayAndEveryEvent) {
+    EXPECT_EQ(grid_hours({}), std::make_pair(8, 18));
+    EXPECT_EQ(grid_hours({{510, 600}, {1020, 1080}}), std::make_pair(8, 18));  // 08:30-10:00, 17:00-18:00
+    EXPECT_EQ(grid_hours({{430, 480}, {1050, 1320}}), std::make_pair(7, 22));  // 07:10 and until 22:00
+    EXPECT_EQ(grid_hours({{1100, 1301}}), std::make_pair(8, 22));              // 21:41 rounds up
+    EXPECT_EQ(grid_hours({{0, 1440}}), std::make_pair(0, 24));
+}
+
+// improve-plain-information D2: schedules in words; anything unusual is custom.
+TEST(ShellFormat, CronSchedulesInWords) {
+    EXPECT_EQ(describe_schedule("0 8 * * 1-5"), (ScheduleWords{"workdays", 8, 0, -1}));
+    EXPECT_EQ(describe_schedule("30 7 * * MON-FRI"), (ScheduleWords{"workdays", 7, 30, -1}));
+    EXPECT_EQ(describe_schedule("15 9 * * *"), (ScheduleWords{"daily", 9, 15, -1}));
+    EXPECT_EQ(describe_schedule("0 15 * * 5"), (ScheduleWords{"weekly", 15, 0, 5}));
+    EXPECT_EQ(describe_schedule("0 15 * * 7"), (ScheduleWords{"weekly", 15, 0, 0}));  // 7 is Sunday too
+    EXPECT_EQ(describe_schedule("0 15 * * sun"), (ScheduleWords{"weekly", 15, 0, 0}));
+    EXPECT_EQ(describe_schedule("5 * * * *"), (ScheduleWords{"hourly", -1, 5, -1}));
+    for (const char* custom : {"*/15 * * * *", "0 8 1 * *", "0 8 * 6 *", "0 8,12 * * *", "0 8 * * 1,3", "0 8 * *", "", "60 8 * * *", "0 24 * * *"})
+        EXPECT_EQ(describe_schedule(custom).kind, "custom") << custom;
 }

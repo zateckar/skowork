@@ -953,7 +953,7 @@ TEST(ShellFeed, GeneratedVisualsAreAccessibleInLocalizedHighContrastThreads) {
 TEST(ShellSettings, GeneratedSurfacesAreOptInAndExplainRestart) {
     Fixture f;
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/general"); });
     ASSERT_TRUE(w.until([&] { return w.exists("settings-generated-surfaces"); }));
     Uia uia;
     const auto nodes = uia.by_id(w.hwnd());
@@ -1433,16 +1433,16 @@ TEST(ShellFeed, ErrorBannerOffersTheRemedyForTheCode) {
     EXPECT_EQ(m[L"error-banner-title"].name, L"This thread is too long for the model");
     EXPECT_TRUE(has(m, L"error-fork"));
     EXPECT_TRUE(has(m, L"error-compact"));
-    EXPECT_TRUE(has(m, L"error-retry"));
+    EXPECT_FALSE(has(m, L"error-retry"));  // it would fail the same way; Compact is the remedy
     EXPECT_FALSE(has(m, L"error-sign-in"));
     std::vector<std::wstring> errors;
     for (const auto& [id, e] : m)
         if (id.starts_with(L"error-run")) errors.push_back(e.name);
     EXPECT_EQ(errors, std::vector<std::wstring>{L"The run failed (CONTEXT_LENGTH)."});
 
-    // Retry sends the request again; the new Run succeeds and the banner goes.
+    // Retry (still available to the window, not offered for this code) sends the request again; the banner goes.
     f.in.env.model.push_text("Now it fits.");
-    EXPECT_TRUE(w.invoke("error-retry"));
+    w.run([&] { w.shell().retry(t); });
     ASSERT_TRUE(w.until([&] { return w.shell().feed() && !w.shell().feed()->runs.empty() && w.shell().feed()->runs.back().state == "succeeded"; }));
     EXPECT_FALSE(has(uia.by_id(w.hwnd()), L"error-banner"));
 
@@ -1666,7 +1666,7 @@ TEST(ShellFeed, ShowWorkDetailsSettingShowsEveryRunAndPersists) {
     }
     {
         ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
-        w.run([&] { w.main().open("#/settings"); });
+        w.run([&] { w.main().open("#/settings/general"); });
         ASSERT_TRUE(w.until([&] { return w.exists("settings-show-work-details"); }));
         Uia uia;
         auto m = uia.by_id(w.hwnd());
@@ -2006,7 +2006,7 @@ TEST(ShellSkills, EditorCreatesAPrivateSkillThatNewRunsUse) {
     sw.attach(f);
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
     f.attach(w);
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/skills"); });
     ASSERT_TRUE(w.until([&] { return w.exists("settings-skills-new"); }));
     ASSERT_TRUE(w.invoke("settings-skills-new"));
     ASSERT_TRUE(w.until([&] { return w.exists("skill-editor-frontmatter") && w.shell().route().hash == "#/skills/new"; }));
@@ -2064,7 +2064,7 @@ TEST(ShellSkills, EditorCreatesAPrivateSkillThatNewRunsUse) {
     ASSERT_TRUE(w.invoke("skill-editor-delete"));
     ASSERT_TRUE(w.until([&] { return w.exists("skill-delete-confirm"); }));
     ASSERT_TRUE(w.invoke("skill-delete-confirm"));
-    ASSERT_TRUE(w.until([&] { return w.shell().route().hash == "#/settings"; }));
+    ASSERT_TRUE(w.until([&] { return w.shell().route().hash == "#/settings/skills"; }));
     EXPECT_FALSE(std::filesystem::exists(folder));
 }
 
@@ -2265,7 +2265,7 @@ TEST(ShellPages, SkillsSectionShowsTiersShadowingErrorsAndUnavailableTools) {
     });
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
     f.attach(w);
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/skills"); });
     ASSERT_TRUE(w.until([&] { return w.exists("skill-entry-weekly-report"); }));
     Uia uia;
     auto m = uia.by_id(w.hwnd());
@@ -2274,7 +2274,11 @@ TEST(ShellPages, SkillsSectionShowsTiersShadowingErrorsAndUnavailableTools) {
     EXPECT_EQ(m[L"skill-entry-weekly-report"].name, L"weekly-report, Private, In use");
     EXPECT_EQ(m[L"skill-tools-weekly-report"].name, L"Tools: files.read");
     EXPECT_EQ(m[L"skill-unavailable-tools-weekly-report"].name, L"Not allowed by your policy: shell.run");
-    EXPECT_EQ(m[L"skill-other-weekly-report-0"].name, L"Organization copy: Shadowed");
+    EXPECT_FALSE(has(m, L"skill-other-weekly-report-0"));  // behind Details (Plain Settings Details)
+    ASSERT_TRUE(w.invoke("skill-details-weekly-report"));
+    ASSERT_TRUE(w.until([&] { return w.exists("skill-other-weekly-report-0"); }));
+    m = uia.by_id(w.hwnd());
+    EXPECT_EQ(m[L"skill-other-weekly-report-0"].name, L"Organization copy: Replaced by another copy");
     EXPECT_EQ(m[L"skill-entry-jira-triage"].name, L"jira-triage, Group, Unavailable");
     EXPECT_EQ(m[L"skill-unavailable-jira-triage"].name, L"Unavailable: requires jira-corp");
     EXPECT_EQ(m[L"skill-error-broken"].name, L"Error in description: A description is required.");
@@ -2316,8 +2320,8 @@ TEST(ShellComposer, EnterQueuesWhileRunningCtrlEnterSteersAndStopCancels) {
     Uia uia;
     auto m = uia.by_id(w.hwnd());
     EXPECT_EQ(m[L"composer-send"].name, L"Queue");
-    EXPECT_EQ(m[L"composer-steer"].name, L"Steer now");
-    EXPECT_EQ(m[L"composer-hint"].name, L"Enter queues the message for the next turn. Ctrl+Enter steers the running turn.");
+    EXPECT_EQ(m[L"composer-steer"].name, L"Send now");
+    EXPECT_EQ(m[L"composer-hint"].name, L"Enter queues the message for the next turn. Ctrl+Enter sends it after the current step.");
 
     // While it runs, Enter queues; the queued list shows the messages and one can be removed.
     w.type("composer-input", u"Then archive the thread");
@@ -2355,7 +2359,7 @@ TEST(ShellComposer, EnterQueuesWhileRunningCtrlEnterSteersAndStopCancels) {
     const auto steering_status = "queued-" + std::to_string(steering_id) + "-status";
     EXPECT_TRUE(w.until([&] { return w.exists(steering_status); }));
     m = uia.by_id(w.hwnd());
-    EXPECT_EQ(m[wide(steering_status)].name, L"Steering queued until the next safe boundary");
+    EXPECT_EQ(m[wide(steering_status)].name, L"Your message is sent after the current step");
 
     // When the Run finishes, the queued message is sent as the next turn.
     f.in.env.model.push_text("Done.");  // the next turn (the steering message joins it)
@@ -2535,8 +2539,8 @@ TEST(ShellTelemetry, ContentIndicatorStaysWhileTheContentLevelIsInForce) {
     ASSERT_TRUE(has(m, L"status-content-telemetry"));
     EXPECT_EQ(m[L"status-content-telemetry"].name, L"Content telemetry active");
     EXPECT_EQ(m[L"status-content-telemetry"].type, UIA_ButtonControlTypeId);
-    // The policy version is a number in the status.
-    EXPECT_EQ(m[L"status-policy"].name, L"Policy 7");
+    // A valid policy is not mentioned in the status bar; only a problem is.
+    EXPECT_FALSE(has(m, L"status-policy"));
     EXPECT_EQ(m[L"status-mcp"].type, UIA_ButtonControlTypeId);
     // It stays across navigation, and leads to the Telemetry viewer.
     w.run([&] { w.main().open("#/settings"); });
@@ -2582,7 +2586,7 @@ TEST(ShellTelemetry, ViewerListsSentAndBufferedRecordsWithTheirFields) {
         return (*f.rpc.find("telemetry.view", false))(json::object());
     });
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/privacy"); });
     ASSERT_TRUE(w.until([&] { return w.exists("settings-open-telemetry"); }));
     // The content indicator in the status bar leads to the viewer.
     ASSERT_TRUE(w.until([&] { return w.exists("status-content-telemetry"); }));
@@ -2700,15 +2704,17 @@ TEST(ShellActions, ApprovalCardShowsProvenanceAndEditThenApprove) {
     ASSERT_FALSE(a.empty());
     const std::string card = "approval-" + a;
     ASSERT_TRUE(w.until([&] { return w.exists(card + "-approve"); }));
-    EXPECT_TRUE(said.heard(u"Approval required: mail.send"));
+    EXPECT_TRUE(said.heard(u"Approval required: Send an email"));
 
     Uia uia;
     auto m = uia.by_id(w.hwnd());
     EXPECT_EQ(m[wide(card)].type, UIA_GroupControlTypeId);
-    EXPECT_EQ(m[wide(card)].name, L"Approval required: mail.send");
+    EXPECT_EQ(m[wide(card)].name, L"Approval required: Send an email");
     EXPECT_EQ(m[wide(card + "-risk")].name, L"Risk: Acts outside this computer");
     EXPECT_EQ(m[wide(card + "-rationale")].name, L"the e-mail asks for it");
-    EXPECT_EQ(m[wide(card + "-source-0")].name.rfind(L"Email: msg-42", 0), 0u) << m[wide(card + "-source-0")].name;
+    // Plain Action Details: the source by its kind, the internal id only in the tooltip.
+    EXPECT_EQ(m[wide(card + "-source-0")].name.rfind(L"Email", 0), 0u) << m[wide(card + "-source-0")].name;
+    EXPECT_EQ(m[wide(card + "-source-0")].name.find(L"msg-42"), std::wstring::npos);
     for (const char* b : {"-approve", "-edit", "-reject", "-respond"}) EXPECT_TRUE(has(m, wide(card + b))) << b;
 
     // Edit arguments: invalid JSON is refused, a JSON object is approved and the Run resumes with it.
@@ -3187,18 +3193,31 @@ TEST(ShellPages, SettingsHasEverySectionAndManagedSettingsAreReadOnly) {
     Fixture f([](Inbox& in) { in.policy["notifications.failed"] = false; });
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
     f.attach(w);
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/notifications"); });
     ASSERT_TRUE(w.until([&] { return w.exists("notify-completed"); }));
     Announcements said(w);
     Uia uia;
     auto m = uia.by_id(w.hwnd());
     EXPECT_EQ(m[L"page-title"].name, L"Settings");
-    for (const wchar_t* id : {L"h-general", L"h-notifications", L"h-files", L"h-connections", L"h-mail", L"h-skills", L"h-automations",
-                              L"h-knowledge", L"h-meetings", L"h-privacy", L"h-policy", L"h-about"})
-        EXPECT_TRUE(has(m, id)) << std::string(id, id + wcslen(id));
-    EXPECT_EQ(m[L"h-mail"].name, L"Mail and calendar");
-    EXPECT_FALSE(has(m, L"settings-later-files"));  // the Files section is built (improve-usability 2.3)
-    EXPECT_TRUE(has(m, L"settings-jump-privacy"));
+    // Settings Navigation (improve-threads-calendar-agenda 6.1): every section in the list, only the chosen one shown.
+    for (const wchar_t* id : {L"general", L"notifications", L"files", L"connections", L"mail", L"skills", L"automations", L"knowledge",
+                              L"meetings", L"agenda", L"daily_report", L"teams", L"triage", L"privacy", L"policy", L"about"})
+        EXPECT_TRUE(has(m, (std::wstring(L"settings-jump-") + id).c_str())) << std::string(id, id + wcslen(id));
+    EXPECT_TRUE(has(m, L"h-notifications"));
+    EXPECT_FALSE(has(m, L"h-general"));
+    EXPECT_FALSE(has(m, L"h-privacy"));
+    EXPECT_EQ(m[L"settings-jump-mail"].name, L"Mail and calendar");
+    int selected = -1, other = -1;
+    w.with("settings-jump-notifications", [&](ui::Node& n) {
+        selected = n.selected_state();
+        return true;
+    });
+    w.with("settings-jump-privacy", [&](ui::Node& n) {
+        other = n.selected_state();
+        return true;
+    });
+    EXPECT_EQ(selected, 1);
+    EXPECT_EQ(other, 0);
     // A setting fixed by policy is shown as managed and cannot be changed.
     BOOL enabled = TRUE;
     m[L"notify-failed"].el->get_CurrentIsEnabled(&enabled);
@@ -3218,13 +3237,17 @@ TEST(ShellPages, SettingsHasEverySectionAndManagedSettingsAreReadOnly) {
     ASSERT_TRUE(saved);
     EXPECT_FALSE((*saved)["notifications.completed"]["value"].get<bool>());
 
-    // The section links move to their section.
+    // Choosing a section shows it instead, and #/settings comes back to it.
     ASSERT_TRUE(w.invoke("settings-jump-privacy"));
-    bool at_privacy = false;
-    w.run([&] { at_privacy = w.main().window()->tree().focused() && w.main().window()->tree().focused()->automation_id() == "h-privacy"; });
-    EXPECT_TRUE(at_privacy);
+    ASSERT_TRUE(w.until([&] { return w.exists("h-privacy") && !w.exists("h-notifications"); }));
+    EXPECT_FALSE(w.exists("settings-later-files"));
+    w.run([&] { w.main().open("#/inbox"); });
+    w.run([&] { w.main().open("#/settings"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("h-privacy"); }));
 
     // The language applies at once.
+    ASSERT_TRUE(w.invoke("settings-jump-general"));
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-language"); }));
     ASSERT_TRUE(w.invoke("settings-language"));
     ASSERT_TRUE(w.until([&] { return w.exists("settings-language-de"); }));
     ASSERT_TRUE(w.invoke("settings-language-de"));
@@ -3257,9 +3280,12 @@ TEST(ShellPages, StatusShowsTheConnectionIdentityBackgroundWorkAndStorage) {
     EXPECT_EQ(m[L"status-background-state"].name, L"Running normally");
     EXPECT_EQ(m[L"status-storage-used"].name, L"50.0 MB of 100 MB used (50%)");
     EXPECT_EQ(m[L"status-storage-bar"].name, L"Storage used: 50.0 MB of 100 MB (50%)");
-    EXPECT_EQ(m[L"status-storage-threads"].name, L"threads: 30.0 MB");
+    EXPECT_EQ(m[L"status-storage-threads"].name, L"Threads: 30.0 MB");
     EXPECT_EQ(m[L"status-storage-mode"].name, L"Mode: Normal");
     EXPECT_TRUE(has(m, L"status-not-deferred"));
+    EXPECT_FALSE(has(m, L"status-identity-token"));  // a token detail is not for the user
+    ASSERT_TRUE(w.invoke("status-pause-button"));  // the durations are in its menu
+    ASSERT_TRUE(w.until([&] { return w.exists("status-pause-15"); }));
     ASSERT_TRUE(w.invoke("status-pause-15"));
     ASSERT_TRUE(w.until([&] { return paused.load() == 15; }));
     std::vector<std::string> problems;
@@ -3355,7 +3381,7 @@ TEST(ShellPages, PolicyPageAndFolderGrants) {
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
     f.attach(w);
     w.picked_folder = L"C:\\Users\\me\\Documents\\Project";
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/policy"); });
     ASSERT_TRUE(w.until([&] { return w.exists("policy-computer"); }));
     {
         Uia uia;
@@ -3364,10 +3390,12 @@ TEST(ShellPages, PolicyPageAndFolderGrants) {
         EXPECT_EQ(m[L"policy-shell"].name, L"Shell commands: Sandboxed  · group:engineering");
         EXPECT_EQ(m[L"policy-net-allow"].name, L"Allowed hosts: github.com  · group:engineering");
         EXPECT_TRUE(m.contains(L"policy-ask-admin"));
-        EXPECT_EQ(m[L"files-empty"].name, L"No folders granted yet.");
     }
     ASSERT_TRUE(w.invoke("policy-refresh"));
     ASSERT_TRUE(w.until([&] { return refreshes.load() == 1; }));
+    ASSERT_TRUE(w.invoke("settings-jump-files"));
+    ASSERT_TRUE(w.until([&] { return w.exists("files-empty"); }));
+    EXPECT_EQ(Uia().by_id(w.hwnd())[L"files-empty"].name, L"No folders granted yet.");
 
     ASSERT_TRUE(w.invoke("files-add-read"));
     ASSERT_TRUE(w.until([&] { return w.exists("files-grant-0"); }));
@@ -3396,7 +3424,7 @@ TEST(ShellPages, DeleteEverythingNeedsTheConfirmationWord) {
     });
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
     f.attach(w);
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/privacy"); });
     ASSERT_TRUE(w.until([&] { return w.exists("settings-delete-everything"); }));
     ASSERT_TRUE(w.invoke("settings-delete-everything"));
     ASSERT_TRUE(w.until([&] { return w.exists("wipe-dialog"); }));
@@ -3415,8 +3443,8 @@ TEST(ShellGolden, SettingsPage) {
         return json{{"state", "idle"}, {"installed", false}, {"version", ""}, {"error", ""}, {"download", true}, {"available_version", "1"}};
     });
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
-    w.run([&] { w.main().open("#/settings"); });
-    ASSERT_TRUE(w.until([&] { return w.exists("notify-completed") && w.exists("settings-speech-download"); }));
+    w.run([&] { w.main().open("#/settings/general"); });
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-speech-download"); }));
     std::vector<uint32_t> px;
     UINT pw = 0, ph = 0;
     w.run([&] {
@@ -4261,7 +4289,7 @@ TEST(ShellAutomations, EditorRunNowAndOpenResultFromHistory) {
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
     f.attach(w);
     aw.window = &w;
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/automations"); });
     ASSERT_TRUE(w.until([&] { return w.exists("settings-automations-empty"); }));
     EXPECT_FALSE(w.exists("settings-later-automations"));
     ASSERT_TRUE(w.invoke("settings-automations-new"));
@@ -4311,15 +4339,17 @@ TEST(ShellAutomations, EditorRunNowAndOpenResultFromHistory) {
     EXPECT_EQ(f.in.svc->store().entry(thread)->origin_kind, "trigger");
 
     // Back in Settings: the last run and the edit and delete path.
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/automations"); });
     ASSERT_TRUE(w.until([&] { return w.exists("automation-last-" + id) && label_text(w, "automation-last-" + id).find(u"succeeded") != std::u16string::npos; }));
+    ASSERT_TRUE(w.invoke("automation-more-" + id));  // Run now and Edit are in the More menu
+    ASSERT_TRUE(w.until([&] { return w.exists("automation-edit-" + id); }));
     ASSERT_TRUE(w.invoke("automation-edit-" + id));
     ASSERT_TRUE(w.until([&] { return field_text(w, "automation-name") == u"Morning digest"; }));
     EXPECT_FALSE(enabled(w, "automation-kind"));
     ASSERT_TRUE(w.invoke("automation-delete"));
     ASSERT_TRUE(w.until([&] { return w.exists("automation-delete-confirm"); }));
     ASSERT_TRUE(w.invoke("automation-delete-confirm"));
-    ASSERT_TRUE(w.until([&] { return w.shell().route().hash == "#/settings" && w.exists("settings-automations-empty"); }));
+    ASSERT_TRUE(w.until([&] { return w.shell().route().hash == "#/settings/automations" && w.exists("settings-automations-empty"); }));
 }
 
 // 4.2: the agent creates a Trigger with tasks.create; the call passes the policy decision as write-local and the
@@ -4355,9 +4385,16 @@ TEST(ShellAutomations, AgentCreatedTriggerIsLabelled) {
 
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
     f.attach(w);
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/automations"); });
     ASSERT_TRUE(w.until([&] { return w.exists("automation-by-agent-" + id); }));
-    EXPECT_NE(label_text(w, "automation-conditions-" + id).find(u"0 15 * * 5"), std::u16string::npos);
+    // Schedules in words (improve-plain-information D2); the expression is in the tooltip.
+    EXPECT_EQ(label_text(w, "automation-conditions-" + id), u"Every Friday at 15:00");
+    std::u16string tip;
+    w.with("automation-conditions-" + id, [&](ui::Node& n) {
+        tip = n.help;
+        return true;
+    });
+    EXPECT_NE(tip.find(u"0 15 * * 5"), std::u16string::npos);
 }
 // 4.1: the Remote task history in Settings > Automations lists each task with its issuer, state and note, and opens its
 // Thread, whose origin names the issuer.
@@ -4382,7 +4419,7 @@ TEST(ShellAutomations, RemoteTaskHistory) {
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
     f.attach(w);
     aw.window = &w;
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/automations"); });
     ASSERT_TRUE(w.until([&] { return w.exists("remote-task-1") && w.exists("remote-task-2"); }));
     EXPECT_FALSE(w.exists("settings-remote-empty"));
     const auto name_of = [&w](const std::string& id) {
@@ -4437,7 +4474,7 @@ TEST(ShellMail, ConnectSyncExclusionsAndDisconnect) {
             });
             return out;
         };
-        w.run([&] { w.main().open("#/settings"); });
+        w.run([&] { w.main().open("#/settings/mail"); });
         ASSERT_TRUE(w.until([&] { return w.exists("settings-mail-connect"); }));
         EXPECT_FALSE(w.exists("settings-later-mail"));
         EXPECT_EQ(name_of("settings-mail-state"), u"Mailbox: Not connected");
@@ -4538,13 +4575,13 @@ TEST(ShellKnowledge, SourcesFoldersExclusionsForgetMergeAndSplit) {
             });
             return out;
         };
-        w.run([&] { w.main().open("#/settings"); });
+        w.run([&] { w.main().open("#/settings/knowledge"); });
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-source-files"); }));
         EXPECT_FALSE(w.exists("settings-later-knowledge"));
         EXPECT_EQ(name_of("knowledge-source-threads"), u"Threads: On");
         EXPECT_EQ(name_of("knowledge-source-mail"), u"Mail: Off by policy");
         EXPECT_TRUE(w.exists("knowledge-source-policy-mail"));
-        EXPECT_FALSE(w.exists("knowledge-source-toggle-mail"));  // the user cannot switch on what policy turned off
+        EXPECT_FALSE(w.exists("knowledge-source-enabled-mail"));  // the user cannot switch on what policy turned off
         EXPECT_EQ(name_of("settings-knowledge-policy-exclusions"), u"Excluded by your organisation: **\\HR\\**");
         EXPECT_TRUE(w.exists("settings-knowledge-no-folders"));
         EXPECT_TRUE(w.exists("settings-knowledge-extraction-off"));
@@ -4628,10 +4665,15 @@ TEST(ShellKnowledge, SourcesFoldersExclusionsForgetMergeAndSplit) {
         EXPECT_FALSE(store.entity(projekt));
 
         // Pause and turn off a Source.
+        ASSERT_TRUE(w.invoke("knowledge-source-more-threads"));  // Pause, Reindex and Forget are in the More menu
+        ASSERT_TRUE(w.until([&] { return w.exists("knowledge-source-pause-threads") && w.exists("knowledge-source-reindex-threads"); }));
         ASSERT_TRUE(w.invoke("knowledge-source-pause-threads"));
         ASSERT_TRUE(w.until([&] { return name_of("knowledge-source-threads") == u"Threads: Paused"; }));
         EXPECT_TRUE(store.source("threads").paused);
-        ASSERT_TRUE(w.invoke("knowledge-source-toggle-files"));
+        ASSERT_TRUE(w.with("knowledge-source-enabled-files", [](ui::Node& n) {
+            n.toggle();
+            return true;
+        }));
         ASSERT_TRUE(w.until([&] { return name_of("knowledge-source-files") == u"Files: Off"; }));
         window = nullptr;
     }
@@ -5002,7 +5044,7 @@ TEST(ShellMeetings, SectionShowsCaptureMeetingsTranscriptAndSeries) {
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
     f.attach(w);
     window = &w;
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/meetings"); });
     // Feature Disabled: no capture controls.
     ASSERT_TRUE(w.until([&] { return w.exists("settings-meetings-off"); }));
     EXPECT_FALSE(w.exists("settings-meetings-list"));
@@ -5112,7 +5154,7 @@ TEST(ShellMeetings, EchoReviewTermsAndCaptureTrouble) {
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
     f.attach(w);
     window = &w;
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/meetings"); });
 
     // Capture Trouble Indication: the microphone is not being recorded, then it recovers.
     ASSERT_TRUE(w.until([&] { return w.exists("settings-meetings-trouble"); }));
@@ -5316,9 +5358,14 @@ TEST(ShellAgenda, ViewGroupsItemsAndOffersNamedActions) {
     EXPECT_TRUE(w.exists("agenda-group-today"));
     EXPECT_TRUE(w.exists("agenda-group-later"));
     EXPECT_FALSE(w.exists("agenda-group-tomorrow"));
-    EXPECT_EQ(m[L"agenda-item-a1"].name, L"Send the Q4 slides, due 2026-11-17");
-    EXPECT_EQ(m[L"agenda-meta-a1"].name, L"Due 2026-11-17 (inferred) · Mail");
-    EXPECT_EQ(m[L"agenda-meta-a2"].name, L"Due 2026-11-26 14:00 · Mail");
+    EXPECT_EQ(m[L"agenda-item-a1"].name, L"Send the Q4 slides, due Tuesday 17. 11.");
+    // Agenda View Layout: the due date as its own chip, the source kinds as badges, the group counts.
+    EXPECT_EQ(m[L"agenda-meta-a1"].name, L"Due Tuesday 17. 11. (inferred)");
+    EXPECT_EQ(m[L"agenda-meta-a2"].name, L"Due Thursday 26. 11. 14:00");
+    EXPECT_TRUE(w.exists("agenda-tags-a1"));
+    EXPECT_TRUE(w.exists("agenda-quote-a1"));
+    EXPECT_EQ(m[L"agenda-more-a1"].name, L"More actions for Send the Q4 slides");
+    EXPECT_FALSE(w.exists("agenda-dismiss-a1"));  // in the card's menu
     EXPECT_EQ(m[L"agenda-prepare-a2"].name, L"Prepare Review the budget");
     EXPECT_EQ(m[L"agenda-done-a3"].name, L"Mark Sign the travel form done");
     EXPECT_TRUE(w.exists("agenda-source-a1"));
@@ -5328,6 +5375,8 @@ TEST(ShellAgenda, ViewGroupsItemsAndOffersNamedActions) {
 
     ASSERT_TRUE(w.invoke("agenda-done-a3"));
     ASSERT_TRUE(w.until([&] { return !w.exists("agenda-item-a3"); }));
+    ASSERT_TRUE(w.invoke("agenda-more-a1"));
+    ASSERT_TRUE(w.until([&] { return w.exists("agenda-dismiss-a1") && w.exists("agenda-date-a1") && w.exists("agenda-rename-a1"); }));
     ASSERT_TRUE(w.invoke("agenda-dismiss-a1"));
     ASSERT_TRUE(w.until([&] { return !w.exists("agenda-item-a1"); }));
     ASSERT_TRUE(w.invoke("agenda-prepare-a2"));
@@ -5336,7 +5385,7 @@ TEST(ShellAgenda, ViewGroupsItemsAndOffersNamedActions) {
     EXPECT_EQ(count("agenda.dismiss"), 1);
 
     // Settings: the Agenda section turns the Agenda off; the view leaves the navigation.
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/agenda"); });
     ASSERT_TRUE(w.until([&] { return w.exists("agenda-enabled") && w.exists("agenda-diagnostics"); }));
     ASSERT_TRUE(w.with("agenda-enabled", [](ui::Node& node) {
         auto* checkbox = dynamic_cast<ui::Checkbox*>(&node);
@@ -5566,6 +5615,8 @@ TEST(ShellKnowledge, SaveMailAndChatAsNote) {
 
         // A Chat: Save as note… asks for the period; the draft opens in the Knowledge view's editor.
         w.run([&] { w.main().open("#/chats/t1"); });
+        ASSERT_TRUE(w.until([&] { return w.exists("chat-more"); }));
+        ASSERT_TRUE(w.invoke("chat-more"));  // Compact Chat Header: Save as note is in the More menu
         ASSERT_TRUE(w.until([&] { return w.exists("chat-save-note"); }));
         ASSERT_TRUE(w.invoke("chat-save-note"));
         ASSERT_TRUE(w.until([&] { return w.exists("chat-save-note-dialog-week"); }));
@@ -5892,7 +5943,7 @@ TEST(ShellChats, EntriesConversationNewChatLeaveAndOff) {
     EXPECT_TRUE(w.exists("new-chat-dialog-name"));
     w.type("new-chat-dialog-name", u"Planning");
     ASSERT_TRUE(w.invoke("new-chat-dialog-start"));
-    ASSERT_TRUE(w.until([&] { return row_names().count("chat:t2") == 1 && w.exists("chat-leave"); }));
+    ASSERT_TRUE(w.until([&] { return row_names().count("chat:t2") == 1 && w.exists("chat-more"); }));
     EXPECT_EQ(jstr(last("messaging.create"), "kind"), "team");
     EXPECT_EQ(jstr(last("messaging.create"), "name"), "Planning");
     EXPECT_EQ(last("messaging.create")["members"], json::array({"carol", "petra"}));
@@ -5935,13 +5986,27 @@ TEST(ShellChats, EntriesConversationNewChatLeaveAndOff) {
     ASSERT_TRUE(w.until([&] { return !last("messaging.add_members").is_null(); }));
     EXPECT_EQ(jstr(last("messaging.add_members"), "chat"), "t2");
     EXPECT_EQ(last("messaging.add_members")["users"], json::array({"petra"}));
-    ASSERT_TRUE(w.until([&] { return w.exists("chat-members") && label_text(w, "chat-members").find(u"Petra Peer") != std::u16string::npos; }));
+    // Compact Chat Header: the count, with the names in the tooltip.
+    const auto members_tip = [&] {
+        std::u16string tip;
+        w.with("chat-members", [&](ui::Node& n) {
+            tip = n.help;
+            return true;
+        });
+        return tip;
+    };
+    ASSERT_TRUE(w.until([&] { return w.exists("chat-members") && members_tip().find(u"Petra Peer") != std::u16string::npos; }));
+    EXPECT_NE(label_text(w, "chat-members").find(u"members"), std::u16string::npos);
 
     // Leave asks first; Cancel stays. Leaving removes the entry and returns to the list.
+    ASSERT_TRUE(w.invoke("chat-more"));
+    ASSERT_TRUE(w.until([&] { return w.exists("chat-leave"); }));
     ASSERT_TRUE(w.invoke("chat-leave"));
     ASSERT_TRUE(w.until([&] { return w.exists("chat-leave-dialog-confirm"); }));
     ASSERT_TRUE(w.invoke("chat-leave-dialog-cancel"));
     EXPECT_TRUE(last("messaging.leave").is_null());
+    ASSERT_TRUE(w.invoke("chat-more"));
+    ASSERT_TRUE(w.until([&] { return w.exists("chat-leave"); }));
     ASSERT_TRUE(w.invoke("chat-leave"));
     ASSERT_TRUE(w.until([&] { return w.exists("chat-leave-dialog-confirm"); }));
     ASSERT_TRUE(w.invoke("chat-leave-dialog-confirm"));
@@ -6308,7 +6373,7 @@ TEST(ShellDictation, DictateInsertsAtTheCaretEscapeDiscardsAndAvailability) {
     EXPECT_FALSE(w.field_key("composer-input", ui::kKeyEscape)) << "Escape does nothing here without a recording";
 
     // Dictation language (D5): Settings, General offers Automatic and the transcript languages.
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/general"); });
     ASSERT_TRUE(w.until([&] { return w.exists("settings-dictation-language"); }));
     ASSERT_TRUE(w.invoke("settings-dictation-language"));
     ASSERT_TRUE(w.until([&] { return w.exists("settings-dictation-language-cs") && w.exists("settings-dictation-language-auto"); }));
@@ -6522,6 +6587,41 @@ TEST(ShellMeetings, RecordMeetingFromANewThread) {
     ASSERT_TRUE(w.until([&] { return !w.exists("composer-record-meeting") && w.exists("composer-input"); }));
 }
 
+// improve-threads-calendar-agenda 2.1, 2.2: the header states each fact once. A meeting Thread shows when it took place
+// and who attended, links to its calendar event and not to Settings; a Daily report shows its badge without words.
+TEST(ShellThreadHeader, MeetingFactsOnceAndNoSettingsLink) {
+    Fixture f;
+    const auto t = f.in.env.thread();
+    ASSERT_TRUE(f.in.svc->store().set_origin(t, "meeting", {{"meeting_id", "mtg_1"}, {"title", "B2X status meeting"}, {"link", "#/settings"}}));
+    const auto r = f.in.env.thread();
+    ASSERT_TRUE(f.in.svc->store().set_origin(r, "system", {{"daily_report", true}, {"title", "Daily report"}}));
+    const long long start = *parse_iso8601_ms("2026-11-27T13:00:00Z");
+    f.rpc.add("meetings.progress", RpcExposure::ui, [&](const json&) -> Result<json> {
+        return json{{"id", "mtg_1"}, {"stage", "done"}, {"reason", ""}, {"error", ""}, {"can_transcribe_now", false},
+                    {"can_transcribe_again", true}, {"started_at", start}, {"ended_at", start + 80 * 60'000},
+                    {"attendees", {"Alice", "Bob", "Carol", "Dan", "Eve"}}, {"event_id", "ev_1"}};
+    });
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + t); });
+    ASSERT_TRUE(w.until([&] { return w.exists("thread-meeting-facts-text") && w.exists("thread-meeting-calendar"); }));
+    Uia uia;
+    auto m = uia.by_id(w.hwnd());
+    EXPECT_TRUE(m[L"thread-meeting-facts-text"].name.ends_with(L"(1 h 20 min) · Alice, Bob, Carol +2 more"))
+        << std::string(m[L"thread-meeting-facts-text"].name.begin(), m[L"thread-meeting-facts-text"].name.end());
+    EXPECT_FALSE(w.exists("thread-origin-text"));  // no "Captured from the meeting <title>"
+    EXPECT_FALSE(w.exists("thread-origin-link"));  // nothing opens Settings
+    std::vector<std::string> problems;
+    w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
+    EXPECT_TRUE(problems.empty()) << problems.front();
+    ASSERT_TRUE(w.invoke("thread-meeting-calendar"));
+    ASSERT_TRUE(w.until([&] { return w.exists("calendar-toolbar"); }));
+
+    w.run([&] { w.main().open("#/threads/" + r); });
+    ASSERT_TRUE(w.until([&] { return w.exists("thread-origin"); }));
+    EXPECT_FALSE(w.exists("thread-origin-text"));  // the "Skowork" badge only, not also "Created by Skowork"
+}
+
 // show-meeting-transcription-progress 3.3 and improve-transcript-language 5.1: a meeting Thread's progress line follows
 // the host's stage, with Transcribe now while it failed, and Transcribe again in a chosen language while audio is kept.
 TEST(ShellMeetings, ProgressLineInTheMeetingThread) {
@@ -6666,7 +6766,7 @@ TEST(ShellDictation, SpeechBlockVerifiesRepairsAndTestsTheMicrophoneOnlyWhenAske
     w.run([&] { w.main().open("#/threads/" + t); });
     ASSERT_TRUE(w.until([&] { return w.exists("composer-input"); }));
     w.type("composer-input", u"Draft before the check");
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/general"); });
     ASSERT_TRUE(w.until([&] { return w.exists("settings-speech-verify") && w.exists("settings-speech-repair") && w.exists("settings-speech-test"); }));
     Uia uia;
     const auto name_becomes = [&](const wchar_t* id, const std::wstring& want) {
@@ -6877,7 +6977,7 @@ TEST(ShellPages, ConnectorsShowApiStatesAndTakeAPersonalTokenOnce) {
         return std::find(all.begin(), all.end(), text) != all.end();
     };
 
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/connections"); });
     ASSERT_TRUE(w.until([&] { return w.exists("api-connector-wiki"); }));
     Announcements said(w);  // the window exists once the page is open
     {
@@ -6896,7 +6996,11 @@ TEST(ShellPages, ConnectorsShowApiStatesAndTakeAPersonalTokenOnce) {
         EXPECT_FALSE(has(m, L"settings-connector-token-open-weather"));  // no personal token for this connector
     }
     EXPECT_TRUE(has_label("api-connector-orders", u"2 of 2 tools usable"));
-    EXPECT_TRUE(has_label("api-connector-orders", u"Token set on 2026-11-10 10:00 UTC"));
+    // In local time and the window's date format, not UTC.
+    const auto token_set = labels("api-connector-orders");
+    EXPECT_TRUE(std::any_of(token_set.begin(), token_set.end(), [](const std::u16string& l) {
+        return l.starts_with(u"Token set on ") && l.find(u"UTC") == std::u16string::npos && l.find(u"2026-11-10") == std::u16string::npos;
+    }));
     EXPECT_TRUE(has_label("api-connector-jira", u"Warning: no usable tools: add your token to use this connector"));
     EXPECT_TRUE(has_label("api-connector-jira", u"No token set"));
     EXPECT_TRUE(has_label("api-connector-jira", u"Create a personal access token in your Jira profile."));
@@ -7792,6 +7896,18 @@ TEST(ShellKnowledge, WorkspaceTraversesEvidenceRevisionsAndReviews) {
         w.run([&] { w.main().open("#/knowledge"); });
         ASSERT_TRUE(w.until([&] { return w.exists("knowledge-section-review") && w.exists(approved_row); }));
         EXPECT_NE(label(w, "knowledge-section-sources").find(u"(selected)"), std::u16string::npos);
+    // Selected Tabs (improve-plain-information 2.7): the chosen tab is selected for UI Automation, the others are not.
+    int chosen = -1, other = -1;
+    w.with("knowledge-section-sources", [&](ui::Node& n) {
+        chosen = n.selected_state();
+        return true;
+    });
+    w.with("knowledge-section-review", [&](ui::Node& n) {
+        other = n.selected_state();
+        return true;
+    });
+    EXPECT_EQ(chosen, 1);
+    EXPECT_EQ(other, 0);
 
         // Item → fact with its evidence → an excerpt in its item; Back returns through them, the item where it was.
         ASSERT_TRUE(w.invoke(approved_row));
@@ -8154,7 +8270,7 @@ TEST(ShellTriage, SettingsSectionAndSuggestionCard) {
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
     f.attach(w);
     window = &w;
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/triage"); });
     ASSERT_TRUE(w.until([&] { return w.exists("triage-enabled"); }));
     EXPECT_FALSE(w.exists("triage-folders"));  // off by default
     ASSERT_TRUE(w.with("triage-enabled", [](ui::Node& n) { return n.focusable && n.enabled; }));
@@ -8246,7 +8362,7 @@ TEST(ShellRecovery, ShutdownFailedRunExplainsTheUnknownOutcomeAndContinues) {
     f.attach(w);
     w.run([&] { w.main().open(shell::thread_hash(thread)); });
     ASSERT_TRUE(w.until([&] { return w.exists("recovery-banner"); }));
-    EXPECT_NE(label_text(w, "recovery-banner-unknown").find(u"mail.send"), std::u16string::npos);
+    EXPECT_NE(label_text(w, "recovery-banner-unknown").find(u"Send an email"), std::u16string::npos);  // the Tool in words
     EXPECT_TRUE(w.exists("recovery-open-actions"));
     EXPECT_FALSE(w.exists("recovery-continue"));  // the unknown outcome is answered first
     const std::u16string body = label_text(w, "recovery-banner-body");
@@ -8263,6 +8379,29 @@ TEST(ShellRecovery, ShutdownFailedRunExplainsTheUnknownOutcomeAndContinues) {
     ASSERT_TRUE(w.until([&] { return !w.exists("recovery-banner"); }, 10000));
     EXPECT_EQ(f.in.env.calls.count("mail.send"), 0);  // nothing was made again
     EXPECT_FALSE(jstr(f.in.env.rt->recovery_status(failed), "continuation").empty());
+}
+
+// improve-plain-information 2.3 (Continuation Blocker Codes): a Run that cannot continue says why in the window's words,
+// from the runtime's code, never with the runtime's own wording.
+TEST(ShellRecovery, CannotContinueGivesTheReasonInWords) {
+    std::string thread;
+    Fixture f([&](Inbox& in) {
+        auto& store = in.env.rt->store();
+        thread = in.env.thread();
+        auto r = store.create_run(thread, {}, false);
+        ASSERT_TRUE(r);
+        ASSERT_TRUE(store.transition(r->id, RunState::running));
+        ASSERT_TRUE(store.append_event(r->id, "message", user_message_event("Summarise the budget")));
+    });
+    f.rpc.add("runs.recovery", RpcExposure::ui, [](const json& p) -> Result<json> {
+        return json{{"run_id", jstr(p, "run_id")}, {"continuable", false}, {"pending", false}, {"blocker_code", "newer_run"},
+                    {"blocker", "a newer Run followed it in the Thread"}, {"unknown", json::array()}};
+    });
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open(shell::thread_hash(thread)); });
+    ASSERT_TRUE(w.until([&] { return w.exists("recovery-banner-body"); }));
+    EXPECT_EQ(label_text(w, "recovery-banner-body"), u"It cannot continue now: newer work followed it in this thread.");
 }
 
 // ==== add-local-outlook-and-teams (tasks 2.4, 3.5, 4.3, 5.1, 5.3) over scripted hosts ===================================
@@ -8318,6 +8457,9 @@ TEST(ShellCalendar, WorkWeekPrivacyAndEventActions) {
                           {"attendees", json::array({{{"name", "Jan"}, {"address", "jan@example.com"}}})},
                           {"online_meeting_url", "https://teams.microsoft.com/l/meetup-join/abc"}, {"body", "Agenda: budget"}});
         events.push_back({{"id", "E2"}, {"private", true}, {"show_as", "busy"}, {"start_ms", at(11)}, {"end_ms", at(12)}});
+        // Calendar Time Grid: an overlapping 09:30-11:00 and an all-day event on the same Monday.
+        events.push_back({{"id", "E3"}, {"subject", "Design review"}, {"start_ms", at(9) + 1'800'000}, {"end_ms", at(11)}, {"all_day", false}});
+        events.push_back({{"id", "E4"}, {"subject", "Away"}, {"start_ms", at(0)}, {"end_ms", at(24)}, {"all_day", true}});
         return json{{"available", true}, {"backend", "outlook"}, {"last_sync", "2026-11-17T09:00:00Z"}, {"state", "connected"}, {"events", events}};
     });
     for (const char* m : {"calendar.ask", "calendar.open_in_outlook"}) {
@@ -8349,6 +8491,25 @@ TEST(ShellCalendar, WorkWeekPrivacyAndEventActions) {
     EXPECT_NE(m[L"calendar-event-E1"].name.find(L"Steering committee"), std::wstring::npos);
     EXPECT_NE(m[L"calendar-event-E2"].name.find(L"Busy"), std::wstring::npos);
     EXPECT_EQ(m[L"calendar-event-E2"].name.find(L"Steering"), std::wstring::npos);
+    // improve-threads-calendar-agenda 4.2: blocks by time and length; overlapping ones side by side; all-day above.
+    const auto frame = [&](const char* id) {
+        ui::Rect r;
+        w.with(id, [&](ui::Node& n) {
+            r = n.frame();
+            return true;
+        });
+        return r;
+    };
+    ASSERT_TRUE(w.until([&] { return !frame("calendar-event-E3").empty(); }));
+    const ui::Rect e1 = frame("calendar-event-E1"), e2 = frame("calendar-event-E2"), e3 = frame("calendar-event-E3"),
+                   e4 = frame("calendar-event-E4");
+    EXPECT_NEAR(e3.h / e1.h, 1.5, 0.1);         // 90 minutes against 60
+    EXPECT_NEAR(e2.y - e1.y, 2 * e1.h, 4.0);    // 11:00 is two hours below 09:00
+    EXPECT_GT(e3.x, e1.x + e1.w / 2);           // side by side
+    EXPECT_NEAR(e3.w, e1.w, 1.0);
+    EXPECT_NEAR(e2.x, e1.x, 1.0);               // E2 does not overlap: the first lane, the whole column
+    EXPECT_GT(e2.w, e1.w * 1.8);
+    EXPECT_LT(e4.bottom(), e1.y);               // the all-day band is above the hours
     std::vector<std::string> problems;
     w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
     EXPECT_TRUE(problems.empty()) << problems.front();
@@ -8413,24 +8574,30 @@ TEST(ShellSettings, OutlookTeamsAndDailyReportSections) {
     };
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
     f.attach(w);
-    w.run([&] { w.main().open("#/settings"); });
+    w.run([&] { w.main().open("#/settings/mail"); });
     ASSERT_TRUE(w.until([&] {
-        return w.exists("settings-mail-backend") && w.exists("settings-teams-counts") && w.exists("settings-report-time");
+        return w.exists("settings-mail-backend");
     }, 10000));
     Uia uia;
     auto m = uia.by_id(w.hwnd());
     EXPECT_NE(m[L"settings-mail-outlook-state"].name.find(L"Outlook is not running"), std::wstring::npos);
-    EXPECT_NE(m[L"settings-teams-counts"].name.find(L"2 conversations, 40 messages"), std::wstring::npos);
 
     ASSERT_TRUE(set_switch(w, "settings-mail-outlook-start", true));
     ASSERT_TRUE(w.until([&] { return !all("mail.outlook_may_start").empty(); }));
     EXPECT_TRUE(jbool(all("mail.outlook_may_start").back(), "on"));
+
+    ASSERT_TRUE(w.invoke("settings-jump-teams"));
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-teams-counts"); }, 10000));
+    m = uia.by_id(w.hwnd());
+    EXPECT_NE(m[L"settings-teams-counts"].name.find(L"2 conversations, 40 messages"), std::wstring::npos);
 
     ASSERT_TRUE(set_switch(w, "settings-teams-conv-1", false));  // the first conversation: Project Falcon
     ASSERT_TRUE(w.until([&] { return !all("teams.exclude").empty(); }));
     EXPECT_EQ(jstr(all("teams.exclude").back(), "conversation_id"), "19:falcon@thread.v2");
     EXPECT_TRUE(jbool(all("teams.exclude").back(), "excluded"));
 
+    ASSERT_TRUE(w.invoke("settings-jump-daily_report"));
+    ASSERT_TRUE(w.until([&] { return w.exists("settings-report-time"); }, 10000));
     // Saturday as well. The page runs one action at a time, so the switch is pressed again until the host has it.
     ASSERT_TRUE(w.until([&] {
         (void)set_switch(w, "settings-report-day-6", false);

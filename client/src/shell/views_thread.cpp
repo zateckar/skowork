@@ -37,6 +37,7 @@ void ThreadPane::rebuild() {
     // (crash 2026-11-24 in rebuild_suggestion).
     banner_ = nullptr;
     progress_ = nullptr;
+    meeting_facts_ = nullptr;
     suggestion_ = nullptr;
     clear_children();
     auto add_composer = [&](const std::string& key) {
@@ -166,17 +167,15 @@ void ThreadPane::rebuild() {
             link = s("link");
             link_text = shell_.t("thread.origin.open_remote");
         } else if (e->origin_kind == "meeting") {
-            text = shell_.t("thread.origin.meeting", {{"title", ui::to_utf16(s("title"))}});
-            link = s("link");
-            link_text = shell_.t("thread.origin.open_meeting");
+            // Thread Header: the title is the meeting's, and its time, attendees and calendar link come from
+            // meetings.progress (rebuild_meeting_facts); the origin ref's old link to Settings is not used.
         } else if (!s("skill_test").empty()) {
             // A Skill test Thread (client/skills Skill Test Run): back to the editor of that Skill.
             text = shell_.t("thread.origin.skill_test", {{"name", ui::to_utf16(s("skill_test"))}});
             link = "#/skills/edit/" + s("skill_test");
             link_text = shell_.t("thread.origin.open_skill");
-        } else {
-            text = shell_.t("thread.origin.system");
         }
+        // A system Thread: the badge ("Skowork" or the triage category) says it all (Thread Header).
         auto* origin = emplace<Node>("thread-origin");
         origin->axis = ui::Axis::row;
         origin->gap = 8;
@@ -186,8 +185,16 @@ void ThreadPane::rebuild() {
         } else {
             origin->emplace<ui::Badge>(shell_.ui(), shell_.t(origin_badge_key(*e)), Paint::surface_alt, Paint::text_secondary);
         }
-        auto* l = origin->emplace<ui::Label>(shell_.ui(), text, TextStyle::caption, Paint::text_secondary, false, "thread-origin-text");
-        l->padding.top = 1;
+        if (!text.empty()) {
+            auto* l = origin->emplace<ui::Label>(shell_.ui(), text, TextStyle::caption, Paint::text_secondary, false, "thread-origin-text");
+            l->padding.top = 1;
+        }
+        meeting_facts_ = nullptr;
+        if (e->origin_kind == "meeting") {
+            meeting_facts_ = origin->emplace<Node>("thread-meeting-facts");
+            meeting_facts_->axis = ui::Axis::row;
+            meeting_facts_->gap = 8;
+        }
         if (!link.empty()) {
             auto* b = origin->emplace<ui::Button>(shell_.ui(), "thread-origin-link", link_text, ui::Button::Kind::subtle);
             b->width = Sizing::fit;
@@ -210,6 +217,7 @@ void ThreadPane::rebuild() {
             load_progress();
         }
         rebuild_progress();
+        rebuild_meeting_facts();
     } else {
         progress_meeting_.clear();
         progress_data_ = nullptr;
@@ -285,7 +293,7 @@ void ThreadPane::rebuild_banner() {
     if (code == "rate_limit" && err.retry_after_s)
         body = shell_.t(base + ".body", {{"seconds", ui::to_utf16(std::to_string(*err.retry_after_s))}});
     else if (code == "quota_exceeded" && !err.reset_at.empty())
-        body = shell_.t(base + ".body", {{"at", ui::to_utf16(err.reset_at)}});
+        body = shell_.t(base + ".body", {{"at", iso_millis(err.reset_at) ? shell_.moment(*iso_millis(err.reset_at)) : ui::to_utf16(err.reset_at)}});
     else if (base == "errors.other" && !(err.reason.empty() && err.message.empty()))
         body = shell_.t(base + ".body", {{"reason", ui::to_utf16(err.reason.empty() ? err.message : err.reason)}});
     else if (shell_.ui().strings.has(base + ".body_none"))
@@ -341,10 +349,11 @@ void ThreadPane::rebuild_banner() {
             auto* f = actions->emplace<ui::Button>(shell_.ui(), "error-fork", shell_.t("errors.fork"));
             f->on_click = [this, id, run_id, seq] { shell_.fork(id, run_id, seq); };
         }
-        auto* c = actions->emplace<ui::Button>(shell_.ui(), "error-compact", shell_.t("errors.compact"));
+        // The remedy that works is the primary one; Retry would fail the same way (Plain Information).
+        auto* c = actions->emplace<ui::Button>(shell_.ui(), "error-compact", shell_.t("errors.compact"), ui::Button::Kind::primary);
         c->on_click = [this, id] { shell_.compact(id); };
     }
-    if (code != "quota_exceeded") {
+    if (code != "quota_exceeded" && code != "context_length") {
         auto* r = actions->emplace<ui::Button>(shell_.ui(), "error-retry", shell_.t("errors.retry"));
         r->on_click = [this, id] { shell_.retry(id); };
     }
@@ -379,7 +388,12 @@ void ThreadPane::build_recovery(Node& banner) {
     if (stopped) body = shell_.t("thread.recovery.stopped");
     else if (unanswered > 0) body = shell_.t("thread.recovery.answer_first", {{"count", ui::to_utf16(std::to_string(unanswered))}});
     else if (continuable) body = shell_.t("thread.recovery.can_continue");
-    else body = shell_.t("thread.recovery.cannot_continue", {{"reason", ui::to_utf16(jstr(r, "blocker"))}});
+    else {
+        // Continuation Blocker Codes: a translated reason, never runtime wording.
+        const std::string key = "thread.recovery.blockers." + jstr(r, "blocker_code");
+        body = shell_.t("thread.recovery.cannot_continue",
+                        {{"reason", shell_.ui().strings.has(key) ? shell_.t(key) : shell_.t("thread.recovery.blockers.other")}});
+    }
     auto* box = banner.emplace<ui::Box>("recovery-banner", Paint::surface_alt, 8, Paint::border);
     box->role = ui::Role::group;
     box->name = shell_.t("thread.recovery.title");
@@ -392,10 +406,10 @@ void ThreadPane::build_recovery(Node& banner) {
     text->emplace<ui::Label>(shell_.ui(), shell_.t("thread.recovery.title"), TextStyle::body_strong, Paint::text, true, "recovery-banner-title");
     text->emplace<ui::Label>(shell_.ui(), body, TextStyle::body, Paint::text, true, "recovery-banner-body");
     if (!unknown_tools.empty()) {
-        std::string list;
-        for (const auto& t : unknown_tools) list += (list.empty() ? "" : ", ") + t;
+        std::u16string list;
+        for (const auto& t : unknown_tools) list += (list.empty() ? u"" : u", ") + shell_.tool_words(t);  // Plain Action Details
         // Neither sent nor not sent: the outcome is unknown.
-        text->emplace<ui::Label>(shell_.ui(), shell_.t("thread.recovery.unknown", {{"tools", ui::to_utf16(list)}}), TextStyle::caption,
+        text->emplace<ui::Label>(shell_.ui(), shell_.t("thread.recovery.unknown", {{"tools", list}}), TextStyle::caption,
                                  Paint::text_secondary, true, "recovery-banner-unknown");
     }
     auto* actions = box->emplace<Node>();

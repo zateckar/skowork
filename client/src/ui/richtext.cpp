@@ -6,6 +6,7 @@
 #include <optional>
 
 #include "ui/elements.h"
+#include "ui/text16.h"
 
 namespace wb::ui {
 
@@ -197,6 +198,16 @@ LinkSpan::LinkSpan(Ui& ui, std::u16string text, std::u16string url, uint32_t sta
 }
 
 void LinkSpan::invoke() {
+    // In-window targets (client/work-inbox In-Window Links): a route of the window, or a Thread by its skowork:// ref.
+    constexpr std::u16string_view thread_ref = u"skowork://thread/";
+    if (ui_.open_route && url_.starts_with(u"#/")) {
+        ui_.open_route(to_utf8(url_));
+        return;
+    }
+    if (ui_.open_route && url_.starts_with(thread_ref)) {
+        ui_.open_route("#/threads/" + to_utf8(url_.substr(thread_ref.size())));
+        return;
+    }
     if (ui_.open_link) ui_.open_link(url_);
 }
 

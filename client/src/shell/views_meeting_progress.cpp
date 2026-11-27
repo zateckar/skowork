@@ -1,10 +1,12 @@
 // Meeting Progress In Its Thread (show-meeting-transcription-progress D3) and transcribing again (improve-transcript-language
 // D4): a line under a meeting-origin Thread's origin with the meeting's stage, polled every 5 seconds while the meeting
 // is not done, with Transcribe now while it waits or failed and Transcribe again while its audio is kept.
+#include "shell/format.h"
 #include "shell/shell.h"
 #include "ui/text16.h"
 
 #include <cmath>
+#include <ctime>
 
 namespace wb::shell {
 
@@ -27,7 +29,70 @@ bool running_stage(const std::string& stage) {
     return stage == "asking" || stage == "recording" || stage == "waiting" || stage == "transcribing" || stage == "summarizing";
 }
 
+std::tm local_tm(long long ms) {
+    const std::time_t t = static_cast<std::time_t>(ms / 1000);
+    std::tm lt{};
+    localtime_s(&lt, &t);
+    return lt;
+}
+
+std::u16string hhmm(const std::tm& t) {
+    char buf[8];
+    std::snprintf(buf, sizeof buf, "%02d:%02d", t.tm_hour, t.tm_min);
+    return ui::to_utf16(buf);
+}
+
 }  // namespace
+
+// Thread Header (improve-threads-calendar-agenda D2): when the meeting took place, how long, who attended, and the
+// calendar event when the meeting was matched to one.
+void ThreadPane::rebuild_meeting_facts() {
+    if (!meeting_facts_) return;
+    meeting_facts_->clear_children();
+    const json& p = progress_data_;
+    if (!p.is_object()) {
+        meeting_facts_->relayout();
+        return;
+    }
+    ui::Ui& u = shell_.ui();
+    const long long start = jint(p, "started_at"), end = jint(p, "ended_at");
+    std::u16string facts;
+    if (start > 0) {
+        const std::tm s = local_tm(start);
+        char day[16];
+        std::snprintf(day, sizeof day, "%d. %d. %d", s.tm_mday, s.tm_mon + 1, s.tm_year + 1900);
+        facts = shell_.t(std::string("calendar.weekday.") + std::to_string(s.tm_wday)) + u" " + ui::to_utf16(day) + u", " + hhmm(s);
+        if (end > start) {
+            facts += u"–" + hhmm(local_tm(end));
+            facts += u" (" + ui::to_utf16(format_elapsed(((end - start) / 60'000) * 60'000)) + u")";
+        }
+    }
+    std::vector<std::string> names;
+    for (const auto& a : p.value("attendees", json::array()))
+        if (a.is_string() && !a.get<std::string>().empty()) names.push_back(a.get<std::string>());
+    if (!names.empty()) {
+        constexpr size_t kShown = 3;
+        std::u16string who;
+        for (size_t i = 0; i < names.size() && i < kShown; ++i) who += (i ? u", " : u"") + ui::to_utf16(names[i]);
+        if (names.size() > kShown) who += u" " + shell_.t("thread.meeting.more_attendees", {{"count", ui::to_utf16(std::to_string(names.size() - kShown))}});
+        facts += (facts.empty() ? u"" : u" · ") + who;
+    }
+    if (!facts.empty()) {
+        auto* l = meeting_facts_->emplace<ui::Label>(u, facts, TextStyle::caption, Paint::text_secondary, false, "thread-meeting-facts-text");
+        l->padding.top = 1;
+        std::u16string all;
+        for (const auto& n : names) all += (all.empty() ? u"" : u", ") + ui::to_utf16(n);
+        l->help = all;  // every attendee, for the tooltip and screen readers
+    }
+    if (const std::string event = jstr(p, "event_id"); !event.empty()) {
+        auto* b = meeting_facts_->emplace<ui::Button>(u, "thread-meeting-calendar", shell_.t("thread.meeting.show_in_calendar"), ui::Button::Kind::subtle);
+        b->width = Sizing::fit;
+        b->role = ui::Role::link;
+        b->on_click = [this, event, start] { shell_.show_calendar_event(event, start > 0 ? start : shell_.now()); };
+    }
+    meeting_facts_->relayout();
+    meeting_facts_->invalidate();
+}
 
 void ThreadPane::meetings_changed() {
     if (!progress_meeting_.empty()) load_progress();
@@ -42,6 +107,7 @@ void ThreadPane::load_progress() {
         if (!alive.lock() || id != progress_meeting_) return;
         progress_data_ = r ? *r : json(nullptr);
         rebuild_progress();
+        rebuild_meeting_facts();
         // Polled while it runs; the share done and the elapsed time change without an event.
         if (r && running_stage(jstr(*r, "stage")) && !progress_timer_)
             progress_timer_ = shell_.window().set_timer(kPollMs, [this, alive, id] {

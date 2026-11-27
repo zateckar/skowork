@@ -281,7 +281,7 @@ void MeetingService::detected(const AppMatch& app) {
     m.detected_at = now();
     if (cal) link_calendar(m, *cal);
     if (m.title.empty()) m.title = app_display(app.process) + " call";
-    const json ref = {{"meeting_id", m.id}, {"title", m.title}, {"link", "#/settings"}};
+    const json ref = {{"meeting_id", m.id}, {"title", m.title}};
     if (env_.create_thread) {
         auto t = env_.create_thread(m.title, ref);
         if (!t) {
@@ -829,6 +829,12 @@ json MeetingService::progress_json(const MeetingRecord& m) {
               {"can_transcribe_now", audio && (st == "pending" || st == "failed" || st == "unsupported")},
               {"can_transcribe_again", audio && (st == "done" || st == "failed" || st == "unsupported")},
               {"language", m.language}};
+    // The meeting's facts for the Thread header (improve-threads-calendar-agenda D2): when it took place (detection
+    // when capture never started), its attendees, and its calendar event.
+    p["started_at"] = m.started_at > 0 ? m.started_at : m.detected_at;
+    p["ended_at"] = m.ended_at;
+    p["attendees"] = m.attendees;
+    p["event_id"] = m.event_id;
     if (st == "offered" || st == "notice") {
         p["stage"] = "asking";
     } else if (st == "capturing") {
@@ -1030,7 +1036,7 @@ Result<json> MeetingService::capture_manual(const std::string& source) {
     if (m.title.empty())
         m.title = src.kind == CaptureSource::Kind::process ? "Capture of " + app_display(name) : name + " capture";
     if (env_.create_thread) {
-        auto t = env_.create_thread(m.title, {{"meeting_id", m.id}, {"title", m.title}, {"link", "#/settings"}});
+        auto t = env_.create_thread(m.title, {{"meeting_id", m.id}, {"title", m.title}});
         if (!t) return t.error();
         m.thread_id = *t;
     }

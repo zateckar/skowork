@@ -15,10 +15,11 @@ namespace {
 
 std::u16string u16(const std::string& s) { return ui::to_utf16(s); }
 
-// "2026-10-26T15:04:05.123Z" as "2026-10-26 15:04 UTC".
-std::u16string sync_time(const std::string& iso) {
-    if (iso.size() < 16) return u16(iso);
-    return u16(iso.substr(0, 10) + " " + iso.substr(11, 5) + " UTC");
+// A timestamp in the window's language and local time: the time today, the date and time otherwise (improve-threads-
+// calendar-agenda: Plain Information).
+std::u16string sync_time(Shell& shell, const std::string& iso) {
+    const auto ms = iso_millis(iso);
+    return ms ? shell.moment(*ms) : u16(iso);
 }
 
 std::string joined(const json* list) {
@@ -118,7 +119,7 @@ void PagePane::build_mail(Node& c) {
 
     // The local copy.
     const std::string last = jstr(mail_, "last_sync");
-    row(c, "settings-mail-last-sync", shell_.t("settings.mail.last_sync"), last.empty() ? shell_.t("settings.mail.never") : sync_time(last));
+    row(c, "settings-mail-last-sync", shell_.t("settings.mail.last_sync"), last.empty() ? shell_.t("settings.mail.never") : sync_time(shell_, last));
     row(c, "settings-mail-counts", shell_.t("settings.mail.local_copy"),
         shell_.t("settings.mail.counts", {{"messages", u16(std::to_string(jint(mail_, "messages")))},
                                           {"events", u16(std::to_string(jint(mail_, "events")))},

@@ -2,10 +2,13 @@
 // settings sections (client/teams-chats, client/daily-report), and the send form of a prepared draft (client/agenda
 // Sending A Prepared Draft). The host does the work (calendar.view, .ask, .open_in_outlook; teams.*; daily_report.*;
 // agenda.draft, .send_draft, .open_draft_in_outlook).
+#include "shell/calendar_layout.h"
 #include "shell/format.h"
 #include "shell/shell.h"
+#include "ui/canvas.h"
 #include "ui/text16.h"
 
+#include <cmath>
 #include <ctime>
 
 namespace wb::shell {
@@ -73,9 +76,179 @@ std::u16string join_addresses(const json& list) {
     return out;
 }
 
+// ---- The time grid (client/calendar-view Calendar Time Grid; improve-threads-calendar-agenda D4) -------------------
+
+constexpr float kGutter = 52;   // the hour scale
+constexpr float kHeadH = 30;    // the day names
+constexpr float kHourH = 48;    // one hour
+constexpr float kAllDayH = 26;  // one all-day row
+constexpr float kMinBlock = 20;
+
+// One event: a focusable block that opens its details. Drawn by itself; placed by the grid.
+class EventBlock : public Node {
+public:
+    EventBlock(ui::Ui& ui, std::string id, std::u16string time, std::u16string title, std::u16string place, bool chosen, bool busy,
+               bool cancelled, bool all_day)
+        : Node(std::move(id)), ui_(ui), time_(std::move(time)), title_(std::move(title)), place_(std::move(place)), chosen_(chosen),
+          busy_(busy), cancelled_(cancelled), all_day_(all_day) {
+        role = ui::Role::button;
+        focusable = true;
+        width = ui::Sizing::fixed;
+        height = ui::Sizing::fixed;
+    }
+    std::function<void()> on_click;
+    bool can_invoke() const override { return enabled; }
+    void invoke() override {
+        if (on_click) on_click();
+    }
+    void on_hover(bool h) override {
+        hovered_ = h;
+        invalidate();
+    }
+    void draw(ui::Canvas& c) override {
+        const ui::Rect f = {frame().x + 1, frame().y + 1, frame().w - 2, frame().h - 2};
+        if (f.empty()) return;
+        const Paint fill = chosen_ ? Paint::accent : busy_ ? Paint::surface_alt : Paint::accent_surface;
+        c.round(f, 4, fill, ui_.theme.high_contrast ? Paint::text : Paint::none, cancelled_ ? 0.45f : 1.f);
+        if (hovered_ && !chosen_) c.round(f, 4, Paint::accent, Paint::none, 0.15f);
+        if (!all_day_ && !chosen_) c.fill({f.x, f.y, 3, f.h}, busy_ ? Paint::border : Paint::accent);
+        const Paint ink = chosen_ ? Paint::accent_text : cancelled_ ? Paint::text_secondary : Paint::text;
+        const Paint ink2 = chosen_ ? Paint::accent_text : Paint::text_secondary;
+        c.push_clip(f);
+        const float x = f.x + (all_day_ ? 6 : 8), w = std::max(1.f, f.right() - x - 4);
+        float y = f.y + 2;
+        // Short blocks: time and title on one line; taller ones put the title under the time, then the place.
+        if (f.h < 36) {
+            IDWriteTextLayout* t = ui_.layout((time_.empty() ? std::u16string() : time_ + u"  ") + title_, TextStyle::caption, w, false);
+            DWRITE_TEXT_METRICS m{};
+            if (t) t->GetMetrics(&m);
+            c.text(t, x, f.y + (f.h - m.height) / 2, ink);
+        } else {
+            if (!time_.empty()) {
+                IDWriteTextLayout* t = ui_.layout(time_, TextStyle::caption, w, false);
+                DWRITE_TEXT_METRICS m{};
+                if (t) t->GetMetrics(&m);
+                c.text(t, x, y, ink2);
+                y += m.height;
+            }
+            IDWriteTextLayout* t = ui_.layout(title_, TextStyle::caption, w, true);
+            DWRITE_TEXT_METRICS m{};
+            if (t) t->GetMetrics(&m);
+            c.text(t, x, y, ink);
+            y += m.height;
+            if (!place_.empty() && y + 14 < f.bottom()) c.text(ui_.layout(place_, TextStyle::caption, w, false), x, y, ink2);
+        }
+        c.pop_clip();
+    }
+
+private:
+    ui::Ui& ui_;
+    std::u16string time_, title_, place_;
+    bool chosen_, busy_, cancelled_, all_day_;
+    bool hovered_ = false;
+};
+
+// The day columns with their names, the all-day band, the hour scale and lines, today's shading and the now line.
+// Each child EventBlock has a slot: its day, and either an all-day row or minutes and a lane.
+class CalendarGrid : public Node {
+public:
+    struct Slot {
+        size_t day = 0;
+        bool all_day = false;
+        int row = 0;             // all-day row
+        int start = 0, end = 0;  // minutes from the day's midnight
+        LanePlacement lane;
+    };
+    CalendarGrid(ui::Ui& ui, std::vector<std::u16string> days, int today, int now_min, int first_hour, int last_hour, int all_day_rows)
+        : Node("calendar-grid"), ui_(ui), days_(std::move(days)), today_(today), now_min_(now_min), first_(first_hour), last_(last_hour),
+          all_day_rows_(all_day_rows) {
+        role = ui::Role::group;
+        height = ui::Sizing::fixed;
+        fixed_h = grid_top() + static_cast<float>(last_ - first_) * kHourH + 1;
+    }
+    EventBlock* add_block(std::unique_ptr<EventBlock> b, Slot slot) {
+        slots_.push_back(slot);
+        return static_cast<EventBlock*>(add(std::move(b)));
+    }
+    bool arrange_children(ui::Tree& tree, const ui::Rect& in) override {
+        const float col = column_w(in);
+        for (size_t i = 0; i < children().size() && i < slots_.size(); ++i) {
+            const Slot& s = slots_[i];
+            const float x0 = in.x + kGutter + col * static_cast<float>(s.day);
+            ui::Rect r;
+            if (s.all_day) {
+                r = {x0 + 2, in.y + kHeadH + kAllDayH * static_cast<float>(s.row), col - 4, kAllDayH - 2};
+            } else {
+                const float lane_w = (col - 8) / static_cast<float>(std::max(1, s.lane.lanes));
+                const float top = minute_y(in, s.start), bottom = std::max(top + kMinBlock, minute_y(in, s.end));
+                r = {x0 + 2 + lane_w * static_cast<float>(s.lane.lane), top, lane_w, bottom - top};
+            }
+            tree.place(*children()[i], r);
+        }
+        return true;
+    }
+    void draw(ui::Canvas& c) override {
+        const ui::Rect& in = frame();
+        const float col = column_w(in);
+        const float top = in.y + grid_top(), bottom = in.bottom();
+        if (today_ >= 0) c.fill({in.x + kGutter + col * static_cast<float>(today_), in.y, col, in.h}, Paint::accent, 0.06f);
+        for (size_t d = 0; d < days_.size(); ++d) {
+            const float x = in.x + kGutter + col * static_cast<float>(d);
+            const bool today = static_cast<int>(d) == today_;
+            c.text(ui_.layout(days_[d], TextStyle::body_strong, std::max(1.f, col - 12), false), x + 8, in.y + 5, today ? Paint::accent : Paint::text);
+            c.line(x, in.y, x, bottom, Paint::border);
+        }
+        c.line(in.right() - 1, in.y, in.right() - 1, bottom, Paint::border);
+        c.line(in.x + kGutter, top, in.right(), top, Paint::border);
+        for (int h = first_; h <= last_; ++h) {
+            const float y = top + static_cast<float>(h - first_) * kHourH;
+            if (h > first_) c.line(in.x + kGutter, y, in.right(), y, Paint::border, 0.5f);
+            if (h < last_) {
+                char buf[8];
+                std::snprintf(buf, sizeof buf, "%02d:00", h);
+                c.text(ui_.layout(u16(buf), TextStyle::caption, kGutter - 8, false), in.x + 4, y + 2, Paint::text_secondary);
+            }
+        }
+        // The current time in today's column.
+        if (today_ >= 0 && now_min_ >= first_ * 60 && now_min_ <= last_ * 60) {
+            const float y = minute_y(in, now_min_);
+            const float x = in.x + kGutter + col * static_cast<float>(today_);
+            c.line(x, y, x + col, y, Paint::error, 2.f);
+            c.round({x - 4, y - 4, 8, 8}, 4, Paint::error);
+        }
+    }
+
+private:
+    float grid_top() const { return kHeadH + kAllDayH * static_cast<float>(all_day_rows_) + (all_day_rows_ > 0 ? 4 : 0); }
+    float column_w(const ui::Rect& in) const {
+        return std::max(40.f, (in.w - kGutter) / static_cast<float>(std::max<size_t>(1, days_.size())));
+    }
+    float minute_y(const ui::Rect& in, int minute) const {
+        return in.y + grid_top() + static_cast<float>(minute - first_ * 60) * kHourH / 60.f;
+    }
+    ui::Ui& ui_;
+    std::vector<std::u16string> days_;
+    int today_;
+    int now_min_;
+    int first_, last_, all_day_rows_;
+    std::vector<Slot> slots_;
+};
+
 }  // namespace
 
 // ---- Calendar page ----------------------------------------------------------------------------------------------------
+
+void PagePane::show_calendar_event(const std::string& event_id, long long at_ms) {
+    const auto monday = [](long long ms) {
+        const int wday = local_tm(ms).tm_wday;  // 0 = Sunday
+        return local_midnight(ms, wday == 0 ? -6 : 1 - wday);
+    };
+    // Whole weeks between the two Mondays; rounded, because a week across a DST change is an hour shorter or longer.
+    const double weeks = static_cast<double>(monday(at_ms) - monday(shell_.now())) / static_cast<double>(7 * kDayMs);
+    calendar_mode_ = "week";
+    calendar_offset_ = static_cast<long long>(std::llround(weeks));
+    calendar_open_ = event_id;
+}
 
 void PagePane::load_calendar() {
     const long long now = shell_.now();
@@ -135,6 +308,17 @@ void PagePane::build_calendar() {
             load_calendar();
         }, ui::Button::Kind::subtle);
     }
+    // The shown range, so Previous and Next say where they went.
+    if (calendar_.is_object() && calendar_mode_ != "list") {
+        const long long a = jint(calendar_, "from"), b = jint(calendar_, "to") - 1;
+        const std::tm ta = local_tm(a), tb = local_tm(b);
+        char buf[48];
+        if (calendar_mode_ == "day") std::snprintf(buf, sizeof buf, "%d. %d. %d", ta.tm_mday, ta.tm_mon + 1, ta.tm_year + 1900);
+        else std::snprintf(buf, sizeof buf, "%d. %d. – %d. %d. %d", ta.tm_mday, ta.tm_mon + 1, tb.tm_mday, tb.tm_mon + 1, tb.tm_year + 1900);
+        auto* range = bar->emplace<ui::Label>(shell_.ui(), u16(buf), TextStyle::body_strong, Paint::text, false, "calendar-range");
+        range->padding.top = 6;
+        range->role = ui::Role::text;
+    }
     if (!calendar_.is_object()) {
         if (!errors_.contains("calendar")) text(*this, shell_.t("common.loading"), Paint::text_secondary);
         error_line(*this, "calendar");
@@ -142,13 +326,15 @@ void PagePane::build_calendar() {
     }
     if (!jbool(calendar_, "available")) {
         text(*this, shell_.t("calendar.unavailable"), Paint::text_secondary, "calendar-unavailable");
-        button(*this, "calendar-open-settings", shell_.t("calendar.open_settings"), [this] { shell_.navigate("#/settings"); });
+        button(*this, "calendar-open-settings", shell_.t("calendar.open_settings"), [this] { shell_.navigate("#/settings/mail"); });
         return;
     }
     // Offline: the local copy, marked with the last sync (Calendar Page).
     const std::string last = jstr(calendar_, "last_sync");
     const bool offline = jstr(calendar_, "state") != "connected";
-    text(*this, last.empty() ? shell_.t("calendar.never_synced") : shell_.t(offline ? "calendar.offline_since" : "calendar.synced", {{"time", u16(last)}}),
+    const auto synced_ms = iso_millis(last);
+    const std::u16string synced = synced_ms ? day_label(shell_, *synced_ms) + u" " + hhmm(*synced_ms) : u16(last);
+    text(*this, last.empty() ? shell_.t("calendar.never_synced") : shell_.t(offline ? "calendar.offline_since" : "calendar.synced", {{"time", synced}}),
          offline ? Paint::warning : Paint::text_secondary, "calendar-sync");
 
     const long long from = jint(calendar_, "from"), to = jint(calendar_, "to"), now = shell_.now();
@@ -192,32 +378,16 @@ void PagePane::build_calendar() {
             for (const auto& e : evs) event_button(*list, e);
         }
         if (!any) text(*list, shell_.t("calendar.empty"), Paint::text_secondary, "calendar-empty");
+        build_calendar_details(events);
     } else {
-        auto* grid = emplace<Node>("calendar-grid");
-        grid->axis = ui::Axis::row;
-        grid->gap = 8;
-        for (long long d = from; d < to; d = local_midnight(d, 1)) {
-            const long long d1 = local_midnight(d, 1);
-            const bool today = now >= d && now < d1;
-            auto* col = grid->emplace<ui::Box>("calendar-day-" + std::to_string(d), today ? Paint::surface_alt : Paint::surface, 6, Paint::border);
-            col->role = ui::Role::group;
-            col->name = day_label(shell_, d);
-            col->padding = ui::Insets::all(8);
-            col->gap = 6;
-            col->emplace<ui::Label>(shell_.ui(), day_label(shell_, d), TextStyle::body_strong, today ? Paint::accent : Paint::text)->role = ui::Role::heading;
-            bool marked = !today;
-            for (const auto& e : day_events(d, d1)) {
-                if (!marked && !jbool(e, "all_day") && jint(e, "start_ms") > now) {
-                    text(*col, shell_.t("calendar.now", {{"time", hhmm(now)}}), Paint::accent, "calendar-now");
-                    marked = true;
-                }
-                event_button(*col, e);
-            }
-            if (!marked) text(*col, shell_.t("calendar.now", {{"time", hhmm(now)}}), Paint::accent, "calendar-now");
-        }
+        build_calendar_details(events);
+        build_calendar_grid(events, from, to, now);
     }
+    error_line(*this, "calendar");
+}
 
-    // The chosen event's details and actions (Calendar Event Actions).
+// The chosen event's details and actions (Calendar Event Actions), above the grid so they are seen without scrolling.
+void PagePane::build_calendar_details(const json& events) {
     for (const auto& e : events) {
         if (jstr(e, "id") != calendar_open_) continue;
         auto* d = emplace<ui::Box>("calendar-details", Paint::surface, 8, Paint::border);
@@ -225,9 +395,18 @@ void PagePane::build_calendar() {
         d->name = u16(jstr(e, "subject"));
         d->padding = ui::Insets::all(16);
         d->gap = 6;
-        d->emplace<ui::Label>(shell_.ui(), u16(jstr(e, "subject")), TextStyle::subtitle)->role = ui::Role::heading;
+        auto* head = d->emplace<Node>();
+        head->axis = ui::Axis::row;
+        head->gap = 8;
+        head->emplace<ui::Label>(shell_.ui(), u16(jstr(e, "subject")), TextStyle::subtitle)->role = ui::Role::heading;
+        auto* close = head->emplace<ui::IconButton>(shell_.ui(), "calendar-details-close", ui::icon::cancel, shell_.t("calendar.close_details"));
+        close->on_click = [this] {
+            calendar_open_.clear();
+            rebuild();
+        };
         row(*d, "calendar-details-when", shell_.t("calendar.when"),
-            day_label(shell_, jint(e, "start_ms")) + u" " + hhmm(jint(e, "start_ms")) + u"–" + hhmm(jint(e, "end_ms")));
+            jbool(e, "all_day") ? day_label(shell_, jint(e, "start_ms")) + u" " + shell_.t("calendar.all_day")
+                                : day_label(shell_, jint(e, "start_ms")) + u" " + hhmm(jint(e, "start_ms")) + u"–" + hhmm(jint(e, "end_ms")));
         if (!jstr(e, "location").empty()) row(*d, "calendar-details-where", shell_.t("calendar.where"), u16(jstr(e, "location")));
         if (const json* o = jobj(e, "organizer"); o && !jstr(*o, "address").empty())
             row(*d, "calendar-details-organizer", shell_.t("calendar.organizer"), u16(jstr(*o, "name").empty() ? jstr(*o, "address") : jstr(*o, "name")));
@@ -235,7 +414,8 @@ void PagePane::build_calendar() {
         for (const auto& a : e.value("attendees", json::array()))
             people += (people.empty() ? u"" : u", ") + u16(jstr(a, "name").empty() ? jstr(a, "address") : jstr(a, "name"));
         if (!people.empty()) row(*d, "calendar-details-attendees", shell_.t("calendar.attendees"), people);
-        if (const std::string body = jstr(e, "body"); !body.empty()) text(*d, u16(body.size() > 1500 ? body.substr(0, 1500) + "…" : body), Paint::text_secondary, "calendar-details-body");
+        if (const std::string body = jstr(e, "body"); !body.empty())
+            text(*d, u16(body.size() > 1500 ? body.substr(0, 1500) + "…" : body), Paint::text_secondary, "calendar-details-body");
         auto* actions = d->emplace<Node>();
         actions->axis = ui::Axis::row;
         actions->gap = 8;
@@ -254,7 +434,87 @@ void PagePane::build_calendar() {
                 act("calendar", "calendar.open_in_outlook", {{"id", id}});
             }, ui::Button::Kind::subtle)->enabled = busy_.empty();
     }
-    error_line(*this, "calendar");
+}
+
+// Calendar Time Grid (improve-threads-calendar-agenda D4): one column per day, events placed by time and length.
+void PagePane::build_calendar_grid(const json& events, long long from, long long to, long long now) {
+    std::vector<long long> days;
+    for (long long d = from; d < to; d = local_midnight(d, 1)) days.push_back(d);
+    struct Item {
+        const json* e;
+        CalendarGrid::Slot slot;
+    };
+    std::vector<Item> items;
+    std::vector<int> all_day_rows(days.size(), 0);
+    std::vector<DaySpan> spans_all;
+    for (size_t di = 0; di < days.size(); ++di) {
+        const long long d0 = days[di], d1 = local_midnight(d0, 1);
+        std::vector<const json*> timed;
+        for (const auto& e : events) {
+            const long long s = jint(e, "start_ms"), en = jint(e, "end_ms");
+            if (!(en > d0 && s < d1)) continue;
+            // All-day, or covering the whole day (a multi-day event): the band.
+            if (jbool(e, "all_day") || (s <= d0 && en >= d1)) {
+                CalendarGrid::Slot slot;
+                slot.day = di;
+                slot.all_day = true;
+                slot.row = all_day_rows[di]++;
+                items.push_back({&e, slot});
+            } else {
+                timed.push_back(&e);
+            }
+        }
+        std::stable_sort(timed.begin(), timed.end(), [](const json* a, const json* b) { return jint(*a, "start_ms") < jint(*b, "start_ms"); });
+        std::vector<DaySpan> spans;
+        for (const json* e : timed) {
+            const int s = static_cast<int>((std::max(jint(*e, "start_ms"), d0) - d0) / 60'000);
+            const int en = static_cast<int>((std::min(jint(*e, "end_ms"), d1) - d0) / 60'000);
+            spans.push_back({s, std::max(en, s + 1)});
+        }
+        const auto lanes = lay_out_lanes(spans);
+        for (size_t i = 0; i < timed.size(); ++i) {
+            CalendarGrid::Slot slot;
+            slot.day = di;
+            slot.start = spans[i].start;
+            slot.end = spans[i].end;
+            slot.lane = lanes[i];
+            items.push_back({timed[i], slot});
+            spans_all.push_back(spans[i]);
+        }
+    }
+    const auto [first, last] = grid_hours(spans_all);
+    int today = -1, now_min = 0;
+    for (size_t di = 0; di < days.size(); ++di)
+        if (now >= days[di] && now < local_midnight(days[di], 1)) {
+            today = static_cast<int>(di);
+            now_min = static_cast<int>((now - days[di]) / 60'000);
+        }
+    std::vector<std::u16string> names;
+    for (long long d : days) names.push_back(day_label(shell_, d));
+    const int rows = days.empty() ? 0 : *std::max_element(all_day_rows.begin(), all_day_rows.end());
+    auto* grid = emplace<CalendarGrid>(shell_.ui(), std::move(names), today, now_min, first, last, rows);
+    grid->name = shell_.t(calendar_mode_ == "day" ? "calendar.mode.day" : "calendar.mode.week");
+    if (items.empty()) text(*this, shell_.t("calendar.empty"), Paint::text_secondary, "calendar-empty");
+    for (const Item& it : items) {
+        const json& e = *it.e;
+        const std::string id = jstr(e, "id");
+        const bool busy = e.contains("withheld") || jbool(e, "private");
+        const bool cancelled = jbool(e, "cancelled");
+        const std::u16string title = (cancelled ? shell_.t("calendar.cancelled") + u" " : std::u16string()) +
+                                     (busy ? shell_.t("calendar.busy") : u16(jstr(e, "subject").empty() ? "(no subject)" : jstr(e, "subject")));
+        const std::u16string when = it.slot.all_day ? shell_.t("calendar.all_day") : hhmm(jint(e, "start_ms")) + u"–" + hhmm(jint(e, "end_ms"));
+        const std::u16string place = busy ? std::u16string() : u16(jstr(e, "location"));
+        auto block = std::make_unique<EventBlock>(shell_.ui(), "calendar-event-" + id, it.slot.all_day ? std::u16string() : hhmm(jint(e, "start_ms")),
+                                                  title, place, calendar_open_ == id, busy, cancelled, it.slot.all_day);
+        block->name = day_label(shell_, days[it.slot.day]) + u" " + when + u" " + title + (place.empty() ? u"" : u" · " + place);
+        block->help = block->name;  // the tooltip shows what a small block cuts off
+        block->enabled = !busy;
+        block->on_click = [this, id] {
+            calendar_open_ = calendar_open_ == id ? std::string{} : id;
+            rebuild();
+        };
+        grid->add_block(std::move(block), it.slot);
+    }
 }
 
 // ---- Teams chats section --------------------------------------------------------------------------------------------

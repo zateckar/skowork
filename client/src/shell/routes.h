@@ -1,7 +1,7 @@
 // Routes of the window (client/work-inbox), the same strings the web UI used as hashes, so tray menu items, toasts
 // and the skowork:// handler keep opening the same places:
 //   #/inbox, #/inbox/<view>, #/inbox/folder/<id>, #/threads/new, #/threads/<id>[?msg=<run>:<seq>],
-//   #/status, #/settings, #/settings/telemetry, #/about,
+//   #/status, #/settings, #/settings/<section> (Settings Navigation), #/settings/telemetry, #/about,
 //   #/skills/new[?thread=<id>] (the Skill editor, with a draft from a Thread), #/skills/edit/<name>,
 //   #/automations/<id> (a Trigger and its history), #/automations/new, #/automations/edit/<id>,
 //   #/knowledge (the Knowledge view, add-knowledge-sharing design D4), #/apps (the Apps view, add-local-apps),
@@ -40,6 +40,7 @@ struct Route {
     std::string thread_id;         // thread routes; the Thread a Skill draft comes from; the Chat of a chat route
     std::string skill;             // the private Skill the editor opens (empty: a new one)
     std::string trigger;           // the Trigger shown or edited (empty: a new one)
+    std::string section;           // the Settings section of #/settings/<section> (empty: the one chosen last)
     std::optional<MessageRef> msg;
 };
 

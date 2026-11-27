@@ -20,17 +20,6 @@ namespace {
 
 std::u16string u16(const std::string& s) { return ui::to_utf16(s); }
 
-// Unix ms as local "2026-10-26 15:04".
-std::u16string local_time(long long ms) {
-    if (ms <= 0) return u"";
-    const std::time_t t = static_cast<std::time_t>(ms / 1000);
-    std::tm tm{};
-    localtime_s(&tm, &t);
-    char buf[32];
-    std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M", &tm);
-    return u16(buf);
-}
-
 }  // namespace
 
 void PagePane::load_meetings() {
@@ -73,7 +62,7 @@ void PagePane::build_meetings(Node& c) {
         r->axis = ui::Axis::row;
         r->gap = 8;
         const std::u16string what = shell_.t("settings.meetings.capturing", {{"title", u16(jstr(*cap, "title"))},
-                                                                            {"since", local_time(jint(*cap, "started_at"))}});
+                                                                            {"since", shell_.moment(jint(*cap, "started_at"))}});
         r->name = what;
         r->emplace<ui::Label>(shell_.ui(), what, TextStyle::body_strong, Paint::error, true);
         button(*r, "settings-meetings-stop", shell_.t("settings.meetings.stop"), [this] {
@@ -118,7 +107,7 @@ void PagePane::build_meetings(Node& c) {
     auto* list = c.emplace<Node>("settings-meetings-list");
     list->role = ui::Role::list;
     list->name = shell_.t("settings.meetings.list");
-    list->gap = 6;
+    list->gap = 16;
     const json* ms = jobj(meetings_, "meetings");
     if (!ms || ms->empty()) text(*list, shell_.t("settings.meetings.none"), Paint::text_secondary, "settings-meetings-none");
     if (ms)
@@ -136,7 +125,7 @@ void PagePane::build_meetings(Node& c) {
             const std::string skey = "settings.meetings.states." + state;
             head->emplace<ui::Label>(shell_.ui(), shell_.ui().strings.has(skey) ? shell_.t(skey) : u16(state), TextStyle::caption,
                                      Paint::text_secondary, false, "meeting-state-" + id);
-            text(*item, local_time(jint(m, "started_at") ? jint(m, "started_at") : jint(m, "detected_at")), Paint::text_secondary);
+            text(*item, shell_.moment(jint(m, "started_at") ? jint(m, "started_at") : jint(m, "detected_at")), Paint::text_secondary);
             if (const std::string e = jstr(m, "error"); !e.empty()) text(*item, u16(e), Paint::warning, "meeting-error-" + id);
             auto* actions = item->emplace<Node>();
             actions->axis = ui::Axis::row;
@@ -158,8 +147,9 @@ void PagePane::build_meetings(Node& c) {
             if (const std::string thread = jstr(m, "thread_id"); !thread.empty() && state == "done")
                 button(*actions, "meeting-open-" + id, shell_.t("settings.meetings.open_thread"),
                        [this, thread] { shell_.navigate(thread_hash(thread)); }, ui::Button::Kind::subtle);
-            button(*actions, "meeting-forget-" + id, shell_.t("settings.meetings.forget"), [this, id] {
-                act("meetings", "meetings.forget", {{"id", id}}, [this](const json&) { load_meetings(); });
+            // Forgetting cannot be undone: asked first, as for knowledge (Plain Information).
+            button(*actions, "meeting-forget-" + id, shell_.t("settings.meetings.forget"), [this, id, title = u16(jstr(m, "title"))] {
+                ask_forget("meetings", title, "meetings.forget", {{"id", id}}, [this] { load_meetings(); });
             }, ui::Button::Kind::subtle)->enabled = busy_.empty();
             // Echo Review: how many segments were left out, the list, and Restore.
             if (const json* echo = jobj(m, "echo"); echo && echo->is_array() && !echo->empty()) {

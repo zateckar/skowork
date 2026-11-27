@@ -63,6 +63,8 @@ public:
 
     // --- navigation
     void navigate(const std::string& hash);  // unknown routes go to the Inbox
+    // Opens the Calendar page on the week of `at_ms` with the event's details shown (a meeting Thread's header).
+    void show_calendar_event(const std::string& event_id, long long at_ms);
     const Route& route() const { return route_; }
     void bring_to_front();
 
@@ -159,6 +161,9 @@ public:
     std::u16string clock(long long unix_seconds);
     // A moment (unix ms) in the window's language: the time today, the date and time otherwise.
     std::u16string moment(long long unix_ms);
+    // A Tool in words (client/work-inbox Plain Action Details): a name for the built-in Tools, "<tool> (<server>)" for
+    // Connector Tools, the id otherwise.
+    std::u16string tool_words(const std::string& tool);
     bool copy_text(const std::string& utf8);  // to the clipboard
     void sign_in();
     // Full-Text Search in the Thread list's place (Ctrl+F); Escape closes it.
@@ -495,6 +500,7 @@ private:
     // meeting, polled every 5 seconds until it is done, with Transcribe now and Transcribe again.
     void load_progress();
     void rebuild_progress();
+    void rebuild_meeting_facts();  // the meeting's time, attendees and calendar link in the header (Thread Header)
     void rebuild_banner();
     // The suggestion card of a triage suggestion Thread (client/event-triage Suggestion Presentation).
     void load_suggestion();
@@ -513,6 +519,7 @@ private:
     json recovery_ = nullptr;       // runs.recovery
     bool recovery_busy_ = false;
     ui::Node* progress_ = nullptr;
+    ui::Node* meeting_facts_ = nullptr;  // in the origin line of a meeting Thread
     std::string progress_meeting_;      // the meeting progress_data_ belongs to
     json progress_data_ = nullptr;      // meetings.progress
     std::string progress_announced_;    // the stage last announced
@@ -947,11 +954,15 @@ public:
     // add-local-outlook-and-teams: Teams chats (teams.changed) and the Daily report (daily_report.changed) changed.
     void teams_changed();
     void daily_report_changed();
+    void load_calendar();
+    // Week mode on the week of at_ms, with the event's details open once loaded.
+    void show_calendar_event(const std::string& event_id, long long at_ms);
 
 private:
     // add-local-outlook-and-teams: the Calendar page, the Teams chats and Daily report sections, the Agenda draft form.
-    void load_calendar();
     void build_calendar();
+    void build_calendar_details(const json& events);
+    void build_calendar_grid(const json& events, long long from, long long to, long long now);
     void build_teams(ui::Node& card);
     void load_teams();
     void build_daily_report(ui::Node& card);
@@ -1069,6 +1080,9 @@ private:
     std::string calendar_mode_ = "week";  // day | week | list
     long long calendar_offset_ = 0;       // days (day mode) or weeks (week mode) from today
     std::string calendar_open_;           // the event whose details are shown
+    std::string settings_section_ = "general";  // the Settings section shown (Settings Navigation)
+    std::set<std::string> details_open_;  // the Details toggles that are open (Plain Settings Details)
+    std::string settings_shown_section_;
     json teams_ = nullptr;                // teams.status
     json teams_conversations_ = nullptr;  // teams.conversations, for exclusions
     json report_ = nullptr;               // daily_report.status

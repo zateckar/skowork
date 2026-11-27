@@ -75,6 +75,9 @@ public:
 
     // Actions the window provides. open_link shows the target and asks before opening it in the browser.
     std::function<void(const std::u16string& url)> open_link;
+    // Opens a place in the window (a route such as "#/threads/<id>"), set by the shell; in-window links in model
+    // output use it instead of open_link, without the browser confirmation (client/work-inbox In-Window Links).
+    std::function<void(const std::string& route)> open_route;
     std::function<void(const std::u16string& text)> copy_text;
     std::function<void(const std::u16string& text)> announce;
 

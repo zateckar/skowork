@@ -203,7 +203,7 @@ void DictateControl::update() {
         auto* b = emplace<ui::IconButton>(u, id, ui::icon::microphone, label);
         b->enabled = setup || (available && !other && phase == Shell::DictationPhase::idle);
         std::weak_ptr<int> alive = alive_;
-        if (setup) b->on_click = [this] { shell_.navigate("#/settings"); };
+        if (setup) b->on_click = [this] { shell_.navigate("#/settings/general"); };
         else b->on_click = [this, alive] { shell_.start_dictation(owner_, alive, field_); };
         focus = b->enabled ? b : nullptr;
     }

@@ -235,6 +235,8 @@ context: |
   51 improve-transcript-language      [Knowledge]
   52 add-local-outlook-and-teams      [Productivity]
   53 add-evaluation-export            [Hardening, Knowledge]
+  54 improve-threads-calendar-agenda  [Productivity]
+  55 improve-plain-information        [Productivity]
 
 rules:
   proposal:

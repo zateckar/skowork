@@ -2261,7 +2261,8 @@ void AgentRuntime::apply_recovery_answer(const ActionItem& action, const std::st
 
 json AgentRuntime::recovery_status(const std::string& run_id) {
     bool pending = false;
-    const std::string blocker = store_.continuation_blocker(run_id, &pending);
+    const std::string blocker_code = store_.continuation_blocker_code(run_id, &pending);
+    const std::string blocker = continuation_blocker_text(blocker_code);
     json unknown = json::array();
     for (const auto& r : subtree(run_id))
         for (const auto& op : store_.operations_of_run(r.id))
@@ -2270,7 +2271,7 @@ json AgentRuntime::recovery_status(const std::string& run_id) {
                                    {"action_id", op.action_id}});
     const auto rec = store_.run(run_id);
     const auto cont = store_.continuation_of(run_id);
-    return {{"run_id", run_id}, {"continuable", blocker.empty()}, {"pending", pending}, {"blocker", blocker},
+    return {{"run_id", run_id}, {"continuable", blocker.empty()}, {"pending", pending}, {"blocker", blocker}, {"blocker_code", blocker_code},
             {"continuation", cont ? cont->id : std::string{}}, {"stopped", rec && rec->recovery == "stopped"},
             {"unknown", std::move(unknown)}};
 }

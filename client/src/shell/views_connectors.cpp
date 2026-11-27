@@ -15,10 +15,11 @@ namespace {
 
 std::u16string u16(const std::string& s) { return ui::to_utf16(s); }
 
-// "2026-11-10T15:04:05.123Z" as "2026-11-10 15:04 UTC".
-std::u16string set_time(const std::string& iso) {
-    if (iso.size() < 16) return u16(iso);
-    return u16(iso.substr(0, 10) + " " + iso.substr(11, 5) + " UTC");
+// A timestamp in the window's language and local time: the time today, the date and time otherwise (improve-threads-
+// calendar-agenda: Plain Information).
+std::u16string set_time(Shell& shell, const std::string& iso) {
+    const auto ms = iso_millis(iso);
+    return ms ? shell.moment(*ms) : u16(iso);
 }
 
 }  // namespace
@@ -113,7 +114,7 @@ void PagePane::build_api_connectors(Node& c) {
         const json* tok = jobj(*x, "token");
         const bool has = tok && jbool(*tok, "set");
         item->emplace<ui::Label>(shell_.ui(),
-                                 has ? shell_.t("settings.connectors.api.token_set", {{"date", set_time(jstr(*tok, "set_at"))}})
+                                 has ? shell_.t("settings.connectors.api.token_set", {{"date", set_time(shell_, jstr(*tok, "set_at"))}})
                                      : shell_.t("settings.connectors.api.no_token"),
                                  TextStyle::caption, Paint::text_secondary)
             ->role = ui::Role::none;

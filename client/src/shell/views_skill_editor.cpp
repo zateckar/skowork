@@ -71,7 +71,7 @@ SkillEditor::SkillEditor(Shell& shell, const Route& route)
     save_->on_click = [this] { save(); };
     auto* back = actions->emplace<ui::Button>(shell_.ui(), "skill-editor-back", shell_.t("skill_editor.back"));
     back->width = Sizing::fit;
-    back->on_click = [this] { shell_.navigate("#/settings"); };
+    back->on_click = [this] { shell_.navigate("#/settings/skills"); };
     delete_ = actions->emplace<ui::Button>(shell_.ui(), "skill-editor-delete", shell_.t("skill_editor.delete"), ui::Button::Kind::subtle);
     delete_->width = Sizing::fit;
     delete_->on_click = [this] { ask_delete(); };
@@ -284,7 +284,7 @@ void SkillEditor::ask_delete() {
             if (!alive.lock()) return;
             if (!r) return show_status(shell_.t("common.error_prefix") + u" " + u16(r.error().message), Paint::error);
             shell_.announce(shell_.t("skill_editor.deleted", {{"name", u16(original_)}}));
-            shell_.navigate("#/settings");
+            shell_.navigate("#/settings/skills");
         });
     });
     ui::Button* cancel = d->add_button("skill-delete-cancel", shell_.t("settings.cancel"), ui::Button::Kind::standard, [dp] { dp->close(); });

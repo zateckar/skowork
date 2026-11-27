@@ -1,5 +1,7 @@
 #include "shell/routes.h"
 
+#include <algorithm>
+
 #include <cctype>
 #include <vector>
 
@@ -160,6 +162,15 @@ std::optional<Route> parse_route(std::string_view input) {
         return std::nullopt;
     }
     if (parts.size() == 2 && parts[0] == "settings" && parts[1] == "telemetry") return simple(RouteName::telemetry, "#/settings/telemetry");
+    // A Settings section (client/work-inbox Settings Navigation): lower-case letters and "_"; the page falls back to
+    // General for one it does not know.
+    if (parts.size() == 2 && parts[0] == "settings" && !parts[1].empty() && parts[1].size() <= 32 &&
+        std::all_of(parts[1].begin(), parts[1].end(), [](char c) { return (c >= 'a' && c <= 'z') || c == '_'; })) {
+        Route r = simple(RouteName::settings, "");
+        r.section = std::string(parts[1]);
+        r.hash = "#/settings/" + r.section;
+        return r;
+    }
     if (parts.size() == 1) {
         if (parts[0] == "status") return simple(RouteName::status, "#/status");
         if (parts[0] == "settings") return simple(RouteName::settings, "#/settings");

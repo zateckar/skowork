@@ -68,6 +68,12 @@ Shell::Shell(HostLink& host, const MainWindow::Options& options, std::function<v
         if (!open_id().empty()) call("inbox.focus", {{"thread_id", open_id()}, {"focused", active}});
     };
     window_->tree().on_layout = [this](ui::Size viewport) { apply_layout(viewport); };
+    // In-window links in model output (client/work-inbox In-Window Links): a later frame, so the click that opened it
+    // finishes before the pane holding the link is rebuilt.
+    window_->ui().open_route = [this](const std::string& route) {
+        std::weak_ptr<int> alive = alive_;
+        window_->set_timer(0, [this, alive, route] { if (alive.lock()) navigate(route); });
+    };
     build();
     load_status();
     call("settings.get", json::object(), [this](Result<json> r) {
@@ -294,6 +300,12 @@ void Shell::apply_layout(ui::Size viewport) {
 
 // ---- routes --------------------------------------------------------------------------------------------------------
 
+void Shell::show_calendar_event(const std::string& event_id, long long at_ms) {
+    page_->show_calendar_event(event_id, at_ms);
+    if (route_.name == RouteName::calendar) page_->load_calendar();
+    else navigate("#/calendar");
+}
+
 void Shell::navigate(const std::string& hash) {
     Route r = parse_route(hash).value_or(default_route());
     const Route before = route_;
@@ -516,6 +528,17 @@ std::u16string Shell::clock(long long unix_seconds) {
     wchar_t time[64]{};
     ::GetTimeFormatEx(locale.c_str(), TIME_NOSECONDS, &st, nullptr, time, 64);
     return std::u16string(reinterpret_cast<const char16_t*>(time));
+}
+
+std::u16string Shell::tool_words(const std::string& tool) {
+    if (ui().strings.has("tools.names." + tool)) return t("tools.names." + tool);
+    for (const char* prefix : {"mcp:", "api:"})
+        if (tool.starts_with(prefix)) {
+            const std::string rest = tool.substr(4);
+            if (const auto slash = rest.find('/'); slash != std::string::npos)
+                return ui::to_utf16(rest.substr(slash + 1) + " (" + rest.substr(0, slash) + ")");
+        }
+    return ui::to_utf16(tool);
 }
 
 std::u16string Shell::moment(long long unix_ms) {
@@ -890,7 +913,7 @@ void Shell::on_run_event(const json& data) {
     if (ev.kind == "action.created") {  // read out like an alert region, also for standalone Action items
         const json* p = jobj(ev.data, "payload");
         const json payload = p ? *p : json::object();
-        announce(jstr(ev.data, "kind") == "approval" ? t("approval.announce", {{"tool", ui::to_utf16(jstr(payload, "tool"))}})
+        announce(jstr(ev.data, "kind") == "approval" ? t("approval.announce", {{"tool", tool_words(jstr(payload, "tool"))}})
                                                      : t("question.announce", {{"prompt", ui::to_utf16(jstr(payload, "prompt"))}}));
     }
     if (apply_live_event(*feed_, live_, ev) == Apply::refetch) load_feed();

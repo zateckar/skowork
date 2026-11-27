@@ -1,6 +1,7 @@
 // Automations (client/scheduler Automations Section, Run History): the Settings section with the user's Triggers and
 // the Remote task history, a Trigger's page with its history, and the editor. The host does the work
 // (automations.list, .get, .save, .delete, .run_now).
+#include "shell/format.h"
 #include "shell/shell.h"
 #include "ui/text16.h"
 #include "ui/textfield.h"
@@ -27,12 +28,35 @@ std::u16string conditions_text(Shell& s, const json& t) {
     if (kind == "schedule") {
         const std::string zone = jstr(c, "time_zone");
         if (c.contains("interval_minutes"))
-            return s.t("automation.every", {{"minutes", u16(std::to_string(jint(c, "interval_minutes")))}, {"zone", u16(zone)}});
-        return s.t("automation.cron", {{"cron", u16(jstr(c, "cron"))}, {"zone", u16(zone)}});
+            return s.t("automation.every_minutes", {{"minutes", u16(std::to_string(jint(c, "interval_minutes")))}});
+        // Schedules in words (improve-plain-information D2); the expression is in the tooltip.
+        const ScheduleWords w = describe_schedule(jstr(c, "cron"));
+        char hm[8];
+        std::snprintf(hm, sizeof hm, "%02d:%02d", std::max(0, w.hour), std::max(0, w.minute));
+        if (w.kind == "daily" || w.kind == "workdays") return s.t("automation.schedule." + w.kind, {{"time", u16(hm)}});
+        if (w.kind == "weekly")
+            return s.t("automation.schedule.weekly", {{"day", s.t("calendar.weekday." + std::to_string(w.weekday))}, {"time", u16(hm)}});
+        if (w.kind == "hourly") return s.t("automation.schedule.hourly", {{"minute", u16(std::to_string(w.minute))}});
+        return s.t("automation.schedule.custom");
     }
     if (kind == "file") return s.t("automation.files", {{"pattern", u16(jstr(c, "pattern", "*"))}, {"folder", u16(jstr(c, "folder"))}});
     if (kind == "session") return s.t("automation_editor.events." + jstr(c, "event", "logon"));
     return u16(c.dump());
+}
+
+// The technical form of a schedule, for the tooltip.
+std::u16string conditions_detail(const json& t) {
+    const json c = t.contains("conditions") ? t["conditions"] : json::object();
+    if (jstr(t, "kind") != "schedule") return {};
+    const std::string zone = jstr(c, "time_zone");
+    const std::string what = c.contains("interval_minutes") ? std::to_string(jint(c, "interval_minutes")) + " min" : jstr(c, "cron");
+    return u16(what + (zone.empty() ? std::string() : " (" + zone + ")"));
+}
+
+// A time the scheduler sends as epoch ms (`at_key`), in the window's format; the scheduler's text otherwise (D1).
+std::u16string fire_time(Shell& s, const json& o, const char* at_key, const char* text_key) {
+    if (const long long at = jint(o, at_key); at > 0) return s.moment(at);
+    return u16(jstr(o, text_key));
 }
 
 }  // namespace
@@ -70,7 +94,7 @@ void PagePane::build_automations(Node& c) {
         auto* items = c.emplace<Node>("settings-automations");
         items->role = ui::Role::list;
         items->name = shell_.t("settings.automations.title");
-        items->gap = 10;
+        items->gap = 16;
         for (const json& t : *list) {
             const std::string id = jstr(t, "id");
             const std::string tname = jstr(t, "name");
@@ -84,7 +108,11 @@ void PagePane::build_automations(Node& c) {
             auto* head = item->emplace<Node>();
             head->axis = ui::Axis::row;
             head->gap = 8;
-            head->emplace<ui::Label>(shell_.ui(), u16(tname), TextStyle::body_strong, Paint::text, false)->role = ui::Role::none;
+            // The name opens the Trigger's page with its history (Plain Settings Details).
+            auto* open = button(*head, "automation-open-" + id, u16(tname), [this, id] { shell_.navigate("#/automations/" + id); },
+                                ui::Button::Kind::subtle);
+            open->role = ui::Role::link;
+            open->name = shell_.t("settings.automations.history_named", {{"name", u16(tname)}});
             head->emplace<ui::Label>(shell_.ui(), kind, TextStyle::caption, Paint::text_secondary, false)->role = ui::Role::none;
             if (jstr(t, "created_by") == "agent")
                 head->emplace<ui::Badge>(shell_.ui(), shell_.t("settings.automations.by_agent"), Paint::info_background, Paint::text,
@@ -94,13 +122,14 @@ void PagePane::build_automations(Node& c) {
                 item->emplace<ui::Label>(shell_.ui(), s, TextStyle::caption, Paint::text_secondary, true, cid);
             };
             caption(conditions_text(shell_, t), "automation-conditions-" + id);
+            if (Node* last_caption = item->children().back().get(); !conditions_detail(t).empty()) last_caption->help = conditions_detail(t);
             if (!disabled.empty())
                 caption(shell_.t("settings.automations.disabled", {{"reason", u16(disabled)}}), "automation-disabled-" + id);
             else if (active && !jstr(t, "next_fire_text").empty())
-                caption(shell_.t("settings.automations.next", {{"time", u16(jstr(t, "next_fire_text"))}}), "automation-next-" + id);
+                caption(shell_.t("settings.automations.next", {{"time", fire_time(shell_, t, "next_fire_at", "next_fire_text")}}), "automation-next-" + id);
             if (const json* last = jobj(t, "last_run"))
                 caption(shell_.t("settings.automations.last",
-                                 {{"time", u16(jstr(*last, "fire_text"))},
+                                 {{"time", fire_time(shell_, *last, "fire_at", "fire_text")},
                                   {"state", label_or(shell_, "settings.automations.states." + jstr(*last, "state"), jstr(*last, "state"))}}),
                         "automation-last-" + id);
             else
@@ -113,20 +142,25 @@ void PagePane::build_automations(Node& c) {
                                act("automations", "automations.save", {{"id", id}, {"definition", {{"enabled", on}}}},
                                    [this](const json&) { load_automations(); });
                            });
-            auto* run = button(*actions, "automation-run-" + id, shell_.t("settings.automations.run_now"), [this, id, tname] {
-                act("automations", "automations.run_now", {{"id", id}}, [this, tname](const json&) {
-                    shell_.announce(shell_.t("settings.automations.started", {{"name", u16(tname)}}));
-                    load_automations();
-                });
-            });
-            run->enabled = disabled.empty() && busy_.empty();
-            run->name = shell_.t("settings.automations.run_now_named", {{"name", u16(tname)}});
-            button(*actions, "automation-open-" + id, shell_.t("settings.automations.history"), [this, id] { shell_.navigate("#/automations/" + id); },
-                   ui::Button::Kind::subtle)
-                ->name = shell_.t("settings.automations.history_named", {{"name", u16(tname)}});
-            button(*actions, "automation-edit-" + id, shell_.t("settings.automations.edit"),
-                   [this, id] { shell_.navigate("#/automations/edit/" + id); }, ui::Button::Kind::subtle)
-                ->name = shell_.t("settings.automations.edit_named", {{"name", u16(tname)}});
+            auto* more = actions->emplace<ui::IconButton>(shell_.ui(), "automation-more-" + id, ui::icon::more,
+                                                          shell_.t("settings.automations.more_named", {{"name", u16(tname)}}));
+            more->enabled = busy_.empty();
+            ui::IconButton* mp = more;
+            const bool can_run = disabled.empty();
+            more->on_click = [this, id, tname, mp, can_run] {
+                auto menu = std::make_unique<ui::Menu>("automation-menu-" + id, shell_.t("settings.automations.more_named", {{"name", u16(tname)}}));
+                if (can_run)
+                    menu->add_item(shell_.ui(), "automation-run-" + id, shell_.t("settings.automations.run_now"), [this, id, tname] {
+                        act("automations", "automations.run_now", {{"id", id}}, [this, tname](const json&) {
+                            shell_.announce(shell_.t("settings.automations.started", {{"name", u16(tname)}}));
+                            load_automations();
+                        });
+                    });
+                menu->add_item(shell_.ui(), "automation-edit-" + id, shell_.t("settings.automations.edit"),
+                               [this, id] { shell_.navigate("#/automations/edit/" + id); });
+                shell_.window().overlay().show(std::move(menu), mp->frame(), true);
+                shell_.window().render();
+            };
         }
     }
     error_line(c, "automations");
@@ -183,10 +217,10 @@ void PagePane::build_automation() {
     row(*c, "automation-conditions", shell_.t("automation.conditions"), conditions_text(shell_, t));
     row(*c, "automation-prompt", shell_.t("automation.prompt"), u16(jstr(t, "prompt")));
     if (const std::string why = jstr(t, "disabled_reason"); !why.empty())
-        row(*c, "automation-disabled", shell_.t("settings.automations.enabled"), shell_.t("settings.automations.disabled", {{"reason", u16(why)}}),
+        row(*c, "automation-disabled", shell_.t("automation.status"), shell_.t("settings.automations.disabled", {{"reason", u16(why)}}),
             Paint::warning);
     else if (!jstr(t, "next_fire_text").empty())
-        row(*c, "automation-next", shell_.t("automation.next"), u16(jstr(t, "next_fire_text")));
+        row(*c, "automation-next", shell_.t("automation.next"), fire_time(shell_, t, "next_fire_at", "next_fire_text"));
     if (jstr(t, "created_by") == "agent") text(*c, shell_.t("settings.automations.by_agent"), Paint::text_secondary, "automation-by-agent");
     auto* actions = c->emplace<Node>();
     actions->axis = ui::Axis::row;
@@ -216,7 +250,7 @@ void PagePane::build_automation() {
         auto* item = list->emplace<Node>("occurrence-" + occ);
         item->role = ui::Role::list_item;
         item->gap = 2;
-        const std::u16string line = u16(jstr(o, "fire_text")) + u", " + reason + u", " + state;
+        const std::u16string line = fire_time(shell_, o, "fire_at", "fire_text") + u", " + reason + u", " + state;
         item->name = line;
         item->emplace<ui::Label>(shell_.ui(), line, TextStyle::body, Paint::text, true)->role = ui::Role::none;
         if (o.contains("duration_ms"))
@@ -338,7 +372,7 @@ AutomationEditor::AutomationEditor(Shell& shell, const Route& route)
     save_->on_click = [this] { save(); };
     auto* back = actions->emplace<ui::Button>(shell_.ui(), "automation-back", shell_.t("automation.back"));
     back->width = Sizing::fit;
-    back->on_click = [this] { shell_.navigate("#/settings"); };
+    back->on_click = [this] { shell_.navigate("#/settings/automations"); };
     delete_ = actions->emplace<ui::Button>(shell_.ui(), "automation-delete", shell_.t("automation_editor.delete"), ui::Button::Kind::subtle);
     delete_->width = Sizing::fit;
     delete_->on_click = [this] { ask_delete(); };
@@ -476,7 +510,7 @@ void AutomationEditor::ask_delete() {
             if (!alive.lock()) return;
             if (!r) return show_status(shell_.t("common.error_prefix") + u" " + u16(r.error().message), Paint::error);
             shell_.announce(shell_.t("automation_editor.deleted", {{"name", title}}));
-            shell_.navigate("#/settings");
+            shell_.navigate("#/settings/automations");
         });
     });
     ui::Button* cancel = d->add_button("automation-delete-cancel", shell_.t("settings.cancel"), ui::Button::Kind::standard, [dp] { dp->close(); });

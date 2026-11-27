@@ -1,6 +1,7 @@
 // The Agenda view (client/work-inbox Agenda View) and the Agenda settings section (client/agenda Agenda Is Opt In,
 // Agenda Data Deletion). Open Agenda items are grouped as Overdue, Today, Tomorrow, This week and Later; each row offers
-// Prepare or Open preparation, Open source, Mark done, Dismiss, Edit date and Rename. The host does the work
+// Prepare or Open preparation, Open source and Mark done, with Dismiss, Edit date and Rename in the card's menu
+// (Agenda View Layout). The host does the work
 // (agenda.list, .done, .dismiss, .edit, .prepare, .status, .set, .delete_all).
 #include "shell/feed.h"
 #include "shell/format.h"
@@ -81,7 +82,7 @@ void PagePane::build_agenda() {
     const json st = agenda_.value("status", json::object());
     if (!jbool(st, "enabled")) {
         text(*this, shell_.t("agenda.disabled"), Paint::text_secondary, "agenda-disabled");
-        button(*this, "agenda-open-settings", shell_.t("agenda.open_settings"), [this] { shell_.navigate("#/settings"); });
+        button(*this, "agenda-open-settings", shell_.t("agenda.open_settings"), [this] { shell_.navigate("#/settings/agenda"); });
         error_line(*this, "agenda");
         return;
     }
@@ -89,7 +90,7 @@ void PagePane::build_agenda() {
     const long long tz = jint(agenda_, "tz_offset_min");
     const json* items = jobj(agenda_, "items");
     if (const long long pending = jint(st, "pending"); pending > 0)
-        text(*this, shell_.count("agenda.pending", pending), Paint::text_secondary, "agenda-pending");
+        emplace<ui::Label>(shell_.ui(), shell_.count("agenda.pending", pending), TextStyle::caption, Paint::text_secondary, true, "agenda-pending");
     if (!items || items->empty()) {
         text(*this, shell_.t("agenda.empty"), Paint::text_secondary, "agenda-empty");
         error_line(*this, "agenda");
@@ -100,9 +101,17 @@ void PagePane::build_agenda() {
         for (const auto& it : *items)
             if (std::string(group) == group_of(jint(it, "due_at"), jbool(it, "has_time"), now, tz)) rows.push_back(&it);
         if (rows.empty()) continue;
-        auto* h = emplace<ui::Label>(shell_.ui(), shell_.t(std::string("agenda.group.") + group), TextStyle::body_strong, Paint::text, true,
-                                     std::string("agenda-group-") + group);
+        const bool overdue = std::string(group) == "overdue";
+        // Agenda View Layout (improve-threads-calendar-agenda D5): the group heading with its count, then one card per item.
+        auto* head = emplace<Node>(std::string("agenda-group-head-") + group);
+        head->axis = ui::Axis::row;
+        head->gap = 8;
+        head->padding.top = 12;
+        auto* h = head->emplace<ui::Label>(shell_.ui(), shell_.t(std::string("agenda.group.") + group), TextStyle::subtitle,
+                                           overdue ? Paint::warning : Paint::text, false, std::string("agenda-group-") + group);
         h->role = ui::Role::heading;
+        auto* count = head->emplace<ui::Badge>(shell_.ui(), u16(std::to_string(rows.size())), Paint::surface_alt, Paint::text_secondary);
+        count->padding.top = 3;
         auto* list = emplace<Node>(std::string("agenda-list-") + group);
         list->role = ui::Role::list;
         list->name = shell_.t(std::string("agenda.group.") + group);
@@ -113,35 +122,65 @@ void PagePane::build_agenda() {
             const std::u16string title = u16(jstr(it, "title"));
             const bool timed = jbool(it, "has_time");
             const std::string local = iso_from_millis(jint(it, "due_at") + tz * 60'000);
-            const std::u16string due = u16(timed ? local.substr(0, 10) + " " + local.substr(11, 5) : local.substr(0, 10));
-            auto* item = list->emplace<Node>("agenda-item-" + id);
+            // A readable date (Agenda View Layout): the weekday and day, the year only when it is not this year.
+            const long long day = local_day(jint(it, "due_at"), tz);
+            const int y = std::stoi(local.substr(0, 4)), mo = std::stoi(local.substr(5, 2)), dd = std::stoi(local.substr(8, 2));
+            std::string date = std::to_string(dd) + ". " + std::to_string(mo) + ".";
+            if (local.substr(0, 4) != iso_from_millis(now + tz * 60'000).substr(0, 4)) date += " " + std::to_string(y);
+            const std::u16string due = shell_.t("calendar.weekday." + std::to_string((weekday(day) + 1) % 7)) + u" " + u16(date) +
+                                       (timed ? u" " + u16(local.substr(11, 5)) : std::u16string());
+            auto* item = list->emplace<ui::Box>("agenda-item-" + id, Paint::surface, 8, overdue ? Paint::warning : Paint::border);
             item->role = ui::Role::list_item;
-            item->gap = 4;
+            item->padding = ui::Insets::all(12);
+            item->gap = 6;
             item->name = shell_.t("agenda.item_name", {{"title", title}, {"due", due}});
-            item->emplace<ui::Label>(shell_.ui(), title, TextStyle::body_strong, Paint::text, true)->role = ui::Role::none;
-            if (const std::string action = jstr(it, "action"); !action.empty()) text(*item, u16(action), Paint::text_secondary, "agenda-action-" + id);
-            std::u16string kinds;
+
+            // Title and due date.
+            auto* top = item->emplace<Node>();
+            top->axis = ui::Axis::row;
+            top->gap = 12;
+            auto* t = top->emplace<ui::Label>(shell_.ui(), title, TextStyle::body_strong, Paint::text, true, "agenda-title-" + id);
+            t->role = ui::Role::none;
+            std::u16string due_text = shell_.t(jbool(it, "inferred") ? "agenda.due_inferred" : "agenda.due", {{"due", due}});
+            auto* chip = top->emplace<ui::Badge>(shell_.ui(), due_text, overdue ? Paint::warning_background : Paint::surface_alt,
+                                                 overdue ? Paint::warning : Paint::text_secondary, "agenda-meta-" + id);
+            chip->name = due_text;
+            chip->role = ui::Role::text;
+
+            // What to do.
+            if (const std::string action = jstr(it, "action"); !action.empty())
+                text(*item, u16(action), Paint::text_secondary, "agenda-action-" + id);
+
+            // Sources and preparation as badges, the notice and the quote.
             std::string link;
+            auto* tags = item->emplace<Node>("agenda-tags-" + id);
+            tags->axis = ui::Axis::row;
+            tags->gap = 6;
+            tags->wraps = true;
+            std::vector<std::u16string> kinds;
             for (const auto& s : it.value("sources", json::array())) {
                 const std::u16string k = shell_.t("agenda.source." + jstr(s, "kind"));
-                if (kinds.find(k) == std::u16string::npos) kinds += (kinds.empty() ? u"" : u", ") + k;
+                if (std::find(kinds.begin(), kinds.end(), k) == kinds.end()) kinds.push_back(k);
                 if (link.empty()) link = jstr(s, "link");
             }
+            for (const auto& k : kinds) tags->emplace<ui::Badge>(shell_.ui(), k, Paint::surface_alt, Paint::text_secondary);
             const bool prepared = !jstr(it, "prep_thread_id").empty();
-            std::u16string meta = shell_.t(jbool(it, "inferred") ? "agenda.due_inferred" : "agenda.due", {{"due", due}});
-            meta += u" · " + kinds;
-            if (prepared) meta += u" · " + shell_.t("agenda.prepared");
-            text(*item, meta, Paint::text_secondary, "agenda-meta-" + id);
+            if (prepared) tags->emplace<ui::Badge>(shell_.ui(), shell_.t("agenda.prepared"), Paint::accent_surface, Paint::text);
             if (const std::string notice = jstr(it, "notice"); !notice.empty())
                 text(*item, shell_.t("agenda.notice." + notice), Paint::warning, "agenda-notice-" + id);
             for (const auto& s : it.value("sources", json::array()))
                 if (const std::string q = jstr(s, "quote"); !q.empty()) {
-                    text(*item, u"“" + u16(q) + u"”", Paint::text_secondary, "agenda-quote-" + id);
+                    auto* quote = item->emplace<ui::Label>(shell_.ui(), u"“" + u16(q) + u"”", TextStyle::caption, Paint::text_secondary, false,
+                                                           "agenda-quote-" + id);
+                    quote->help = u16(q);  // the whole quote in the tooltip; the line is cut
                     break;
                 }
+
+            // Actions: the main one, Open source and Mark done; the rest in the card's menu.
             auto* actions = item->emplace<Node>();
             actions->axis = ui::Axis::row;
             actions->gap = 8;
+            actions->wraps = true;
             if (prepared) {
                 const std::string thread = jstr(it, "prep_thread_id");
                 auto* open = button(*actions, "agenda-open-prep-" + id, shell_.t("agenda.open_preparation"),
@@ -173,7 +212,7 @@ void PagePane::build_agenda() {
                 auto* src = button(*actions, "agenda-source-" + id, shell_.t("agenda.open_source"), [this, link] {
                     if (link.starts_with("#/")) shell_.navigate(link);
                     else if ((link.starts_with("https://") || link.starts_with("http://")) && shell_.ui().open_link) shell_.ui().open_link(u16(link));
-                }, ui::Button::Kind::subtle);
+                });
                 src->name = shell_.t("agenda.open_source_named", {{"title", title}});
             }
             auto* done = button(*actions, "agenda-done-" + id, shell_.t("agenda.done"), [this, id, title] {
@@ -181,34 +220,37 @@ void PagePane::build_agenda() {
                     shell_.announce(shell_.t("agenda.done_announce", {{"title", title}}));
                     load_agenda();
                 });
-            }, ui::Button::Kind::subtle);
+            });
             done->name = shell_.t("agenda.done_named", {{"title", title}});
             done->enabled = busy_.empty();
-            auto* dismiss = button(*actions, "agenda-dismiss-" + id, shell_.t("agenda.dismiss"), [this, id, title] {
-                act("agenda", "agenda.dismiss", {{"id", id}}, [this, title](const json&) {
-                    shell_.announce(shell_.t("agenda.dismissed", {{"title", title}}));
-                    load_agenda();
-                });
-            }, ui::Button::Kind::subtle);
-            dismiss->name = shell_.t("agenda.dismiss_named", {{"title", title}});
-            dismiss->enabled = busy_.empty();
             const std::u16string initial = u16(timed ? local.substr(0, 16) : local.substr(0, 10));
-            auto* date = button(*actions, "agenda-date-" + id, shell_.t("agenda.edit_date"), [this, id, title, initial] {
-                shell_.ask_text_value("agenda-date-dialog", shell_.t("agenda.edit_date_title", {{"title", title}}), shell_.t("agenda.edit_date_label"),
-                                      initial, [this, id](const std::string& v) {
-                                          act("agenda", "agenda.edit", {{"id", id}, {"patch", {{"due", v}}}}, [this](const json&) { load_agenda(); });
-                                      });
-            }, ui::Button::Kind::subtle);
-            date->name = shell_.t("agenda.edit_date_named", {{"title", title}});
-            date->enabled = busy_.empty();
-            auto* rename = button(*actions, "agenda-rename-" + id, shell_.t("agenda.rename"), [this, id, title] {
-                shell_.ask_text_value("agenda-rename-dialog", shell_.t("agenda.rename_title"), shell_.t("agenda.rename_label"), title,
-                                      [this, id](const std::string& v) {
-                                          act("agenda", "agenda.edit", {{"id", id}, {"patch", {{"title", v}}}}, [this](const json&) { load_agenda(); });
-                                      });
-            }, ui::Button::Kind::subtle);
-            rename->name = shell_.t("agenda.rename_named", {{"title", title}});
-            rename->enabled = busy_.empty();
+            auto* more = actions->emplace<ui::IconButton>(shell_.ui(), "agenda-more-" + id, ui::icon::more,
+                                                          shell_.t("agenda.more_named", {{"title", title}}));
+            more->enabled = busy_.empty();
+            ui::IconButton* mp = more;
+            more->on_click = [this, id, title, initial, mp] {
+                auto menu = std::make_unique<ui::Menu>("agenda-menu-" + id, shell_.t("agenda.more_named", {{"title", title}}));
+                menu->add_item(shell_.ui(), "agenda-dismiss-" + id, shell_.t("agenda.dismiss"), [this, id, title] {
+                    act("agenda", "agenda.dismiss", {{"id", id}}, [this, title](const json&) {
+                        shell_.announce(shell_.t("agenda.dismissed", {{"title", title}}));
+                        load_agenda();
+                    });
+                });
+                menu->add_item(shell_.ui(), "agenda-date-" + id, shell_.t("agenda.edit_date"), [this, id, title, initial] {
+                    shell_.ask_text_value("agenda-date-dialog", shell_.t("agenda.edit_date_title", {{"title", title}}), shell_.t("agenda.edit_date_label"),
+                                          initial, [this, id](const std::string& v) {
+                                              act("agenda", "agenda.edit", {{"id", id}, {"patch", {{"due", v}}}}, [this](const json&) { load_agenda(); });
+                                          });
+                });
+                menu->add_item(shell_.ui(), "agenda-rename-" + id, shell_.t("agenda.rename"), [this, id, title] {
+                    shell_.ask_text_value("agenda-rename-dialog", shell_.t("agenda.rename_title"), shell_.t("agenda.rename_label"), title,
+                                          [this, id](const std::string& v) {
+                                              act("agenda", "agenda.edit", {{"id", id}, {"patch", {{"title", v}}}}, [this](const json&) { load_agenda(); });
+                                          });
+                });
+                shell_.window().overlay().show(std::move(menu), mp->frame(), true);
+                shell_.window().render();
+            };
             if (draft_item_ == id) build_draft(*item);
         }
     }

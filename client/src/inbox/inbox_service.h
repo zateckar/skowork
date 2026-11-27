@@ -97,6 +97,9 @@ public:
     // A Chat or its Inbox entry changed (client/user-messaging; add-chats-in-inbox design D1): inbox.changed with the
     // entry, or with an empty id when the whole list may have changed.
     void chat_changed(const std::string& chat_id);
+    // Another part of the client wrote the store directly (triage, meeting capture, the Agenda, the Daily report,
+    // Remote tasks): inbox.changed with the entry, so the list follows at once (client/work-inbox Live List Entries).
+    void thread_changed(const std::string& thread_id) { changed(thread_id); }
 
 private:
     void worker();

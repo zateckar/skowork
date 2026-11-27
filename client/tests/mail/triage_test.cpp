@@ -280,6 +280,7 @@ TEST(EventTriage, DismissHoldsForTheRevisionAndStartClaimsOnce) {
     const std::string t = h.thread_of("m1");
     ASSERT_TRUE(h.svc->dismiss(t));
     EXPECT_EQ(jstr(h.svc->suggestion(t), "status"), "dismissed");
+    EXPECT_EQ(jstr(h.refs[t], "action"), "none");  // improve-threads-calendar-agenda 3.2
     EXPECT_FALSE(h.svc->dismiss(t));
     auto r = h.svc->start_work(t);
     ASSERT_FALSE(r);
@@ -684,6 +685,10 @@ TEST(EventTriage, NoActionNeededIsRecordedCancelsTheRunAndArchives) {
     EXPECT_EQ(jstr(h.svc->suggestion(t), "status"), "no_action");
     EXPECT_TRUE(h.cancelled.contains(t));
     EXPECT_TRUE(h.archived.contains(t));
+    // improve-threads-calendar-agenda 3.2: the origin ref no longer asks for action, so "Needs your action" goes away.
+    EXPECT_EQ(jstr(h.refs[t], "action"), "none");
+    EXPECT_EQ(jstr(h.refs[t], "kind"), "triage");
+    EXPECT_EQ(jstr(h.refs[t], "item_id"), "m1");
     EXPECT_EQ(h.svc->no_action(t).error().code, "not_open");  // once
     // The Daily report no longer lists it; the other item is still open work.
     auto d = h.svc->digest();

@@ -597,29 +597,48 @@ std::optional<RunRecord> RunStore::continuation_of(const std::string& run_id) {
     return read_run(st);
 }
 
-std::string RunStore::continuation_blocker(const std::string& failed_run_id, bool* pending) {
+// Why an interrupted Run cannot continue, as a code (client/agent-runtime Continuation Blocker Codes); empty when it can.
+std::string RunStore::continuation_blocker_code(const std::string& failed_run_id, bool* pending) {
     const std::lock_guard lock(db_.mutex());
     if (pending) *pending = false;
     const auto r = run(failed_run_id);
-    if (!r) return "the Run does not exist";
-    if (!r->parent_run_id.empty()) return "a subagent is continued with the Run that started it";
-    if (r->state != RunState::failed || r->reason != "interrupted by shutdown") return "the Run did not fail at a shutdown";
-    if (r->recovery == "stopped") return "you stopped this Run";
-    if (continuation_of(failed_run_id)) return "the Run was already continued";
+    if (!r) return "missing";
+    if (!r->parent_run_id.empty()) return "subagent";
+    if (r->state != RunState::failed || r->reason != "interrupted by shutdown") return "not_interrupted";
+    if (r->recovery == "stopped") return "stopped";
+    if (continuation_of(failed_run_id)) return "already_continued";
     {
         auto st = db_.prepare("SELECT 1 FROM runs WHERE thread_id=?1 AND parent_run_id IS NULL AND queue_seq>?2 LIMIT 1");
         st.bind(1, r->thread_id).bind(2, r->queue_seq);
-        if (st.step()) return "a newer Run followed it in the Thread";
+        if (st.step()) return "newer_run";
     }
-    if (active_run(r->thread_id)) return "the Thread has an active Run";
+    if (active_run(r->thread_id)) return "active_run";
     for (const auto& x : subtree_locked(failed_run_id))
         for (const auto& o : operations_of_run(x.id)) {
             if (o.state != "unknown" || o.resolution == "continue") continue;
-            if (o.resolution == "stop") return "you stopped this Run";
+            if (o.resolution == "stop") return "stopped";
             if (pending) *pending = true;
-            return "a call's outcome is unknown and waits for your answer";
+            return "unknown_outcome";
         }
     return {};
+}
+
+// The English reason of a blocker code, for errors and logs.
+std::string continuation_blocker_text(const std::string& code) {
+    if (code.empty()) return {};
+    if (code == "missing") return "the Run does not exist";
+    if (code == "subagent") return "a subagent is continued with the Run that started it";
+    if (code == "not_interrupted") return "the Run did not fail at a shutdown";
+    if (code == "stopped") return "you stopped this Run";
+    if (code == "already_continued") return "the Run was already continued";
+    if (code == "newer_run") return "a newer Run followed it in the Thread";
+    if (code == "active_run") return "the Thread has an active Run";
+    if (code == "unknown_outcome") return "a call's outcome is unknown and waits for your answer";
+    return code;
+}
+
+std::string RunStore::continuation_blocker(const std::string& failed_run_id, bool* pending) {
+    return continuation_blocker_text(continuation_blocker_code(failed_run_id, pending));
 }
 
 Result<RunRecord> RunStore::create_continuation(const std::string& failed_run_id, const std::string& role) {

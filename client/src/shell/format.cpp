@@ -1,8 +1,10 @@
 #include "shell/format.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 #include "shell/model.h"
 
@@ -136,6 +138,44 @@ std::vector<UsageSegment> usage_segments(const json& categories, double max, siz
     }
     for (auto& e : entries) e.fraction = std::min(1.0, static_cast<double>(e.bytes) / denom);
     return entries;
+}
+
+ScheduleWords describe_schedule(std::string_view cron) {
+    std::vector<std::string> f;
+    std::string cur;
+    for (const char c : cron) {
+        if (c == ' ' || c == '\t') {
+            if (!cur.empty()) f.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) f.push_back(cur);
+    ScheduleWords out;
+    if (f.size() != 5) return out;
+    const auto number = [](const std::string& v, int lo, int hi) {
+        if (v.empty() || v.size() > 2 || !std::all_of(v.begin(), v.end(), [](char c) { return c >= '0' && c <= '9'; })) return -1;
+        const int n = std::stoi(v);
+        return n >= lo && n <= hi ? n : -1;
+    };
+    const int minute = number(f[0], 0, 59);
+    if (minute < 0 || f[2] != "*" || f[3] != "*") return out;
+    if (f[1] == "*") {
+        if (f[4] == "*") out = {"hourly", -1, minute, -1};
+        return out;
+    }
+    const int hour = number(f[1], 0, 23);
+    if (hour < 0) return out;
+    std::string dow = f[4];
+    std::transform(dow.begin(), dow.end(), dow.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    if (dow == "*") return {"daily", hour, minute, -1};
+    if (dow == "1-5" || dow == "MON-FRI") return {"workdays", hour, minute, -1};
+    static const char* const kDays[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+    for (int d = 0; d < 7; ++d)
+        if (dow == kDays[d]) return {"weekly", hour, minute, d};
+    if (const int d = number(dow, 0, 7); d >= 0) return {"weekly", hour, minute, d % 7};
+    return out;
 }
 
 }  // namespace wb::shell
