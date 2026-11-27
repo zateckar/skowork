@@ -226,6 +226,165 @@ std::vector<Block> parse_markdown(std::string_view utf8) {
     return std::move(p.out);
 }
 
+namespace {
+
+bool md_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+bool md_alnum(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || static_cast<unsigned char>(c) >= 0x80;
+}
+
+// The offset where the last paragraph outside fenced code starts, or npos when the text ends inside a fenced code
+// block (md4c runs an open fence to the end by itself).
+size_t last_paragraph(std::string_view s) {
+    size_t start = 0, line = 0;
+    char fence = 0;
+    size_t fence_len = 0;
+    while (line <= s.size()) {
+        const size_t end = std::min(s.find('\n', line), s.size());
+        const std::string_view l = s.substr(line, end - line);
+        size_t i = 0;
+        while (i < l.size() && i < 3 && l[i] == ' ') ++i;
+        const char c = i < l.size() ? l[i] : 0;
+        size_t run = 0;
+        while (i + run < l.size() && l[i + run] == c) ++run;
+        if ((c == '`' || c == '~') && run >= 3) {
+            if (!fence) {
+                fence = c;
+                fence_len = run;
+            } else if (c == fence && run >= fence_len && l.find_first_not_of(" \t\r", i + run) == std::string_view::npos) {
+                fence = 0;
+                start = end + 1;
+            }
+        } else if (!fence && l.find_first_not_of(" \t\r") == std::string_view::npos) {
+            start = end + 1;  // a blank line ends the paragraph
+        }
+        if (end >= s.size()) break;
+        line = end + 1;
+    }
+    if (fence) return std::string_view::npos;
+    return std::min(start, s.size());
+}
+
+// A link at the end of the paragraph that is not complete: "[text](partial" or "[text]" with nothing after it.
+// Returns the paragraph with that link replaced by its text.
+std::string cut_open_link(std::string p) {
+    // Find the last unescaped '[' outside code spans.
+    size_t open = std::string::npos;
+    size_t code = 0;  // the backtick run length of an open code span
+    for (size_t i = 0; i < p.size(); ++i) {
+        const char c = p[i];
+        if (c == '\\' && !code) {
+            ++i;
+            continue;
+        }
+        if (c == '`') {
+            size_t run = 1;
+            while (i + run < p.size() && p[i + run] == '`') ++run;
+            if (!code) code = run;
+            else if (run == code) code = 0;
+            i += run - 1;
+            continue;
+        }
+        if (!code && c == '[') open = i;
+    }
+    if (open == std::string::npos) return p;
+    const size_t close = p.find(']', open + 1);
+    size_t from = open;
+    if (from > 0 && p[from - 1] == '!') --from;  // an image: its alternative text, as for a link
+    if (close == std::string::npos) return p;  // "[2": brackets stay literal until it is a link
+    const std::string label = p.substr(open + 1, close - open - 1);
+    // "[text]": a "(" may follow. A number in brackets is a Citation marker ([2]) and stays as it is.
+    const bool number = !label.empty() && label.find_first_not_of("0123456789, ") == std::string::npos;
+    if (close + 1 == p.size()) return number ? p : p.substr(0, from) + label;
+    if (p[close + 1] == '(' && p.find(')', close + 2) == std::string::npos) return p.substr(0, from) + label;
+    return p;
+}
+
+}  // namespace
+
+std::string close_streaming_markdown(std::string_view utf8) {
+    const size_t start = last_paragraph(utf8);
+    if (start == std::string_view::npos || start >= utf8.size()) return std::string(utf8);
+    std::string p = cut_open_link(std::string(utf8.substr(start)));
+    struct Open {
+        char c;
+        size_t len;
+    };
+    std::vector<Open> stack;
+    size_t code = 0;
+    size_t dangling = std::string::npos;  // the start of a delimiter run that neither opened nor closed
+    size_t code_start = 0;                // where the open code span's backticks start
+    for (size_t i = 0; i < p.size(); ++i) {
+        const char c = p[i];
+        if (code) {
+            if (c == '`') {
+                size_t run = 1;
+                while (i + run < p.size() && p[i + run] == '`') ++run;
+                if (run == code) code = 0;
+                i += run - 1;
+            }
+            continue;
+        }
+        if (c == '\\') {
+            ++i;
+            continue;
+        }
+        if (c == '`') {
+            size_t run = 1;
+            while (i + run < p.size() && p[i + run] == '`') ++run;
+            code = run;
+            code_start = i;
+            i += run - 1;
+            continue;
+        }
+        if (c != '*' && c != '_' && c != '~') continue;
+        size_t run = 1;
+        while (i + run < p.size() && p[i + run] == c) ++run;
+        const char before = i > 0 ? p[i - 1] : '\n';
+        const char after = i + run < p.size() ? p[i + run] : '\n';
+        bool can_open = !md_space(after) && i + run < p.size();
+        bool can_close = !md_space(before) && i > 0;
+        if (c == '_') {  // intraword underscores are literal
+            can_open = can_open && !md_alnum(before);
+            can_close = can_close && !md_alnum(after);
+        }
+        if (c == '~' && run > 2) can_open = can_close = false;
+        size_t left = run;
+        if (can_close)
+            while (left > 0 && !stack.empty() && stack.back().c == c) {
+                Open& top = stack.back();
+                const size_t take = std::min(left, top.len);
+                top.len -= take;
+                left -= take;
+                if (top.len == 0) stack.pop_back();
+            }
+        if (left > 0 && can_open && left == run) stack.push_back({c, run});
+        dangling = left == run && !(can_open && left > 0) ? i : std::string::npos;
+        i += run - 1;
+    }
+    // A delimiter run at the very end that did nothing yet is held back: it may open or close once more text arrives.
+    // Closers go before trailing white space, where they still close (a delimiter after a space cannot close).
+    size_t tail = p.size();
+    while (tail > 0 && md_space(p[tail - 1])) --tail;
+    if (code && code_start + code >= tail) {  // backticks with nothing after them yet: held back
+        code = 0;
+        tail = code_start;
+        while (tail > 0 && md_space(p[tail - 1])) --tail;
+    }
+    if (!code && dangling != std::string::npos && dangling < tail &&
+        p.find_first_not_of(p[dangling], dangling) >= tail) {
+        tail = dangling;
+        while (tail > 0 && md_space(p[tail - 1])) --tail;
+    }
+    std::string closers;
+    if (code) closers += std::string(code, '`');
+    for (auto it = stack.rbegin(); it != stack.rend(); ++it) closers += std::string(it->len, it->c);
+    if (closers.empty() && tail == p.size() && p == utf8.substr(start)) return std::string(utf8);
+    p.resize(tail);
+    p += closers;
+    return std::string(utf8.substr(0, start)) + p;
+}
+
 std::u16string plain_text(const std::vector<Block>& blocks) {
     std::u16string out;
     for (const Block& b : blocks) {

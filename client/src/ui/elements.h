@@ -59,6 +59,10 @@ public:
     Button(Ui& ui, std::string id, std::u16string label, Kind kind = Kind::standard, char16_t glyph = 0);
     std::function<void()> on_click;
     void set_label(std::u16string label);
+    Kind kind() const { return kind_; }
+    // Shows a result on the button for `ms` (client/work-inbox Button Feedback): the glyph and the label (also its
+    // name) change, then the button returns to what it was. A second flash restarts the time.
+    void flash(char16_t glyph, std::u16string label, unsigned ms = 1500);
     // A text-sized button that lines up with caption labels (a status bar): caption text, no control height.
     void make_inline();
     bool can_invoke() const override { return enabled; }
@@ -71,6 +75,17 @@ protected:
     Kind kind_;
     char16_t glyph_;
     TextStyle text_style_ = TextStyle::body;
+
+private:
+    struct Saved {
+        std::u16string label, name;
+        char16_t glyph;
+        Sizing width;
+        Insets padding;
+    };
+    std::optional<Saved> saved_;
+    unsigned flashes_ = 0;
+    std::shared_ptr<int> alive_ = std::make_shared<int>(0);
 };
 
 class IconButton : public Button {
@@ -131,6 +146,8 @@ class Avatar : public Node {
 public:
     Avatar(Ui& ui, std::u16string_view who, Paint fill = Paint::surface_alt, Paint color = Paint::text, float size = 28);
     static std::u16string initials(std::u16string_view who);
+    // The fill of a person's avatar: one of the eight avatar colours by a stable hash (FNV-1a) of the case-folded name.
+    static Paint paint_for(std::u16string_view who);
     const std::u16string& text() const { return text_; }
     void draw(Canvas& c) override;
 

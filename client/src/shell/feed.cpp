@@ -79,6 +79,7 @@ void fold_event(std::vector<FeedItem>& items, std::map<std::string, size_t>& too
     } else if (e.kind == "reasoning") {
         it.text = str(p, "text");
         if (it.text.empty()) return;
+        it.duration_ms = jint(p, "duration_ms", -1);
         it.type = ItemType::reasoning;
         items.push_back(std::move(it));
     } else if (e.kind == "tool_call") {
@@ -90,6 +91,7 @@ void fold_event(std::vector<FeedItem>& items, std::map<std::string, size_t>& too
         it.decision = str(p, "decision");
         it.reason = str(p, "reason");
         it.rationale = str(p, "rationale");
+        it.started_ms = iso_millis(e.at).value_or(-1);
         tools[it.call_id] = items.size();
         items.push_back(std::move(it));
     } else if (e.kind == "tool_result") {
@@ -103,6 +105,9 @@ void fold_event(std::vector<FeedItem>& items, std::map<std::string, size_t>& too
                     r.files.push_back({jstr(f, "id"), jstr(f, "name"), jstr(f, "mime"), jint(f, "size"), static_cast<int>(jint(f, "width")),
                                        static_cast<int>(jint(f, "height"))});
             items[t->second].result = std::move(r);
+            if (const auto at = iso_millis(e.at); at && items[t->second].started_ms >= 0)
+                items[t->second].duration_ms = std::max(0LL, *at - items[t->second].started_ms);
+            items[t->second].started_ms = -1;  // no longer running
         }
     } else if (e.kind == "interrupt") {
         const auto a = actions.find(str(p, "action_id"));
@@ -168,6 +173,13 @@ void stream_delta(std::map<std::string, std::string>& text, std::map<std::string
     std::string& streamed = text[run_id];
     if (streamed.empty()) after[run_id] = last_seq;
     streamed += delta;
+}
+
+// The first reasoning delta of a stream (no live reasoning yet) records when the reasoning began.
+void mark_reasoning(LiveText& live, const std::string& run_id, const std::string& at) {
+    const auto r = live.reasoning.find(run_id);
+    if (r != live.reasoning.end() && !r->second.empty()) return;
+    live.reasoning_since[run_id] = iso_millis(at).value_or(now_millis());
 }
 
 // The first streamed output of a model call starts its live speed estimate (show-generation-speed design D2).
@@ -450,6 +462,20 @@ std::optional<RunSpeed> run_speed(const RunInfo& run, const LiveText& live, long
     return speed;
 }
 
+std::vector<PlanStep> plan_of(const std::vector<FeedItem>& items, size_t from, size_t to) {
+    std::vector<PlanStep> steps;
+    for (size_t i = from; i < to && i < items.size(); ++i) {
+        const FeedItem& it = items[i];
+        if (it.type != ItemType::tool || it.tool != "update_plan" || !it.result || !it.result->ok) continue;
+        const json* list = it.args.is_object() ? jobj(it.args, "steps") : nullptr;
+        if (!list || !list->is_array()) continue;
+        std::vector<PlanStep> next;
+        for (const json& s : *list) next.push_back({jstr(s, "title"), jstr(s, "status")});
+        steps = std::move(next);
+    }
+    return steps;
+}
+
 std::vector<FeedItem> build_feed(const FeedSnapshot& snap, const LiveText& live, long long now_ms) {
     FeedFold fold;
     return fold.build(snap, live, now_ms);
@@ -489,6 +515,7 @@ std::vector<FeedItem> FeedFold::build(const FeedSnapshot& snap, const LiveText& 
             it.run_id = run.id;
             it.text = r->second;
             it.streaming = true;
+            if (const auto since = live.reasoning_since.find(run.id); since != live.reasoning_since.end()) it.started_ms = since->second;
             items.push_back(std::move(it));
         }
         // The stored answer replaces the text that streamed into it, also when a snapshot holds both (Live Feed Updates).
@@ -510,6 +537,8 @@ std::vector<FeedItem> FeedFold::build(const FeedSnapshot& snap, const LiveText& 
             else if (model_active(run)) it.text = "feed.working_model";
             items.push_back(std::move(it));
         }
+        if (!is_active_state(run.state))  // a call of a Run that no longer runs is not running either
+            for (size_t i = first; i < items.size(); ++i) items[i].started_ms = -1;
         if (auto speed = run_speed(run, live, now_ms)) {  // Generation Speed Under Answers
             FeedItem it;
             it.type = ItemType::speed;
@@ -534,6 +563,22 @@ std::vector<FeedItem> FeedFold::build(const FeedSnapshot& snap, const LiveText& 
             it.by_user = run.reason.empty() || run.reason == "cancelled by user";
             it.reason = run.reason;
             items.push_back(std::move(it));
+        }
+        // Run Plan In The Feed: one plan item where the Run's first plan was made, with its latest steps.
+        if (auto steps = run.parent_run_id.empty() ? plan_of(items, first, items.size()) : std::vector<PlanStep>{}; !steps.empty()) {
+            size_t at = items.size();
+            for (size_t i = first; i < items.size(); ++i)
+                if (items[i].type == ItemType::tool && items[i].tool == "update_plan" && items[i].result && items[i].result->ok) {
+                    at = i;
+                    break;
+                }
+            FeedItem it;
+            it.type = ItemType::plan;
+            it.key = run.id + ":plan";
+            it.run_id = run.id;
+            it.plan = std::move(steps);
+            it.run_active = is_active_state(run.state) || run.state == "interrupted";
+            items.insert(items.begin() + static_cast<std::ptrdiff_t>(at), std::move(it));
         }
         // Cited Sources In The Feed: an answer lists the passages of this Run's searches that its [n] markers name.
         std::map<long long, Citation> cited;
@@ -713,7 +758,10 @@ Apply apply_live_event(FeedSnapshot& snap, LiveText& live, const LiveRunEvent& e
         // A Run the snapshot does not hold yet: its streaming text is kept for when the refetched snapshot has it. Its
         // stored events are not known, so the recorded sequence number is 0.
         if (ev.kind == "text.delta") stream_delta(live.text, live.text_after, ev.run_id, live.seen[ev.run_id], str(d, "text"));
-        if (ev.kind == "reasoning.delta") stream_delta(live.reasoning, live.reasoning_after, ev.run_id, live.seen[ev.run_id], str(d, "text"));
+        if (ev.kind == "reasoning.delta") {
+            mark_reasoning(live, ev.run_id, ev.at);
+            stream_delta(live.reasoning, live.reasoning_after, ev.run_id, live.seen[ev.run_id], str(d, "text"));
+        }
         if (ev.kind == "text.delta" || ev.kind == "reasoning.delta") mark_output(live, ev.run_id, live.seen[ev.run_id], ev.at, str(d, "text"));
         return Apply::refetch;
     }
@@ -725,6 +773,7 @@ Apply apply_live_event(FeedSnapshot& snap, LiveText& live, const LiveRunEvent& e
         return Apply::ok;
     }
     if (ev.kind == "reasoning.delta") {
+        mark_reasoning(live, run->id, ev.at);
         stream_delta(live.reasoning, live.reasoning_after, run->id, delta_base, str(d, "text"));
         mark_output(live, run->id, delta_base, ev.at, str(d, "text"));
         return Apply::ok;

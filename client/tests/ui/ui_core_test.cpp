@@ -129,6 +129,57 @@ TEST(Markdown, StreamingReparseIsStableAtEveryPrefix) {
     EXPECT_EQ(parse_markdown(full).size(), 4u);
 }
 
+// Stable streaming Markdown (add-assistant-feedback-patterns design D1): unfinished inline markup at the end of the
+// streamed text is closed, so it never shows and then disappears.
+TEST(StreamingMarkdown, ClosesOpenInlineMarkupAtTheEnd) {
+    EXPECT_EQ(close_streaming_markdown("the **important"), "the **important**");
+    EXPECT_EQ(close_streaming_markdown("an *it"), "an *it*");
+    EXPECT_EQ(close_streaming_markdown("~~gone"), "~~gone~~");
+    EXPECT_EQ(close_streaming_markdown("run `npm i"), "run `npm i`");
+    EXPECT_EQ(close_streaming_markdown("**bold *both"), "**bold *both***");
+    EXPECT_EQ(close_streaming_markdown("**bold*"), "**bold**");
+    EXPECT_EQ(close_streaming_markdown("a **"), "a");  // held back until it opens something
+    EXPECT_EQ(close_streaming_markdown("_x"), "_x_");
+    EXPECT_EQ(close_streaming_markdown("and `"), "and");
+    const auto b = parse_markdown(close_streaming_markdown("the **important"));
+    ASSERT_EQ(b.size(), 1u);
+    EXPECT_EQ(b[0].text, u"the important");
+    const Span* bold = find_span(b[0].spans, kBold);
+    ASSERT_NE(bold, nullptr);
+    EXPECT_EQ(span_text(b[0].text, *bold), u"important");
+}
+
+TEST(StreamingMarkdown, LeavesCompleteAndLiteralTextAlone) {
+    for (const char* s : {"done **bold** text", "5 * 3 = 15", "snake_case_name", "a \\*not emphasis", "- item\n- other",
+                          "`a*b`", "[2]", "x", ""})
+        EXPECT_EQ(close_streaming_markdown(s), s) << s;
+    // Only the last paragraph is looked at; an open fence runs to the end by itself.
+    EXPECT_EQ(close_streaming_markdown("*old\n\nnew"), "*old\n\nnew");
+    EXPECT_EQ(close_streaming_markdown("```\n**x\n"), "```\n**x\n");
+    EXPECT_EQ(close_streaming_markdown("```\ncode\n```\n\n**b"), "```\ncode\n```\n\n**b**");
+}
+
+TEST(StreamingMarkdown, UnfinishedLinkShowsOnlyItsText) {
+    EXPECT_EQ(close_streaming_markdown("see [the report](https://exa"), "see the report");
+    EXPECT_EQ(close_streaming_markdown("see [the report]"), "see the report");
+    EXPECT_EQ(close_streaming_markdown("see [the report](https://x.test) ok"), "see [the report](https://x.test) ok");
+    const auto b = parse_markdown(close_streaming_markdown("see [the report](https://exa"));
+    ASSERT_EQ(b.size(), 1u);
+    EXPECT_EQ(b[0].text, u"see the report");
+    EXPECT_EQ(find_span(b[0].spans, kLink), nullptr);
+}
+
+TEST(StreamingMarkdown, EveryPrefixParsesWithoutMarkupFlicker) {
+    const std::string full = "Some **bold** and *it* and `code` and ~~gone~~ and [link](https://x.test/p).";
+    for (size_t n = 0; n <= full.size(); ++n) {
+        const auto b = parse_markdown(close_streaming_markdown(std::string_view(full).substr(0, n)));
+        for (const Block& x : b) {
+            for (const Span& s : x.spans) ASSERT_LE(s.start + s.length, x.text.size()) << "prefix " << n;
+            EXPECT_EQ(x.text.find_first_of(u"*`~"), std::u16string::npos) << "prefix " << n << ": " << to_utf8(x.text);
+        }
+    }
+}
+
 TEST(Markdown, SpansAreUtf16Units) {
     const auto b = parse_markdown("😀 **ž**");
     ASSERT_EQ(b.size(), 1u);

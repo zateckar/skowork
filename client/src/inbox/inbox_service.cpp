@@ -618,6 +618,8 @@ void InboxService::register_rpc(RpcRegistry& rpc, bool expose_on_pipe) {
                     {"input_budget", u.input_budget}, {"trigger", u.trigger}, {"target", u.target},
                     {"output_reserve", u.output_reserve}, {"estimated", true}, {"includes_tools", u.includes_tools},
                     {"tool_tokens", u.tool_tokens}, {"tools_snapshot", u.includes_tools ? "last_request" : "unavailable"},
+                    {"parts", {{"instructions", u.instruction_tokens}, {"tools", u.tool_tokens}, {"summary", u.summary_tokens},
+                               {"conversation", u.conversation_tokens}}},
                     {"last_compaction", last}};
     });
     rpc.add("folders.list", ex, [&st](const json&) -> Result<json> {

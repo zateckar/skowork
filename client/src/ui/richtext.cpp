@@ -346,6 +346,11 @@ void MarkdownView::set_markdown(std::string_view utf8) {
     set_blocks(parse_markdown(utf8));
 }
 
+void MarkdownView::set_streaming_markdown(std::string_view utf8) {
+    plain_text_ = false;
+    set_blocks(parse_markdown(close_streaming_markdown(utf8)));
+}
+
 void MarkdownView::set_plain(std::u16string text) {
     if (!plain_text_) clear_children();
     blocks_.clear();
@@ -405,8 +410,9 @@ std::unique_ptr<Node> MarkdownView::build(const Block& b, size_t index) {
         copy->name = ui_.strings.get("markdown.copy_code");
         std::u16string code = b.text;
         Ui* ui = &ui_;
-        copy->on_click = [ui, code] {
+        copy->on_click = [ui, code, copy] {
             if (ui->copy_text) ui->copy_text(code);
+            copy->flash(icon::check, ui->strings.get("feed.copied_short"));  // Button Feedback
             if (ui->announce) ui->announce(ui->strings.get("markdown.copied"));
         };
         auto* text = box->emplace<RichText>(ui_, b.text, std::vector<Span>{}, TextStyle::code, Paint::text, id + "-text");

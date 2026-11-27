@@ -101,6 +101,7 @@ Result<std::unique_ptr<Window>> Window::create(const Options& o) {
     w->ui_->open_link = [self](const std::u16string& url) { self->open_link(url); };
     w->ui_->copy_text = [self](const std::u16string& text) { self->copy_text(text); };
     w->ui_->announce = [self](const std::u16string& text) { self->announce(text); };
+    w->ui_->after = [self](unsigned ms, std::function<void()> fn) { self->set_timer(ms, std::move(fn)); };
     w->ui_->host = w->hwnd_;
     w->ui_->scale = w->renderer_->scale();
     w->ui_->dispatch_key = [self](const KeyEvent& e) { return self->dispatch_key(e); };

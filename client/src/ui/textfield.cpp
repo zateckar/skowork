@@ -331,7 +331,8 @@ LRESULT TextField::edit_message(UINT msg, WPARAM wp, LPARAM lp) {
         }
         const bool window_key = (e.key == kKeyTab && !e.ctrl) || e.key == kKeyEscape || (e.key == kKeyEnter && !opt_.multiline) ||
                                 (e.ctrl && !e.alt &&
-                                 (e.key == kKeyN || e.key == kKeyF || e.key == kKeyB || e.key == kKeyComma || e.key == kKeySlash));
+                                 (e.key == kKeyN || e.key == kKeyF || e.key == kKeyK || e.key == kKeyB || e.key == kKeyComma ||
+                                  e.key == kKeySlash));
         if (window_key) {
             swallow_char_ = true;
             if (ui_.dispatch_key) ui_.dispatch_key(e);

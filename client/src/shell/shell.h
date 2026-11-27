@@ -177,6 +177,8 @@ public:
     // Full-Text Search in the Thread list's place (Ctrl+F); Escape closes it.
     void open_search();
     void close_search();
+    // The command palette (Ctrl+K; Command Palette).
+    void open_palette();
     bool search_open() const;
     // Keyboard shortcut help (Ctrl+/).
     void show_shortcuts();

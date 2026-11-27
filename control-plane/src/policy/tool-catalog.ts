@@ -1,7 +1,7 @@
 // Built-in tool IDs are independent of the policy that happens to be in force.
 // MCP tools are discovered separately and custom patterns remain valid.
 export const BUILT_IN_TOOL_IDS = [
-  'ask_user', 'find_tools', 'read_attachment', 'delegate', 'use_skill',
+  'ask_user', 'find_tools', 'read_attachment', 'delegate', 'use_skill', 'update_plan',
   'apps.create', 'apps.list', 'apps.logs', 'apps.open', 'apps.stop', 'apps.delete',
   'browser.snapshot', 'browser.screenshot', 'browser.navigate', 'browser.click', 'browser.type', 'browser.select',
   'browser.scroll', 'browser.wait', 'browser.tabs', 'browser.back', 'browser.eval',
@@ -51,6 +51,7 @@ export const BUILT_IN_TOOL_DETAILS: Record<string, ToolDetail> = {
     'read_attachment': ['Read part of an attached tool result.', 'read'],
     'delegate': ['Delegate an independent task to a subagent.', 'read'],
     'use_skill': ['Run an available skill as a subagent.', 'read'],
+    'update_plan': ['Show the user the plan of the current run as ordered steps.', 'read'],
   }),
   ...familyDetails('client/local-apps', 'Local apps must be available.', 'Policy and app-specific confirmation still apply.', {
     'apps.create': ['Create a local app or change its manifest.', 'write_local'],

@@ -32,6 +32,10 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     // Output is bounded by the input: an image repeats its address after the alternative text, list markers and
     // numeric entities add a few units each.
     if (total > 4 * size + 64) __builtin_trap();
+    // Streaming text closed at its end parses too, and closing adds at most one delimiter per input byte.
+    const std::string closed = close_streaming_markdown(text);
+    if (closed.size() > 2 * size + 8) __builtin_trap();
+    for (const Block& b : parse_markdown(closed)) check_spans(b.text, b.spans);
     // UTF-16 conversion round-trips whatever it produced.
     const std::u16string u = to_utf16(text);
     if (to_utf16(to_utf8(u)) != u) __builtin_trap();

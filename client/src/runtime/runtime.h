@@ -168,6 +168,9 @@ public:
         long long tokens = 0, window = 0;
         long long input_budget = 0, trigger = 0, target = 0, output_reserve = 0;
         long long tool_tokens = 0;
+        // What fills `tokens` (client/work-inbox Status Bar): the instructions, the compaction summary and the
+        // conversation's messages; with tool_tokens they add up to tokens.
+        long long instruction_tokens = 0, summary_tokens = 0, conversation_tokens = 0;
         bool includes_tools = false;
         double compaction_threshold = 0;
         // The factor `tokens` includes from provider prompt usage (1 when none was observed); still an estimate.

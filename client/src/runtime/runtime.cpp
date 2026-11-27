@@ -22,6 +22,7 @@ namespace {
 constexpr const char* kFindTools = "find_tools";
 constexpr const char* kAskUser = "ask_user";
 constexpr const char* kReadAttachment = "read_attachment";
+constexpr const char* kUpdatePlan = "update_plan";
 constexpr const char* kDelegate = "delegate";
 constexpr const char* kUseSkill = "use_skill";
 
@@ -47,7 +48,7 @@ constexpr size_t kMaxRecordedResultBytes = 1024 * 1024;
 
 // The runtime's own discovery, attachment reads and Questions have no effect outside the Run.
 Recovery recovery_of(const ToolDef& d) {
-    if (d.id == kFindTools || d.id == kReadAttachment || d.id == kAskUser) return Recovery::replay_safe;
+    if (d.id == kFindTools || d.id == kReadAttachment || d.id == kAskUser || d.id == kUpdatePlan) return Recovery::replay_safe;
     return d.recovery;
 }
 
@@ -61,7 +62,7 @@ std::string unknown_prompt(const std::string& tool, bool after_shutdown) {
 }
 
 bool reserved_id(const std::string& id) {
-    return id == kFindTools || id == kAskUser || id == kReadAttachment || id == kDelegate || id == kUseSkill;
+    return id == kFindTools || id == kAskUser || id == kReadAttachment || id == kDelegate || id == kUseSkill || id == kUpdatePlan;
 }
 
 ToolDef make_use_skill() {
@@ -192,6 +193,44 @@ ToolDef make_ask_user(bool surfaces_enabled) {
             q.surface = std::move(*form);
         }
         return ToolOutput::ask(std::move(q));
+    };
+    return t;
+}
+
+// The Run plan (client/agent-runtime Run Plan Tool; add-assistant-feedback-patterns design D4): the model publishes its
+// steps and their status; each call replaces the previous plan. Nothing is stored beyond the call itself: the feed
+// shows the latest successful call's steps.
+ToolDef make_update_plan() {
+    ToolDef t;
+    t.id = kUpdatePlan;
+    t.description = "Show the user your plan for this task as ordered steps with their status. Send the whole plan each time; "
+                    "at most one step is running.";
+    t.parameters = json::parse(R"({"type":"object","properties":{
+        "steps":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","properties":{
+            "title":{"type":"string","minLength":1,"maxLength":200},
+            "status":{"type":"string","enum":["pending","running","done","failed","skipped"]}},"required":["title","status"]}}},
+        "required":["steps"]})");
+    t.risk = Risk::read;
+    t.core = true;
+    t.own_data = true;  // no effect outside the Run
+    t.run = [](ToolContext&, const json& args) {
+        const json* steps = jobj(args, "steps");
+        if (!steps || !steps->is_array() || steps->empty()) return ToolOutput::failure("The plan needs 1 to 20 steps.");
+        if (steps->size() > 20) return ToolOutput::failure("The plan has more than 20 steps; at most 20 are allowed.");
+        static const std::set<std::string> kStatus = {"pending", "running", "done", "failed", "skipped"};
+        int running = 0, done = 0;
+        for (const json& s : *steps) {
+            const std::string title = jstr(s, "title"), status = jstr(s, "status");
+            if (trim(title).empty()) return ToolOutput::failure("Every step needs a title.");
+            const auto chars = std::count_if(title.begin(), title.end(), [](char c) { return (static_cast<unsigned char>(c) & 0xC0) != 0x80; });
+            if (chars > 200) return ToolOutput::failure("A step title has more than 200 characters.");
+            if (!kStatus.contains(status))
+                return ToolOutput::failure("A step's status must be pending, running, done, failed or skipped.");
+            running += status == "running";
+            done += status == "done";
+        }
+        if (running > 1) return ToolOutput::failure("At most one step may be running.");
+        return ToolOutput::success("Plan updated: " + std::to_string(steps->size()) + " steps, " + std::to_string(done) + " done.");
     };
     return t;
 }
@@ -672,6 +711,7 @@ private:
         if (!tool_offered(def)) return false;  // withdrawn right now (for example browser tools without Chrome)
         if (def.attended_only && (is_child_ || rec_.unattended)) return false;
         if (def.id == kUseSkill) return !is_child_ && static_cast<bool>(rt_.cfg_.resolve_skill);
+        if (def.id == kUpdatePlan) return !is_child_;  // only a top-level Run's plan is shown
         if (!is_child_) return true;
         if (def.id == kDelegate) return false;
         if (def.id == kFindTools || def.id == kAskUser || def.id == kReadAttachment) return true;
@@ -776,6 +816,8 @@ private:
         // produced the response; a retry starts the measurement again.
         auto call_started = rt_.clock_.now();
         std::optional<decltype(call_started)> first_output;
+        // Reasoning Duration: the first and the last streamed reasoning text of the attempt.
+        std::optional<decltype(call_started)> reasoning_first, reasoning_last;
         const auto mark_output = [&](std::string_view t) {
             if (!t.empty() && !first_output) first_output = rt_.clock_.now();
         };
@@ -793,11 +835,17 @@ private:
         };
         sink.on_reasoning = [&](std::string_view t) {
             mark_output(t);
+            if (!t.empty()) {
+                if (!reasoning_first) reasoning_first = rt_.clock_.now();
+                reasoning_last = rt_.clock_.now();
+            }
             emit("reasoning.delta", {{"text", std::string(t)}});
         };
         sink.on_retry = [&](int attempt, const model::ModelFailure& f, std::chrono::milliseconds delay) {
             call_started = rt_.clock_.now() + delay;
             first_output.reset();
+            reasoning_first.reset();
+            reasoning_last.reset();
             incomplete_text.clear();
             incomplete_truncated = false;
             emit("discard", json::object());
@@ -845,7 +893,10 @@ private:
         record_usage(resp.usage);
         record_model_call(resp, call_started, first_output);
         if (!resp.reasoning.empty()) {  // kept, never resent; sent live with its stored sequence number (Run Event Stream)
-            const json reasoning = {{"text", resp.reasoning}};
+            json reasoning = {{"text", resp.reasoning}};
+            if (reasoning_first && reasoning_last)
+                reasoning["duration_ms"] = std::max<long long>(
+                    0, std::chrono::duration_cast<std::chrono::milliseconds>(*reasoning_last - *reasoning_first).count());
             const auto seq = store_.append_event(id_, "reasoning", reasoning);
             emit("reasoning", reasoning, seq ? *seq : 0);
         }
@@ -2103,6 +2154,7 @@ AgentRuntime::AgentRuntime(RuntimeConfig config, Database& db, model::IChatModel
     tools_.add(make_read_attachment());
     tools_.add(make_delegate());
     tools_.add(make_use_skill());
+    tools_.add(make_update_plan());
     hooks_.on_error = [](const std::string& what) { log::warn("runtime", what); };
     cfg_.max_concurrent_runs = std::max(1, cfg_.max_concurrent_runs);
 }
@@ -3150,7 +3202,9 @@ AgentRuntime::ContextUsage AgentRuntime::context_usage(const std::string& thread
     std::vector<model::ChatMessage> msgs;
     msgs.reserve(ctx.messages.size());
     for (const auto& m : ctx.messages) msgs.push_back(m.msg);
-    u.tokens = static_cast<long long>(estimate_request_tokens(msgs, {}) + estimate_context_tokens(ctx.summary) + estimate_context_tokens(cfg_.system_prompt));
+    const size_t conversation = estimate_request_tokens(msgs, {}), summary = estimate_context_tokens(ctx.summary),
+                 instructions = estimate_context_tokens(cfg_.system_prompt);
+    u.tokens = static_cast<long long>(conversation + summary + instructions);
     {
         const std::lock_guard lock(context_estimate_mx_);
         const auto tools = context_tool_estimates_.find(thread_id);
@@ -3163,6 +3217,10 @@ AgentRuntime::ContextUsage AgentRuntime::context_usage(const std::string& thread
     u.calibration = calibration_factor(cfg_.role);
     u.tokens = static_cast<long long>(calibrated(cfg_.role, static_cast<size_t>(u.tokens)));
     u.tool_tokens = static_cast<long long>(calibrated(cfg_.role, static_cast<size_t>(u.tool_tokens)));
+    u.instruction_tokens = static_cast<long long>(calibrated(cfg_.role, instructions));
+    u.summary_tokens = static_cast<long long>(calibrated(cfg_.role, summary));
+    // The rest is the conversation, so the parts add up to the total exactly.
+    u.conversation_tokens = std::max(0LL, u.tokens - u.tool_tokens - u.instruction_tokens - u.summary_tokens);
     u.window = context_window(cfg_.role);
     u.output_reserve = output_limit(cfg_.role);
     if (const auto budget = working_context_budget(u.window, u.output_reserve)) {

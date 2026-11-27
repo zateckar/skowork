@@ -90,7 +90,9 @@ constexpr const char* kOperationColumns =
 
 // The runtime's own tools: discovery, attachment reads and Questions have no effect outside the Run; delegate and
 // use_skill start Child Runs, whose own calls are in the ledger (improve-proactive-durable-work design D3).
-bool replay_safe_tool(const std::string& tool) { return tool == "find_tools" || tool == "read_attachment" || tool == "ask_user"; }
+bool replay_safe_tool(const std::string& tool) {
+    return tool == "find_tools" || tool == "read_attachment" || tool == "ask_user" || tool == "update_plan";
+}
 bool child_tool(const std::string& tool) { return tool == "delegate" || tool == "use_skill"; }
 
 }  // namespace

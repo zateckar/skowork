@@ -1267,6 +1267,7 @@ bool Shell::on_key(const ui::KeyEvent& e) {
     switch (*cmd) {
         case Command::new_thread: navigate("#/threads/new"); return true;
         case Command::search: open_search(); return true;
+        case Command::palette: open_palette(); return true;
         case Command::toggle_rail: toggle_rail(); return true;
         case Command::settings: navigate("#/settings"); return true;
         case Command::help: show_shortcuts(); return true;

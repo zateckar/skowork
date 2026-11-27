@@ -544,6 +544,45 @@ TEST(UiElements, LabelsWrapAndEllipsize) {
     EXPECT_GT(s.ui->texts().size(), 0u);
 }
 
+namespace {
+// Lines of a layout and the words on its last line.
+std::pair<UINT32, size_t> lines_and_last_words(IDWriteTextLayout* l, std::u16string_view text) {
+    DWRITE_TEXT_METRICS m{};
+    l->GetMetrics(&m);
+    std::vector<DWRITE_LINE_METRICS> lm(m.lineCount);
+    UINT32 n = 0;
+    l->GetLineMetrics(lm.data(), m.lineCount, &n);
+    size_t start = 0;
+    for (UINT32 i = 0; i + 1 < n; ++i) start += lm[i].length;
+    std::u16string last(text.substr(start));
+    while (!last.empty() && last.back() == u' ') last.pop_back();
+    return {n, static_cast<size_t>(std::count(last.begin(), last.end(), u' ')) + (last.empty() ? 0 : 1)};
+}
+}  // namespace
+
+// Balanced Line Wrapping (add-assistant-feedback-patterns design D6): a wrapped text that would end with one word alone
+// wraps a little earlier, keeping its number of lines.
+TEST(UiElements, WrappedTextDoesNotEndWithAnOrphanWord) {
+    Surface s(600, 200);
+    const std::u16string text = u"Skowork checks the folders you chose every morning and tells you what changed in them today";
+    size_t orphans = 0, balanced = 0;
+    for (float w = 120; w <= 520; w += 7) {
+        com_ptr<IDWriteTextLayout> raw;
+        ASSERT_TRUE(SUCCEEDED(s.ui->dwrite()->CreateTextLayout(reinterpret_cast<const wchar_t*>(text.data()),
+                                                              static_cast<UINT32>(text.size()), s.ui->format(TextStyle::body),
+                                                              w, 1e6f, raw.put())));
+        const auto [raw_lines, raw_words] = lines_and_last_words(raw.get(), text);
+        if (raw_lines < 2 || raw_words != 1) continue;
+        ++orphans;
+        const auto [lines, words] = lines_and_last_words(s.ui->layout(text, TextStyle::body, w, true), text);
+        EXPECT_EQ(lines, raw_lines) << "width " << w;  // never an extra line
+        if (words >= 2) ++balanced;
+    }
+    EXPECT_GT(orphans, 0u);
+    EXPECT_GT(balanced, 0u);
+    EXPECT_GE(balanced * 4, orphans * 3) << balanced << " of " << orphans;  // nearly always possible within 24 %
+}
+
 TEST(UiElements, MenuOpensBelowItsAnchorAndClosesWithEscapeRestoringFocus) {
     Surface s(400, 300);
     auto* opener = s.content().emplace<IconButton>(*s.ui, "more", icon::more, u"More options");

@@ -31,7 +31,7 @@ enum class TextStyle { body, body_strong, caption, subtitle, title, heading1, he
 enum class Paint {
     none, background, surface, text, text_secondary, border, accent, accent_text, selection, selection_text, link, focus,
     error, code_background, surface_alt, warning, success, info, error_background, warning_background, info_background,
-    control_border, accent_surface
+    control_border, accent_surface, avatar_0, avatar_1, avatar_2, avatar_3, avatar_4, avatar_5, avatar_6, avatar_7
 };
 uint32_t paint_color(const Theme& t, Paint p);
 
@@ -80,6 +80,8 @@ public:
     std::function<void(const std::string& route)> open_route;
     std::function<void(const std::u16string& text)> copy_text;
     std::function<void(const std::u16string& text)> announce;
+    // Runs fn once after ms on the window's thread (a control showing its result for a moment); unset off screen.
+    std::function<void(unsigned ms, std::function<void()> fn)> after;
 
     // The window that hosts child-window elements (text fields) and its scale; null off screen (tests).
     HWND host = nullptr;

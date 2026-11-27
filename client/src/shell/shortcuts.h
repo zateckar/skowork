@@ -10,7 +10,7 @@
 
 namespace wb::shell {
 
-enum class Command { new_thread, search, toggle_rail, settings, help, archive, mark_unread, remove, next, previous, open, back };
+enum class Command { new_thread, search, palette, toggle_rail, settings, help, archive, mark_unread, remove, next, previous, open, back };
 
 struct KeyContext {
     bool typing = false;         // focus is in a text field, where single keys type text

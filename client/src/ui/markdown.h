@@ -43,6 +43,11 @@ struct Block {
 
 std::vector<Block> parse_markdown(std::string_view utf8);
 
+// Streamed model output so far, made safe to parse while it streams (client/work-inbox Markdown Rendering; add-assistant-
+// feedback-patterns design D1): in the last paragraph, outside fenced code, an open code span, emphasis or strikethrough
+// is closed, and a link that is not complete yet keeps only its text. The stored answer is parsed unchanged.
+std::string close_streaming_markdown(std::string_view utf8);
+
 // The plain text of the blocks, one block per line, for copying and for screen readers.
 std::u16string plain_text(const std::vector<Block>& blocks);
 

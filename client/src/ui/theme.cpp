@@ -31,6 +31,7 @@ Theme make_theme(bool dark, bool high_contrast, const SystemColors& sys) {
         t.surface_alt = t.accent_surface = sys.window;
         t.warning = t.success = t.info = sys.window_text;
         t.error_background = t.warning_background = t.info_background = sys.window;
+        for (uint32_t& a : t.avatar) a = sys.window;
         return t;
     }
     // Neutrals with a slight green tint, so they sit with the accent. The contrast levels (text 4.5:1, control
@@ -58,6 +59,8 @@ Theme make_theme(bool dark, bool high_contrast, const SystemColors& sys) {
         t.error_background = 0x3D2224;
         t.warning_background = 0x3A3018;
         t.info_background = 0x1B2E3D;
+        const uint32_t avatars[8] = {0x5A2A2E, 0x5A3D1E, 0x4D4415, 0x2F4A25, 0x1D4645, 0x233D63, 0x3D2F66, 0x5A2650};
+        for (int i = 0; i < 8; ++i) t.avatar[i] = avatars[i];
     } else {
         t.background = 0xF1F5F3;
         t.surface = 0xFFFFFF;
@@ -81,6 +84,8 @@ Theme make_theme(bool dark, bool high_contrast, const SystemColors& sys) {
         t.error_background = 0xFDE8E8;
         t.warning_background = 0xFFF3D6;
         t.info_background = 0xE3F0FB;
+        const uint32_t avatars[8] = {0xF6D6D6, 0xF8E1C4, 0xF3EBB5, 0xD5EBC8, 0xC7E6E3, 0xCFE0F7, 0xDDD5F5, 0xF2D3EA};
+        for (int i = 0; i < 8; ++i) t.avatar[i] = avatars[i];
     }
     return t;
 }

@@ -322,7 +322,7 @@ namespace {
 // The context-usage ring with its label: a track circle and the used share as an arc.
 class ContextMeter : public Node {
 public:
-    ContextMeter(double fraction, bool warn) : Node("status-context"), fraction_(fraction), warn_(warn) {
+    ContextMeter(double fraction, Paint level) : Node("status-context"), fraction_(fraction), level_(level) {
         role = ui::Role::text;
         axis = ui::Axis::row;
         padding.left = 22;
@@ -331,12 +331,12 @@ public:
         const ui::Rect f = frame();
         const float r = 7, cx = f.x + 9, cy = f.y + f.h / 2;
         c.arc(cx, cy, r, 2.f, Paint::border, 1.0);
-        c.arc(cx, cy, r, 2.f, warn_ ? Paint::warning : Paint::accent, fraction_);
+        c.arc(cx, cy, r, 2.f, level_, fraction_);
     }
 
 private:
     double fraction_;
-    bool warn_;
+    Paint level_;
 };
 
 }  // namespace
@@ -453,15 +453,29 @@ void StatusBarView::rebuild() {
         const double fraction = capacity > 0 ? std::min(1.0, tokens / capacity) : (budget_known ? 1.0 : 0.0);
         const std::u16string pct = ui::to_utf16(format_percent(fraction, shell_.decimal()));
         const bool warn = fraction >= 0.75;
-        auto* meter = emplace<ContextMeter>(fraction, warn);
+        const bool full = fraction >= 0.9;  // compaction is close: the error colour (Status Bar)
+        const Paint level = full ? Paint::error : warn ? Paint::warning : Paint::accent;
+        auto* meter = emplace<ContextMeter>(fraction, level);
         const auto context_label = shell_.t(budget_known ? "status_bar.context_estimate" : "status_bar.context", {{"pct", pct}});
         const auto warning = shell_.t(budget_known ? "status_bar.context_budget_warn" : "status_bar.context_warn");
-        meter->name = context_label + (warn ? u", " + warning : u"");
+        // What fills the context: instructions, tool definitions, conversation (with its summary) and free.
+        std::u16string breakdown;
+        if (const json* parts = jobj(ctx, "parts"); parts && parts->is_object()) {
+            const auto shares = whole_shares({jint(*parts, "instructions"), jint(*parts, "tools"),
+                                              jint(*parts, "conversation") + jint(*parts, "summary")},
+                                             static_cast<long long>(capacity));
+            if (shares.size() == 4) {
+                const auto n = [](int v) { return ui::to_utf16(std::to_string(v)); };
+                breakdown = shell_.t("status_bar.context_parts", {{"instructions", n(shares[0])}, {"tools", n(shares[1])},
+                                                                   {"conversation", n(shares[2])}, {"free", n(shares[3])}});
+            }
+        }
+        meter->name = context_label + (breakdown.empty() ? u"" : u", " + breakdown) + (warn ? u", " + warning : u"");
         const char* context_help = !budget_known ? "status_bar.context_title" :
             (jbool(ctx, "includes_tools") ? "status_bar.context_budget_tools_title" : "status_bar.context_budget_title");
-        meter->help = shell_.t(context_help, {{"pct", pct}});
+        meter->help = shell_.t(context_help, {{"pct", pct}}) + (breakdown.empty() ? u"" : u"\n" + breakdown);
         meter->emplace<ui::Label>(shell_.ui(), context_label, TextStyle::caption,
-                                  warn ? Paint::warning : Paint::text_secondary, false)
+                                  full ? Paint::error : warn ? Paint::warning : Paint::text_secondary, false)
             ->role = ui::Role::none;
         if (const json* last = jobj(ctx, "last_compaction"); last && jstr(*last, "kind") == "automatic")
             label(shell_.t("status_bar.auto_compacted"), "status-auto-compacted");

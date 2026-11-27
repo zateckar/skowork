@@ -864,6 +864,54 @@ TEST(ShellFeed, StreamsMarkdownWithReasoningAndCollapsedToolCards) {
     EXPECT_TRUE(problems.empty()) << problems.front();
 }
 
+// Run Plan In The Feed (add-assistant-feedback-patterns design D4): the plan shows with work details hidden, updates in
+// place, and an ended Run's unfinished steps read as not done.
+TEST(ShellFeed, RunPlanCardShowsTheLatestPlanWithWorkDetailsHidden) {
+    Fixture f;
+    const auto t = f.in.env.thread();
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + t); });
+    ASSERT_TRUE(w.until([&] { return w.shell().feed().has_value(); }));
+    const auto steps = [](std::vector<std::pair<const char*, const char*>> s) {
+        json list = json::array();
+        for (const auto& [title, status] : s) list.push_back({{"title", title}, {"status", status}});
+        return json{{"steps", list}};
+    };
+    f.in.env.model.push_calls({{"p1", "update_plan", steps({{"Read the mail", "done"}, {"Draft the reply", "done"},
+                                                            {"Check the dates", "running"}, {"Ask Jana", "pending"}, {"Send it", "pending"}})}});
+    Gate gate;
+    f.in.env.model.push_blocking(gate, text_response("Done"));
+    const auto run = f.in.env.run(t, "reply to Jana");
+    const std::wstring card = wide("plan-" + run);
+    ASSERT_TRUE(w.until([&] { return w.exists("plan-" + run); }));
+    Uia uia;
+    auto m = uia.by_id(w.hwnd());
+    EXPECT_EQ(m[card].name, L"Plan, 2 of 5 done");
+    EXPECT_EQ(m[wide("plan-step-" + run + "-2")].name, L"Step 3 of 5, Check the dates, running");
+    EXPECT_EQ(m[wide("plan-step-" + run + "-2")].type, UIA_ListItemControlTypeId);
+    for (const auto& [id, e] : m) EXPECT_FALSE(id.starts_with(L"tool-")) << "work details are hidden";
+
+    // The user stops the Run: what was not finished is not done.
+    w.run([&] { (void)f.in.env.rt->cancel(run); });
+    ASSERT_TRUE(f.in.env.wait(run, RunState::cancelled));
+    ASSERT_TRUE(w.until([&] {
+        bool ended = false;
+        w.with("plan-step-" + run + "-3", [&](ui::Node& n) {
+            ended = n.name == u"Step 4 of 5, Ask Jana, not done";
+            return true;
+        });
+        return ended;
+    }));
+    m = uia.by_id(w.hwnd());
+    EXPECT_EQ(m[wide("plan-step-" + run + "-2")].name, L"Step 3 of 5, Check the dates, not done");
+    EXPECT_EQ(m[wide("plan-step-" + run + "-0")].name, L"Step 1 of 5, Read the mail, done");
+    std::vector<std::string> problems;
+    w.run([&] { problems = ui::a11y_problems(w.main().window()->tree()); });
+    EXPECT_TRUE(problems.empty()) << problems.front();
+    gate.release();
+}
+
 TEST(ShellFeed, EnabledCompletedSurfaceRendersNativeTableAndKeepsExplorationLocal) {
     Fixture f;
     f.rpc.add("surfaces.capabilities", RpcExposure::ui, [](const json&) -> Result<json> { return json{{"enabled", true}}; });
@@ -2429,6 +2477,59 @@ TEST(ShellComposer, EnterQueuesWhileRunningCtrlEnterSteersAndStopCancels) {
     ASSERT_TRUE(w.until([&] { return !w.exists("composer-stop") && !w.exists("composer-steer"); }));
 }
 
+// Composer: nothing to send means Send, Queue and Steer are off, and while a Run is active Stop leads
+// (add-assistant-feedback-patterns design D6).
+TEST(ShellComposer, EmptyDraftDisablesSendAndStopLeadsWhileRunning) {
+    Fixture f;
+    const auto t = f.in.env.thread();
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + t); });
+    ASSERT_TRUE(w.until([&] { return w.shell().feed().has_value() && w.exists("composer-send"); }));
+    const auto enabled = [&](const std::string& id) {
+        bool on = false;
+        w.with(id, [&](ui::Node& n) {
+            on = n.enabled;
+            return true;
+        });
+        return on;
+    };
+    const auto kind = [&](const std::string& id) {
+        ui::Button::Kind k = ui::Button::Kind::subtle;
+        w.with(id, [&](ui::Node& n) {
+            if (auto* b = dynamic_cast<ui::Button*>(&n)) k = b->kind();
+            return true;
+        });
+        return k;
+    };
+    EXPECT_FALSE(enabled("composer-send"));
+    w.type("composer-input", u"   ");
+    EXPECT_FALSE(enabled("composer-send"));
+    EXPECT_TRUE(w.field_key("composer-input", ui::kKeyEnter));  // nothing is sent
+    std::this_thread::sleep_for(100ms);
+    EXPECT_FALSE(f.in.env.rt->store().active_run(t).has_value());
+    w.type("composer-input", u"Summarise the budget");
+    EXPECT_TRUE(enabled("composer-send"));
+
+    Gate gate;
+    std::atomic<bool> streamed{false};
+    push_streaming(f.in.env.model, gate, streamed);
+    EXPECT_TRUE(w.field_key("composer-input", ui::kKeyEnter));
+    ASSERT_TRUE(f.in.env.wait_for([&] { return streamed.load(); }));
+    ASSERT_TRUE(w.until([&] { return w.exists("composer-stop") && w.exists("composer-steer"); }));
+    EXPECT_FALSE(enabled("composer-send"));
+    EXPECT_FALSE(enabled("composer-steer"));
+    EXPECT_EQ(kind("composer-stop"), ui::Button::Kind::primary);
+    EXPECT_EQ(kind("composer-send"), ui::Button::Kind::standard);
+    w.type("composer-input", u"Then archive it");
+    EXPECT_TRUE(enabled("composer-send"));
+    EXPECT_TRUE(enabled("composer-steer"));
+    EXPECT_EQ(kind("composer-stop"), ui::Button::Kind::standard);
+    EXPECT_EQ(kind("composer-send"), ui::Button::Kind::primary);
+    gate.release();
+    ASSERT_TRUE(w.until([&] { return !running_run(*w.shell().feed()); }, 10000));
+}
+
 TEST(ShellComposer, NewThreadStartsWithTheFirstMessage) {
     Fixture f;
     ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
@@ -2517,12 +2618,12 @@ TEST(ShellComposer, OfflineRequestWaitsForTheConnection) {
     EXPECT_EQ(m[L"composer-blocked"].name, L"You're offline. Your request will start when Skowork is connected again.");
     EXPECT_EQ(m[L"status-connection"].name.rfind(L"Offline since ", 0), 0u) << narrow(m[L"status-connection"].name);
     EXPECT_GT(m[L"status-connection"].name.size(), std::wstring(L"Offline since ").size());
-    BOOL enabled = FALSE;
-    m[L"composer-send"].el->get_CurrentIsEnabled(&enabled);
-    EXPECT_TRUE(enabled);
     const std::u16string request = u"Summarise my week: the meetings I had, the decisions we took, the open questions, the documents I "
                                    u"changed, the mails I still owe an answer to, and what I promised to whom, grouped by project.";
     w.type("composer-input", request);
+    BOOL enabled = FALSE;  // offline, a request can still be sent (it waits); an empty draft cannot (Composer)
+    uia.by_id(w.hwnd())[L"composer-send"].el->get_CurrentIsEnabled(&enabled);
+    EXPECT_TRUE(enabled);
     EXPECT_TRUE(w.field_key("composer-input", ui::kKeyEnter));
     ASSERT_TRUE(w.until([&] { return w.exists("composer-queued-title"); }, 10000));
     m = uia.by_id(w.hwnd());
@@ -3043,6 +3144,67 @@ TEST(ShellRail, EscapeClosesTheDrawer) {
 
 // ---- Search, shortcuts and the status bar (3.7) ----------------------------------------------------------------------
 
+TEST(ShellPalette, CtrlKFindsAThreadByTitleAndOpensIt) {
+    Fixture f;
+    const auto t1 = f.in.env.thread();
+    f.in.run_to_end(t1, "hello", "hi");
+    ASSERT_TRUE(f.in.svc->store().rename(t1, "Budget review Q3"));
+    const auto t2 = f.in.env.thread();
+    f.in.run_to_end(t2, "hello", "hi");
+    ASSERT_TRUE(f.in.svc->store().rename(t2, "Holiday plan"));
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/inbox"); });
+    ASSERT_TRUE(w.until([&] { return w.shell().entries().size() == 2; }));
+
+    // Ctrl+K opens the palette with the keyboard in its field; every command and entry is listed.
+    w.key(ui::kKeyK, true);
+    ASSERT_TRUE(w.exists("palette"));
+    bool focused = false;
+    w.run([&] {
+        ui::Node* n = w.main().window()->tree().focused();
+        focused = n && n->automation_id() == "palette-field";
+    });
+    EXPECT_TRUE(focused);
+    w.key(ui::kKeyK, true);  // a second Ctrl+K keeps the one palette
+    Uia uia;
+    auto m = uia.by_id(w.hwnd());
+    EXPECT_TRUE(has(m, L"palette-item-0"));
+    EXPECT_EQ(m[L"palette-item-0"].name, L"New thread, Ctrl+N");
+
+    // Typing narrows the list; the count is read out.
+    w.type("palette-field", u"budg");
+    m = uia.by_id(w.hwnd());
+    EXPECT_EQ(m[L"palette-item-0"].name, L"Budget review Q3");
+    EXPECT_FALSE(has(m, L"palette-item-1"));
+    EXPECT_EQ(m[L"palette-status"].name, L"1 result");
+    EXPECT_EQ(m[L"palette-item-0"].type, UIA_ListItemControlTypeId);
+
+    w.type("palette-field", u"zzzz");
+    m = uia.by_id(w.hwnd());
+    EXPECT_EQ(m[L"palette-status"].name, L"Nothing found");
+    EXPECT_TRUE(w.field_key("palette-field", ui::kKeyEnter));  // nothing to run
+    EXPECT_TRUE(w.exists("palette"));
+
+    // Enter runs the selected result: the Thread opens and the palette closes.
+    w.type("palette-field", u"hol");
+    EXPECT_TRUE(w.field_key("palette-field", ui::kKeyEnter));
+    ASSERT_TRUE(w.until([&] { return w.shell().route().thread_id == t2; }));
+    EXPECT_FALSE(w.exists("palette"));
+
+    // Down moves the selection; Escape closes the palette.
+    w.key(ui::kKeyK, true);
+    ASSERT_TRUE(w.exists("palette"));
+    w.type("palette-field", u"sett");
+    EXPECT_TRUE(w.field_key("palette-field", ui::kKeyEscape));
+    EXPECT_FALSE(w.exists("palette"));
+    w.key(ui::kKeyK, true);
+    w.type("palette-field", u"settings");
+    EXPECT_TRUE(w.field_key("palette-field", ui::kKeyEnter));
+    ASSERT_TRUE(w.until([&] { return w.shell().route().name == shell::RouteName::settings; }));
+    w.run([&] { EXPECT_TRUE(ui::a11y_problems(w.main().window()->tree()).empty()); });
+}
+
 TEST(ShellSearch, TypingSearchesAndOpeningAHitJumpsToTheMessageAndHighlightsIt) {
     Fixture f;
     const auto t1 = f.in.env.thread();
@@ -3161,6 +3323,73 @@ TEST(ShellShortcuts, CtrlSlashShowsTheCatalogue) {
     EXPECT_TRUE(contains(names, L"E: "));
     ASSERT_TRUE(w.invoke("shortcuts-close"));
     EXPECT_FALSE(has(uia.by_id(w.hwnd()), L"shortcuts-dialog"));
+}
+
+// Button Feedback: Copy shows its result on the button for a moment, and says it.
+TEST(ShellFeed, CopyShowsCopiedOnTheButtonThenReturns) {
+    Fixture f;
+    const auto t = f.in.env.thread();
+    f.in.run_to_end(t, "hello", "hi there");
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + t); });
+    std::string copy;
+    ASSERT_TRUE(w.until([&] {
+        std::function<void(ui::Node&)> find = [&](ui::Node& n) {
+            if (n.automation_id().starts_with("copy-") && copy.empty()) copy = n.automation_id();
+            for (const auto& c : n.children()) find(*c);
+        };
+        find(w.main().window()->tree().root());
+        return !copy.empty();
+    }));
+    Announcements said(w);
+    ASSERT_TRUE(w.invoke(copy));
+    std::u16string name;
+    w.with(copy, [&](ui::Node& n) {
+        name = n.name;
+        return true;
+    });
+    EXPECT_EQ(name, u"Copied");
+    EXPECT_TRUE(said.heard(u"Copied to the clipboard"));
+    ASSERT_TRUE(w.until([&] {
+        bool back = false;
+        w.with(copy, [&](ui::Node& n) {
+            back = n.name == u"Copy message";
+            return true;
+        });
+        return back;
+    }, 4000));
+}
+
+// Status Bar: the context indicator says what fills the context, and turns to the error colour from 90 %.
+TEST(ShellStatusBar, ContextIndicatorListsWhatFillsTheContext) {
+    Fixture f;
+    std::atomic<long long> tokens{31000};
+    f.rpc.add("threads.context", RpcExposure::ui, [&](const json&) -> Result<json> {
+        const long long t = tokens.load();
+        return json{{"tokens", t}, {"window", 100000}, {"input_budget", 50000}, {"includes_tools", true},
+                    {"parts", {{"instructions", 2000}, {"tools", 6000}, {"summary", 1000}, {"conversation", t - 9000}}}};
+    });
+    const auto t = f.in.env.thread();
+    f.in.run_to_end(t, "hello", "hi");
+    ShellThread w(f.rpc, 1300, [&f] { return f.now(); });
+    f.attach(w);
+    w.run([&] { w.main().open("#/threads/" + t); });
+    ASSERT_TRUE(w.until([&] { return w.exists("status-context"); }));
+    Uia uia;
+    auto m = uia.by_id(w.hwnd());
+    EXPECT_EQ(m[L"status-context"].name, L"Context ~62%, Instructions 4%, tools 12%, conversation 46%, free 38%");
+    bool error = true;
+    w.with("status-context", [&](ui::Node& n) {
+        error = n.help.find(u"free 38%") == std::u16string::npos;
+        return true;
+    });
+    EXPECT_FALSE(error);  // the tooltip carries the breakdown too
+    tokens = 46000;
+    w.run([&] { w.shell().load_context(); });
+    ASSERT_TRUE(w.until([&] { return w.exists("status-compact"); }));
+    m = uia.by_id(w.hwnd());
+    EXPECT_TRUE(m[L"status-context"].name.starts_with(L"Context ~92%, Instructions 4%, tools 12%, conversation 76%, free 8%"));
 }
 
 TEST(ShellStatusBar, ContextUsageWarnsAtThreeQuartersAndOffersCompactNow) {

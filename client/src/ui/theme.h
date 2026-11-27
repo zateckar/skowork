@@ -34,6 +34,8 @@ struct Theme {
     uint32_t info = 0;
     // Banner backgrounds by severity (client/work-inbox Error Banners With Remedy, status notices).
     uint32_t error_background = 0, warning_background = 0, info_background = 0;
+    // Avatar fills, one per person by a hash of the name (client/work-inbox Stable Avatar Colours); text stays legible.
+    uint32_t avatar[8] = {};
 };
 
 // The system colours a high-contrast theme takes (GetSysColor, as 0xRRGGBB).

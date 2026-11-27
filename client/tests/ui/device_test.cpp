@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 #include "ui/bundles.h"
 #include "ui/device.h"
+#include "ui/elements.h"
 #include "ui/theme.h"
 
 using namespace wb;
@@ -250,7 +252,18 @@ TEST(UiTheme, PalettesMeetWcagAaContrast) {
         EXPECT_GE(contrast(t.warning, t.warning_background), 4.5) << mode << " warning on its banner";
         EXPECT_GE(contrast(t.info, t.info_background), 4.5) << mode << " info on its banner";
         EXPECT_GE(contrast(t.text, t.error_background), 4.5) << mode << " text on the error banner";
+        for (int i = 0; i < 8; ++i) EXPECT_GE(contrast(t.text, t.avatar[i]), 4.5) << mode << " initials on avatar " << i;
     }
+}
+
+// Stable Avatar Colours: the same name has the same colour, whatever its case; names spread over the palette.
+TEST(UiTheme, AvatarColourIsStablePerName) {
+    EXPECT_EQ(Avatar::paint_for(u"Jana Nov\u00e1kov\u00e1"), Avatar::paint_for(u"jana nov\u00e1kov\u00e1"));
+    std::set<Paint> seen;
+    for (const char16_t* n : {u"jana", u"bob", u"alice", u"petr", u"eva", u"karel", u"marie", u"tom", u"lucie", u"jan"})
+        seen.insert(Avatar::paint_for(n));
+    EXPECT_GE(seen.size(), 4u);
+    for (Paint p : seen) EXPECT_GE(static_cast<int>(p), static_cast<int>(Paint::avatar_0));
 }
 TEST(UiStrings, SystemLanguageIsATag) {
     const std::string tag = system_language();

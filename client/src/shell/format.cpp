@@ -47,6 +47,36 @@ std::string format_elapsed(long long ms) {
     return m % 60 ? std::to_string(m / 60) + " h " + std::to_string(m % 60) + " min" : std::to_string(m / 60) + " h";
 }
 
+std::string format_call_time(long long ms, char decimal) {
+    ms = std::max(0LL, ms);
+    if (ms >= 9950) return format_elapsed(ms);
+    const long long tenths = (ms + 50) / 100;
+    return std::to_string(tenths / 10) + decimal + std::to_string(tenths % 10) + " s";
+}
+
+std::vector<int> whole_shares(const std::vector<long long>& parts, long long capacity) {
+    if (capacity <= 0) return {};
+    std::vector<long long> v;
+    long long used = 0;
+    for (long long p : parts) {
+        v.push_back(std::max(0LL, p));
+        used += v.back();
+    }
+    const long long total = std::max(capacity, used);
+    v.push_back(total - used);  // free
+    std::vector<int> out(v.size());
+    std::vector<std::pair<long long, size_t>> rest;
+    int sum = 0;
+    for (size_t i = 0; i < v.size(); ++i) {
+        out[i] = static_cast<int>(v[i] * 100 / total);
+        sum += out[i];
+        rest.push_back({v[i] * 100 % total, i});
+    }
+    std::stable_sort(rest.begin(), rest.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    for (size_t k = 0; sum < 100 && k < rest.size(); ++k, ++sum) ++out[rest[k].second];
+    return out;
+}
+
 std::u16string format_relative(const std::string& iso, long long now_ms, const ui::Strings& s,
                                const std::function<std::u16string(long long)>& date) {
     const auto at = iso_millis(iso);

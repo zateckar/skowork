@@ -991,7 +991,7 @@ TEST(RuntimeLoop, MultiStepRunPersistsTheConversation) {
     // The first turn offers only the runtime's core tools.
     std::set<std::string> first;
     for (const auto& t : reqs[0].tools) first.insert(t.id);
-    EXPECT_EQ(first, (std::set<std::string>{"find_tools", "ask_user", "read_attachment", "delegate"}));
+    EXPECT_EQ(first, (std::set<std::string>{"find_tools", "ask_user", "read_attachment", "delegate", "update_plan"}));
     // After find_tools the loaded tools are offered.
     std::set<std::string> second;
     for (const auto& t : reqs[1].tools) second.insert(t.id);
@@ -1147,6 +1147,34 @@ TEST(RuntimeLoop, EveryModelCallStoresItsTimingBeforeItsAnswer) {
     EXPECT_EQ(jint(call, "duration_ms"), 5000);
     EXPECT_EQ(jint(call, "output_tokens"), 5);  // the provider's completion figure
     EXPECT_TRUE(jbool(call, "exact"));
+}
+
+// Reasoning Duration (add-assistant-feedback-patterns design D2): from the first to the last streamed reasoning text.
+TEST(RuntimeLoop, StreamedReasoningStoresItsDuration) {
+    Env env;
+    env.start();
+    env.model.push([&env](const model::ChatRequest&, const model::ChatSink& sink) {
+        env.clock.advance(std::chrono::milliseconds(1000));
+        sink.on_reasoning("Let me ");
+        env.clock.advance(std::chrono::milliseconds(8000));
+        sink.on_reasoning("think.");
+        env.clock.advance(std::chrono::milliseconds(2000));
+        sink.on_text("Done");
+        auto r = text_response("Done");
+        r.reasoning = "Let me think.";
+        return model::ModelResult<model::ChatResponse>(r);
+    });
+    auto plain = text_response("Again");
+    plain.reasoning = "Not streamed.";
+    env.model.push_response(plain);
+    const auto first = env.run(env.thread(), "hi");
+    ASSERT_TRUE(env.wait(first, RunState::succeeded));
+    const auto second = env.run(env.thread(), "again");
+    ASSERT_TRUE(env.wait(second, RunState::succeeded));
+    const auto reasoning = env.events.of("reasoning");
+    ASSERT_EQ(reasoning.size(), 2u);
+    EXPECT_EQ(jint(reasoning[0].data, "duration_ms", -1), 8000);
+    EXPECT_FALSE(reasoning[1].data.contains("duration_ms"));
 }
 
 TEST(RuntimeLoop, ModelCallWithoutUsageOrStreamedTextIsEstimatedAndHasNoFirstToken) {
@@ -2066,6 +2094,41 @@ TEST(RuntimeFindTools, IndexRanksByNameAndDescription) {
 }
 
 // ==== 3.8 Questions and approvals ===================================================================================
+
+// Run Plan Tool (add-assistant-feedback-patterns design D4): the whole plan each call, at most one step running, no
+// approval and no effect outside the Run.
+TEST(RuntimePlan, UpdatePlanAcceptsAValidPlanAndRefusesTwoRunningSteps) {
+    Env env;
+    env.start();
+    const json plan = {{"steps", json::array({{{"title", "Read the mail"}, {"status", "running"}},
+                                              {{"title", "Draft the reply"}, {"status", "pending"}},
+                                              {{"title", "Send it"}, {"status", "pending"}}})}};
+    const json two = {{"steps", json::array({{{"title", "a"}, {"status", "running"}}, {{"title", "b"}, {"status", "running"}}})}};
+    json many = {{"steps", json::array()}};
+    for (int i = 0; i < 21; ++i) many["steps"].push_back({{"title", "s" + std::to_string(i)}, {"status", "pending"}});
+    const json long_title = {{"steps", json::array({{{"title", std::string(201, 'x')}, {"status", "pending"}}})}};
+    env.model.push_calls({{"p1", "update_plan", plan}});
+    env.model.push_calls({{"p2", "update_plan", two}});
+    env.model.push_calls({{"p3", "update_plan", many}});
+    env.model.push_calls({{"p4", "update_plan", long_title}});
+    env.model.push_text("done");
+    const auto thread = env.thread();
+    const auto id = env.run(thread, "reply to Jana");
+    ASSERT_TRUE(env.wait(id, RunState::succeeded)) << env.rec(id).reason;
+    EXPECT_EQ(env.tool_content(id, "p1"), "Plan updated: 3 steps, 0 done.");
+    EXPECT_NE(env.tool_content(id, "p2").find("At most one step may be running"), std::string::npos);
+    EXPECT_FALSE(env.tool_content(id, "p3").starts_with("Plan updated"));
+    EXPECT_FALSE(env.tool_content(id, "p4").starts_with("Plan updated"));
+    EXPECT_TRUE(env.rt->pending_actions(thread).empty());  // never asks for approval
+    bool stored = false;
+    for (const auto& e : env.rt->events(id))
+        if (e.kind == "tool_call" && jstr(e.payload, "call_id") == "p1") {
+            stored = true;
+            EXPECT_EQ(jstr(e.payload, "risk"), "read");
+            EXPECT_EQ(e.payload["args"], plan);
+        }
+    EXPECT_TRUE(stored);
+}
 
 TEST(RuntimeQuestions, AskUserChoicesAreSuggestions) {
     Env env;
@@ -3025,7 +3088,8 @@ public:
 
 TEST(RuntimeCompaction, LongRunIsCompactedBeforeTheRequestWouldExceedTheThreshold) {
     RuntimeConfig cfg;
-    cfg.default_context_window = 12000;  // 3,808 input tokens after the output and safety reserves
+    // 4,008 input tokens after the output and safety reserves: room for the baseline tools, update_plan among them.
+    cfg.default_context_window = 12200;
     cfg.compaction_keep_messages = 4;
     Env env(cfg);
     auto hook = std::make_shared<CompactionHook>();
@@ -3138,6 +3202,11 @@ TEST(RuntimeCompaction, FinalAnswerOverTheTriggerIsCompactedBeforeTheRunEnds) {
     // The idle Thread rests below the trigger without "Compact now".
     const auto usage = env.rt->context_usage(thread);
     EXPECT_LT(usage.tokens, usage.trigger);
+    // What fills the context adds up to the total (Status Bar context breakdown), with the summary as its own part.
+    EXPECT_EQ(usage.instruction_tokens + usage.tool_tokens + usage.summary_tokens + usage.conversation_tokens, usage.tokens);
+    EXPECT_GT(usage.summary_tokens, 0);
+    EXPECT_GT(usage.instruction_tokens, 0);
+    EXPECT_GT(usage.conversation_tokens, 0);
     const auto records = env.rt->store().compactions(thread);
     ASSERT_EQ(records.size(), 1u);
     EXPECT_EQ(records[0].kind, "automatic");
@@ -5108,6 +5177,7 @@ TEST(LazyToolLoading, DefaultChildRunInheritsBaselineAndLoadedTools) {
     EXPECT_FALSE(child_tools.count("unavailable.news"));
     EXPECT_FALSE(child_tools.count("forbidden.secret"));
     EXPECT_FALSE(child_tools.count("delegate"));
+    EXPECT_FALSE(child_tools.count("update_plan"));  // only a top-level Run shows a Run plan
     const auto children = children_of(env, thread, id);
     ASSERT_EQ(children.size(), 1u);
     bool baseline_load_event = false;

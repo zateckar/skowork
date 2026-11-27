@@ -204,7 +204,7 @@ test('built-in policy tool IDs agree with the current registration sites', async
     registered.push(...registeredToolIds(await readFile(join(entry.parentPath, entry.name), 'utf8')));
   }
   const runtime = await readFile(new URL('../../client/src/runtime/runtime.cpp', import.meta.url), 'utf8');
-  registered.push(...Array.from(runtime.matchAll(/constexpr const char\* k(?:FindTools|AskUser|ReadAttachment|Delegate|UseSkill) = "([a-z_]+)"/g), (m) => m[1]!));
+  registered.push(...Array.from(runtime.matchAll(/constexpr const char\* k(?:FindTools|AskUser|ReadAttachment|Delegate|UseSkill|UpdatePlan) = "([a-z_]+)"/g), (m) => m[1]!));
   assert.equal(new Set(BUILT_IN_TOOL_IDS).size, BUILT_IN_TOOL_IDS.length, 'duplicate catalog entry');
   assert.deepEqual([...BUILT_IN_TOOL_IDS].sort(), registered.sort());
 });
@@ -243,7 +243,7 @@ test('every built-in has metadata and runtime core risks match registrations', a
     assert.ok(detail.owner && detail.description && detail.prerequisite && detail.caveat && detail.declared_risk, `incomplete metadata for ${id}`);
   }
   const source = await readFile(new URL('../../client/src/runtime/runtime.cpp', import.meta.url), 'utf8');
-  for (const [, constant, id] of source.matchAll(/constexpr const char\* (k(?:FindTools|AskUser|ReadAttachment|Delegate|UseSkill)) = "([a-z_]+)"/g)) {
+  for (const [, constant, id] of source.matchAll(/constexpr const char\* (k(?:FindTools|AskUser|ReadAttachment|Delegate|UseSkill|UpdatePlan)) = "([a-z_]+)"/g)) {
     const registration = new RegExp(`\\.id = ${constant};[\\s\\S]*?\\.risk = Risk::([a-z_]+);`).exec(source);
     assert.ok(registration, `missing registration for ${id}`);
     assert.equal(BUILT_IN_TOOL_DETAILS[id!]!.declared_risk, registration[1]);
@@ -278,7 +278,8 @@ test('built-in owners name their OpenSpec capabilities', async () => {
     assert.ok(specs[owner], `no owning capability spec for ${owner}`);
     // Once an in-flight capability is archived, its accepted spec replaces the delta at this path.
     const candidates = [`openspec/specs/${owner}/spec.md`, `openspec/changes/${specs[owner]}/specs/${owner}/spec.md`,
-      `openspec/changes/improve-skowork-and-knowledge-control/specs/${owner}/spec.md`];
+      `openspec/changes/improve-skowork-and-knowledge-control/specs/${owner}/spec.md`,
+      `openspec/changes/add-assistant-feedback-patterns/specs/${owner}/spec.md`];
     const contents = (await Promise.all(candidates.map((path) => readFile(new URL(`../../${path}`, import.meta.url), 'utf8').catch(() => '')))).join('\n');
     assert.match(contents, /## (?:ADDED |MODIFIED )?Requirements/);
     for (const [id, detail] of Object.entries(BUILT_IN_TOOL_DETAILS)) {

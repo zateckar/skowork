@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <vector>
 
 #include "ui/bundles.h"
 
@@ -33,11 +34,63 @@ uint32_t paint_color(const Theme& t, Paint p) {
     case Paint::info_background: return t.info_background;
     case Paint::control_border: return t.control_border;
     case Paint::accent_surface: return t.accent_surface;
+    case Paint::avatar_0:
+    case Paint::avatar_1:
+    case Paint::avatar_2:
+    case Paint::avatar_3:
+    case Paint::avatar_4:
+    case Paint::avatar_5:
+    case Paint::avatar_6:
+    case Paint::avatar_7: return t.avatar[static_cast<int>(p) - static_cast<int>(Paint::avatar_0)];
     }
     return t.text;
 }
 
 // --- TextCache ----------------------------------------------------------------------------------------------
+
+namespace {
+
+// The text of a layout's last line without its trailing white space, and whether that line follows a hard line break.
+std::u16string_view last_line(IDWriteTextLayout* layout, std::u16string_view text, UINT32& lines, bool& after_break) {
+    DWRITE_TEXT_METRICS m{};
+    if (FAILED(layout->GetMetrics(&m))) return {};
+    lines = m.lineCount;
+    if (lines < 2) return {};
+    std::vector<DWRITE_LINE_METRICS> lm(lines);
+    UINT32 actual = 0;
+    if (FAILED(layout->GetLineMetrics(lm.data(), lines, &actual)) || actual != lines) return {};
+    size_t start = 0;
+    for (UINT32 i = 0; i + 1 < lines; ++i) start += lm[i].length;
+    after_break = lm[lines - 2].newlineLength > 0;
+    if (start > text.size()) return {};
+    std::u16string_view last = text.substr(start, std::min<size_t>(lm[lines - 1].length, text.size() - start));
+    while (!last.empty() && (last.back() == u' ' || last.back() == u'\n' || last.back() == u'\r' || last.back() == u'\t'))
+        last.remove_suffix(1);
+    return last;
+}
+
+bool one_word(std::u16string_view line) { return !line.empty() && line.find_first_of(u" \t") == std::u16string_view::npos; }
+
+// Balanced Line Wrapping (add-assistant-feedback-patterns design D6): when a wrapped text ends with one word alone on
+// its last line, a slightly narrower width that keeps the number of lines moves a second word down.
+void balance_last_line(IDWriteTextLayout* layout, std::u16string_view text, float max_w) {
+    if (layout->GetTextAlignment() != DWRITE_TEXT_ALIGNMENT_LEADING) return;
+    UINT32 lines = 0;
+    bool after_break = false;
+    if (!one_word(last_line(layout, text, lines, after_break)) || after_break) return;
+    const UINT32 want = lines;
+    for (int k = 1; k <= 4; ++k) {
+        layout->SetMaxWidth(max_w * (1.f - 0.06f * static_cast<float>(k)));
+        UINT32 now = 0;
+        bool brk = false;
+        const std::u16string_view last = last_line(layout, text, now, brk);
+        if (now != want) break;
+        if (!last.empty() && !one_word(last)) return;
+    }
+    layout->SetMaxWidth(max_w);
+}
+
+}  // namespace
 
 IDWriteTextLayout* TextCache::get(IDWriteTextFormat* format, int style_key, std::u16string_view text, float max_w, bool wrap) {
     uint32_t wbits = 0;
@@ -57,6 +110,7 @@ IDWriteTextLayout* TextCache::get(IDWriteTextFormat* format, int style_key, std:
                                      max_w, 1e6f, layout.put())))
         return nullptr;
     layout->SetWordWrapping(wrap ? DWRITE_WORD_WRAPPING_WRAP : DWRITE_WORD_WRAPPING_NO_WRAP);
+    if (wrap) balance_last_line(layout.get(), text, max_w);
     if (!wrap) {
         // Single-line text that does not fit its width ends with an ellipsis.
         com_ptr<IDWriteInlineObject> sign;

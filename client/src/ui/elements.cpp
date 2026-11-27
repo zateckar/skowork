@@ -80,6 +80,31 @@ Button::Button(Ui& ui, std::string id, std::u16string label, Kind kind, char16_t
     padding = label_.empty() ? Insets::xy(8, 5) : Insets::xy(12, 5);
 }
 
+void Button::flash(char16_t glyph, std::u16string label, unsigned ms) {
+    if (!saved_) saved_ = Saved{label_, name, glyph_, width, padding};
+    glyph_ = glyph;
+    label_ = std::move(label);
+    name = label_;
+    width = Sizing::fit;  // an icon button widens to show its result
+    if (padding.left < 12) padding = Insets::xy(12, padding.top);
+    relayout();
+    invalidate();
+    if (!ui_.after) return;
+    const unsigned flash = ++flashes_;
+    std::weak_ptr<int> alive = alive_;
+    ui_.after(ms, [this, alive, flash] {
+        if (!alive.lock() || flash != flashes_ || !saved_) return;
+        label_ = saved_->label;
+        name = saved_->name;
+        glyph_ = saved_->glyph;
+        width = saved_->width;
+        padding = saved_->padding;
+        saved_.reset();
+        relayout();
+        invalidate();
+    });
+}
+
 void Button::make_inline() {
     text_style_ = TextStyle::caption;
     padding = Insets::xy(4, 0);
@@ -293,6 +318,16 @@ std::u16string Avatar::initials(std::u16string_view who) {
         start = false;
     }
     return out.empty() ? u"?" : out;
+}
+
+Paint Avatar::paint_for(std::u16string_view who) {
+    uint32_t h = 2166136261u;
+    for (char16_t ch : who) {
+        const char16_t c = ch >= u'A' && ch <= u'Z' ? static_cast<char16_t>(ch - u'A' + u'a') : ch;
+        h = (h ^ (c & 0xFFu)) * 16777619u;
+        h = (h ^ (c >> 8)) * 16777619u;
+    }
+    return static_cast<Paint>(static_cast<int>(Paint::avatar_0) + static_cast<int>(h % 8));
 }
 
 void Avatar::draw(Canvas& c) {

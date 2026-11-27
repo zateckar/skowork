@@ -155,6 +155,7 @@ void ComposerView::text_changed() {
     save_soon();
     if (skill_query() != before) skill_index_ = 0;
     rebuild_skills();
+    rebuild_bar();  // Send follows whether there is anything to send (Composer)
     relayout();
 }
 
@@ -315,6 +316,7 @@ void ComposerView::attach(const std::vector<std::wstring>& paths) {
 }
 
 void ComposerView::rebuild_attachments() {
+    rebuild_bar();
     attachments_->clear_children();
     attachments_->visible = !files_.empty();
     ui::Ui& u = shell_.ui();
@@ -572,7 +574,9 @@ void ComposerView::rebuild_bar() {
     const bool record = key_ == "new" && jbool(meetings, "manual");
     const bool capturing = jbool(meetings, "capturing");
     const bool dictating = shell_.dictation_phase() != Shell::DictationPhase::idle;
+    const bool empty = blank(text_) && files_.empty();  // nothing to send (Composer)
     const std::string state = std::string(running ? "r" : "") + (active ? "a" : "") + (blocked ? "b" : "") + (busy_ ? "s" : "") +
+                              (empty ? "e" : "") +
                               (record ? "m" : "") + (capturing ? "c" : "") + (dictating ? "d" : "") + (recording_ ? "g" : "") +
                               shell_.ui().strings.lang();
     if (state == bar_state_) return;
@@ -608,20 +612,23 @@ void ComposerView::rebuild_bar() {
                                           Paint::text_secondary, true, "composer-hint");
     hint->padding.top = 7;
     if (active) {
-        auto* stop = bar_->emplace<ui::Button>(u, "composer-stop", shell_.t("composer.stop"), ui::Button::Kind::standard, ui::icon::stop);
+        // With nothing to send, stopping is what the user can do: Stop is the primary button.
+        auto* stop = bar_->emplace<ui::Button>(u, "composer-stop", shell_.t("composer.stop"),
+                                               empty ? ui::Button::Kind::primary : ui::Button::Kind::standard, ui::icon::stop);
         stop->width = Sizing::fit;
         stop->on_click = [this] { this->stop(); };
     }
     if (running) {
         auto* steer = bar_->emplace<ui::Button>(u, "composer-steer", shell_.t("composer.steer"));
         steer->width = Sizing::fit;
-        steer->enabled = !busy_ && !blocked;
+        steer->enabled = !busy_ && !blocked && !empty;
         steer->on_click = [this] { send(true); };
     }
     auto* send_b = bar_->emplace<ui::Button>(u, "composer-send", shell_.t(running ? "composer.queue" : "composer.send"),
-                                             ui::Button::Kind::primary, running ? 0 : ui::icon::send);
+                                             active && empty ? ui::Button::Kind::standard : ui::Button::Kind::primary,
+                                             running ? 0 : ui::icon::send);
     send_b->width = Sizing::fit;
-    send_b->enabled = !busy_ && !blocked;
+    send_b->enabled = !busy_ && !blocked && !empty;
     send_b->on_click = [this] { send(false); };
     if (tr && !focused.empty())
         for (const auto& c : bar_->children())

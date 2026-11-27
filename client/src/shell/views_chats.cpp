@@ -177,7 +177,7 @@ private:
             line->gap = 8;
             line->role = ui::Role::list_item;
             line->name = what;
-            line->emplace<ui::Avatar>(shell_.ui(), shown);
+            line->emplace<ui::Avatar>(shell_.ui(), shown, ui::Avatar::paint_for(ui::to_utf16(user)));
             auto* cb = line->emplace<ui::Checkbox>(shell_.ui(), id_ + "-pick-" + user, what, member || is_picked(user));
             cb->padding.top = 4;
             cb->enabled = !member;
@@ -587,7 +587,8 @@ void ChatsView::build_conversation(Node& parent) {
             item->gap = 4;
             auto* head = row_box(*item);
             const std::u16string sender_name = u16(jstr(m, "sender_name", jstr(m, "sender")));
-            head->emplace<ui::Avatar>(shell_.ui(), sender_name, own ? Paint::accent : Paint::surface, own ? Paint::accent_text : Paint::text);
+            // Each person's own colour (Stable Avatar Colours); the user's messages are set apart by their surface.
+            head->emplace<ui::Avatar>(shell_.ui(), sender_name, ui::Avatar::paint_for(u16(jstr(m, "sender"))), Paint::text);
             auto* who = head->emplace<ui::Label>(shell_.ui(), sender, TextStyle::body_strong, Paint::text, false);
             who->role = ui::Role::none;
             who->padding.top = 4;
@@ -598,7 +599,11 @@ void ChatsView::build_conversation(Node& parent) {
             head->emplace<Node>()->width = ui::Sizing::fill;
             const std::string text = jstr(m, "text");
             auto* copy = head->emplace<ui::IconButton>(shell_.ui(), "chat-message-copy-" + mid, ui::icon::copy, shell_.t("feed.copy_message"));
-            copy->on_click = [this, text] { shell_.announce(shell_.t(shell_.copy_text(text) ? "feed.copied" : "question.copy_failed")); };
+            copy->on_click = [this, copy, text] {
+                const bool ok = shell_.copy_text(text);
+                copy->flash(ok ? ui::icon::check : ui::icon::error, shell_.t(ok ? "feed.copied_short" : "feed.copy_failed_short"));
+                shell_.announce(shell_.t(ok ? "feed.copied" : "question.copy_failed"));
+            };
             auto* md = item->emplace<ui::MarkdownView>(shell_.ui(), meta, "chat-message-text-" + mid);
             md->set_markdown(text);
             if (m.contains("error"))

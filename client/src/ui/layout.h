@@ -86,6 +86,7 @@ enum Key : unsigned {
     kKeyC = 0x43,
     kKeyE = 0x45,
     kKeyF = 0x46,
+    kKeyK = 0x4B,
     kKeyN = 0x4E,
     kKeyU = 0x55,
     kKeyComma = 0xBC,  // VK_OEM_COMMA

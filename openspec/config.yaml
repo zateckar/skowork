@@ -115,6 +115,8 @@ context: |
     top-level Run.
   - Run event: one stored, sequence-numbered record of what happened in a Run (messages, reasoning, tool calls,
     state changes). The feed is built from Run events.
+  - Run plan: the ordered steps, each pending, running, done, failed or skipped, that the agent last published
+    for a top-level Run with update_plan (client/agent-runtime Run Plan Tool).
   - Passage: a chunk of knowledge returned by knowledge.search.
   - Citation: a numbered source listed under an answer, for a Passage the answer refers to.
   - Generated surface: a versioned JSON block (fence skowork-ui) in an assistant message that the Thread renders
@@ -133,7 +135,7 @@ context: |
   - Automations: the UI label for the section where users manage Triggers. It is not a separate concept.
   - Tool: a callable capability exposed to the model. Tool ids look like: files.read, files.write,
     shell.run, web.fetch, browser.*, computer.*, image.generate, mail.*, calendar.*, knowledge.*, tasks.*,
-    messages.*, apps.*, skills.*, ask_user, mcp:<server>/<tool>, api:<connector>/<operation>.
+    messages.*, apps.*, skills.*, ask_user, update_plan, mcp:<server>/<tool>, api:<connector>/<operation>.
   - Connector: an external service the agent can use through Tools. Its kinds are mcp (an MCP server) and
     api (an API connector). The user-facing name is Connectors; internal names (policy.mcp, mcp-catalog,
     mcp-client, tool ids mcp:) stay. LLM connections are not Connectors.
@@ -242,6 +244,7 @@ context: |
   54 improve-threads-calendar-agenda  [Productivity]
   55 improve-plain-information        [Productivity]
   56 improve-remaining-views          [Productivity]
+  57 add-assistant-feedback-patterns  [Productivity]
 
 rules:
   proposal:

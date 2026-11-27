@@ -74,6 +74,8 @@ public:
     MarkdownView(Ui& ui, std::u16string name, std::string id = {});
     ~MarkdownView() override;
     void set_markdown(std::string_view utf8);
+    // Text that is still streaming: unfinished inline markup at its end is closed first (close_streaming_markdown).
+    void set_streaming_markdown(std::string_view utf8);
     // Text shown as written, one paragraph, without Markdown (the user's own messages), and still selectable.
     void set_plain(std::u16string text);
     const std::vector<Block>& blocks() const { return blocks_; }

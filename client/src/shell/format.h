@@ -27,6 +27,11 @@ std::string format_bytes(double bytes, char decimal = '.');
 std::string format_duration(double seconds);
 // Elapsed time of a Run: "12 s", "3 min 5 s", "1 h 2 min".
 std::string format_elapsed(long long ms);
+// How long a tool call took: one decimal under 10 s ("1.4 s"), else as format_elapsed. `decimal` is the separator.
+std::string format_call_time(long long ms, char decimal = '.');
+// Whole percentages of `capacity` for the given parts and the free rest, which add up to 100 (largest remainder). A
+// total above the capacity leaves no free share. Empty when the capacity is not positive.
+std::vector<int> whole_shares(const std::vector<long long>& parts, long long capacity);
 // Relative time of an ISO timestamp for list entries: "now", "5 min ago", "yesterday", "3 days ago"; older ones go
 // through `date` (milliseconds since the epoch -> a localised date). Empty for an unreadable timestamp.
 std::u16string format_relative(const std::string& iso, long long now_ms, const ui::Strings& s,

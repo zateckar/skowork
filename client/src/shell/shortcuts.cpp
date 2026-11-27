@@ -9,6 +9,7 @@ std::optional<Command> command_for(const KeyEvent& e, const KeyContext& ctx) {
         switch (e.key) {
             case kKeyN: return Command::new_thread;
             case kKeyF: return Command::search;
+            case kKeyK: return Command::palette;
             case kKeyB: return Command::toggle_rail;
             case kKeyComma: return Command::settings;
             case kKeySlash: return Command::help;
@@ -37,6 +38,7 @@ std::optional<Command> command_for(const KeyEvent& e, const KeyContext& ctx) {
 const std::vector<CatalogueEntry>& catalogue() {
     static const std::vector<CatalogueEntry> entries = {
         {"Ctrl+N", "shortcuts.commands.new_thread"}, {"Ctrl+F", "shortcuts.commands.search"},
+        {"Ctrl+K", "shortcuts.commands.palette"},
         {"Ctrl+B", "shortcuts.commands.toggle_rail"}, {"Ctrl+,", "shortcuts.commands.settings"},
         {"Ctrl+/", "shortcuts.commands.help"},       {"E", "shortcuts.commands.archive"},
         {"U", "shortcuts.commands.mark_unread"},     {"Delete", "shortcuts.commands.delete"},

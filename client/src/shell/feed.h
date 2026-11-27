@@ -54,7 +54,14 @@ struct RunError {
 // details: Show details / Hide details after a finished Run whose work is hidden (Work Details Visibility).
 // speed: the generation speed line under a top-level Run's answer (Generation Speed Under Answers).
 // limit: the note under an answer written at a Run limit (Run Limit Note); `reason` holds the limit, `text` its value.
-enum class ItemType { user, assistant, reasoning, tool, activity, action, error, stopped, working, details, speed, limit };
+// plan: the Run plan of a top-level Run (Run Plan In The Feed).
+enum class ItemType { user, assistant, reasoning, tool, activity, action, error, stopped, working, details, speed, limit, plan };
+
+// One step of a Run plan (client/agent-runtime Run Plan Tool): its title and pending | running | done | failed | skipped.
+struct PlanStep {
+    std::string title, status;
+    bool operator==(const PlanStep&) const = default;
+};
 
 // The generation speed of a Run (show-generation-speed design D1, D2): output tokens per second of model generation,
 // or, while a model call has produced no output yet, how long the Run has waited for it.
@@ -77,6 +84,13 @@ struct FeedItem {
     std::optional<RunUsage> usage;  // activity: the Run's token totals, after it ended
     std::optional<RunSpeed> speed;  // speed
     bool streaming = false;
+    // Durations (add-assistant-feedback-patterns design D2). tool: from the call to its result; reasoning: the stored
+    // reasoning time. -1 when unknown.
+    long long duration_ms = -1;
+    // When what is still running started (Unix milliseconds): a tool call without a result, streaming reasoning, and a
+    // working line's current step. -1 when nothing runs. elapsed_ms is set from it by the feed view at each update.
+    long long started_ms = -1;
+    long long elapsed_ms = -1;
     bool surface_eligible = false;  // completed, durable assistant message; not an activation by itself
     // assistant: the passages the answer cites with [n], in number order (Cited Sources In The Feed)
     std::vector<Citation> sources;
@@ -87,6 +101,9 @@ struct FeedItem {
     std::optional<ToolResult> result;
     bool edited = false;
     bool compact = false;  // tool: only the images and citations it produced (work details hidden)
+    // plan: the steps, and whether the Run is still at work (a step not done of an ended Run is not done)
+    std::vector<PlanStep> plan;
+    bool run_active = false;
     // action
     ActionItem action;
     // error
@@ -96,6 +113,9 @@ struct FeedItem {
 };
 
 long long now_millis();  // declared again with the Activity Rail below
+
+// The steps of the latest successful update_plan call among items [from, to) of one Run; empty when there is none.
+std::vector<PlanStep> plan_of(const std::vector<FeedItem>& items, size_t from, size_t to);
 
 // This is deliberately a Thread feed API, not part of the shared Markdown or human Chat renderer.
 std::vector<ui::GeneratedSurfaceBlock> eligible_generated_surfaces(const FeedItem& item);
@@ -112,6 +132,8 @@ struct LiveText {
     // Per Run, when the first streamed text or reasoning of the current model call arrived (Unix milliseconds) and the
     // Run's last sequence number then: a stored model_call event with a higher number ends that call's live estimate.
     std::map<std::string, long long> output_since, output_after;
+    // Per Run, when the streamed reasoning of the current model call began (Unix milliseconds; Streaming Thread Feed).
+    std::map<std::string, long long> reasoning_since;
 };
 
 // The generation speed of a top-level Run at now_ms: measured from its stored model_call events plus an estimate of the

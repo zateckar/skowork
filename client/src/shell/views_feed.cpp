@@ -3,6 +3,7 @@
 
 #include "shell/shell.h"
 #include "platform/crypto.h"
+#include "shell/format.h"
 #include "ui/generated_save_queue.h"
 #include "ui/generated_surface.h"
 #include "ui/generated_surface_view.h"
@@ -82,16 +83,26 @@ std::string sources_signature(const std::vector<Citation>& sources) {
     return s;
 }
 
+// Step Elapsed Time: a step's time shows on the status line from 2 seconds.
+constexpr long long kStepTimeMs = 2000;
+
 std::string signature(const FeedItem& it) {
     std::string s = std::to_string(static_cast<int>(it.type)) + "|";
     switch (it.type) {
     case ItemType::user: return s + it.text;
     case ItemType::assistant:  // live text is updated in place
         return s + (it.streaming ? "live" : it.text) + sources_signature(it.sources) + sources_signature(it.surface_sources);
-    case ItemType::reasoning: return s + (it.streaming ? "live" : it.text);
+    case ItemType::reasoning:
+        return s + (it.streaming ? "live" : it.text) + "|" + std::to_string(it.duration_ms) + "|" +
+               std::to_string(it.elapsed_ms < 0 ? -1 : it.elapsed_ms / 1000);
     case ItemType::details: return s + it.text;
+    case ItemType::plan:
+        s += it.run_active ? "a" : "e";
+        for (const PlanStep& p : it.plan) s += "|" + p.status + ":" + p.title;
+        return s;
     case ItemType::tool:
         s += std::string(it.compact ? "c|" : "") + it.tool + "|" + it.risk + "|" + it.decision + "|" + it.reason + "|" + (it.edited ? "e" : "") + "|" + it.args.dump();
+        s += "|" + std::to_string(it.duration_ms) + "|" + std::to_string(it.elapsed_ms < 0 ? -1 : it.elapsed_ms / 1000);
         if (it.result) s += "|" + std::string(it.result->unknown ? "unknown" : it.result->ok ? "ok" : "bad") + "|" + it.result->content;
         if (it.result)
             for (const FileRef& f : it.result->files) s += "|" + f.id;
@@ -105,7 +116,7 @@ std::string signature(const FeedItem& it) {
             return s + "usage|" + std::to_string(it.usage->prompt) + "|" + std::to_string(it.usage->completion) + "|" +
                    std::to_string(it.usage->reasoning) + "|" + std::to_string(it.usage->calls);
         return s + it.text;
-    case ItemType::working: return s + it.text;
+    case ItemType::working: return s + it.text + "|" + std::to_string(it.elapsed_ms < kStepTimeMs ? -1 : it.elapsed_ms / 1000);
     case ItemType::speed:
         if (!it.speed) return s;
         return s + std::to_string(it.speed->tokens_per_s) + (it.speed->approximate ? "~" : "") + "|" +
@@ -161,7 +172,8 @@ void message_header(Shell& s, Node& msg, const FeedItem& it) {
         const json* auth = jobj(s.status(), "auth");
         std::string me = m ? jstr(*m, "me") : std::string();
         if (me.empty() && auth) me = jstr(*auth, "user");
-        head->emplace<ui::Avatar>(s.ui(), me.empty() ? s.t("feed.you") : ui::to_utf16(me));
+        const std::u16string who = me.empty() ? s.t("feed.you") : ui::to_utf16(me);
+        head->emplace<ui::Avatar>(s.ui(), who, ui::Avatar::paint_for(who));  // Stable Avatar Colours
     } else {
         head->emplace<ui::Avatar>(s.ui(), u"S", Paint::accent, Paint::accent_text);  // the Skowork mark
     }
@@ -178,13 +190,25 @@ void message_header(Shell& s, Node& msg, const FeedItem& it) {
     spacer->width = Sizing::fill;
     Shell* sp = &s;
     auto* copy = head->emplace<ui::IconButton>(s.ui(), id_of("copy-", it.key), ui::icon::copy, s.t("feed.copy_message"));
-    copy->on_click = [sp, text = it.text] {
-        sp->announce(sp->t(sp->copy_text(text) ? "feed.copied" : "question.copy_failed"));
+    copy->on_click = [sp, copy, text = it.text] {
+        const bool ok = sp->copy_text(text);
+        copy->flash(ok ? ui::icon::check : ui::icon::error, sp->t(ok ? "feed.copied_short" : "feed.copy_failed_short"));  // Button Feedback
+        sp->announce(sp->t(ok ? "feed.copied" : "question.copy_failed"));
     };
     if (it.seq > 0) {
         auto* fork = head->emplace<ui::IconButton>(s.ui(), id_of("fork-", it.key), ui::icon::fork, s.t("thread.fork_from_here"));
         fork->on_click = [sp, thread = s.open_id(), run = it.run_id, seq = it.seq] { sp->fork(thread, run, seq); };
     }
+}
+
+// A tool result as shown in its card: a JSON object or array indented, anything else as it came (Streaming Thread Feed).
+std::string readable_result(const std::string& content) {
+    constexpr size_t kMaxIndented = 256 * 1024;
+    const size_t first = content.find_first_not_of(" \t\r\n");
+    if (content.size() > kMaxIndented || first == std::string::npos || (content[first] != '{' && content[first] != '[')) return content;
+    const json parsed = json::parse(content, nullptr, false);
+    if (parsed.is_discarded() || !(parsed.is_object() || parsed.is_array())) return content;
+    return parsed.dump(2, ' ', false, json::error_handler_t::replace);
 }
 
 // Text in a monospace box (tool arguments and results).
@@ -195,6 +219,39 @@ Node* code_box(Shell& s, Node& parent, const std::string& id, const std::string&
     (void)t;
     return box;
 }
+
+// The mark before a Run plan step (Run Plan In The Feed): an empty ring (pending, not done), an accent ring with a dot
+// (running), a check (done), a cross (failed) or a dash (skipped). The step's status is also in words beside it.
+class PlanMark : public Node {
+public:
+    PlanMark(ui::Ui& ui, std::string state) : ui_(ui), state_(std::move(state)) {
+        width = height = Sizing::fixed;
+        fixed_w = 16;
+        fixed_h = 20;
+    }
+    void draw(ui::Canvas& c) override {
+        const ui::Rect f = frame();
+        const float cx = f.x + 8, cy = f.y + 10;
+        if (state_ == "done" || state_ == "failed") {
+            const char16_t g = state_ == "done" ? ui::icon::check : ui::icon::cancel;
+            IDWriteTextLayout* l = ui_.layout(std::u16string(1, g), TextStyle::icon, 100.f, false);
+            DWRITE_TEXT_METRICS m{};
+            if (l) l->GetMetrics(&m);
+            c.text(l, cx - m.width / 2, cy - m.height / 2, state_ == "done" ? Paint::success : Paint::error);
+        } else if (state_ == "skipped") {
+            c.line(cx - 5, cy, cx + 5, cy, Paint::text_secondary, 2.f);
+        } else if (state_ == "running") {
+            c.arc(cx, cy, 6, 2.f, Paint::accent, 1.0);
+            c.round({cx - 2.5f, cy - 2.5f, 5, 5}, 2.5f, Paint::accent);
+        } else {
+            c.arc(cx, cy, 6, 1.5f, Paint::text_secondary, 1.0);
+        }
+    }
+
+private:
+    ui::Ui& ui_;
+    std::string state_;
+};
 
 // The Approval card and the Question card (client/work-inbox Approval Card, Question Card, Standalone Action Items):
 // what is asked, with the decisions while it is open, and what was decided once it is resolved. Edit arguments and
@@ -611,15 +668,19 @@ std::vector<FeedItem> FeedView::visible(std::vector<FeedItem> items) const {
     };
     std::set<std::string> active, with_work;
     std::map<std::string, size_t> last;  // run -> index of its last item
-    std::map<std::string, std::pair<std::string, std::string>> step;  // run -> step key, MCP server
+    struct Step {
+        std::string key, server;
+        long long started_ms = -1;
+    };
+    std::map<std::string, Step> step;  // run -> the step the status line names
     for (size_t i = 0; i < items.size(); ++i) {
         const FeedItem& it = items[i];
         if (it.run_id.empty()) continue;
         last[it.run_id] = i;
         if (it.type == ItemType::working || it.streaming) active.insert(it.run_id);
         if (is_work(it)) with_work.insert(it.run_id);
-        if (it.type == ItemType::tool) step[it.run_id] = {step_key(it.tool, it.risk), mcp_server(it.tool)};
-        else if (it.type == ItemType::reasoning && it.streaming) step[it.run_id] = {"feed.step.thinking", ""};
+        if (it.type == ItemType::tool) step[it.run_id] = {step_key(it.tool, it.risk), mcp_server(it.tool), it.started_ms};
+        else if (it.type == ItemType::reasoning && it.streaming) step[it.run_id] = {"feed.step.thinking", "", it.started_ms};
         else if (it.type == ItemType::assistant) step.erase(it.run_id);  // answering: the generic working line
     }
     std::vector<FeedItem> out;
@@ -638,12 +699,16 @@ std::vector<FeedItem> FeedView::visible(std::vector<FeedItem> items) const {
                 w.key = run + ":working";
                 w.run_id = run;
                 w.text = "feed.step.thinking|";
+                w.started_ms = it.started_ms;
                 out.push_back(std::move(w));
             }
         } else {
             // One Tool at work is named in plain words ("Working with mail"); parallel Tools keep their count.
             if (it.type == ItemType::working && (it.text.empty() || it.text == "feed.working_tools|1"))
-                if (const auto s = step.find(it.run_id); s != step.end()) it.text = s->second.first + "|" + s->second.second;
+                if (const auto s = step.find(it.run_id); s != step.end()) {
+                    it.text = s->second.key + "|" + s->second.server;
+                    it.started_ms = s->second.started_ms;
+                }
             out.push_back(std::move(it));
         }
         if (!run.empty() && last[run] == i && with_work.contains(run) && !active.contains(run)) {
@@ -660,10 +725,15 @@ std::vector<FeedItem> FeedView::visible(std::vector<FeedItem> items) const {
 
 void FeedView::update() {
     const auto& snap = shell_.feed();
-    std::vector<FeedItem> items = visible(snap ? shell_.fold().build(*snap, shell_.live(), shell_.now()) : std::vector<FeedItem>{});
-    // A speed line that is waiting for the model or estimating a stream counts on by itself: once a second.
+    const long long now = shell_.now();
+    std::vector<FeedItem> items = visible(snap ? shell_.fold().build(*snap, shell_.live(), now) : std::vector<FeedItem>{});
+    for (FeedItem& it : items)
+        if (it.started_ms >= 0) it.elapsed_ms = std::max(0LL, now - it.started_ms);
+    // A speed line that is waiting for the model or estimating a stream, a running tool call, streaming reasoning and a
+    // working line with a step count on by themselves: once a second.
     const bool ticking = std::any_of(items.begin(), items.end(), [](const FeedItem& it) {
-        return it.type == ItemType::speed && it.speed && (it.speed->waiting_ms >= 0 || it.speed->approximate);
+        return (it.type == ItemType::speed && it.speed && (it.speed->waiting_ms >= 0 || it.speed->approximate)) ||
+               it.elapsed_ms >= 0;
     });
     if (ticking && !speed_timer_) {
         std::weak_ptr<int> alive = alive_;
@@ -691,7 +761,7 @@ void FeedView::update() {
         if (found != old_index.end() && found->second < old_nodes.size() && old_nodes[found->second] &&
             slots_[found->second].sig == sig) {
             Slot slot = slots_[found->second];
-            if (it.streaming && slot.markdown) slot.markdown->set_markdown(it.text);
+            if (it.streaming && slot.markdown) slot.markdown->set_streaming_markdown(it.text);
             if (it.streaming && slot.text && ui::to_utf8(slot.text->text()) != it.text) slot.text->set_text(ui::to_utf16(it.text));
             add(std::move(old_nodes[found->second]));
             next.push_back(std::move(slot));
@@ -986,14 +1056,20 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
             }
         }
         slot.markdown = msg->emplace<ui::MarkdownView>(u, shell_.t("feed.agent"), id_of("md-", it.key));
-        slot.markdown->set_markdown(it.text);
+        if (it.streaming) slot.markdown->set_streaming_markdown(it.text);
+        else slot.markdown->set_markdown(it.text);
         if (!it.sources.empty()) add_citations(*msg, it.sources, it.key, "msg-sources-", "msg-source-");
         return msg;
     }
     case ItemType::reasoning: {
         const std::string key = it.key;
-        auto card = std::make_unique<ui::Card>(u, id_of("reasoning-", it.key), shell_.t(it.streaming ? "feed.thinking" : "feed.reasoning"),
-                                               true, expanded_.contains(key));
+        // "Thinking · 8 s" while it streams, "Thought for 8 s" once stored with its duration (Streaming Thread Feed).
+        std::u16string title = shell_.t(it.streaming ? "feed.thinking" : "feed.reasoning");
+        if (it.streaming && it.elapsed_ms >= 1000)
+            title = shell_.t("feed.thinking_for", {{"time", ui::to_utf16(format_elapsed(it.elapsed_ms))}});
+        else if (!it.streaming && it.duration_ms >= 1000)
+            title = shell_.t("feed.thought_for", {{"time", ui::to_utf16(format_elapsed(it.duration_ms))}});
+        auto card = std::make_unique<ui::Card>(u, id_of("reasoning-", it.key), title, true, expanded_.contains(key));
         card->background = Paint::none;
         card->on_expand = [this, key](bool on) {
             if (on) expanded_.insert(key);
@@ -1026,9 +1102,17 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
         if (it.edited)
             card->header().emplace<ui::Badge>(u, shell_.t("feed.tool.edited"), Paint::warning_background, Paint::text,
                                               id_of("tool-edited-", it.key));
+        // How long the call took, or has been running (Streaming Thread Feed).
+        const long long took = it.result ? it.duration_ms : it.elapsed_ms;
+        const std::u16string time = took >= 0 ? ui::to_utf16(format_call_time(took, shell_.decimal())) : std::u16string();
+        if (!time.empty()) {
+            auto* tl = card->header().emplace<ui::Label>(u, time, TextStyle::caption, Paint::text_secondary, false, id_of("tool-time-", it.key));
+            tl->role = ui::Role::none;
+            tl->padding.top = 3;
+        }
         // The header's name is what a screen reader reads for the collapsed card.
         card->header().name = shell_.t("feed.tool.label", {{"tool", ui::to_utf16(it.tool)}}) + u", " + state +
-                              (it.edited ? u", " + shell_.t("feed.tool.edited") : u"");
+                              (it.edited ? u", " + shell_.t("feed.tool.edited") : u"") + (time.empty() ? u"" : u", " + time);
         Node& b = card->body();
         const std::u16string risk = shell_.ui().strings.has("feed.risk." + it.risk) ? shell_.t("feed.risk." + it.risk) : ui::to_utf16(it.risk);
         b.emplace<ui::Label>(u, shell_.t("feed.tool.risk") + u": " + risk, TextStyle::body, Paint::text, true, id_of("tool-risk-", it.key));
@@ -1042,7 +1126,7 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
         code_box(shell_, b, id_of("tool-args-", it.key), it.args.dump(2));
         if (it.result) {
             b.emplace<ui::Label>(u, shell_.t(state_key), TextStyle::caption, Paint::text_secondary, true);
-            code_box(shell_, b, id_of("tool-result-", it.key), it.result->content, it.result->ok || unknown ? Paint::text : Paint::error);
+            code_box(shell_, b, id_of("tool-result-", it.key), readable_result(it.result->content), it.result->ok || unknown ? Paint::text : Paint::error);
         }
         // Images the tool stored, and the sources knowledge.search cited, show under the card without expanding it.
         if (!produced_something(it)) return card;
@@ -1082,8 +1166,10 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
         const auto bar = it.text.find('|');
         const std::string k = it.text.empty() ? "feed.working" : it.text.substr(0, bar);
         const std::u16string server = bar == std::string::npos ? u"" : ui::to_utf16(it.text.substr(bar + 1));
-        auto l = std::make_unique<ui::Label>(u, shell_.t(k, {{"server", server}, {"count", server}}), TextStyle::caption, Paint::text_secondary, true,
-                                             id_of("working-", it.key));
+        std::u16string text = shell_.t(k, {{"server", server}, {"count", server}});
+        if (it.elapsed_ms >= kStepTimeMs)  // Step Elapsed Time
+            text += u" · " + shell_.t("feed.step_seconds", {{"seconds", ui::to_utf16(std::to_string(it.elapsed_ms / 1000))}});
+        auto l = std::make_unique<ui::Label>(u, text, TextStyle::caption, Paint::text_secondary, true, id_of("working-", it.key));
         return l;
     }
     case ItemType::speed: {  // Generation Speed Under Answers: plain text, not a live region (design D4)
@@ -1105,6 +1191,52 @@ std::unique_ptr<Node> FeedView::build(const FeedItem& it, Slot& slot) {
         auto l = std::make_unique<ui::Label>(u, text, TextStyle::caption, Paint::text_secondary, true, id_of("speed-", it.run_id));
         l->name = spoken;
         return l;
+    }
+    case ItemType::plan: {  // Run Plan In The Feed: shown whatever Work Details Visibility hides
+        const auto n = [](size_t v) { return ui::to_utf16(std::to_string(v)); };
+        size_t done = 0;
+        for (const PlanStep& p : it.plan) done += p.status == "done";
+        auto card = std::make_unique<ui::Box>(id_of("plan-", it.run_id), Paint::surface, 8, Paint::border);
+        card->role = ui::Role::group;
+        card->padding = ui::Insets::xy(14, 10);
+        card->gap = 4;
+        const std::u16string progress = shell_.t("feed.plan.progress", {{"done", n(done)}, {"total", n(it.plan.size())}});
+        card->name = shell_.t("feed.plan.title") + u", " + progress;
+        auto* head = card->emplace<Node>();
+        head->axis = ui::Axis::row;
+        head->gap = 8;
+        auto* title = head->emplace<ui::Label>(u, shell_.t("feed.plan.title"), TextStyle::body_strong, Paint::text, false);
+        title->role = ui::Role::none;
+        auto* count = head->emplace<ui::Label>(u, progress, TextStyle::caption, Paint::text_secondary, false, id_of("plan-progress-", it.run_id));
+        count->role = ui::Role::none;
+        count->padding.top = 2;
+        auto* list = card->emplace<Node>(id_of("plan-steps-", it.run_id));
+        list->role = ui::Role::list;
+        list->name = shell_.t("feed.plan.title");
+        list->gap = 2;
+        for (size_t i = 0; i < it.plan.size(); ++i) {
+            const PlanStep& step = it.plan[i];
+            // A step an ended Run left pending or running is not done (Run Plan In The Feed).
+            const std::string state = !it.run_active && (step.status == "pending" || step.status == "running") ? "not_done" : step.status;
+            const std::string key = "feed.plan.status." + state;
+            const std::u16string word = shell_.ui().strings.has(key) ? shell_.t(key) : ui::to_utf16(state);
+            auto* row = list->emplace<ui::Box>(id_of("plan-step-", it.run_id) + "-" + std::to_string(i),
+                                               state == "running" ? Paint::accent_surface : Paint::none, 4);
+            row->axis = ui::Axis::row;
+            row->gap = 8;
+            row->padding = ui::Insets::xy(4, 2);
+            row->role = ui::Role::list_item;
+            row->name = shell_.t("feed.plan.step", {{"n", n(i + 1)}, {"total", n(it.plan.size())},
+                                                    {"title", ui::to_utf16(step.title)}, {"status", word}});
+            row->emplace<PlanMark>(u, state);
+            auto* t = row->emplace<ui::Label>(u, ui::to_utf16(step.title), state == "running" ? TextStyle::body_strong : TextStyle::body,
+                                              state == "skipped" || state == "not_done" ? Paint::text_secondary : Paint::text, true);
+            t->role = ui::Role::none;
+            auto* w = row->emplace<ui::Label>(u, word, TextStyle::caption, Paint::text_secondary, false);
+            w->role = ui::Role::none;
+            w->padding.top = 2;
+        }
+        return card;
     }
     case ItemType::details: {
         const bool open = it.text == "open";

@@ -8,6 +8,7 @@
 #include "shell/derive.h"
 #include "shell/feed.h"
 #include "shell/format.h"
+#include "shell/palette.h"
 #include "shell/inbox_model.h"
 #include "shell/routes.h"
 #include "shell/shortcuts.h"
@@ -775,6 +776,16 @@ TEST(ShellFormat, SizesDurationsAndRelativeTimes) {
     EXPECT_EQ(format_duration(3900), "1 h 5 min");
     EXPECT_EQ(format_elapsed(185000), "3 min 5 s");
     EXPECT_EQ(format_elapsed(3720000), "1 h 2 min");
+    EXPECT_EQ(format_call_time(1440), "1.4 s");
+    EXPECT_EQ(format_call_time(1440, ','), "1,4 s");
+    EXPECT_EQ(format_call_time(30), "0.0 s");
+    EXPECT_EQ(format_call_time(9940), "9.9 s");
+    EXPECT_EQ(format_call_time(12000), "12 s");
+    // Context shares add up to 100 with the free rest (Status Bar context breakdown).
+    EXPECT_EQ(whole_shares({40, 120, 460}, 1000), (std::vector<int>{4, 12, 46, 38}));
+    EXPECT_EQ(whole_shares({1, 1, 1}, 3), (std::vector<int>{34, 33, 33, 0}));
+    EXPECT_EQ(whole_shares({500, 600, 0}, 1000), (std::vector<int>{45, 55, 0, 0}));  // over the capacity: no free share
+    EXPECT_TRUE(whole_shares({1}, 0).empty());
     EXPECT_EQ(short_commit("0123456789abcdef"), "01234567");
     EXPECT_EQ(display_user({{"name", "Jana"}, {"email", "jana@x.cz"}}), "Jana (jana@x.cz)");
     EXPECT_EQ(display_user(" bob "), "bob");
@@ -1145,6 +1156,133 @@ TEST(ShellFeed, SavedSkillEntryLinksToItsPublishDialogAndARefusalHasNoLink) {
     EXPECT_EQ(tools[0]->result->publish_route, "#/skills/edit/weekly-report");
     ASSERT_TRUE(tools[1]->result.has_value());
     EXPECT_TRUE(tools[1]->result->publish_route.empty());
+}
+
+// ---- Command Palette (add-assistant-feedback-patterns design D3) ----
+
+TEST(ShellPalette, RanksPrefixThenWordStartThenSubsequence) {
+    const std::vector<PaletteEntry> e = {
+        {u"Status", true},            // 0
+        {u"Budget review Q3", false}, // 1
+        {u"New Thread", true},        // 2
+        {u"Settings", true},          // 3
+        {u"Q3 budget", false},        // 4
+        {u"Shortcut help", true},     // 5
+    };
+    EXPECT_EQ(rank_palette(e, u"budg"), (std::vector<size_t>{1, 4}));  // prefix before word start
+    EXPECT_EQ(rank_palette(e, u"nwthr"), (std::vector<size_t>{2}));    // characters in order
+    EXPECT_EQ(rank_palette(e, u"set"), (std::vector<size_t>{3}));
+    // Commands before entries at the same rank, then the shorter name.
+    EXPECT_EQ(rank_palette(e, u"s"), (std::vector<size_t>{0, 3, 5}));
+    EXPECT_EQ(rank_palette(e, u"q3"), (std::vector<size_t>{4, 1}));  // an entry's prefix before another's word
+    EXPECT_TRUE(rank_palette(e, u"zzz").empty());
+    EXPECT_EQ(rank_palette(e, u"").size(), e.size());  // as listed
+    EXPECT_EQ(rank_palette(e, u"", 2), (std::vector<size_t>{0, 1}));
+}
+
+TEST(ShellPalette, MatchingIgnoresCaseAndAccents) {
+    EXPECT_EQ(fold_for_match(u"Žluťoučký KŮŇ Übersicht straße"), u"zlutoucky kun ubersicht strase");
+    const std::vector<PaletteEntry> e = {{u"Příprava schůzky", false}, {u"Übersicht", false}};
+    EXPECT_EQ(rank_palette(e, u"schuz"), (std::vector<size_t>{0}));
+    EXPECT_EQ(rank_palette(e, u"UBER"), (std::vector<size_t>{1}));
+}
+
+// ---- Run Plan In The Feed (add-assistant-feedback-patterns design D4) ----
+
+namespace {
+StoredEvent plan_call(long long seq, const std::string& call, std::vector<std::pair<std::string, std::string>> steps) {
+    json list = json::array();
+    for (const auto& [title, status] : steps) list.push_back({{"title", title}, {"status", status}});
+    return {seq, "2026-10-23T10:00:00.000Z", "tool_call",
+            {{"call_id", call}, {"tool", "update_plan"}, {"risk", "read"}, {"decision", "allow"}, {"args", {{"steps", list}}}}};
+}
+StoredEvent call_result(long long seq, const std::string& call, bool ok) {
+    return {seq, "2026-10-23T10:00:00.500Z", "tool_result", {{"call_id", call}, {"ok", ok}, {"content", ok ? "Plan updated" : "bad"}}};
+}
+}  // namespace
+
+TEST(ShellFeed, RunPlanShowsTheLatestPlanWhereTheFirstWasMade) {
+    RunInfo r = run("run_1", "running");
+    r.events.push_back({1, "", "message", {{"role", "user"}, {"content", "reply to Jana"}}});
+    r.events.push_back(plan_call(2, "p1", {{"Read", "running"}, {"Draft", "pending"}, {"Send", "pending"}}));
+    r.events.push_back(call_result(3, "p1", true));
+    r.events.push_back({4, "", "message", {{"role", "assistant"}, {"content", "Reading."}}});
+    r.events.push_back(plan_call(5, "p2", {{"Read", "done"}, {"Draft", "running"}, {"Send", "pending"}}));
+    r.events.push_back(call_result(6, "p2", true));
+    r.events.push_back(plan_call(7, "p3", {{"x", "running"}, {"y", "running"}}));
+    r.events.push_back(call_result(8, "p3", false));  // refused: the plan before stays
+    auto snap = snapshot({r});
+    const auto items = build_feed(snap, {});
+    std::vector<size_t> plans;
+    size_t first_call = 0;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (items[i].type == ItemType::plan) plans.push_back(i);
+        if (items[i].type == ItemType::tool && items[i].call_id == "p1") first_call = i;
+    }
+    ASSERT_EQ(plans.size(), 1u);
+    const FeedItem& plan = items[plans[0]];
+    EXPECT_EQ(plans[0] + 1, first_call);  // just before the first plan call
+    EXPECT_EQ(plan.key, "run_1:plan");
+    EXPECT_TRUE(plan.run_active);
+    EXPECT_EQ(plan.plan, (std::vector<PlanStep>{{"Read", "done"}, {"Draft", "running"}, {"Send", "pending"}}));
+    snap.runs[0].state = "cancelled";
+    for (const FeedItem& i : build_feed(snap, {}))
+        if (i.type == ItemType::plan) EXPECT_FALSE(i.run_active);
+    // A Child Run's plan is not shown in the feed.
+    snap.runs[0].parent_run_id = "run_0";
+    for (const FeedItem& i : build_feed(snap, {})) EXPECT_NE(i.type, ItemType::plan);
+}
+
+// ---- Durations (add-assistant-feedback-patterns design D2) ----
+
+TEST(ShellFeed, ToolCallsCarryTheirDurationAndRunningCallsTheirStart) {
+    RunInfo r = run("run_1", "running");
+    r.events.push_back({1, "2026-10-23T10:00:00.000Z", "tool_call",
+                        {{"call_id", "a"}, {"tool", "web.fetch"}, {"risk", "read"}, {"decision", "allow"}, {"args", json::object()}}});
+    r.events.push_back({2, "2026-10-23T10:00:01.400Z", "tool_result", {{"call_id", "a"}, {"ok", true}, {"content", "{}"}}});
+    r.events.push_back({3, "2026-10-23T10:00:02.000Z", "tool_call",
+                        {{"call_id", "b"}, {"tool", "files.read"}, {"risk", "read"}, {"decision", "allow"}, {"args", json::object()}}});
+    r.events.push_back({4, "2026-10-23T10:00:02.500Z", "reasoning", {{"text", "hm"}, {"duration_ms", 8000}}});
+    auto snap = snapshot({r});
+    std::vector<const FeedItem*> tools;
+    const auto items = build_feed(snap, {});
+    const FeedItem* reasoning = nullptr;
+    for (const FeedItem& i : items) {
+        if (i.type == ItemType::tool) tools.push_back(&i);
+        if (i.type == ItemType::reasoning) reasoning = &i;
+    }
+    ASSERT_EQ(tools.size(), 2u);
+    EXPECT_EQ(tools[0]->duration_ms, 1400);
+    EXPECT_EQ(tools[0]->started_ms, -1);
+    EXPECT_EQ(tools[1]->duration_ms, -1);
+    EXPECT_EQ(tools[1]->started_ms, *iso_millis("2026-10-23T10:00:02.000Z"));
+    ASSERT_NE(reasoning, nullptr);
+    EXPECT_EQ(reasoning->duration_ms, 8000);
+    // Once the Run has ended, nothing in it is running any more.
+    snap.runs[0].state = "cancelled";
+    for (const FeedItem& i : build_feed(snap, {})) EXPECT_EQ(i.started_ms, -1);
+}
+
+TEST(ShellFeedLive, StreamingReasoningStartsAtItsFirstDelta) {
+    FeedSnapshot snap = snapshot({run("run_1", "running")});
+    LiveText live;
+    LiveRunEvent ev;
+    ev.run_id = "run_1";
+    ev.thread_id = T;
+    ev.kind = "reasoning.delta";
+    ev.at = "2026-10-23T10:00:03.000Z";
+    ev.data = {{"text", "Let "}};
+    apply_live_event(snap, live, ev);
+    ev.at = "2026-10-23T10:00:05.000Z";
+    ev.data = {{"text", "me"}};
+    apply_live_event(snap, live, ev);
+    const FeedItem* reasoning = nullptr;
+    const auto items = build_feed(snap, live);
+    for (const FeedItem& i : items)
+        if (i.type == ItemType::reasoning) reasoning = &i;
+    ASSERT_NE(reasoning, nullptr);
+    EXPECT_TRUE(reasoning->streaming);
+    EXPECT_EQ(reasoning->started_ms, *iso_millis("2026-10-23T10:00:03.000Z"));
 }
 
 // ---- Generation Speed Under Answers (show-generation-speed) ----
